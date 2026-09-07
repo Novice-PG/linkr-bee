@@ -1,6 +1,7 @@
 /* Host-only fakes around the production functions included by the test runner.
  * No Zephyr scheduler, networking, or Bluetooth hardware is emulated here. */
 #include <errno.h>
+#include <assert.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -35,21 +36,46 @@ struct webdav_url {
 static const char *scenario;
 static const char *ring_data = "OLD_PRIVATE_LOG";
 static unsigned int ticks, requests;
+static bool retarget_clear_pending;
 static jmp_buf finished;
 
 static int atomic_get(int *p) { return *p; }
 static void atomic_set(int *p, int x) { *p = x; }
 static void atomic_clear(int *p) { *p = 0; }
 static void atomic_inc(int *p) { ++*p; }
-static void k_mutex_lock(int *p, int timeout) { (void)p; (void)timeout; }
-static void k_mutex_unlock(int *p) { (void)p; }
+static void k_mutex_lock(int *p, int timeout)
+{
+    (void)timeout;
+    if (p == &upload_lock && retarget_clear_pending) {
+        /* Complete the paused setter before granting its upload lock: discard
+         * the old ring, then allow fresh logs to arrive for the new target. */
+        ring_data = "NEW_LOG";
+        upload_pending_bytes = 0;
+        retarget_clear_pending = false;
+    }
+    assert(*p == 0);
+    *p = 1;
+}
+static void k_mutex_unlock(int *p)
+{
+    assert(*p == 1);
+    *p = 0;
+}
 static int advance_log_boot_id(void) { return 0; }
 static uint32_t k_uptime_get_32(void) { return ticks * 1000; }
 
 static void k_sleep(int ms)
 {
     (void)ms;
+    assert(!upload_lock && !cfg_lock && !log_lock);
     ++ticks;
+    if (ticks == 1 && !strcmp(scenario, "retarget_handoff")) {
+        /* Pause the setter just after cfg_lock is released: new URL and
+         * generation are visible, but its old ring has not been cleared. */
+        strcpy(webdav_url, "http://new/logs/");
+        ++webdav_generation;
+        retarget_clear_pending = true;
+    }
     if (!strcmp(scenario, "clear")) {
         if (ticks == 2) {
             webdav_configured = 0;

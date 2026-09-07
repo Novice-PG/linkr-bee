@@ -65,6 +65,11 @@ class FirmwareTests(unittest.TestCase):
         self.assertEqual(first[:2], ["old", "OLD_PRIVATE_LOG"])
         self.assertEqual(second[:2], ["old", "NEW_LOG"])
 
+    def test_retarget_published_before_ring_clear_never_uploads_old_logs(self):
+        first, retry = self.run_scenario("retarget_handoff")
+        self.assertEqual(first[:2], ["new", "NEW_LOG"])
+        self.assertEqual(first, retry)
+
     def test_default_firmware_keeps_lan_and_logs_flowing_after_ble_disconnect(self):
         self.run_scenario("forward")
 

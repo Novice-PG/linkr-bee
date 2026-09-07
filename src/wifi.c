@@ -1589,11 +1589,17 @@ static void upload_thread(void *a, void *b, void *c)
         }
 
         for (;;) {
+            /* Serialize the generation check AND ring drain with retargeting.
+             * A setter may have published its new config but not yet cleared
+             * the old ring. Wait for that entire transition before taking data.
+             * Keep the lock through PUT so this batch cannot change targets. */
+            k_mutex_lock(&upload_lock, K_FOREVER);
             if (!atomic_get(&webdav_configured) ||
                 atomic_get(&webdav_generation) != upload_generation) {
                 /* A clear or retarget makes this private retry batch stale. */
                 pending_total = 0;
                 atomic_clear(&upload_pending_bytes);
+                k_mutex_unlock(&upload_lock);
                 break;
             }
 
@@ -1622,6 +1628,7 @@ static void upload_thread(void *a, void *b, void *c)
             }
 
             if (pending_total == 0) {
+                k_mutex_unlock(&upload_lock);
                 break;
             }
 
@@ -1636,21 +1643,12 @@ static void upload_thread(void *a, void *b, void *c)
 
             if (path_len < 0 || (size_t)path_len >= sizeof(full_path)) {
                 LOG_WRN("WebDAV path too long");
+                k_mutex_unlock(&upload_lock);
                 break;
             }
             struct webdav_url per = u;
             per.path = full_path;
 
-            /* Setters take the same lock, so once they return no request can
-             * still send a batch addressed to the previous target. */
-            k_mutex_lock(&upload_lock, K_FOREVER);
-            if (!atomic_get(&webdav_configured) ||
-                atomic_get(&webdav_generation) != upload_generation) {
-                k_mutex_unlock(&upload_lock);
-                pending_total = 0;
-                atomic_clear(&upload_pending_bytes);
-                break;
-            }
             int err = http_put(&per, chunk, pending_total);
             k_mutex_unlock(&upload_lock);
             if (err != 0) {
