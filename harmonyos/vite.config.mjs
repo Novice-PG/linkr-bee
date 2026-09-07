@@ -47,6 +47,9 @@ export default {
       name: "use-harmony-native-bootstrap",
       enforce: "pre",
       resolveId(source) {
+        if (source === "./agent_runtime.js" || source.endsWith("/web/agent_runtime.js")) {
+          return path.join(repoDir, "mobile/src/agent-runtime.mjs");
+        }
         if (
           source === "./native-bootstrap.js" ||
           source === "/native-bootstrap.js" ||
@@ -80,5 +83,8 @@ export default {
   build: {
     outDir: distDir,
     emptyOutDir: true,
+    // ArkWeb loads the inlined entry from rawfile/index.html. Keep relative
+    // lazy-import paths out of that relocated script (including the Pi SDK).
+    rollupOptions: { output: { inlineDynamicImports: true } },
   },
 };

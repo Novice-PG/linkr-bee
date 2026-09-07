@@ -1,0 +1,227 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createDeviceExecutor } from "../../web/device_executor.js";
+import { SerialJournal } from "../../web/serial_journal.js";
+import { inspectSerialConsole } from "../../web/serial_console.js";
+
+const query = { text: "uname -a", appendEnter: true };
+function fixture({ initial = "root@board:~# ", send } = {}) {
+  const journal = new SerialJournal();
+  const receive = (text) => journal.append(new TextEncoder().encode(text));
+  receive(initial);
+  const status = { connected: true, sessionId: 1, inputRevision: 0, inputPending: false };
+  const sent = [], events = [];
+  const device = createDeviceExecutor({ getStatus: () => ({ ...status }), readLog: (options) => journal.read(options),
+    prepareInput: ({ text, appendEnter }) => text + (appendEnter ? "\r" : ""),
+    sendInput: async (...args) => {
+      sent.push(args[0]);
+      const inputRevision = ++status.inputRevision;
+      await send?.(...args);
+      return { inputRevision };
+    }, onRecord: (record) => events.push(record),
+  });
+  return { device, status, sent, events, receive, journal };
+}
+
+test("console hints use the current tail and do not trust old shell prompts", () => {
+  for (const [text, kind] of [
+    ["Linux boot\r\nroot@board:~# ", "shell"], ["[root@board /]# ", "shell"],
+    ["board login: ", "login"], ["Password: ", "password"], ["=> ", "bootloader"],
+    ["Kernel panic - not syncing: VFS failed\r\n", "panic"],
+    ["root@board:~# reboot\r\nBooting...\r\n", "unknown"],
+    ["root@board:~# \r\nPassword: ", "password"], ["logs say use root@board:~# ", "unknown"],
+    ["# ", "unknown"], ["(initramfs) ", "unknown"], ["", "unknown"],
+  ]) assert.equal(inspectSerialConsole({ text, latestCursor: text.length }).kind, kind, text);
+});
+
+test("Auto waits in non-shell consoles; Full Auto needs no approval there", async () => {
+  for (const initial of ["", "=> ", "board login: ", "Password: "]) {
+    const { device, sent } = fixture({ initial });
+    const pending = device.execute(query);
+    assert.equal(device.getRecords()[0].state, "awaiting-approval");
+    assert.equal(sent.length, 0);
+    device.cancel();
+    await assert.rejects(pending, /cancelled/);
+    device.setMode("full-auto");
+    const record = await device.execute(query);
+    assert.equal(record.delivery, "sent");
+    assert.equal(sent.length, 1);
+  }
+});
+
+test("manual approval is single-use and independent of a UI or model SDK", async () => {
+  const { device, sent } = fixture();
+  device.setMode("manual");
+  const pending = device.execute(query);
+  const [{ id }] = device.getRecords();
+  assert.equal(device.approve("wrong-id"), false);
+  assert.equal(device.approve(id), true);
+  assert.equal(device.approve(id), false);
+  assert.equal((await pending).delivery, "sent");
+  assert.deepEqual(sent, ["uname -a\r"]);
+});
+
+test("mode changes revoke pending input without silently approving it", async () => {
+  const { device, sent } = fixture();
+  device.setMode("manual");
+  const pending = device.execute(query);
+  const [{ id }] = device.getRecords();
+  device.setMode("full-auto");
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(device.approve(id), false);
+  assert.equal(device.getRecords()[0].state, "cancelled");
+  assert.deepEqual(sent, []);
+});
+
+for (const change of ["session", "input", "console"]) {
+  test(`${change} changes invalidate the exact pending approval`, async () => {
+    const { device, status, sent, receive } = fixture();
+    device.setMode("manual");
+    const pending = device.execute(query);
+    const [{ id }] = device.getRecords();
+    if (change === "session") status.sessionId++;
+    if (change === "input") status.inputRevision++;
+    if (change === "console") receive("\r\nPassword: ");
+    assert.equal(device.approve(id), false);
+    await assert.rejects(pending, /changed/);
+    assert.deepEqual(sent, []);
+  });
+}
+
+test("rejection and externally aborted approvals never reach transport", async () => {
+  const { device, sent } = fixture();
+  device.setMode("manual");
+  let pending = device.execute(query);
+  device.reject(device.getRecords()[0].id);
+  await assert.rejects(pending, /rejected/);
+  assert.equal(device.getRecords()[0].state, "denied");
+  const controller = new AbortController();
+  pending = device.execute(query, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  assert.deepEqual(sent, []);
+});
+
+test("uncertain transport failure is recorded and never retried", async () => {
+  const { device, sent } = fixture({ send: () => { throw new Error("connection lost after first fragment"); } });
+  await assert.rejects(device.execute(query), /connection lost/);
+  const [record] = device.getRecords();
+  assert.equal(record.state, "failed");
+  assert.equal(record.delivery, "unknown");
+  assert.equal(record.executionStatus, "unknown");
+  assert.equal(sent.length, 1);
+});
+
+test("observations distinguish silence, output and a returned prompt without inventing success", async () => {
+  const { device, receive } = fixture();
+  const record = await device.execute(query);
+  assert.equal(record.observation, "no-output");
+  assert.equal(device.getStatus().console.kind, "unknown");
+  receive("uname -a\r\nLinux board 6.12\r\n");
+  assert.equal(device.inspectExecution(record.id).observation, "output-observed");
+  receive("root@board:~# ");
+  const observed = device.inspectExecution(record.id);
+  assert.equal(observed.observation, "prompt-returned");
+  assert.equal(observed.executionStatus, "unknown");
+  assert.equal(observed.evidence, "uname -a\r\nLinux board 6.12\r\nroot@board:~# ");
+  assert.equal(device.getStatus().console.kind, "shell");
+});
+
+test("new user input closes evidence collection before unrelated output is attributed", async () => {
+  const { device, status, receive } = fixture();
+  const record = await device.execute(query);
+  receive("Linux board\r\n");
+  device.observe();
+  status.inputRevision++;
+  receive("UNRELATED_SECRET\r\nroot@board:~# ");
+  const observed = device.inspectExecution(record.id);
+  assert.equal(observed.observation, "interrupted");
+  assert.equal(observed.evidence, "Linux board\r\n");
+  assert(!JSON.stringify(observed).includes("UNRELATED_SECRET"));
+});
+
+test("large output exposes its tail and allows paging through earlier evidence", async () => {
+  const { device, receive } = fixture();
+  const record = await device.execute(query);
+  const output = "x".repeat(5000) + "\r\nRESULT_AT_END\r\nroot@board:~# ";
+  receive(output);
+  const observed = device.inspectExecution(record.id);
+  assert.equal(observed.evidence.length, 4000);
+  assert.equal(observed.evidenceTruncated, true);
+  assert(observed.evidence.includes("RESULT_AT_END"));
+  assert.equal(device.inspectExecution(record.id, { limit: 1000 }).evidence.length, 1000);
+  assert.equal(observed.observation, "prompt-returned");
+  assert.equal(observed.executionStatus, "unknown");
+  const first = device.inspectExecution(record.id, { after: record.logStart, limit: 3000 });
+  assert.equal(first.hasMore, true);
+  const second = device.inspectExecution(record.id, { after: first.observedCursor, limit: 3000 });
+  assert.equal(second.hasMore, false);
+  assert.equal(first.evidence + second.evidence, output);
+});
+
+test("closed execution pages never include later manual input or ring-buffer replacements", async () => {
+  const { device, status, receive } = fixture();
+  const record = await device.execute(query);
+  receive("KNOWN_OUTPUT");
+  device.observe();
+  status.inputRevision++;
+  receive("UNRELATED_OUTPUT");
+  let page = device.inspectExecution(record.id, { after: record.logStart });
+  assert.equal(page.observation, "interrupted");
+  assert.equal(page.evidence, "KNOWN_OUTPUT");
+  receive("x".repeat(140000));
+  page = device.inspectExecution(record.id, { after: record.logStart });
+  assert.equal(page.evidence, "");
+  assert.equal(page.evidenceTruncated, true);
+});
+
+test("partially evicted execution pages stay within the closed command's raw range", async () => {
+  const { device, status, journal, receive } = fixture();
+  journal.capacity = 30;
+  const record = await device.execute(query);
+  receive("A".repeat(25));
+  device.observe();
+  status.inputRevision++;
+  receive("UNRELATED_DATA");
+  const page = device.inspectExecution(record.id, { after: record.logStart });
+  assert(page.evidence.length > 0);
+  assert.match(page.evidence, /^A+$/);
+  assert.equal(page.evidenceTruncated, true);
+});
+
+test("a new device cannot look up old execution evidence even before UI reset", async () => {
+  const { device, status, receive } = fixture();
+  const record = await device.execute(query);
+  receive("OLD_DEVICE_DATA");
+  device.observe();
+  status.sessionId++;
+  assert.deepEqual(device.getRecords(), []);
+  assert.throws(() => device.inspectExecution(record.id), /unavailable/);
+  assert.doesNotThrow(() => device.observe());
+});
+
+test("reset removes records and suppresses late events from the old device", async () => {
+  let finish;
+  const { device, events } = fixture({ send: () => new Promise((resolve) => { finish = resolve; }) });
+  const pending = device.execute(query);
+  const id = device.getRecords()[0].id;
+  device.reset();
+  const eventCount = events.length;
+  finish();
+  await assert.rejects(pending);
+  assert.equal(events.length, eventCount);
+  assert.deepEqual(device.getRecords(), []);
+  assert.throws(() => device.inspectExecution(id), /unavailable/);
+});
+
+test("a second writer is refused until the first settles; snapshots cannot mutate execution", async () => {
+  const { device, sent } = fixture();
+  device.setMode("manual");
+  const pending = device.execute(query);
+  const record = device.getRecords()[0];
+  record.payload = "reboot\r";
+  await assert.rejects(device.execute(query), /still active/);
+  device.approve(record.id);
+  await pending;
+  assert.deepEqual(sent, ["uname -a\r"]);
+});

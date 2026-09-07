@@ -16,6 +16,179 @@ shells that support it. Paste uses the clipboard when available and otherwise
 prompts you to long-press the terminal. Both rows stay above the soft keyboard
 and are shared with the Web and HarmonyOS clients.
 
+## Built-in serial assistant (Pi)
+
+Tap **AI** in the terminal toolbar to enter Agent mode. Narrow windows show the
+terminal above the conversation. When the workspace has at least 960 CSS pixels
+of available width, the terminal and conversation sit side by side. Resizing or
+rotating the window adapts the layout without recreating the terminal or clearing
+its logs. Terminal keys and the conversation remain independently usable.
+Desktop Agent mode keeps the surrounding toolbar and the settings sidebar in
+their original positions, including its expanded/collapsed state. Agent settings
+opens that same sidebar. Touch devices and narrow windows use a settings sheet
+over the compact Agent workspace.
+
+When a soft keyboard opens while editing an AI question or model setting, the
+terminal collapses to a **Show terminal** button. Dismissing the keyboard restores
+the split. **Show terminal** moves input back to the UART and restores its shortcut
+keys; received logs continue to accumulate while the terminal is collapsed.
+**Exit** (or tapping **AI** again) returns to the terminal workspace and cancels
+the active agent run. Entering Agent mode from terminal fullscreen exits fullscreen
+so both panes are visible. These viewport behaviors need real-device verification
+in addition to the browser regression tests.
+
+Open **Settings → AI** in the main controls panel (also available through
+**Settings** in the Agent header, without leaving the conversation).
+Configure a Chat Completions-compatible API
+base URL, a model ID with tool-calling support, and your own API key (optional
+for keyless local services), then select **Save configuration**. Saving does not
+send a model request. Endpoint, model and API key are restored after reloading
+or restarting the app. **Clear configuration** removes all three from this device.
+Ask a question such as “Why did this board fail to
+boot?” The app runs the Pi agent loop locally; model inference uses the configured
+service. This is not an on-device/offline language model.
+
+The implementation uses pi-mono's `@earendil-works/pi-agent-core` and `pi-ai`,
+pinned to 0.85.1. It exposes only these target-device tools:
+
+- `read_serial_log`: first reads the recent tail, then continues from its cursor.
+  Use `recent: true` to reread the tail or `after` for an explicit range.
+- `get_device_status`: connection, transport, UART settings, execution mode and
+  passive console-state hints, without WiFi credentials.
+- `send_serial_input`: submits exact serial input under the selected execution mode.
+- `wait_for_serial_output`: collects output until a quiet interval (400 ms by
+  default) or a deadline; reports settled output, continued streaming or silence.
+- `inspect_serial_execution`: waits for output to settle and retrieves a send
+  record. Default evidence is its latest tail; `after` / `limit` page through
+  earlier output, with `observedCursor` / `hasMore` indicating the next page.
+
+The Agent header shows a compact gear selector with the current execution mode.
+Tap it to open the vertical **M → A → F** gear track, then tap a mode to engage
+it and close the selector. Tapping outside or pressing Escape dismisses it without
+changing modes. Arrow keys move focus; Enter or Space selects the focused mode.
+The selector remains available when the soft keyboard is open.
+
+Terminal, Agent, settings and the gear picker share their window chrome through
+`web/window.css` (`window-surface` / `window-header`). Update the shared tokens
+there to keep both themes, headers and controls consistent across window sizes.
+
+| Mode | Serial input behavior |
+| --- | --- |
+| Full Auto | Sends commands directly, without confirmation. |
+| Auto (recommended, default) | Sends recognized low-risk queries at a detected shell prompt; asks for approval for everything else. |
+| Manual | Shows proposed input and waits for the user to click Send. |
+
+The app enforces Auto with an exact local allowlist, not the model's risk rating.
+Examples include `pwd`, `uname -a`, `free -h`, `ip addr show`, and
+`cat /proc/version`. Unrecognized commands, flags, arbitrary paths, compound
+commands, control characters, and partial input require approval. A pending
+terminal input line also requires approval; intervening terminal input invalidates
+an outstanding send. This is a conservative shell-query classification, not a
+sandbox: aliases, custom consoles and running programs can interpret input
+differently. The current log tail must match a supported shell prompt (for example,
+`root@board:~# `). Login/password prompts, U-Boot, panic output, custom/unrecognized
+prompts and missing output require approval in Auto. Console hints are passive
+heuristics, never proof that a shell is running. The assistant must still inspect
+the logs. A console-state change also invalidates a pending approval.
+All modes can read logs and device status automatically, and show submitted input
+and results in the conversation. Switching modes stops the current run and cancels
+pending input while retaining the same device's diagnostic conversation. Ask again
+to continue with the new policy; interrupted requests are not replayed. Mode
+selection stays in memory for this app session; restarting the app defaults to Auto.
+The Pi adapter requires an execution inspection result to reach a subsequent model
+turn before another serial input is allowed, including Full Auto. This adds no
+confirmation dialog; it prevents the model from batching dependent inputs before
+it has received the preceding observation. Unresolved output still needs judgment.
+
+Logs come from the receive path, separately from local echo, management messages
+and AI answers. New connections clear the assistant journal and conversation;
+disconnects retain received logs for diagnosis but cancel ongoing work. The
+journal retains at most 128 Ki UTF-16 code units. Each question is limited to
+eight model turns and three minutes. The adapter bounds model context to 24,000
+serialized characters by abbreviating older evidence and then replacing complete
+tool exchanges with mechanical history excerpts. It retains the current question,
+marks omitted evidence, and keeps tool calls paired with their results. Excerpts
+are not verified conclusions or complete durable memory; retained log ranges can
+be reread until the journal evicts them. This is a character budget, not a model
+tokenizer measurement.
+
+The system prompt lives in `mobile/src/agent-prompt.mjs`. It distinguishes analysis
+from requested repair, adapts diagnostics to the observed console and available
+commands, and asks for hypotheses, evidence and verification of the original symptom.
+Context management lives in `mobile/src/agent-context.mjs`; neither module changes
+the device executor's approval rules.
+
+Press **Stop** to cancel model requests, pending approvals and unsent input.
+Already transmitted bytes cannot be recalled. To interrupt a running target
+program, use Ctrl-C in the terminal. Sending bytes does not prove a command
+completed; the assistant must inspect subsequent output before claiming success.
+Closing the assistant or backgrounding the app also cancels its current run.
+
+### Device execution layer
+
+`web/device_executor.js` owns execution modes, single-use approvals, cancellation,
+session/input checks and the last 50 execution records independently of Pi and
+the DOM. `web/agent_panel.js` renders its state and forwards user decisions;
+`mobile/src/pi-agent.mjs` adapts the device interface to Pi tools. Another model
+SDK can use the same executor without implementing its own permission gate.
+
+Each record keeps the exact wire text, device session, mode, timestamps and up to
+4,000 UTF-16 code units from the latest subsequent output. Inspection can page
+through the retained command range, bounded before another input or session change.
+The UI and inspection tool distinguish
+no output, observed output, a returned shell prompt, and interrupted observation.
+Another serial input or device session ends the association with subsequent output.
+Output can still include unsolicited device messages; this is an observation
+window, not a command protocol or an exit-code measurement. The structured
+`executionStatus` remains `unknown`; a returned prompt is not a success signal.
+Partial/uncertain delivery is recorded and never automatically replayed by the
+executor. No probing or verification command is silently added to the wire text.
+
+Execution records stay in memory. New conversations, cleared logs and new device
+connections reset them. Restarting the app does not restore approvals or replay
+unfinished actions; durable task recovery is not implemented.
+
+Questions and requested serial logs are sent to the configured model endpoint.
+Endpoint, model ID and API key are saved in this app / browser origin's
+`localStorage`; this is not an encrypted OS credential vault. Clearing the
+configuration or app / site data removes them. Conversations stay in memory.
+Unsaved edits do not change the active configuration, and configuration is
+locked while the Agent is running. Execution mode remains session-only and
+starts in recommended Auto mode. No shared service key is included in the app.
+The endpoint must allow requests from the app's WebView origin
+(CORS), or be accessed through a trusted compatible proxy. Prefer HTTPS outside
+a trusted local development network. Subscription/OAuth login and native
+secure credential storage are not part of this integration.
+
+Android/iOS load the Pi runtime when first needed. HarmonyOS includes it in the
+inlined ArkWeb bundle so rawfile imports work. Vite dev/production web builds
+also include the assistant; directly serving the unbuilt `web/` directory keeps
+the terminal available and hides the AI entry point.
+
+## Regression tests
+
+```sh
+cd mobile
+npm ci
+npm test
+npx playwright install chromium
+npm run test:browser
+```
+
+Browser tests start Vite and use the shipped xterm and a fake UART transport to
+check terminal replies, focus reports, touch input, IME, paste, and soft-keyboard
+layout in normal and fullscreen modes. Agent tests run the real Pi loop and
+provider SDK against a mocked streaming model endpoint, checking log evidence,
+input approval, console-state gating, execution evidence, mode-change continuity,
+cancellation and session isolation. Unit tests also cover long-log compaction,
+fragmented output collection and observation-before-input ordering. The device
+executor also has SDK-independent unit tests. These tests do
+not call a paid model.
+`web/terminal_input.js` uses the bundled xterm core's input-source event because
+the public `onData` API also emits protocol replies; run these tests when
+updating xterm. To use an existing Chrome installation, set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to its executable path.
+
 ## Build web assets
 
 ```sh

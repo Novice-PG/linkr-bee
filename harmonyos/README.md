@@ -77,6 +77,12 @@ native request timeout.
 
 ## Validation boundary
 
+The shared terminal now includes the Pi serial assistant. Its setup and tool
+behavior are documented in [the mobile guide](../mobile/README.md#built-in-serial-assistant-pi).
+The Pi runtime is included in the single inlined ArkWeb entry; no Node.js process
+runs on the phone. Model endpoint/CORS behavior and agent cancellation across
+real-device lifecycle transitions still require hardware validation.
+
 The project currently passes ArkTS type checking and builds an unsigned API 26
 HAP. The HAP, ArkWeb UI, responsive phone/tablet layout, and JavaScript bridge
 have been exercised in the API 26 emulator. BLE permission behavior, scanning,

@@ -9,6 +9,7 @@
     "build:harmony": "vite build --config ../harmonyos/vite.config.mjs",
     "build:harmony:hap": "../harmonyos/tools/build.sh",
     "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
     "cap:add:android": "cap add android",
     "cap:add:ios": "cap add ios",
     "cap:sync": "npm run build && cap sync"
@@ -17,10 +18,13 @@
     "@capacitor-community/bluetooth-le": "^8.0.0",
     "@capacitor/android": "^8.0.0",
     "@capacitor/core": "^8.0.0",
-    "@capacitor/ios": "^8.0.0"
+    "@capacitor/ios": "^8.0.0",
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1"
   },
   "devDependencies": {
     "@capacitor/cli": "8.4.3",
+    "@playwright/test": "^1.63.0",
     "typescript": "^5.9.0",
     "vite": "^7.0.0"
   }

@@ -7,12 +7,26 @@ import { defineConfig } from "vite";
 const mobileDir = path.dirname(fileURLToPath(import.meta.url));
 const repoDir = path.resolve(mobileDir, "..");
 const webDir = path.join(repoDir, "web");
+const browserDependencies = ["@capacitor/core", "@capacitor-community/bluetooth-le",
+  "@earendil-works/pi-agent-core", "@earendil-works/pi-ai",
+  "@earendil-works/pi-ai/api/openai-completions"];
 
 export default defineConfig({
   root: webDir,
   base: "./",
+  cacheDir: path.join(mobileDir, "node_modules/.vite"),
+  optimizeDeps: {
+    // Prebundle lazy agent dependencies before the first chat. Discovering
+    // these after startup would make Vite reload an active serial session.
+    include: browserDependencies,
+  },
   resolve: {
     alias: [
+      // The Vite root is web/, but npm dependencies live under mobile/.
+      ...browserDependencies.map((name) => ({
+        find: new RegExp(`^${name}$`),
+        replacement: fileURLToPath(import.meta.resolve(name)),
+      })),
       {
         find: "/native-bootstrap.js",
         replacement: path.join(mobileDir, "src/native-bootstrap.ts"),
@@ -28,6 +42,9 @@ export default defineConfig({
       name: "use-capacitor-native-bootstrap",
       enforce: "pre",
       resolveId(source) {
+        if (source === "./agent_runtime.js" || source.endsWith("/web/agent_runtime.js")) {
+          return path.join(mobileDir, "src/agent-runtime.mjs");
+        }
         if (
           source === "./native-bootstrap.js" ||
           source === "/native-bootstrap.js" ||

@@ -26,6 +26,8 @@ log_*.txt
 # Mobile app dependencies and generated output
 mobile/node_modules/
 mobile/dist/
+mobile/test-results/
+mobile/playwright-report/
 harmonyos/dist/
 harmonyos/.idea/
 harmonyos/.hvigor/

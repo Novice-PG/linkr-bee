@@ -2,6 +2,17 @@
 
 import { ManagementResponseTracker } from "./management_protocol.js";
 import { applyInputModifiers, terminalKeySequence } from "./terminal_keys.js";
+import { subscribeTerminalInput } from "./terminal_input.js";
+import { SerialJournal } from "./serial_journal.js";
+import { createAgentPanel } from "./agent_panel.js";
+import { createAgentSettings } from "./agent_settings.js";
+import { inputLeavesPendingLine } from "./agent_execution_policy.js";
+
+const agentJournal = new SerialJournal();
+let agentPanel = null;
+let agentSettings = null;
+let serialInputRevision = 0;
+let serialInputPending = false;
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -835,10 +846,12 @@ function applyLang() {
   updateWifiConnectionView();
   updateFullscreenButton();
   updateModifierButtons();
+  agentPanel?.refreshLang();
+  agentSettings?.refreshLang();
 }
 
 function fitTerminal() {
-  if (!state.fitAddon) {
+  if (!state.fitAddon || !elements.terminalOutput.clientWidth || !elements.terminalOutput.clientHeight) {
     return;
   }
   try {
@@ -882,7 +895,7 @@ function refitTerminalAfterLayoutChange() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       fitTerminal();
-      state.term?.focus();
+      if (!agentPanel?.isOpen()) state.term?.focus();
     });
   });
 }
@@ -950,7 +963,7 @@ function initTerminal() {
   state.fitAddon = new globalThis.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
-  state.term.onData(onTerminalData);
+  subscribeTerminalInput(state.term, onTerminalData);
   applyTerminalFont(state.fontFamily);
   fitTerminal();
 
@@ -1476,7 +1489,11 @@ function setConnected(connected) {
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   state.writeGeneration += 1;
+  serialInputRevision++;
+  serialInputPending = false;
   state.connected = connected;
+  if (connected) agentJournal.reset();
+  agentPanel?.connectionChanged(connected);
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = t(
     connected ? "connected" : "disconnected",
@@ -1613,7 +1630,15 @@ function chunkSize() {
   return Math.max(1, Math.min(BLE_MAX_ATT_VALUE, Math.floor(value)));
 }
 
-async function writeBytes(bytes, sensitive = false) {
+function assertWriteSession(generation, signal) {
+  signal?.throwIfAborted();
+  if (!state.connected || generation !== state.writeGeneration) {
+    throw new Error("Device session changed; UART delivery may be incomplete.");
+  }
+}
+
+async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal) {
+  assertWriteSession(generation, signal);
   if (state.mode === "ws") {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
       throw new Error("WebSocket is not connected");
@@ -1639,6 +1664,7 @@ async function writeBytes(bytes, sensitive = false) {
     ? state.reliableMaxPayload
     : chunkSize();
   for (let offset = 0; offset < bytes.length; offset += size) {
+    assertWriteSession(generation, signal);
     const chunk = bytes.slice(offset, offset + size);
     if (elements.debugInput.checked) {
       appendLine(
@@ -1649,7 +1675,7 @@ async function writeBytes(bytes, sensitive = false) {
     }
     try {
       if (state.reliableReady) {
-        await writeReliableUartChunk(chunk);
+        await writeReliableUartChunk(chunk, generation, signal);
         state.txBytes += chunk.length;
         continue;
       }
@@ -1660,8 +1686,13 @@ async function writeBytes(bytes, sensitive = false) {
         chunk,
         false,
       );
+      assertWriteSession(generation, signal);
       state.txBytes += chunk.length;
     } catch (error) {
+      assertWriteSession(generation, signal);
+      // Agent writes cannot be replayed after an uncertain legacy write, and
+      // an earlier successful chunk must never be resent as part of fallback.
+      if (signal || offset > 0) throw error;
       if (state.reliableReady) {
         throw error;
       }
@@ -1670,7 +1701,7 @@ async function writeBytes(bytes, sensitive = false) {
       }
       elements.chunkInput.value = "20";
       appendLine("[warn] BLE write failed; retrying with 20-byte chunks");
-      await writeBytes(bytes, sensitive);
+      await writeBytes(bytes, sensitive, generation, signal);
       return;
     }
   }
@@ -1681,7 +1712,7 @@ function nextSequence(sequence) {
   return sequence === 0xffffffff ? 1 : sequence + 1;
 }
 
-async function writeReliableUartChunk(payload) {
+async function writeReliableUartChunk(payload, generation = state.writeGeneration, signal) {
   const sequence = state.reliableTxSequence;
   const frame = new Uint8Array(RELIABLE_UART_HEADER_SIZE + payload.length);
   const view = new DataView(frame.buffer);
@@ -1707,6 +1738,7 @@ async function writeReliableUartChunk(payload) {
     let writesCompleted = 0;
     try {
       for (let offset = 0; offset < frame.length; offset += attSize) {
+        assertWriteSession(generation, signal);
         await bleTransport.write(
           state.device.id,
           RELIABLE_UART_SERVICE,
@@ -1716,10 +1748,12 @@ async function writeReliableUartChunk(payload) {
         );
         writesCompleted += 1;
       }
+      assertWriteSession(generation, signal);
       state.reliableWriteSize = attSize;
       state.reliableTxSequence = nextSequence(sequence);
       return;
     } catch (error) {
+      assertWriteSession(generation, signal);
       lastError = error;
       if (writesCompleted > 0) {
         throw error;
@@ -1731,13 +1765,28 @@ async function writeReliableUartChunk(payload) {
   throw lastError || new Error("Reliable UART write failed");
 }
 
-function enqueueBytes(bytes, sensitive = false) {
-  const generation = state.writeGeneration;
-  const operation = state.writeQueue.then(() => {
-    if (!state.connected || generation !== state.writeGeneration) {
-      return;
+function enqueueBytes(bytes, sensitive = false, { generation = state.writeGeneration, signal, inputRevision } = {}) {
+  try { assertWriteSession(generation, signal); } catch (error) { return Promise.reject(error); }
+  if (inputRevision !== undefined && inputRevision !== serialInputRevision) {
+    return Promise.reject(new Error("Terminal input changed; request a new command before sending."));
+  }
+  const queuedRevision = ++serialInputRevision;
+  serialInputPending = inputLeavesPendingLine(bytes, serialInputPending);
+  const operation = state.writeQueue.then(async () => {
+    try {
+      assertWriteSession(generation, signal);
+      if (inputRevision !== undefined && queuedRevision !== serialInputRevision) {
+        throw new Error("Terminal input changed; request a new command before sending.");
+      }
+      await writeBytes(bytes, sensitive, generation, signal);
+    } catch (error) {
+      // A partially delivered line has unknown contents; Auto must ask next time.
+      if (generation === state.writeGeneration) {
+        serialInputPending = true;
+        serialInputRevision++;
+      }
+      throw error;
     }
-    return writeBytes(bytes, sensitive);
   });
   state.writeQueue = operation.catch(() => {});
   return operation;
@@ -1779,8 +1828,14 @@ function resetModifiers() {
   updateModifierButtons();
 }
 
-function onTerminalData(data, { raw = false } = {}) {
+function onTerminalData(data, { raw = false, userInput = true } = {}) {
   if (!state.connected || !data) {
+    return;
+  }
+  if (!userInput) {
+    // Replies and focus reports are transport data, not keystrokes. Preserve
+    // armed modifiers and send these bytes without local echo or CR mapping.
+    writeText(data).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
   const modifiers = pendingModifiers();
@@ -2007,6 +2062,8 @@ function onReliableUartIndication(value) {
 }
 
 function handleIncomingBytes(bytes) {
+  agentJournal.append(bytes);
+  agentPanel?.logsChanged();
   appendLogBytes(bytes);
   state.rxBytes += bytes.length;
   updateCounters();
@@ -2393,6 +2450,7 @@ function saveSetting(key, value) {
 }
 
 const mobileMedia = window.matchMedia("(max-width: 900px)");
+let sidebarReturnFocus = null;
 const softKeyboardLayout = {
   active: false,
   fullHeight: 0,
@@ -2442,11 +2500,15 @@ function syncSoftKeyboardLayout() {
   const active =
     compactInputDevice &&
     heightLoss > keyboardHeight &&
-    (terminalHasFocus() || softKeyboardLayout.active);
+    (terminalHasFocus() || agentPanel?.hasInputFocus() ||
+      (elements.controlsPanel.contains(document.activeElement) && document.activeElement.matches("input, textarea")) ||
+      softKeyboardLayout.active);
 
   // iOS/Android WebViews may resize only the visual viewport, leaving dvh
   // unchanged. Size the workspace to the area actually above the keyboard.
   document.documentElement.style.setProperty("--terminal-viewport-height", `${height}px`);
+  document.documentElement.style.setProperty("--settings-viewport-top", `${window.visualViewport?.offsetTop || 0}px`);
+  agentPanel?.syncLayout({ keyboardOpen: active });
 
   if (active === softKeyboardLayout.active) {
     return;
@@ -2502,7 +2564,11 @@ function setInert(element, inert) {
 }
 
 function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false } = {}) {
+  const returnButton = sidebarReturnFocus === $("agentSettingsButton") && agentPanel?.isOpen()
+    ? sidebarReturnFocus : elements.panelToggle;
   const drawerLayout = usesSettingsDrawer();
+  // Use the same drawer presentation for touch and narrow desktop windows.
+  document.documentElement.classList.toggle("settings-drawer-layout", drawerLayout);
   const drawerOpen =
     drawerLayout && elements.appShell.classList.contains("sidebar-open");
   const sidebarHidden = drawerLayout
@@ -2516,7 +2582,7 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
       restoreToggle &&
       elements.controlsPanel.contains(document.activeElement)
     ) {
-      elements.panelToggle.focus();
+      returnButton.focus({ preventScroll: true });
     }
   }
 
@@ -2547,9 +2613,9 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   } else if (
     restoreToggle &&
     !drawerOpen &&
-    document.activeElement !== elements.panelToggle
+    document.activeElement !== returnButton
   ) {
-    requestAnimationFrame(() => elements.panelToggle.focus());
+    requestAnimationFrame(() => returnButton.focus({ preventScroll: true }));
   }
 }
 
@@ -2572,6 +2638,7 @@ function applySidebar() {
 }
 
 function toggleSidebar() {
+  sidebarReturnFocus = elements.panelToggle;
   if (usesSettingsDrawer()) {
     setMobileSidebarOpen(
       !elements.appShell.classList.contains("sidebar-open"),
@@ -2584,16 +2651,37 @@ function toggleSidebar() {
   }
 }
 
+function openAgentSettings() {
+  setSettingsPage("ai");
+  sidebarReturnFocus = $("agentSettingsButton");
+  if (usesSettingsDrawer()) {
+    setMobileSidebarOpen(true);
+  } else {
+    elements.appShell.classList.remove("controls-hidden");
+    state.sidebarCollapsed = false;
+    saveSetting("linkr-sidebar", "open");
+    syncSidebarAccessibility();
+    elements.drawerClose.focus({ preventScroll: true });
+  }
+}
+
 function closeSidebar({ restoreFocus = true } = {}) {
-  const wasOpen = elements.appShell.classList.contains("sidebar-open");
+  const wasOpen = usesSettingsDrawer()
+    ? elements.appShell.classList.contains("sidebar-open")
+    : !elements.appShell.classList.contains("controls-hidden");
   elements.appShell.classList.remove("sidebar-open");
+  if (!usesSettingsDrawer()) {
+    elements.appShell.classList.add("controls-hidden");
+    state.sidebarCollapsed = true;
+    saveSetting("linkr-sidebar", "collapsed");
+  }
   syncSidebarAccessibility({
     restoreToggle: wasOpen && restoreFocus,
   });
 }
 
 function setSettingsPage(page) {
-  const next = ["connection", "terminal", "network"].includes(page)
+  const next = ["connection", "terminal", "network", ...(agentSettings ? ["ai"] : [])].includes(page)
     ? page
     : "connection";
   elements.controls.dataset.settingsActive = next;
@@ -2683,6 +2771,8 @@ function bind() {
     clearTerminalOutput(true);
     state.logBytes = [];
     state.logSize = 0;
+    agentJournal.reset();
+    agentPanel?.logsCleared();
     toast(t("cleared"));
   });
 
@@ -2906,6 +2996,7 @@ function bind() {
         elements.appShell.classList.contains("sidebar-open")
       ) {
         event.preventDefault();
+        event.stopPropagation();
         closeSidebar();
       }
       if (
@@ -2944,6 +3035,10 @@ function bind() {
 
 function init() {
   loadPersisted();
+  agentSettings = createAgentSettings({
+    section: $("agentSettings"), tab: document.querySelector('[data-settings-target="ai"]'),
+    getLang: () => lang, onChange: () => agentPanel?.settingsChanged(),
+  });
   setSettingsPage(localStorage.getItem("linkr-settings-page") || "connection");
   initTerminal();
   applyTheme();
@@ -2954,6 +3049,36 @@ function init() {
   }
   setConnected(false);
   bind();
+  agentPanel = createAgentPanel({
+    button: $("agentButton"), getLang: () => lang,
+    settings: agentSettings,
+    openSettings: openAgentSettings,
+    onClose: syncSidebarForViewport,
+    workspace: $("terminalWorkspace"), terminal: elements.terminalCard,
+    onLayout: scheduleFit,
+    focusTerminal: () => state.term?.focus(),
+    onOpen: async () => {
+      // Entering Agent changes only the workspace on desktop. Keep the docked
+      // settings panel and its saved visibility; touch layouts close the sheet.
+      if (usesSettingsDrawer()) setMobileSidebarOpen(false, { restoreFocus: false });
+      if (document.fullscreenElement === elements.terminalCard) await document.exitFullscreen();
+      elements.terminalCard.classList.remove("terminal-fullscreen-fallback");
+      document.body.classList.remove("terminal-fullscreen-fallback");
+      updateFullscreenButton();
+    },
+    getStatus: () => ({ sessionId: state.writeGeneration, connected: state.connected,
+      inputPending: serialInputPending, inputRevision: serialInputRevision,
+      transport: state.mode, device: elements.deviceName.textContent,
+      uart: elements.uartInput.value, receivedBytes: state.rxBytes, sentBytes: state.txBytes }),
+    readLog: (options) => agentJournal.read(options),
+    prepareInput: ({ text, appendEnter }) => normalizeEnter(text + (appendEnter ? "\r" : "")),
+    sendInput: async (payload, generation, signal, inputRevision) => {
+      const operation = enqueueBytes(encoder.encode(payload), false, { generation, signal, inputRevision });
+      const queuedRevision = serialInputRevision;
+      await operation;
+      return { inputRevision: queuedRevision };
+    },
+  });
   initSoftKeyboardLayout();
   syncSidebarForViewport();
   if (mobileMedia.addEventListener) {

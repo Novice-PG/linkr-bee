@@ -53,6 +53,12 @@ jobs:
       - name: Run bridge tests
         run: npm test
 
+      - name: Install browser test runtime
+        run: npx playwright install --with-deps chromium
+
+      - name: Run terminal browser regressions
+        run: npm run test:browser
+
       - name: Build Android and iOS web assets
         run: npm run build
 

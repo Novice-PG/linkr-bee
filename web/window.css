@@ -1,0 +1,132 @@
+/* Shared window chrome for the terminal, Agent, settings and gear picker.
+ * Layout, terminal rendering and execution behavior live in their own modules. */
+:root {
+  --window-radius: var(--radius);
+  --control-radius: var(--radius-sm);
+  --window-header-height: 56px;
+  --window-header-padding: 6px 10px;
+  --window-shadow: 0 2px 8px rgba(2, 6, 16, .2);
+  --overlay-shadow: 0 12px 32px rgba(2, 6, 16, .35), 0 2px 8px rgba(2, 6, 16, .2);
+  --primary-fill: var(--accent);
+}
+
+[data-theme="light"] {
+  --window-shadow: 0 2px 8px rgba(15, 35, 70, .05);
+  --overlay-shadow: 0 12px 32px rgba(15, 35, 70, .12), 0 2px 8px rgba(15, 35, 70, .06);
+  --primary-fill: var(--accent-strong);
+}
+
+.window-surface {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--window-radius);
+  box-shadow: var(--window-shadow);
+}
+
+.window-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--window-header-height);
+  margin: 0;
+  padding: var(--window-header-padding);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.window-header :is(.term-title, #agentTitle, strong) {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.btn, .icon-btn, .term-tool, .agent-gear, .terminal-key, .settings-tab,
+.ts-btn, .agent-terminal-peek, input, select, .agent-question textarea {
+  border-radius: var(--control-radius);
+}
+
+.window-header :is(.btn, .icon-btn, .term-tool) {
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  justify-content: center;
+  background: var(--panel-3);
+  font-size: 13px;
+}
+
+.window-header .icon-btn { width: 44px; padding: 0; }
+.drawer-head-actions { gap: 8px; }
+.btn:active:not(:disabled), .icon-btn:active { transform: none; }
+.btn:focus-visible, .icon-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.btn-primary { background: var(--primary-fill); border-color: transparent; box-shadow: none; }
+.btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary-fill) 92%, var(--text)); border-color: transparent; box-shadow: none; }
+.window-header :is(.btn, .icon-btn, .term-tool):hover:not(:disabled) { background: var(--btn-hover); }
+.agent-gear { background: var(--panel-3); border-color: var(--line); }
+.agent-gear-track b { box-shadow: 0 0 0 2px var(--panel-3); }
+.agent-question textarea { background: var(--input-bg); }
+.agent-form { background: var(--panel-2); }
+
+.card {
+  flex: 0 0 auto;
+  background: var(--panel-2);
+  border-radius: var(--window-radius);
+  box-shadow: none;
+}
+.card-title { font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--text); }
+.agent-message, .diagnostic-item { border-radius: var(--control-radius); }
+.topbar, .statusbar { background: var(--panel); border-radius: var(--window-radius); box-shadow: var(--window-shadow); }
+.toast { background: var(--panel); border-color: var(--line-strong); border-radius: var(--window-radius); box-shadow: var(--overlay-shadow); backdrop-filter: none; }
+
+html.agent-mode .terminal-head, .agent-tight .agent-header { min-height: var(--window-header-height); padding: var(--window-header-padding); }
+html.agent-mode .terminal-card { box-shadow: var(--window-shadow); }
+.agent-mode-picker.window-surface { padding: 0; border-color: var(--line); box-shadow: var(--overlay-shadow); scroll-padding-top: var(--window-header-height); }
+.agent-mode-title.window-header { position: sticky; top: 0; z-index: 1; }
+.agent-mode-options { padding: 12px; }
+.agent-mode-options::before { top: 50px; bottom: 50px; left: 40px; }
+.agent-mode-option { border-radius: var(--control-radius); }
+
+/* Docked settings and the touch/narrow-window sheet share the same chrome. */
+.controls.window-surface { padding: 0; gap: 12px; }
+.controls.window-surface > :not(.drawer-head) { margin-inline: 12px; }
+.controls.window-surface > :last-child { margin-bottom: 12px; }
+.controls .drawer-head.window-header { position: sticky; top: 0; z-index: 5; }
+.controls .settings-tabs { position: sticky; top: var(--window-header-height); z-index: 3; }
+html.settings-drawer-layout .controls.window-surface {
+  padding: 0;
+  border-radius: var(--window-radius);
+  box-shadow: var(--overlay-shadow);
+  scroll-padding-top: calc(var(--window-header-height) + 64px);
+}
+html.settings-drawer-layout .drawer-head.window-header { top: 0; background: var(--panel-2); padding: var(--window-header-padding); }
+html.settings-drawer-layout .settings-tabs { top: var(--window-header-height); border-radius: var(--control-radius); }
+.controls.has-agent-settings .settings-tabs { border-radius: var(--control-radius); }
+
+@media (max-width: 600px) {
+  html.settings-drawer-layout .controls.window-surface {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    border: 0;
+    border-radius: 0;
+  }
+  html.settings-drawer-layout .drawer-head.window-header { top: env(safe-area-inset-top, 0px); }
+  html.settings-drawer-layout .settings-tabs { top: calc(var(--window-header-height) + env(safe-area-inset-top, 0px)); }
+  .controls .card { border-radius: var(--window-radius); }
+}
+
+@media (max-width: 380px) {
+  :root { --window-header-padding: 6px 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-surface, .window-header, .window-header button { transition: none; }
+}

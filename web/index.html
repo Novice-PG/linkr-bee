@@ -10,7 +10,8 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260905-terminalkeys2" />
+    <link rel="stylesheet" href="./style.css?v=20260906-agent-sidebar-2" />
+    <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
   </head>
   <body>
     <main class="app-shell">
@@ -63,8 +64,8 @@
         </div>
       </header>
 
-      <aside id="controlsPanel" class="controls" data-i18n-aria="controls" aria-label="Controls" data-settings-active="connection">
-        <div class="drawer-head">
+      <aside id="controlsPanel" class="controls window-surface" data-i18n-aria="controls" aria-label="Controls" data-settings-active="connection">
+        <div class="drawer-head window-header">
           <span data-i18n="panel">Panel</span>
           <div class="drawer-head-actions">
             <button id="drawerThemeButton" class="icon-btn" type="button" data-i18n-title="theme" data-i18n-aria="theme" aria-label="Theme">
@@ -92,6 +93,7 @@
           <button class="settings-tab active" type="button" data-settings-target="connection" data-i18n="settingsConnection" aria-selected="true">Connect</button>
           <button class="settings-tab" type="button" data-settings-target="terminal" data-i18n="settingsTerminal" aria-selected="false">Serial</button>
           <button class="settings-tab" type="button" data-settings-target="network" data-i18n="settingsNetwork" aria-selected="false">Network</button>
+          <button class="settings-tab" type="button" data-settings-target="ai" aria-selected="false" hidden>AI</button>
         </nav>
 
         <section class="card" data-i18n-aria="connectionControls" aria-label="Connection controls" data-settings-page="connection">
@@ -318,15 +320,42 @@
           </details>
           <p class="ref-hint" data-i18n="cheatHint">Tip: click a command to send it when connected.</p>
         </section>
+        <section id="agentSettings" class="card agent-settings" data-settings-page="ai" aria-labelledby="agentSettingsTitle" hidden>
+          <div class="card-title"><span class="dot"></span><span id="agentSettingsTitle" data-ai-setting="title">AI configuration</span></div>
+          <form id="agentSettingsForm" novalidate>
+            <fieldset id="agentSettingsFields">
+              <label class="field"><span class="field-label" data-ai-setting="endpoint">API base URL</span>
+                <input id="agentEndpoint" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="agentEndpointHint agentSettingsStatus">
+                <span id="agentEndpointHint" class="field-hint" data-ai-setting="endpointHint"></span>
+              </label>
+              <label class="field"><span class="field-label" data-ai-setting="model">Model ID</span>
+                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" aria-describedby="agentSettingsStatus">
+              </label>
+              <label class="field"><span class="field-label" data-ai-setting="key">API key</span>
+                <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
+                <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
+              </label>
+              <div class="btn-grid">
+                <button id="agentSettingsSave" class="btn btn-primary" type="submit" data-ai-setting="save">Save configuration</button>
+                <button id="agentSettingsClear" class="btn" type="button" data-ai-setting="clear">Clear configuration</button>
+              </div>
+            </fieldset>
+          </form>
+          <p id="agentSettingsStatus" class="field-hint" role="status" aria-live="polite"></p>
+          <p class="field-hint" data-ai-setting="storage"></p>
+          <p class="field-hint" data-ai-setting="notice"></p>
+        </section>
       </aside>
 
       <section class="workpanel">
-        <section id="terminalCard" class="terminal-card" aria-label="Interactive serial terminal" data-i18n-aria="terminalAria">
-          <div class="terminal-head">
+        <div id="terminalWorkspace" class="terminal-workspace">
+        <section id="terminalCard" class="terminal-card window-surface" aria-label="Interactive serial terminal" data-i18n-aria="terminalAria">
+          <div class="terminal-head window-header">
             <span class="term-title">
               <span class="term-led"></span><span data-i18n="serialOutput">Serial Terminal</span>
             </span>
             <div class="term-tools">
+              <button id="agentButton" class="term-tool" type="button" aria-label="Serial assistant" hidden>AI</button>
               <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" data-i18n-aria="zoomOut" aria-label="Decrease font">A−</button>
               <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" data-i18n-aria="zoomIn" aria-label="Increase font">A+</button>
               <button id="fullscreenBtn" class="term-tool" type="button" data-i18n-title="fullscreen" data-i18n-aria="fullscreen" aria-label="Fullscreen terminal" aria-pressed="false">
@@ -404,6 +433,7 @@
             </div>
           </div>
         </section>
+        </div>
 
         <div class="presets" id="presetChips" data-i18n-aria="quickSend" aria-label="Quick send">
           <button class="preset-chip" type="button" data-cmd="help" disabled="">help</button>
@@ -430,6 +460,6 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260905-terminalkeys2"></script>
+    <script type="module" src="./app.js?v=20260906-agent-diagnostics"></script>
   </body>
 </html>
