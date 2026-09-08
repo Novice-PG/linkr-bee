@@ -223,6 +223,123 @@ test("returning from another app preserves an idle diagnostic conversation", asy
   expect(JSON.stringify(continued.messages)).toContain("suspected fault");
 });
 
+for (const action of ["stop", "background", "timeout", "exit"]) {
+  test(`${action} retains completed context and cancelled input history for the next question`, async ({ page }) => {
+    let continued;
+    await mockModel(page, (request, count) => {
+      if (count === 1) return { text: "The board boots from eMMC and the root filesystem could not be mounted." };
+      if (count === 2) return { tool: { name: "send_serial_input", args: { text: "reboot", appendEnter: true } } };
+      continued = request;
+      return { text: "Continuing the same diagnosis without replaying the cancelled restart." };
+    });
+    await ask(page, "Remember the eMMC boot failure");
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    if (action === "timeout") await page.clock.install();
+    await ask(page, "Propose a restart");
+    const approve = page.locator("#agentMessages .agent-actions .btn-primary");
+    await expect(approve).toBeVisible();
+    if (action === "stop") await page.locator("#agentStop").tap();
+    if (action === "exit") await page.locator("#agentClose").tap();
+    if (action === "timeout") await page.clock.fastForward(180001);
+    if (action === "background") await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+      delete document.hidden;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await expect(approve).toBeDisabled();
+    if (action === "exit") await page.locator("#agentButton").tap();
+    await ask(page, "Continue analysis only");
+    await expect(page.locator("#agentMessages")).toContainText("without replaying the cancelled restart");
+    const context = JSON.stringify(continued.messages);
+    expect(context).toContain("Remember the eMMC boot failure");
+    expect(context).toContain("could not be mounted");
+    expect(context).toContain("Propose a restart");
+    const calls = continued.messages.flatMap((message) => message.tool_calls || []);
+    const results = continued.messages.filter((message) => message.role === "tool");
+    expect(calls).toHaveLength(1);
+    expect(results).toHaveLength(1);
+    expect(results[0].tool_call_id).toBe(calls[0].id);
+    expect(results[0].content).toMatch(/cancelled|aborted/i);
+    expect(await page.evaluate(() => window.sent)).toEqual([]);
+    await expect(page.locator("#agentMessages [data-execution]")).toHaveCount(1);
+  });
+}
+
+test("closing an idle Agent keeps its history without adding a stopped-run notice", async ({ page }) => {
+  let continued;
+  await mockModel(page, (request, count) => {
+    if (count === 1) return { text: "The known issue is an eMMC root filesystem mount failure." };
+    continued = request;
+    return { text: "Continuing after reopening the Agent." };
+  });
+  await ask(page, "Remember the boot problem");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  const previous = await page.locator("#agentMessages").textContent();
+  await page.locator("#agentClose").tap();
+  await page.locator("#agentButton").tap();
+  await expect(page.locator("#agentMessages")).toHaveText(previous);
+  await ask(page, "Continue investigating");
+  await expect(page.locator("#agentMessages")).toContainText("after reopening the Agent");
+  expect(JSON.stringify(continued.messages)).toContain("root filesystem mount failure");
+});
+
+test("a cancelled model response cannot overwrite the preserved conversation or the following answer", async ({ page }) => {
+  let releaseCancelled, requests = 0, continued;
+  await mockModel(page, (request, count) => {
+    requests = count;
+    if (count === 1) return { text: "Retained diagnosis: the eMMC root filesystem failed to mount." };
+    if (count === 2) return new Promise((resolve) => { releaseCancelled = resolve; });
+    continued = request;
+    return { text: "The follow-up answer continues the retained diagnosis." };
+  });
+  await ask(page, "Diagnose the eMMC boot failure");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  await ask(page, "Inspect another possible cause");
+  await expect.poll(() => requests).toBe(2);
+  await page.locator("#agentStop").tap();
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  releaseCancelled({ text: "STALE_CANCELLED_RESPONSE" });
+  await ask(page, "Continue after stopping that request");
+  await expect(page.locator("#agentMessages")).toContainText("follow-up answer continues");
+  expect(JSON.stringify(continued.messages)).toContain("Retained diagnosis");
+  expect(JSON.stringify(continued.messages)).not.toContain("STALE_CANCELLED_RESPONSE");
+  await expect(page.locator("#agentMessages")).not.toContainText("STALE_CANCELLED_RESPONSE");
+});
+
+for (const action of ["new chat", "new connection"]) {
+  test(`${action} resets context and execution cards after an interrupted question`, async ({ page }) => {
+    let continued;
+    await mockModel(page, (request, count) => {
+      if (count === 1) return { text: "OLD_DIAGNOSTIC_FACT" };
+      if (count === 2) return { tool: { name: "send_serial_input", args: { text: "OLD_PRIVATE_COMMAND", appendEnter: true } } };
+      continued = request;
+      return { text: "A fresh diagnostic conversation." };
+    });
+    await ask(page, "Remember the old diagnosis");
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await ask(page, "Propose input for the old diagnosis");
+    await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
+    if (action === "new chat") {
+      await page.locator("#agentStop").tap();
+      await expect(page.locator("#agentNew")).toBeEnabled();
+      await page.locator("#agentNew").tap();
+    } else await page.evaluate(() => {
+      window.__test.setConnected(false);
+      window.__test.setConnected(true);
+    });
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await expect(page.locator("#agentMessages")).toHaveText("");
+    await ask(page, "Diagnose from a fresh context");
+    await expect(page.locator("#agentMessages")).toContainText("fresh diagnostic conversation");
+    expect(JSON.stringify(continued.messages)).not.toContain("OLD_DIAGNOSTIC_FACT");
+    expect(JSON.stringify(continued.messages)).not.toContain("OLD_PRIVATE_COMMAND");
+    expect(await page.evaluate(() => window.sent)).toEqual([]);
+    await expect(page.locator("#agentMessages [data-execution]")).toHaveCount(0);
+  });
+}
+
 test("Escape during IME composition preserves the Agent and its question draft", async ({ page }) => {
   await page.locator("#agentQuestion").fill("分析启动失败");
   await page.locator("#agentQuestion").dispatchEvent("keydown", { key: "Escape", isComposing: true });

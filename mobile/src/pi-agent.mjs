@@ -35,7 +35,8 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
         checkSession(signal);
         if (args.recent && args.after !== undefined) throw new Error("Choose recent or after, not both.");
         const log = device.readLog({ limit: args.limit ?? 6000, after: args.recent ? undefined : args.after ?? readCursor });
-        readCursor = Math.max(readCursor ?? 0, log.cursor ?? 0);
+        // Explicit history reads reposition the next implicit page as well.
+        readCursor = log.cursor ?? readCursor;
         return result({ ...log, hasMore: log.cursor < log.latestCursor });
       },
     },
@@ -96,7 +97,7 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     },
     {
       name: "wait_for_serial_output", label: "Wait for output",
-      description: "Collect output until a quiet interval or the deadline, then read from a cursor. waitStatus distinguishes settled output, continued streaming and no output. Follow cursor if hasMore is true. Quiet or silence is not proof of command completion.",
+      description: "Collect output until a quiet interval or the deadline, then read from a cursor. waitStatus distinguishes settled output, continued streaming and no output. Follow cursor if hasMore is true; read_serial_log without after continues from this returned cursor. Quiet or silence is not proof of command completion.",
       parameters: Type.Object({
         after: Type.Integer({ minimum: 0 }),
         timeoutMs: Type.Integer({ minimum: 100, maximum: 5000 }),
@@ -105,7 +106,7 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
       execute: async (_id, args, signal) => {
         const log = await waitForSerialOutput({ ...args, signal, readLog: (options) => device.readLog(options),
           check: () => checkSession(signal) });
-        readCursor = Math.max(readCursor ?? 0, log.cursor ?? 0);
+        readCursor = log.cursor ?? readCursor;
         return result(log);
       },
     },

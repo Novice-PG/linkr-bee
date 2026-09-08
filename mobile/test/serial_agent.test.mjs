@@ -185,6 +185,49 @@ test("omitted log cursors read only new data, while recent explicitly rereads th
   await agent.prompt("Watch new output");
 });
 
+test("default log reads continue from an explicit historical page after reading the tail", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("ABCDEFGHIJ"));
+  const pages = [];
+  const requests = [{ limit: 2 }, { after: 0, limit: 2 }, { limit: 2 }];
+  let turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status, readLog: (options) => journal.read(options),
+    stream: fakeStream((context) => {
+      if (turns > 0) pages.push(JSON.parse(context.messages.at(-1).content[0].text));
+      if (turns < requests.length) return [call("read_serial_log", requests[turns++])];
+      return [{ type: "text", text: "Historical paging continued without skipping output." }];
+    }),
+  });
+  await agent.prompt("Read the tail, then page through the earlier output");
+  assert.deepEqual(pages.map(({ text, start, cursor, hasMore }) => ({ text, start, cursor, hasMore })), [
+    { text: "IJ", start: 8, cursor: 10, hasMore: false },
+    { text: "AB", start: 0, cursor: 2, hasMore: true },
+    { text: "CD", start: 2, cursor: 4, hasMore: true },
+  ]);
+});
+
+test("default log reads continue from the last page returned by waiting for output", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("A".repeat(12000) + "NEXT_PAGE" + "Z".repeat(1000)));
+  const pages = [];
+  let turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status, readLog: (options) => journal.read(options),
+    stream: fakeStream((context) => {
+      if (++turns === 1) return [call("read_serial_log", { limit: 2 })];
+      pages.push(JSON.parse(context.messages.at(-1).content[0].text));
+      if (turns === 2) return [call("wait_for_serial_output", { after: 0, timeoutMs: 100, settleMs: 100 })];
+      if (turns === 3) return [call("read_serial_log", { limit: 9 })];
+      return [{ type: "text", text: "Continued from the observed page." }];
+    }),
+  });
+  await agent.prompt("Read the tail, then observe and page through earlier output");
+  assert.equal(pages[0].text, "ZZ");
+  assert.equal(pages[1].cursor, 12000);
+  assert.equal(pages[1].hasMore, true);
+  assert.equal(pages[2].text, "NEXT_PAGE");
+  assert.equal(pages[2].start, 12000);
+});
+
 function executableDevice({ onRecord, output = "DONE\r\nroot@board:~# " } = {}) {
   const journal = new SerialJournal();
   const sent = [];

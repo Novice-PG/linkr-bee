@@ -13,6 +13,7 @@ let agentPanel = null;
 let agentSettings = null;
 let serialInputRevision = 0;
 let serialInputPending = false;
+let bleNotificationSession = null;
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -1479,7 +1480,7 @@ function setConnecting(connecting) {
   }
 }
 
-function setConnected(connected) {
+function setConnected(connected, { preserveJournal = false } = {}) {
   const isWs = state.mode === "ws";
   const canConnect =
     Boolean(state.term) && (isWs || Boolean(bleTransport?.isAvailable()));
@@ -1496,7 +1497,7 @@ function setConnected(connected) {
   serialInputRevision++;
   serialInputPending = false;
   state.connected = connected;
-  if (connected) agentJournal.reset();
+  if (connected && !preserveJournal) agentJournal.reset();
   agentPanel?.connectionChanged(connected);
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = t(
@@ -2114,6 +2115,7 @@ function handleIncomingBytes(bytes) {
 }
 
 function onDisconnected() {
+  bleNotificationSession = null;
   const hadSession = Boolean(
     state.connected ||
       state.nusReady ||
@@ -2188,7 +2190,7 @@ function connectWs() {
     appendLine(`[connect] ${url}`);
 
     ws.onopen = () => {
-      if (settled) {
+      if (settled || state.ws !== ws) {
         ws.close();
         return;
       }
@@ -2201,6 +2203,7 @@ function connectWs() {
       resolve();
     };
     ws.onmessage = (event) => {
+      if (state.ws !== ws || !opened) return;
       if (event.data instanceof ArrayBuffer) {
         handleIncomingBytes(new Uint8Array(event.data));
       } else if (typeof event.data === "string") {
@@ -2208,6 +2211,7 @@ function connectWs() {
       }
     };
     ws.onclose = () => {
+      if (state.ws !== ws) return;
       if (opened) {
         onDisconnected();
       } else {
@@ -2215,6 +2219,7 @@ function connectWs() {
       }
     };
     ws.onerror = () => {
+      if (state.ws !== ws) return;
       if (!opened) {
         failConnect(t("wsUnreachable").replace("{url}", url));
       }
@@ -2299,11 +2304,23 @@ async function connect() {
       ),
       (byte) => byte.toString(16).padStart(2, "0"),
     ).join("");
+    // Notifications can arrive before startNotifications resolves. Start the
+    // evidence window before subscribing, and retain these first bytes when
+    // the handshake completes. Retired callbacks cannot feed the next device.
+    const notificationSession = {};
+    bleNotificationSession = notificationSession;
+    // Offline diagnostics may still be running. Retire that generation before
+    // its journal is replaced, without changing the connecting UI state.
+    state.writeGeneration += 1;
+    agentPanel?.connectionChanged(false);
+    agentJournal.reset();
     await bleTransport.startNotifications(
       device.id,
       MGMT_SERVICE,
       MGMT_RESPONSE,
-      onManagementIndication,
+      (value) => {
+        if (bleNotificationSession === notificationSession) onManagementIndication(value);
+      },
     );
     state.mgmtReady = true;
     const reliableState = await bleTransport.read(
@@ -2338,11 +2355,13 @@ async function connect() {
       device.id,
       RELIABLE_UART_SERVICE,
       RELIABLE_UART_TX,
-      onReliableUartIndication,
+      (value) => {
+        if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
+      },
     );
     state.reliableReady = true;
     state.deviceRestored = false;
-    setConnected(true);
+    setConnected(true, { preserveJournal: true });
     appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
     requestWifiState().catch((error) =>
       appendLine(`[error] ${error.message}`),

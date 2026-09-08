@@ -159,14 +159,16 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     $("agentStop").disabled = !value;
     $("agentStatus").textContent = value ? text("thinking") : "";
   }
-  function stop(reason, { preserveConversation = false } = {}) {
+  // Cancelling a run keeps its history; only explicit context/session resets
+  // discard the runner. The active prompt must still settle before another ask.
+  function stop(reason, { preserveConversation = true } = {}) {
     version++;
     runner?.abort();
     device.cancel();
     if (!preserveConversation) { runner = null; fingerprint = ""; }
     activeInputRow = null;
     toolRows.clear();
-    if (reason && (busy || preserveConversation)) addMessage("assistant", text(reason));
+    if (reason && (busy || reason === "modeChanged")) addMessage("assistant", text(reason));
     // The active prompt's finally block unlocks the UI once Pi settles.
   }
   function renderExecution(record) {
@@ -346,7 +348,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     if (!modePicker.hidden && !modePicker.contains(event.target) && !modeButton.contains(event.target)) showModePicker(false);
   });
   $("agentNew").addEventListener("click", () => {
-    stop();
+    stop(undefined, { preserveConversation: false });
     clearConversation();
   });
   function closePanel() {
@@ -433,15 +435,15 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   button.addEventListener("click", openPanel);
   refreshLang();
   return {
-    settingsChanged() { stop(); },
+    settingsChanged() { stop(undefined, { preserveConversation: false }); },
     refreshLang,
     logsChanged,
     syncLayout,
     isOpen: () => opened,
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),
-    logsCleared() { stop("stopped"); clearConversation(); refreshConsole(); },
+    logsCleared() { stop("stopped", { preserveConversation: false }); clearConversation(); refreshConsole(); },
     connectionChanged(connected) {
-      stop("changed");
+      stop("changed", { preserveConversation: false });
       if (connected) clearConversation();
       else device.observe();
       refreshConsole();

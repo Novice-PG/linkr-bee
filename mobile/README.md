@@ -103,8 +103,10 @@ confirmation dialog; it prevents the model from batching dependent inputs before
 it has received the preceding observation. Unresolved output still needs judgment.
 
 Logs come from the receive path, separately from local echo, management messages
-and AI answers. New connections clear the assistant journal and conversation;
-disconnects retain received logs for diagnosis but cancel ongoing work. The
+and AI answers. New connections clear the previous assistant journal before
+accepting device output, preserving logs received during BLE subscription. They
+also clear the conversation. Disconnects retain received logs for diagnosis but
+cancel ongoing work. The
 journal retains at most 128 Ki UTF-16 code units. Terminal control sequences are
 filtered continuously on receipt, so split packets, pages and buffer eviction do
 not expose control-sequence fragments as diagnostic evidence. Cursors still refer
@@ -115,8 +117,10 @@ serialized characters by abbreviating older evidence and then replacing complete
 tool exchanges with mechanical history excerpts. It retains the current question,
 marks omitted evidence, and keeps tool calls paired with their results. Excerpts
 are not verified conclusions or complete durable memory; retained log ranges can
-be reread until the journal evicts them. This is a character budget, not a model
-tokenizer measurement.
+be reread until the journal evicts them. Log reads without an explicit cursor
+continue from the last page returned by a read or wait, including historical
+pages; `recent: true` returns to the latest tail. This is a character budget,
+not a model tokenizer measurement.
 Interrupted model responses remain labelled text history; incomplete tool drafts
 and their placeholder results are not replayed as provider tool messages.
 
@@ -130,8 +134,11 @@ Press **Stop** to cancel model requests, pending approvals and unsent input.
 Already transmitted bytes cannot be recalled. To interrupt a running target
 program, use Ctrl-C in the terminal. Sending bytes does not prove a command
 completed; the assistant must inspect subsequent output before claiming success.
-Closing the assistant or backgrounding the app also cancels its current run.
-Switching apps while the Agent is idle preserves the conversation in memory.
+Closing the assistant, backgrounding the app or reaching the time limit also
+cancels its current run. These interruptions preserve the conversation in memory
+for the next question, after the cancelled run finishes settling. New conversations,
+cleared logs, changed AI configuration and device connection changes reset the
+model context. Switching apps while the Agent is idle also preserves the conversation.
 Escape during IME composition only cancels the input candidate; it does not close
 the Agent or its settings.
 
