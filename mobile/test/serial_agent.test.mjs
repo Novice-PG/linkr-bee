@@ -98,6 +98,43 @@ test("automatic diagnosis has a bounded number of model turns", async () => {
   assert.equal(reads, 8);
 });
 
+test("exhausting the tool budget reports an interrupted run and resets for the next question", async () => {
+  let reads = 0, turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status,
+    readLog: () => { reads++; return { text: "waiting" }; },
+    stream: fakeStream(() => {
+      turns++;
+      return Array.from({ length: 4 }, () => call("read_serial_log", {}));
+    }),
+  });
+  assert.equal((await agent.prompt("Inspect target")).limitReached, true);
+  assert.equal(reads, 16);
+  assert.equal(turns, 5);
+  assert.equal((await agent.prompt("Continue inspecting")).limitReached, true);
+  assert.equal(reads, 32);
+});
+
+test("a final answer on the last allowed model turn is a completed diagnosis", async () => {
+  let turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status, readLog: () => ({ text: "evidence" }),
+    stream: fakeStream(() => ++turns < 8 ? [call("read_serial_log", {})]
+      : [{ type: "text", text: "Diagnosis complete." }]),
+  });
+  assert.equal((await agent.prompt("Inspect target")).limitReached, false);
+  assert.equal(turns, 8);
+});
+
+test("a mixed tool batch stops at the execution budget before another model request", async () => {
+  let reads = 0, turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status,
+    readLog: () => { reads++; return { text: "evidence" }; },
+    stream: fakeStream(() => { turns++; return Array.from({ length: 20 }, () => call("read_serial_log", {})); }),
+  });
+  assert.equal((await agent.prompt("Inspect target")).limitReached, true);
+  assert.equal(reads, 16);
+  assert.equal(turns, 1);
+});
+
 test("a changed connection cannot reuse a previous device's agent context", async () => {
   let sessionId = 1;
   const agent = makeAgent({ config, getStatus: () => ({ sessionId }), readLog: () => ({}),

@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({
       response,
       body: await response.text() +
-        "\nwindow.__test = { state, setConnected, setTerminalFallbackFullscreen };",
+        "\nwindow.__test = { state, setConnected, setTerminalFallbackFullscreen, sendControl, bleTransport, onDisconnected, enqueueBytes };",
     });
   });
   await page.goto("/");
@@ -21,6 +21,166 @@ test.beforeEach(async ({ page }) => {
     setConnected(true);
     state.term.focus();
   });
+});
+
+for (const phase of ["queued", "fragmented"]) {
+  test(`management commands do not cross device sessions when ${phase}`, async ({ page }) => {
+    const result = await page.evaluate(async (phase) => {
+      const { state, setConnected, sendControl, bleTransport, onDisconnected } = window.__test;
+      state.mode = "ble";
+      state.device = { id: "old-device" };
+      state.mgmtReady = true;
+      setConnected(true);
+      document.querySelector("#chunkInput").value = "20";
+      const writes = [];
+      const reconnect = () => {
+        onDisconnected();
+        state.device = { id: "new-device" };
+        state.mgmtReady = true;
+        setConnected(true);
+      };
+      let release;
+      if (phase === "queued") {
+        state.controlWriteQueue = new Promise((resolve) => { release = resolve; });
+      }
+      bleTransport.write = async (deviceId, _service, _characteristic, chunk) => {
+        writes.push({ deviceId, length: chunk.length });
+        if (phase === "fragmented" && writes.length === 1) reconnect();
+        // Permit the original implementation to settle after leaking a command
+        // to the next device, instead of leaving a ten-second response timeout.
+        if (deviceId === "new-device") {
+          for (const id of state.mgmtResponses.pending.keys()) {
+            state.mgmtResponses.settle({ requestId: id, type: 2, flags: 0 });
+          }
+        }
+      };
+      const operation = sendControl("@w=" + "s".repeat(50)).then(
+        () => ({ rejected: false }), () => ({ rejected: true }),
+      );
+      if (phase === "queued") {
+        reconnect();
+        release();
+      }
+      return { ...await operation, writes };
+    }, phase);
+    expect(result.rejected).toBe(true);
+    expect(result.writes).toEqual(phase === "queued" ? [] : [{ deviceId: "old-device", length: 20 }]);
+  });
+}
+
+for (const failure of ["cancel-fragment", "reject-final-fragment", "reject-complete-frame"]) {
+  test(`uncertain Reliable UART ${failure} blocks later input until reconnect`, async ({ page }) => {
+    const result = await page.evaluate(async (failure) => {
+      const { state, setConnected, enqueueBytes, bleTransport } = window.__test;
+      state.mode = "ble";
+      state.device = { id: "device" };
+      state.nusReady = state.reliableReady = true;
+      state.reliableMaxPayload = 232;
+      state.reliableWriteSize = failure === "reject-complete-frame" ? 244 : 20;
+      setConnected(true);
+      const abort = new AbortController();
+      const writes = [];
+      bleTransport.write = async (_id, _service, _characteristic, chunk) => {
+        // The peripheral may already have accepted these bytes before the local
+        // promise rejects or the user cancels. Never infer rejection = unsent.
+        writes.push([...chunk]);
+        if (failure === "cancel-fragment") abort.abort();
+        if (failure === "reject-complete-frame" ||
+            (failure === "reject-final-fragment" && writes.length === 2)) {
+          throw new Error("GATT write response timed out");
+        }
+      };
+      const first = await enqueueBytes(new Uint8Array(28).fill(65), false, { signal: abort.signal })
+        .then(() => "sent", (error) => error.message);
+      const writesAfterFailure = writes.length;
+      const next = await enqueueBytes(new TextEncoder().encode("pwd\r"))
+        .then(() => "sent", (error) => error.message);
+      const writesAfterNext = writes.length;
+      // Simulate a fresh handshake, which resets the peer's frame assembler and
+      // reads its current sequence before accepting more user input.
+      setConnected(false);
+      setConnected(true);
+      bleTransport.write = async (_id, _service, _characteristic, chunk) => writes.push([...chunk]);
+      await enqueueBytes(new TextEncoder().encode("pwd\r"));
+      return { first, next, writesAfterFailure, writesAfterNext, writesAfterReconnect: writes.length };
+    }, failure);
+    expect(result.first).toMatch(/uncertain.*reconnect/i);
+    expect(result.next).toMatch(/uncertain.*reconnect/i);
+    expect(result.writesAfterFailure).toBe(failure === "reject-final-fragment" ? 2 : 1);
+    expect(result.writesAfterNext).toBe(result.writesAfterFailure);
+    expect(result.writesAfterReconnect).toBe(result.writesAfterFailure + 1);
+  });
+}
+
+test("uncertain management fragment blocks queued settings until reconnect", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { state, setConnected, sendControl, bleTransport } = window.__test;
+    state.mode = "ble";
+    state.device = { id: "device" };
+    state.mgmtReady = true;
+    setConnected(true);
+    document.querySelector("#chunkInput").value = "20";
+    let writes = 0;
+    bleTransport.write = async () => {
+      writes++;
+      if (writes === 2) throw new Error("GATT write response timed out");
+      // Avoid waiting for responses if the regression leaks the queued frame.
+      if (writes > 2) for (const id of state.mgmtResponses.pending.keys()) {
+        state.mgmtResponses.settle({ requestId: id, type: 2, flags: 0 });
+      }
+    };
+    const resultOf = (operation) => operation.then(() => "sent", (error) => error.message);
+    const first = resultOf(sendControl("@w=" + "s".repeat(50)));
+    const queued = resultOf(sendControl("@w?"));
+    const outcomes = await Promise.all([first, queued]);
+    const writesBeforeReconnect = writes;
+    setConnected(false);
+    setConnected(true);
+    await sendControl("@w?");
+    return { outcomes, writesBeforeReconnect, writesAfterReconnect: writes };
+  });
+  for (const outcome of result.outcomes) expect(outcome).toMatch(/uncertain.*reconnect/i);
+  expect(result.writesBeforeReconnect).toBe(2);
+  expect(result.writesAfterReconnect).toBe(3);
+});
+
+test("explicit ATT size rejection still falls back before a frame starts", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { state, setConnected, enqueueBytes, bleTransport } = window.__test;
+    state.mode = "ble";
+    state.device = { id: "device" };
+    state.nusReady = state.reliableReady = true;
+    state.reliableMaxPayload = 232;
+    state.reliableWriteSize = 244;
+    setConnected(true);
+    const attempts = [];
+    const accepted = [];
+    bleTransport.write = async (_id, _service, _characteristic, chunk) => {
+      attempts.push(chunk.length);
+      if (chunk.length > 20) throw new Error("GATT Invalid Attribute Length.");
+      accepted.push(...chunk);
+    };
+    await enqueueBytes(new Uint8Array(80).fill(65));
+    return { attempts, accepted, nextSequence: state.reliableTxSequence, writeError: state.uartWriteError };
+  });
+  expect(result.attempts).toEqual([92, 62, 20, 20, 20, 20, 12]);
+  expect(result.accepted.slice(12)).toEqual(new Array(80).fill(65));
+  expect(result.nextSequence).toBe(2);
+  expect(result.writeError).toBe("");
+});
+
+test("IME Escape does not exit terminal fullscreen", async ({ page }) => {
+  await page.evaluate(() => window.__test.setTerminalFallbackFullscreen(true));
+  for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
+    await page.evaluate((composition) => {
+      window.__test.state.term.textarea.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape", bubbles: true, ...composition,
+      }));
+    }, composition);
+    await expect(page.locator("#terminalCard")).toHaveClass(/terminal-fullscreen-fallback/);
+  }
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#terminalCard")).not.toHaveClass(/terminal-fullscreen-fallback/);
 });
 
 async function terminalWrite(page, text) {

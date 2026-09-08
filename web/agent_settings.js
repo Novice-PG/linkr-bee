@@ -57,13 +57,16 @@ export function createAgentSettings({ section, tab, getLang, onChange }) {
       inputs[name].focus();
       return;
     }
+    const previous = config;
     try { config = saveAgentConfig(localStorage, draft); } catch {
       showStatus("saveError", true);
       return;
     }
     fill();
     showStatus("saved");
-    onChange?.();
+    // Re-saving the same normalized settings must not silently reset the visible
+    // diagnostic conversation. A changed provider, model or key starts fresh.
+    if (!previous || Object.keys(inputs).some((name) => previous[name] !== config[name])) onChange?.();
   });
   $("agentSettingsClear").addEventListener("click", () => {
     if (busy) return;

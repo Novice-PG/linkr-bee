@@ -408,9 +408,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   $("agentClose").addEventListener("click", closePanel);
   $("agentSettingsButton").addEventListener("click", openSettings);
   terminalPeek.addEventListener("click", () => { editingAgent = false; focusTerminal(); syncLayout(); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden) stop("stopped"); });
+  // Mobile app switches must cancel active work, but an idle conversation should
+  // still match the visible history when the user returns with more information.
+  document.addEventListener("visibilitychange", () => { if (document.hidden && busy) stop("stopped"); });
   // Escape in xterm remains a UART key. Escape within the assistant exits it.
   dialog.addEventListener("keydown", (event) => {
+    // Escape belongs to the IME while the user is choosing/cancelling a candidate.
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape") {
       event.preventDefault();
       if (!modePicker.hidden) { event.stopPropagation(); showModePicker(false, true); }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactAgentContext } from "../src/agent-context.mjs";
+import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
+import { compactAgentContext, settleAgentHistory } from "../src/agent-context.mjs";
 
 const user = (text) => ({ role: "user", content: [{ type: "text", text }], timestamp: 1 });
 const assistant = (content) => ({ role: "assistant", content, api: "openai-completions", provider: "test", model: "test", timestamp: 1, stopReason: "toolUse" });
@@ -16,6 +17,38 @@ function checkPairs(messages) {
     if (message.role === "toolResult") { assert(calls.has(message.toolCallId)); results.add(message.toolCallId); }
   }
   assert.deepEqual(calls, results);
+}
+
+for (const stopReason of ["aborted", "error"]) {
+  for (const hasRecordedResult of [false, true]) {
+    test(`${stopReason} streaming tool drafts remain safe after Pi provider conversion (recorded result: ${hasRecordedResult})`, () => {
+      const partial = { ...assistant([
+        { type: "text", text: "The unfinished hypothesis is an eMMC mount failure." },
+        { type: "toolCall", id: "partial-restart", name: "send_serial_input", arguments: { text: "reboot" } },
+      ]), stopReason };
+      const recorded = { role: "toolResult", toolCallId: "partial-restart", toolName: "send_serial_input", isError: true,
+        content: [{ type: "text", text: "Interrupted before a completed result. Delivery is unknown." }], timestamp: 1 };
+      const history = [user("Diagnose this board"), ...pair("completed-read", "OBSERVED_ERROR"), partial,
+        ...(hasRecordedResult ? [recorded] : []), user("Continue analysis only")];
+      const original = structuredClone(history);
+      const settled = settleAgentHistory(history);
+      const request = convertMessages({ id: "test", provider: "test", api: "openai-completions", input: ["text"] },
+        { messages: settled }, {});
+      const toolCalls = request.flatMap((message) => message.tool_calls || []).map((call) => call.id);
+      const toolResults = request.filter((message) => message.role === "tool").map((message) => message.tool_call_id);
+      assert.deepEqual(toolCalls, ["completed-read"]);
+      assert.deepEqual(toolResults, toolCalls, "Provider requests must not contain orphaned tool results");
+      const retained = request.filter((message) => message.role === "assistant" && typeof message.content === "string")
+        .map((message) => message.content).join("\n");
+      assert.match(retained, /unfinished hypothesis.*eMMC/);
+      assert.match(retained, /interrupted/i);
+      assert.match(retained, /do not execute or replay/i);
+      assert.match(retained, /not.*verified result/i);
+      if (hasRecordedResult) assert.match(retained, /Delivery is unknown/);
+      assert.deepEqual(history, original);
+      assert.deepEqual(settleAgentHistory(settled), settled);
+    });
+  }
 }
 
 test("two large log reads fit without losing current evidence or changing original messages", () => {

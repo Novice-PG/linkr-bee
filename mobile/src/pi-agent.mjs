@@ -131,14 +131,21 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     },
     toolExecution: "sequential",
     beforeToolCall: async ({ toolCall }) => {
-      if (++toolCalls > 16) return { block: true, reason: "Tool-call budget exhausted. Explain current findings without more tools.", terminate: true };
+      if (++toolCalls > 16) {
+        limitReached = true;
+        return { block: true, reason: "Tool-call budget exhausted. No further tools will run for this question.", terminate: true };
+      }
       if (toolCall.name === "send_serial_input" && pendingExecution &&
         (pendingExecution.reviewedRound === null || pendingExecution.reviewedRound >= modelRound)) {
         return { block: true, reason: `Inspect execution ${pendingExecution.id} and read its result in the next model turn before sending another input. Do not batch dependent input.` };
       }
     },
     transformContext: async (messages) => compactAgentContext(messages),
-    shouldStopAfterTurn: () => { limitReached = ++turns >= 8; return limitReached; },
+    shouldStopAfterTurn: ({ message }) => {
+      turns++;
+      limitReached ||= turns >= 8 && message.content.some((part) => part.type === "toolCall");
+      return limitReached;
+    },
   });
   agent.subscribe((event) => onEvent?.(event));
   return {

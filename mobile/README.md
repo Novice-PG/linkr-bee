@@ -43,7 +43,9 @@ Configure a Chat Completions-compatible API
 base URL, a model ID with tool-calling support, and your own API key (optional
 for keyless local services), then select **Save configuration**. Saving does not
 send a model request. Endpoint, model and API key are restored after reloading
-or restarting the app. **Clear configuration** removes all three from this device.
+or restarting the app. Re-saving unchanged settings retains the current diagnostic
+conversation; changing the endpoint, model or key resets its model context.
+**Clear configuration** removes all three from this device.
 Ask a question such as “Why did this board fail to
 boot?” The app runs the Pi agent loop locally; model inference uses the configured
 service. This is not an on-device/offline language model.
@@ -103,14 +105,20 @@ it has received the preceding observation. Unresolved output still needs judgmen
 Logs come from the receive path, separately from local echo, management messages
 and AI answers. New connections clear the assistant journal and conversation;
 disconnects retain received logs for diagnosis but cancel ongoing work. The
-journal retains at most 128 Ki UTF-16 code units. Each question is limited to
-eight model turns and three minutes. The adapter bounds model context to 24,000
+journal retains at most 128 Ki UTF-16 code units. Terminal control sequences are
+filtered continuously on receipt, so split packets, pages and buffer eviction do
+not expose control-sequence fragments as diagnostic evidence. Cursors still refer
+to the original UTF-16 offsets. Each question is limited to eight model turns,
+16 tool calls and three minutes. Exhausting an execution budget shows a stop
+notice; a completed answer on the eighth turn does not. The adapter bounds model context to 24,000
 serialized characters by abbreviating older evidence and then replacing complete
 tool exchanges with mechanical history excerpts. It retains the current question,
 marks omitted evidence, and keeps tool calls paired with their results. Excerpts
 are not verified conclusions or complete durable memory; retained log ranges can
 be reread until the journal evicts them. This is a character budget, not a model
 tokenizer measurement.
+Interrupted model responses remain labelled text history; incomplete tool drafts
+and their placeholder results are not replayed as provider tool messages.
 
 The system prompt lives in `mobile/src/agent-prompt.mjs`. It distinguishes analysis
 from requested repair, adapts diagnostics to the observed console and available
@@ -123,6 +131,9 @@ Already transmitted bytes cannot be recalled. To interrupt a running target
 program, use Ctrl-C in the terminal. Sending bytes does not prove a command
 completed; the assistant must inspect subsequent output before claiming success.
 Closing the assistant or backgrounding the app also cancels its current run.
+Switching apps while the Agent is idle preserves the conversation in memory.
+Escape during IME composition only cancels the input candidate; it does not close
+the Agent or its settings.
 
 ### Device execution layer
 
@@ -143,6 +154,12 @@ window, not a command protocol or an exit-code measurement. The structured
 `executionStatus` remains `unknown`; a returned prompt is not a success signal.
 Partial/uncertain delivery is recorded and never automatically replayed by the
 executor. No probing or verification command is silently added to the wire text.
+If a fragmented BLE transfer is interrupted or its delivery cannot be confirmed,
+the affected UART or management channel blocks further writes until disconnect
+and reconnect; received logs remain available. This prevents a new command from
+being consumed as the remainder of an old frame. Queued management requests and
+individual fragments are also bound to their original connection. Only an explicit
+first-fragment ATT size rejection can trigger a smaller-size retry.
 
 Execution records stay in memory. New conversations, cleared logs and new device
 connections reset them. Restarting the app does not restore approvals or replay

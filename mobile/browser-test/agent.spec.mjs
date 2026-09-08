@@ -103,6 +103,33 @@ test("unsaved configuration is not used, and running Agent settings are locked",
   await expect(page.locator("#agentSettingsStatus")).toContainText("not been saved");
 });
 
+for (const changed of [false, true]) {
+  test(`saved settings ${changed ? "start fresh when the model changes" : "retain the conversation when unchanged"}`, async ({ page }) => {
+    let continued;
+    await mockModel(page, (request, count) => {
+      if (count === 1) return { text: "The root partition could not be mounted." };
+      continued = request;
+      return { text: "The next question uses the explicitly saved configuration." };
+    });
+    await ask(page, "Remember the board boots from eMMC");
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await page.locator("#agentSettingsButton").tap();
+    if (changed) await page.locator("#agentModel").fill("replacement-model");
+    await page.locator("#agentSettingsSave").tap();
+    await expect(page.locator("#agentSettingsStatus")).toContainText("saved on this device");
+    await page.locator("#drawerClose").tap();
+    await ask(page, "Continue diagnosing");
+    await expect(page.locator("#agentMessages")).toContainText("explicitly saved configuration");
+    expect(continued.model).toBe(changed ? "replacement-model" : "test-model");
+    const context = JSON.stringify(continued.messages);
+    if (changed) expect(context).not.toContain("boots from eMMC");
+    else {
+      expect(context).toContain("boots from eMMC");
+      expect(context).toContain("could not be mounted");
+    }
+  });
+}
+
 test("serial input waits for explicit approval and returns to the Pi loop", async ({ page }) => {
   await chooseMode(page, "manual");
   await mockModel(page, (_request, count) => count === 1
@@ -173,6 +200,36 @@ test("mode changes keep completed diagnostic context and use the new policy on t
   expect(JSON.stringify(nextRequest.messages)).toContain("boots from eMMC");
   expect(JSON.stringify(nextRequest.messages)).toContain("missing root filesystem");
   expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("returning from another app preserves an idle diagnostic conversation", async ({ page }) => {
+  let continued;
+  await mockModel(page, (request, count) => {
+    if (count === 1) return { text: "The suspected fault is the eMMC root filesystem." };
+    continued = request;
+    return { text: "Continuing the same diagnosis after returning to the app." };
+  });
+  await ask(page, "Remember this board boots from eMMC");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    delete document.hidden;
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await ask(page, "Continue the diagnosis");
+  await expect(page.locator("#agentMessages")).toContainText("after returning to the app");
+  expect(JSON.stringify(continued.messages)).toContain("boots from eMMC");
+  expect(JSON.stringify(continued.messages)).toContain("suspected fault");
+});
+
+test("Escape during IME composition preserves the Agent and its question draft", async ({ page }) => {
+  await page.locator("#agentQuestion").fill("分析启动失败");
+  await page.locator("#agentQuestion").dispatchEvent("keydown", { key: "Escape", isComposing: true });
+  await expect(page.locator("#agentPanel")).toBeVisible();
+  await expect(page.locator("#agentQuestion")).toHaveValue("分析启动失败");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#agentPanel")).toBeHidden();
 });
 
 test("a mode change during approval preserves context but never sends the cancelled command", async ({ page }) => {
@@ -334,7 +391,7 @@ test("intervening terminal input invalidates an approved command", async ({ page
   expect(await page.evaluate(() => window.sent.length)).toBe(1);
 });
 
-for (const action of ["stop", "disconnect", "reject", "exit"]) {
+for (const action of ["stop", "disconnect", "reject", "exit", "background"]) {
   test(`${action} prevents a pending agent write`, async ({ page }) => {
     await mockModel(page, (_request, count) => count === 1
       ? { tool: { name: "send_serial_input", args: { text: "reboot", appendEnter: true } } }
@@ -345,6 +402,10 @@ for (const action of ["stop", "disconnect", "reject", "exit"]) {
     if (action === "disconnect") await page.evaluate(() => window.__test.setConnected(false));
     if (action === "reject") await page.locator("#agentMessages .agent-actions .btn:not(.btn-primary)").tap();
     if (action === "exit") await page.locator("#agentClose").tap();
+    if (action === "background") await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
     await expect(page.locator("#agentAsk")).toBeEnabled();
     expect(await page.evaluate(() => window.sent)).toEqual([]);
   });

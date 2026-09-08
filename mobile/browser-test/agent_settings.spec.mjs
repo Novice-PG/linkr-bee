@@ -88,6 +88,16 @@ test("Agent settings uses the same drawer and returns to the existing conversati
   await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "true");
 });
 
+test("Escape during IME composition keeps the settings drawer and unsaved input open", async ({ page }) => {
+  await openSettings(page);
+  await page.locator("#agentModel").fill("正在输入模型名");
+  await page.locator("#agentModel").dispatchEvent("keydown", { key: "Escape", isComposing: true });
+  await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "false");
+  await expect(page.locator("#agentModel")).toHaveValue("正在输入模型名");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "true");
+});
+
 for (const inAgent of [false, true]) {
   test(`settings remains editable above the phone keyboard (Agent: ${inAgent})`, async ({ page }) => {
     if (inAgent) {

@@ -73,6 +73,7 @@ const state = {
   mgmtRx: null,
   mgmtResponses: new ManagementResponseTracker(),
   controlWriteQueue: Promise.resolve(),
+  mgmtWriteError: "",
   mode: "ble",
   ws: null,
   wsHost: "",
@@ -89,6 +90,7 @@ const state = {
   txBytes: 0,
   writeQueue: Promise.resolve(),
   writeGeneration: 0,
+  uartWriteError: "",
   controlPending: false,
   shiftPending: false,
   altPending: false,
@@ -1489,6 +1491,8 @@ function setConnected(connected) {
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   state.writeGeneration += 1;
+  state.uartWriteError = "";
+  state.mgmtWriteError = "";
   serialInputRevision++;
   serialInputPending = false;
   state.connected = connected;
@@ -1637,8 +1641,16 @@ function assertWriteSession(generation, signal) {
   }
 }
 
+function isAttSizeRejection(error) {
+  // Only explicit local/ATT size rejection proves this write was not applied.
+  // Timeouts and generic network errors can arrive after the peripheral wrote it.
+  return error?.name === "InvalidModificationError" ||
+    /invalid attribute (?:value )?length/i.test(error?.message || "");
+}
+
 async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal) {
   assertWriteSession(generation, signal);
+  if (state.uartWriteError) throw new Error(state.uartWriteError);
   if (state.mode === "ws") {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
       throw new Error("WebSocket is not connected");
@@ -1689,10 +1701,11 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
       assertWriteSession(generation, signal);
       state.txBytes += chunk.length;
     } catch (error) {
+      if (state.uartWriteError && generation === state.writeGeneration) throw error;
       assertWriteSession(generation, signal);
       // Agent writes cannot be replayed after an uncertain legacy write, and
       // an earlier successful chunk must never be resent as part of fallback.
-      if (signal || offset > 0) throw error;
+      if (signal || offset > 0 || !isAttSizeRejection(error)) throw error;
       if (state.reliableReady) {
         throw error;
       }
@@ -1736,9 +1749,11 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
 
   for (const attSize of candidates) {
     let writesCompleted = 0;
+    let writesAttempted = 0;
     try {
       for (let offset = 0; offset < frame.length; offset += attSize) {
         assertWriteSession(generation, signal);
+        writesAttempted += 1;
         await bleTransport.write(
           state.device.id,
           RELIABLE_UART_SERVICE,
@@ -1753,13 +1768,18 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
       state.reliableTxSequence = nextSequence(sequence);
       return;
     } catch (error) {
+      if (generation === state.writeGeneration && state.connected &&
+          writesAttempted > 0 && (writesCompleted > 0 || !isAttSizeRejection(error))) {
+        // An unfinished frame may consume the next command as its payload;
+        // an unacknowledged complete frame may have advanced the peer sequence.
+        // Preserve incoming logs but require a fresh session before any UART input.
+        state.uartWriteError = "Reliable UART delivery is uncertain; disconnect and reconnect before sending more input.";
+        throw new Error(state.uartWriteError, { cause: error });
+      }
       assertWriteSession(generation, signal);
       lastError = error;
-      if (writesCompleted > 0) {
-        throw error;
-      }
-      /* A rejected atomic write has not started a Reliable frame. Retry with
-       * the next common ATT payload size and cache the accepted size. */
+      /* Explicit size rejection before the first fragment is safe to retry
+       * with the next common ATT payload size. */
     }
   }
   throw lastError || new Error("Reliable UART write failed");
@@ -1857,6 +1877,10 @@ async function sendControl(command) {
   if (state.mode !== "ble" || !state.mgmtReady) {
     throw new Error("Management characteristic is not ready");
   }
+  if (state.mgmtWriteError) throw new Error(state.mgmtWriteError);
+  const generation = state.writeGeneration;
+  const deviceId = state.device?.id;
+  const responses = state.mgmtResponses;
 
   const requestId = state.nextRequestId || 1;
   state.nextRequestId = requestId === 0xffffffff ? 1 : requestId + 1;
@@ -1876,16 +1900,21 @@ async function sendControl(command) {
   frame.set(payload, MGMT_HEADER_SIZE);
 
   const operation = state.controlWriteQueue.then(async () => {
+    assertWriteSession(generation);
+    if (state.mgmtWriteError) throw new Error(state.mgmtWriteError);
     if (!state.connected || !state.mgmtReady || !state.device) {
       throw new Error("Management characteristic is not ready");
     }
-    const response = state.mgmtResponses.wait(requestId);
+    const response = responses.wait(requestId);
+    let writesCompleted = 0;
+    let writesAttempted = 0;
     /* The first GATT write must contain the complete 12-byte management
      * header. Keep 20 bytes as the minimum even if the terminal's raw UART
      * chunk-size control is configured lower. */
     try {
       const size = Math.max(20, chunkSize());
       for (let offset = 0; offset < frame.length; offset += size) {
+        assertWriteSession(generation);
         const chunk = frame.slice(offset, offset + size);
         if (elements.debugInput.checked) {
           appendLine(
@@ -1894,18 +1923,28 @@ async function sendControl(command) {
               : `MGMT TX #${requestId} ${chunk.length} bytes`,
           );
         }
+        writesAttempted += 1;
         await bleTransport.write(
-          state.device.id,
+          deviceId,
           MGMT_SERVICE,
           MGMT_COMMAND,
           chunk,
           true,
         );
+        writesCompleted += 1;
+        assertWriteSession(generation);
       }
     } catch (error) {
-      state.mgmtResponses.reject(requestId, error);
+      if (generation === state.writeGeneration && state.connected &&
+          writesAttempted > 0 && (writesCompleted > 0 || !isAttSizeRejection(error))) {
+        // A partial management frame must not absorb a later settings request.
+        state.mgmtWriteError = "Management delivery is uncertain; disconnect and reconnect before sending more settings commands.";
+        error = new Error(state.mgmtWriteError, { cause: error });
+      }
+      responses.reject(requestId, error);
     }
     await response;
+    assertWriteSession(generation);
     return requestId;
   });
   state.controlWriteQueue = operation.catch(() => {});
@@ -2990,6 +3029,8 @@ function bind() {
   document.addEventListener("fullscreenchange", onFullscreenChange);
 
   document.addEventListener("keydown", (event) => {
+    // Escape may cancel a mobile/IME composition without leaving its editor.
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape") {
       if (
         usesSettingsDrawer() &&
@@ -3068,6 +3109,7 @@ function init() {
     },
     getStatus: () => ({ sessionId: state.writeGeneration, connected: state.connected,
       inputPending: serialInputPending, inputRevision: serialInputRevision,
+      uartWriteError: state.uartWriteError,
       transport: state.mode, device: elements.deviceName.textContent,
       uart: elements.uartInput.value, receivedBytes: state.rxBytes, sentBytes: state.txBytes }),
     readLog: (options) => agentJournal.read(options),
