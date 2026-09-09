@@ -1,4 +1,5 @@
 import { requiresInputApproval } from "./agent_execution_policy.js";
+import { parseDeviceProfile } from "./device_profile.js";
 import { inspectSerialConsole } from "./serial_console.js";
 
 const cancelled = () => new Error("Operation cancelled. Do not retry automatically.");
@@ -9,6 +10,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
   let nextId = 0;
   let active = null;
   const records = [];
+  let profile = null;
   const snapshot = (record) => structuredClone(record);
   const publish = (record) => { if (records.includes(record)) onRecord?.(snapshot(record)); };
   function consoleState() {
@@ -67,7 +69,31 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       Object.assign(record, executionPage(record));
       record.observation = !record.evidence ? "no-output"
         : inspectSerialConsole({ text: record.evidence, latestCursor: record.observedEnd }).kind === "shell" ? "prompt-returned" : "output-observed";
-      // A prompt or output does not provide an exit code or prove success.
+      const hint = inspectSerialConsole({text:record.evidence,latestCursor:record.observedEnd});
+      record.waitingFor = ["login", "password", "sudo-password", "confirmation", "pager", "bootloader"].includes(hint.kind) ? hint.kind : null;
+      if (record.download) {
+        const partial = record.evidence.match(/^LINKR_PART:(.+)\r?$/m);
+        if (partial) record.download.partialPath = partial[1].trim();
+        const hash = record.evidence.match(/^LINKR_SHA256:([a-fA-F0-9]{64})\r?$/m);
+        const bytes = record.evidence.match(/^LINKR_BYTES:\s*(\d+)\r?$/m);
+        if (hash) record.download.sha256 = hash[1].toLowerCase();
+        if (bytes) record.download.bytes = Number(bytes[1]);
+      }
+      if (record.completionToken) {
+        const match = record.evidence.match(new RegExp(`(?:^|\\n)${record.completionToken}:([0-9]{1,3})\\r?\\n`));
+        if (match && Number(match[1]) <= 255) {
+          record.exitCode = Number(match[1]);
+          record.executionStatus = "completed";
+          record.observationClosed = true;
+          if (record.download) record.download.status = record.exitCode === 0 && record.download.sha256 && Number.isFinite(record.download.bytes) ? "saved" : "failed-or-unverified";
+          if (record.profileProbe && record.exitCode === 0) {
+            const data = parseDeviceProfile(record.evidence);
+            if (data) profile = {...data, sessionId:record.sessionId, cursor:record.observedEnd};
+          }
+          record.completedAt = new Date().toISOString();
+        }
+      }
+      // Exit status describes shell completion, never verification of the goal.
     }
     publish(record);
     return snapshot(paged ? { ...record, ...executionPage(record, options) } : record);
@@ -90,8 +116,18 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       if (value !== mode) { cancel(); mode = value; }
     },
     cancel,
-    reset() { cancel(); records.length = 0; },
-    getStatus() { return { ...getStatus(), executionMode: mode, console: consoleState() }; },
+    forgetProfile() { profile = null; },
+    reset() { cancel(); records.length = 0; profile = null; },
+    getStatus() {
+      const status = getStatus();
+      if (profile) {
+        const recent = readLog({after:profile.cursor,limit:4000});
+        profile.stale ||= !status.connected || status.sessionId !== profile.sessionId || Date.now()-profile.observedAt > 900000 ||
+          /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '') || recent.truncated;
+        profile.cursor = recent.cursor ?? profile.cursor;
+      }
+      return { ...status, executionMode: mode, console: consoleState(), profile };
+    },
     readLog(options) { return readLog(options); },
     getRecords() { return records.filter((record) => record.sessionId === getStatus().sessionId).map(snapshot); },
     inspectExecution,
@@ -109,7 +145,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       active.rejectApproval(new Error("User rejected this input. Do not request it again."));
       return true;
     },
-    async execute(args, signal) {
+    async execute(args, signal, { userApproved = false } = {}) {
       signal?.throwIfAborted();
       if (active) throw new Error("Another serial action is still active.");
       if (typeof args?.text !== "string" || !args.text.length || args.text.length > 2048 || typeof args.appendEnter !== "boolean") {
@@ -117,7 +153,19 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       }
       const status = getStatus();
       if (!status.connected) throw new Error("Device is disconnected.");
-      const record = { id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
+      const download = args.download;
+      const profileProbe = args.profileProbe;
+      let completionToken;
+      if (args.trackExit) {
+        if (status.inputPending || consoleState().kind !== "shell" || !args.appendEnter) {
+          throw new Error("Tracked commands require an idle, observed POSIX shell prompt.");
+        }
+        completionToken = `LINKR_EXIT_${crypto.randomUUID().replaceAll("-", "")}`;
+        const quoted = "'" + args.text.replaceAll("'", "'\\''") + "'";
+        args = { text: `sh -c ${quoted}; printf '\\n%s:%s\\n' '${completionToken}' "$?"`, appendEnter: true };
+        if (args.text.length > 2048) throw new Error("Tracked command is too long after shell quoting.");
+      }
+      const record = { profileProbe, download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
         payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
         executionStatus: "unknown", createdAt: new Date().toISOString(), evidence: "", observation: "no-output" };
       const controller = new AbortController();
@@ -128,7 +176,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       records.push(record);
       if (records.length > 50) records.shift();
       try {
-        if (requiresInputApproval(mode, args, record.payload, status.inputPending) || (mode === "auto" && record.console.kind !== "shell")) {
+        if (!userApproved && (requiresInputApproval(mode, args, record.payload, status.inputPending) || (mode === "auto" && record.console.kind !== "shell"))) {
           record.state = "awaiting-approval";
           await new Promise((resolve, reject) => {
             let settled = false;

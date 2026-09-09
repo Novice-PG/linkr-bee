@@ -225,3 +225,52 @@ test("a second writer is refused until the first settles; snapshots cannot mutat
   await pending;
   assert.deepEqual(sent, ["uname -a\r"]);
 });
+
+test("tracked shell commands preserve quoting and require an explicit exit marker", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const f = fixture();
+  f.device.setMode("full-auto");
+  const record = await f.device.execute({ text: "printf \"it's working\\n\"; exit 7", appendEnter: true, trackExit: true });
+  // Terminal echo of the wrapper must not be interpreted as completion.
+  f.receive(f.sent[0] + "\n");
+  assert.equal(f.device.inspectExecution(record.id).executionStatus, "unknown");
+  const output = execFileSync("sh", ["-c", f.sent[0].trim()], { encoding: "utf8" });
+  f.receive(output.slice(0, -2));
+  assert.equal(f.device.inspectExecution(record.id).executionStatus, "unknown");
+  f.receive(output.slice(-2));
+  const done = f.device.inspectExecution(record.id);
+  assert.equal(done.executionStatus, "completed");
+  assert.equal(done.exitCode, 7);
+  assert.match(done.evidence, /it's working/);
+});
+
+test("tracked commands reject login consoles and preserve exact-input approval", async () => {
+  const login = fixture({ initial: "board login: " });
+  login.device.setMode("full-auto");
+  await assert.rejects(login.device.execute({ ...query, trackExit: true }), /idle, observed/);
+  assert.equal(login.sent.length, 0);
+  const f = fixture();
+  const pending = f.device.execute({ ...query, trackExit: true });
+  const record = f.device.getRecords()[0];
+  assert.equal(record.state, "awaiting-approval");
+  assert.match(record.payload, /sh -c 'uname -a'/);
+  f.device.approve(record.id);
+  await pending;
+  assert.equal(f.sent[0], record.payload);
+});
+
+test('interaction hints detect sudo, confirmations and pagers without treating them as shells', () => {
+  for (const [text,kind] of [['[sudo] password for root: ','sudo-password'],['Continue? [Y/n] ','confirmation'],['--More--','pager'],['(END)','pager']]) assert.equal(inspectSerialConsole({text}).kind,kind);
+});
+for (const eol of ['\n', '\r\n', '\n\r']) {
+test(`completed device profile handles ${JSON.stringify(eol)}, becomes stale after reboot and is cleared on reset`, async () => {
+  const f=fixture(); f.device.setMode('full-auto');
+  const record=await f.device.execute({text:'true',appendEnter:true,trackExit:true,profileProbe:true});
+  f.receive(`\nLINKR_PROFILE_BEGIN\nLinux\nLINKR_OS\nID=debian\nLINKR_MODEL\nBoard\nLINKR_BOOT\nboot\nLINKR_DISK\nroot 100 20 80\nLINKR_TOOLS\nTOOL:curl\nLINKR_PROFILE_END\n`.replaceAll('\n', eol) + `\n${record.completionToken}:0\nroot@board:~# `);
+  f.device.inspectExecution(record.id);
+  assert.equal(f.device.getStatus().profile.model,'Board');
+  assert.ok(!f.device.getStatus().profile.stale);
+  f.receive('\nU-Boot 2026\n'); assert.equal(f.device.getStatus().profile.stale,true);
+  f.device.reset(); assert.equal(f.device.getStatus().profile,null);
+});
+}

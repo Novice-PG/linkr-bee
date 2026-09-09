@@ -4,7 +4,7 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/app.js?*", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, body: await response.text() +
-      "\nwindow.__test = { state, setConnected, handleIncomingBytes, enqueueBytes, bleTransport };" });
+      "\nwindow.__test = { state, setConnected, handleIncomingBytes, enqueueBytes, bleTransport, setBindingControl: fn => { sendControl = fn; } };" });
   });
   await page.goto("/");
   await page.waitForFunction(() => window.__test?.state.term);
@@ -15,14 +15,14 @@ test.beforeEach(async ({ page }) => {
     state.ws = { readyState: 1, send: (bytes) => window.sent.push(Array.from(bytes)) };
     setConnected(true);
   });
-  await page.locator("#agentButton").tap();
-  await page.locator("#agentSettingsButton").tap();
+  await page.locator("#agentButton").click();
+  await page.locator("#agentSettingsButton").click();
   await page.locator("#agentEndpoint").fill("https://agent.test/v1");
   await page.locator("#agentModel").fill("test-model");
   await page.locator("#agentApiKey").fill("test-device-key");
-  await page.locator("#agentSettingsSave").tap();
+  await page.locator("#agentSettingsSave").click();
   await expect(page.locator("#agentSettingsStatus")).toContainText("saved");
-  await page.locator("#drawerClose").tap();
+  await page.locator("#drawerClose").click();
 });
 
 function sse({ text, tool }) {
@@ -53,8 +53,74 @@ async function chooseMode(page, mode) {
 }
 async function ask(page, question = "Why did the target fail to boot?") {
   await page.locator("#agentQuestion").fill(question);
-  await page.locator("#agentAsk").tap();
+  await page.locator("#agentAsk").click();
 }
+
+test("assistant renders Markdown while user and tool input stay literal", async ({ page }, testInfo) => {
+  const markdown = '## 检查结果\n\n**连接正常**，请查看 [Radxa Docs](https://docs.radxa.com/)。\n\n1. 检查版本\n2. 查看日志\n\n```sh\nuname -a\nprintf "<tag>"\n' + 'x'.repeat(180) + '\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| UART | 正常 |\n\n> 保留日志以便核对。';
+  await mockModel(page, () => ({ text: markdown }));
+  await ask(page, "**原始问题**");
+  const answer = page.locator(".agent-assistant .agent-markdown").last();
+  await expect(answer.locator("h2")).toHaveText("检查结果");
+  await expect(answer.locator("strong")).toHaveText("连接正常");
+  await expect(answer.locator("ol li")).toHaveCount(2);
+  await expect(answer.locator("pre code")).toContainText('printf "<tag>"');
+  await expect(answer.locator("table tbody td")).toHaveText(["UART", "正常"]);
+  await expect(answer.locator("a")).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(page.locator(".agent-user .agent-message-text")).toHaveText("**原始问题**");
+  for (const viewport of [{width:1552,height:1221},{width:390,height:844}]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(() => answer.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await expect(page.locator("#agentMessages")).toHaveCSS("overflow-x", "hidden");
+    await expect(answer.locator("pre")).toHaveCSS("overflow-x", "auto");
+    const scrolling = await answer.locator("pre").evaluate(pre => {
+      pre.scrollLeft = 100;
+      const messages = pre.closest("#agentMessages");
+      return { codeScrolled: pre.scrollLeft > 0, messagesScrolled: messages.scrollLeft,
+        messagesFit: messages.scrollWidth <= messages.clientWidth + 1 };
+    });
+    expect(scrolling).toEqual({ codeScrolled: true, messagesScrolled: 0, messagesFit: true });
+    await page.screenshot({path: testInfo.outputPath(`markdown-${viewport.width}.png`)});
+  }
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("streaming Markdown retains raw source and filters active HTML and unsafe links", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { renderAssistantMarkdown } = await import('/agent_markdown.js');
+    const body = document.createElement('div');
+    document.body.append(body);
+    renderAssistantMarkdown(body, '**str');
+    renderAssistantMarkdown(body, 'ong**\n\n```sh\necho <script>', {append:true});
+    renderAssistantMarkdown(body, '\n```\n\n<img src=x onerror="window.pwned=true"><script>window.pwned=true</script><iframe src="https://evil.test"></iframe>\n\n[bad](javascript:alert(1)) [local](/reset) [good](https://docs.radxa.com/)\n\n<form><input autofocus></form>', {append:true});
+    const result = { strong:body.querySelector('strong')?.textContent, code:body.querySelector('code')?.textContent,
+      active:body.querySelectorAll('script,img,iframe,form,input,[onerror]').length,
+      links:[...body.querySelectorAll('a[href]')].map(a=>a.href), pwned:!!window.pwned };
+    body.remove();
+    return result;
+  });
+  expect(result).toEqual({strong:'strong',code:'echo <script>\n',active:0,links:['https://docs.radxa.com/'],pwned:false});
+});
+
+test("Pi reads and extracts a web page without UART or credential leakage", async ({ page }) => {
+  await page.route("https://docs.example.org/board", async route => {
+    expect(route.request().headers().authorization).toBeUndefined();
+    expect(route.request().headers().cookie).toBeUndefined();
+    await route.fulfill({ contentType: "text/html", headers: { "access-control-allow-origin": "*" },
+      body: '<title>Board guide</title><script>SECRET_SCRIPT</script><main><h1>Board instructions</h1><p>Version 2</p><a href="/releases">Releases</a></main>' });
+  });
+  await mockModel(page, (request, round) => {
+    if (round === 1) return { tool: { name: "read_web_page", args: { url: "https://docs.example.org/board" } } };
+    const evidence = request.messages.at(-1).content;
+    expect(evidence).toContain("Board instructions");
+    expect(evidence).toContain("https://docs.example.org/releases");
+    expect(evidence).not.toContain("SECRET_SCRIPT");
+    return { text: "Read the board guide successfully." };
+  });
+  await ask(page, "Read https://docs.example.org/board");
+  await expect(page.locator("#agentMessages")).toContainText("Read the board guide successfully.");
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
 
 test("Pi reads real UART logs without exposing the saved key to model context", async ({ page }) => {
   let toolEvidence = "";
@@ -240,7 +306,7 @@ for (const action of ["stop", "background", "timeout", "exit"]) {
     await expect(approve).toBeVisible();
     if (action === "stop") await page.locator("#agentStop").tap();
     if (action === "exit") await page.locator("#agentClose").tap();
-    if (action === "timeout") await page.clock.fastForward(180001);
+    if (action === "timeout") await page.clock.fastForward(900001);
     if (action === "background") await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, value: true });
       document.dispatchEvent(new Event("visibilitychange"));
@@ -695,4 +761,247 @@ test("cancelled BLE writes stop between fragments before a new device is used", 
     } catch { return { writes, failed: true }; }
   });
   expect(result).toEqual({ writes: 1, failed: true });
+});
+
+test("tracked shell exit is displayed without claiming goal verification", async ({ page }) => {
+  await chooseMode(page, 'full-auto');
+  await page.evaluate(() => window.__test.handleIncomingBytes(new TextEncoder().encode('root@board:~# ')));
+  await mockModel(page, async (request, round) => {
+    if (round === 1) return {tool:{name:'run_shell_command',args:{command:'false'}}};
+    if (round === 2) {
+      const record = JSON.parse(request.messages.at(-1).content);
+      await page.evaluate(token => window.__test.handleIncomingBytes(new TextEncoder().encode(`\r\n${token}:1\r\nroot@board:~# `)), record.completionToken);
+      return {tool:{name:'monitor_serial_execution',args:{id:record.id,timeoutMs:100}}};
+    }
+    expect(request.messages.at(-1).content).toContain('"exitCode":1');
+    return {text:'Command failed with exit code 1. Goal unverified.'};
+  });
+  await ask(page, 'Run false and inspect its exit status');
+  await expect(page.locator('#agentMessages')).toContainText('Goal unverified.');
+  await expect(page.locator('#agentMessages')).toContainText('Exit code: 1');
+});
+
+test("target download probes tools, reports path and hash, and blocks follow-on execution", async ({ page }) => {
+  await chooseMode(page,'full-auto');
+  await page.evaluate(()=>window.__test.handleIncomingBytes(new TextEncoder().encode('root@board:~# ')));
+  let probe, download;
+  const hash='a'.repeat(64);
+  await mockModel(page,async(request,round)=>{
+    const last=()=>JSON.parse(request.messages.at(-1).content);
+    if(round===1) return {tool:{name:'probe_download_tools',args:{}}};
+    if(round===2){
+      probe=last();
+      await page.evaluate(token=>window.__test.handleIncomingBytes(new TextEncoder().encode(`\r\nLINKR_TOOL:curl\r\nLINKR_TOOL:sha256sum\r\n${token}:0\r\nroot@board:~# `)),probe.completionToken);
+      return {tool:{name:'inspect_serial_execution',args:{id:probe.id}}};
+    }
+    if(round===3) return {tool:{name:'download_to_target',args:{url:'https://files.example.org/fw.bin',path:'/tmp/fw.bin',sha256:hash}}};
+    if(round===4){
+      download=last();
+      await page.evaluate(({token,hash})=>window.__test.handleIncomingBytes(new TextEncoder().encode(`\r\n100%\r\nLINKR_SHA256:${hash}\r\nLINKR_BYTES:1024\r\n${token}:0\r\nroot@board:~# `)),{token:download.completionToken,hash});
+      return {tool:{name:'monitor_serial_execution',args:{id:download.id,timeoutMs:100}}};
+    }
+    if(round===5){
+      expect(last().download).toMatchObject({status:'saved',path:'/tmp/fw.bin',sha256:hash,bytes:1024});
+      return {tool:{name:'run_shell_command',args:{command:'echo MUST_NOT_RUN'}}};
+    }
+    expect(request.messages.at(-1).content).toContain('wait for a new user instruction');
+    return {text:'Download complete. Awaiting your next instruction.'};
+  });
+  await ask(page,'Download firmware to target /tmp/fw.bin');
+  await expect(page.locator('#agentMessages')).toContainText('Awaiting your next instruction.');
+  await expect(page.locator('#agentMessages')).toContainText(hash);
+  expect(await page.evaluate(()=>window.sent.some(bytes=>new TextDecoder().decode(new Uint8Array(bytes)).includes('MUST_NOT_RUN')))).toBe(false);
+});
+
+test("computer download waits for save action and shows checked file details",async({page})=>{
+  await page.evaluate(()=>{
+    window.savedBytes=0;
+    window.showSaveFilePicker=async()=>({name:'local.bin',createWritable:async()=>({write:async bytes=>window.savedBytes=bytes.length,close:async()=>{},abort:async()=>{}})});
+  });
+  await page.route('https://files.example.org/local.bin',route=>route.fulfill({body:'payload',headers:{'access-control-allow-origin':'*','content-length':'7'}}));
+  await mockModel(page,(request,round)=>{
+    if(round===1) return {tool:{name:'download_to_computer',args:{url:'https://files.example.org/local.bin',fileName:'local.bin'}}};
+    expect(JSON.parse(request.messages.at(-1).content)).toMatchObject({destination:'computer',bytes:7,saveStatus:'saved',checksumStatus:'computed-only'});
+    return {text:'Local file saved; awaiting next instruction.'};
+  });
+  await ask(page,'Download to my computer');
+  await expect(page.getByRole('button',{name:'Choose location and download'})).toBeVisible();
+  expect(await page.evaluate(()=>window.savedBytes)).toBe(0);
+  await page.getByRole('button',{name:'Choose location and download'}).click();
+  await expect(page.locator('#agentMessages')).toContainText('Local file saved');
+  await expect(page.locator('#agentMessages')).toContainText('SHA-256:');
+  expect(await page.evaluate(()=>window.savedBytes)).toBe(7);
+  expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
+
+test('task summaries survive reconnect without replay and can be cleared', async ({page}) => {
+  await page.evaluate(()=>{window.__test.state.wsHost='ws://test-board';});
+  await mockModel(page,()=>({text:'Inspection complete; no repair performed.'}));
+  await ask(page,'Inspect storage');
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+  await page.locator('#agentHistory > summary').tap();
+  await expect(page.locator('#agentTasks')).toContainText('Inspect storage');
+  await page.evaluate(()=>{window.__test.setConnected(false);window.__test.setConnected(true);});
+  await expect(page.locator('#agentTasks')).toContainText('Inspection complete');
+  await expect(page.locator('#agentMessages')).toBeEmpty();
+  await page.locator('#agentTasks summary').first().tap();
+  await page.locator('#agentTasks button').first().tap();
+  await expect(page.locator('#agentQuestion')).toHaveValue(/Inspect storage/);
+  await expect(page.locator('#agentMessages')).toBeEmpty();
+  await page.locator('#agentForget').tap();
+  await expect(page.locator('#agentTasks')).toBeEmpty();
+});
+
+for (const desktop of [false,true]) test.describe(desktop ? 'desktop task archive' : 'mobile task archive',()=>{
+  test.use({isMobile:!desktop,hasTouch:!desktop,viewport:desktop?{width:1552,height:1000}:{width:390,height:844}});
+  test('refresh restores only summaries and keeps the panel within the viewport',async ({page},testInfo)=>{
+    await page.evaluate(()=>{window.__test.state.wsHost='ws://archive-board';});
+    await mockModel(page,()=>({text:'Saved observation only.'}));
+    await ask(page,'Verify target storage');
+    await expect(page.locator('#agentAsk')).toBeEnabled();
+    await page.reload(); await page.waitForFunction(()=>window.__test?.state.term);
+    await page.evaluate(()=>{const {state,setConnected}=window.__test;state.mode='ws';state.wsHost='ws://archive-board';state.ws={readyState:1,send:()=>{throw new Error('unexpected replay');}};setConnected(true);});
+    await page.locator('#agentButton').click();
+    await page.locator('#agentHistory > summary').click();
+    await page.locator('#agentTasks summary').click();
+    await expect(page.locator('#agentTasks')).toContainText('Saved observation only.');
+    await expect(page.locator('#agentMessages .agent-message')).toHaveCount(0);
+    expect(await page.locator('#agentPanel').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
+    await page.screenshot({path:testInfo.outputPath('task-archive.png')});
+  });
+});
+
+for (const desktop of [false, true]) test.describe(desktop ? 'desktop agent composer' : 'mobile agent composer', () => {
+  test.use({isMobile:!desktop,hasTouch:!desktop,viewport:desktop?{width:1552,height:1000}:{width:390,height:844}});
+  test('focus and send shortcuts protect UART and IME; surfaces match the terminal', async ({page},testInfo) => {
+    let requests=0;
+    await mockModel(page,()=>{requests++;return {text:'**Ready**\n\n```sh\nuname -a\n```'};});
+    await page.locator('#agentClose').click();
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.keyboard.press('Control+Shift+K');
+    await expect(page.locator('#agentQuestion')).toBeFocused();
+    expect(await page.evaluate(()=>window.sent)).toEqual([]);
+    await page.locator('#agentQuestion').fill('First line');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#agentQuestion')).toHaveValue('First line\n');
+    await page.locator('#agentQuestion').dispatchEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true});
+    expect(requests).toBe(0);
+    await page.keyboard.press('Control+Enter');
+    await expect(page.locator('.agent-assistant strong')).toHaveText('Ready');
+    expect(requests).toBe(1);
+    await expect(page.locator('#agentAsk')).toHaveAttribute('aria-label','Send');
+    await expect(page.locator('#agentAsk svg')).toHaveCount(1);
+    expect(await page.locator('#agentAsk').innerText()).toBe('');
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.keyboard.press('Meta+Shift+K');
+    await expect(page.locator('#agentQuestion')).toBeFocused();
+    await page.locator('#agentQuestion').fill('Second question');
+    await page.keyboard.press('Meta+Enter');
+    await expect(page.locator('#agentAsk')).toBeEnabled();
+    expect(requests).toBe(2);
+    expect(await page.evaluate(()=>window.sent)).toEqual([]);
+    for (const dark of [false,true]) {
+      await page.evaluate(dark=>document.documentElement.dataset.theme=dark?'dark':'light',dark);
+      const colors=await page.evaluate(()=>['#agentMessages','#terminalOutput','#agentPanel'].map(selector=>getComputedStyle(document.querySelector(selector)).backgroundColor));
+      expect(colors[0]).toBe(colors[1]);expect(colors[2]).toBe(colors[1]);
+      expect(await page.locator('#agentPanel').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
+      await page.screenshot({path:testInfo.outputPath(`composer-${dark?'dark':'light'}.png`)});
+    }
+  });
+});
+
+for (const desktop of [false,true]) test.describe(desktop?'desktop target binding':'mobile target binding',()=>{
+ test.use({isMobile:!desktop,hasTouch:!desktop,viewport:desktop?{width:1552,height:1000}:{width:390,height:844}});
+ test('AI settings verify, bind, regenerate and unbind with explicit Flash acknowledgement',async ({page},testInfo)=>{
+  await page.evaluate(()=>{
+   const {state,setConnected,handleIncomingBytes,bleTransport,setBindingControl}=window.__test;
+   state.mode='ble';state.device={id:'bee'};state.deviceId='stable-bee';state.nusReady=true;state.reliableReady=false;
+   setConnected(true);handleIncomingBytes(new TextEncoder().encode('root@board:~# '));
+   window.flashId=null;window.targetId='12345678-1234-4123-8123-123456789abc';window.bindingWrites=[];
+   setBindingControl(async command=>{
+    if(command==='@linkr target?') return 'OK target='+(window.flashId||'none');
+    window.bindingWrites.push(command);
+    if(command==='@linkr target clear') window.flashId=null;
+    else window.flashId=command.split('=')[1];
+    return 'OK target='+(window.flashId||'none');
+   });
+   let pending='';
+   bleTransport.write=async (_id,_service,_characteristic,bytes)=>{
+    pending+=new TextDecoder().decode(bytes);
+    if(pending.endsWith('\r')){
+     const marker=pending.match(/LINKR_ID_[a-f0-9]+/)[0],exit=pending.match(/LINKR_EXIT_[a-f0-9]+/)[0];
+     if(window.bindingPasswordPrompt) { pending=''; window.bindingPasswordPrompt=false; setTimeout(()=>handleIncomingBytes(new TextEncoder().encode('\r\n[sudo] password: ')),30); return; }
+     if(pending.includes('mv -f')) window.targetId=pending.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)[0];
+     pending='';setTimeout(()=>handleIncomingBytes(new TextEncoder().encode(`\r\n${marker}:${window.targetId}\r\n${exit}:0\r\nroot@board:~# `)),30);
+    }
+   };
+  });
+  await page.locator('#agentSettingsButton').click();
+  await page.evaluate(()=>window.bindingPasswordPrompt=true);
+  await page.locator('#targetBind').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('Enter the target sudo password');
+  expect(await page.evaluate(()=>window.bindingWrites)).toEqual([]);
+  await page.evaluate(()=>window.__test.handleIncomingBytes(new TextEncoder().encode('\r\nroot@board:~# ')));
+  await page.locator('#targetVerify').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('does not match');
+  expect(await page.evaluate(()=>window.bindingWrites)).toEqual([]);
+  await page.locator('#targetBind').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('verified against Bee Flash');
+  await expect(page.locator('#targetBindingIdentity')).toContainText('12345678-1234-4123-8123-123456789abc');
+  await expect(page.locator('#targetRegenerate')).toBeDisabled();
+  await page.locator('#targetRegenerateConfirm').check();
+  await page.locator('#targetRegenerate').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('verified against Bee Flash');
+  const regenerated = await page.evaluate(()=>window.targetId);
+  expect(regenerated).not.toBe('12345678-1234-4123-8123-123456789abc');
+  await expect(page.locator('#targetBindingIdentity')).toContainText(regenerated);
+  await page.locator('.target-binding').scrollIntoViewIfNeeded();
+  await page.screenshot({path:testInfo.outputPath('binding-settings.png')});
+  await page.locator('#targetUnbind').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('target ID file and historical records retained');
+  expect(await page.evaluate(()=>window.targetId)).toBe(regenerated);
+  await page.evaluate(()=>window.__test.setBindingControl(async()=>{throw new Error('ERR unsupported; update firmware');}));
+  await page.locator('#targetBind').click();
+  await expect(page.locator('#targetBindingStatus')).toContainText('update firmware');
+ });
+});
+
+for (const matches of [true, false]) test('automatic identity waits for shell and checks history match: '+matches, async ({page})=>{
+ const id='12345678-1234-4123-8123-123456789abc';
+ await page.evaluate(({id,matches})=>{
+  const observedId = matches ? id : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const {state,setConnected,handleIncomingBytes,bleTransport,setBindingControl}=window.__test;
+  window.identityCommands=[];
+  localStorage.setItem('linkr-target-profile:'+id,JSON.stringify({tools:['curl'],model:'remembered-board',observedAt:1}));
+  setBindingControl(async()=> 'OK target='+id);
+  let pending='';
+  bleTransport.write=async (_id,_s,_c,bytes)=>{
+   pending+=new TextDecoder().decode(bytes);
+   if(pending.endsWith('\r')) {
+    window.identityCommands.push(pending);
+    const marker=pending.match(/LINKR_ID_[a-f0-9]+/)[0],exit=pending.match(/LINKR_EXIT_[a-f0-9]+/)[0];
+    pending='';setTimeout(()=>handleIncomingBytes(new TextEncoder().encode(`\r\n${marker}:${observedId}\r\n${exit}:0\r\nroot@board:~# `)),30);
+   }
+  };
+  state.mode='ble';state.device={id:'bee'};state.deviceId='bee';state.nusReady=true;state.reliableReady=false;
+  setConnected(true);handleIncomingBytes(new TextEncoder().encode('\r\nboard login: '));
+ },{id,matches});
+ await page.waitForTimeout(600);
+ expect(await page.evaluate(()=>window.identityCommands)).toEqual([]);
+ await page.evaluate(()=>window.__test.handleIncomingBytes(new TextEncoder().encode('\r\nroot@board:~# ')));
+ await expect.poll(()=>page.evaluate(()=>window.identityCommands.length)).toBe(1);
+ await expect(page.locator('#agentAsk')).toBeEnabled();
+ let status;
+ await mockModel(page,(body,count)=>{
+  if(count===1)return {tool:{name:'get_device_status',args:{}}};
+  status=JSON.parse(body.messages.findLast(m=>m.role==='tool').content);
+  return {text:'Loaded remembered device.'};
+ });
+ await page.locator('#agentQuestion').fill('What do you remember?');await page.locator('#agentAsk').click();
+ await expect(page.locator('#agentMessages')).toContainText('Loaded remembered device.');
+ expect(status.targetBinding).toMatchObject({targetId:id,verified:matches});
+ if(matches) expect(status.rememberedProfile.profile.model).toBe('remembered-board');
+ else expect(status.rememberedProfile).toBeNull();
+ expect(await page.evaluate(()=>window.identityCommands.length)).toBe(1);
+ expect(await page.evaluate(()=>window.identityCommands[0])).not.toMatch(/uname|command -v|mkdir|sudo/);
 });

@@ -1,7 +1,22 @@
+import { bindingReply, targetIdentityCommand, observedTargetId, observedTargetPath } from "./target_binding.js";
+import { monitorSerialExecution } from "./serial_observation.js";
+import { createTaskStore, deviceIdentity } from "./agent_tasks.js";
 import { available, createSerialAgent } from "./agent_runtime.js";
 import { createDeviceExecutor } from "./device_executor.js";
+import { requestComputerDownload } from "./local_download.js";
+import { renderAssistantMarkdown } from "./agent_markdown.js";
 
 const labels = {
+  history: ["任务记录与设备", "Tasks and device"], refreshProfile: ["探测设备", "Probe device"],
+  noProfile: ["尚未探测设备能力", "Device capabilities not probed"], staleProfile: ["档案已过期，请重新探测", "Profile stale; probe again"],
+  forgetTasks: ["清除记录", "Clear records"], recover: ["核实上次任务", "Verify previous task"],
+  storageError: ["任务记录无法保存，请检查浏览器存储空间。", "Cannot save tasks; check browser storage."],
+  taskNote: ["摘要保存在此浏览器，可能含设备信息。恢复时重新核实，不自动重发命令。", "Summaries are stored in this browser and may contain device information. Recovery verifies current state without replaying commands."],
+  probe_device_profile: ["探测设备档案", "Probe device profile"],
+  "console-sudo-password": ["等待 sudo 密码，请在终端输入", "Sudo password; enter in terminal"],
+  "console-confirmation": ["等待交互确认", "Awaiting confirmation"], "console-pager": ["分页器等待输入", "Pager awaiting input"],
+  copy: ["复制", "Copy"], copied: ["已复制", "Copied"], copyFailed: ["复制失败，请手动选择", "Copy failed; select manually"],
+  logs: ["执行日志", "Execution log"],
   title: ["Agent", "Agent"], settingsButton: ["设置", "Settings"],
   enterMode: ["进入 Agent 模式", "Enter Agent mode"], exitMode: ["退出 Agent 模式", "Exit Agent mode"],
   showTerminal: ["终端已收起 · 查看终端", "Terminal collapsed · Show terminal"],
@@ -15,7 +30,8 @@ const labels = {
   "help-manual": ["AI 提出命令建议；点击发送后才会输入到被控机。", "AI proposes commands; click Send to enter them on the target."],
   modeChanged: ["档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。", "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue."],
   automatic: ["自动发送到当前被控机（控制字符已转义）：", "Automatically sending to the target (control characters escaped):"],
-  send: ["提问", "Ask"], stop: ["停止", "Stop"], clear: ["新对话", "New chat"], close: ["退出", "Exit"],
+  send: ["发送", "Send"], stop: ["停止", "Stop"], clear: ["新对话", "New chat"], close: ["退出", "Exit"],
+  shortcuts: ["聚焦：{focus} · 发送：{send} · Enter 换行", "Focus: {focus} · Send: {send} · Enter for newline"],
   question: ["描述你遇到的问题", "Describe the problem"],
   empty: ["例如：根据当前串口日志，分析系统为什么启动失败。", "For example: why did boot fail, based on the current serial log?"],
   thinking: ["正在分析…", "Analyzing…"], user: ["你", "You"], assistant: ["助手", "Assistant"],
@@ -41,16 +57,23 @@ const labels = {
   "observation-output-observed": ["已收到后续输出，结果待核实。", "Subsequent output received; verify the result."],
   "observation-prompt-returned": ["检测到 Shell 提示符返回，仍需核对输出。", "A shell prompt returned; the output still needs verification."],
   "observation-interrupted": ["连接或终端输入已变化，已停止关联后续输出。", "Connection or terminal input changed; subsequent output is no longer attributed to this action."],
+  verificationNeeded: ["命令已结束，目标结果仍需验证", "Command completed; verify the intended result"],
   evidence: ["后续串口输出：", "Subsequent serial output:"], truncated: ["输出已截断。", "Output truncated."],
   connected: ["已连接", "Connected"], disconnected: ["未连接", "Disconnected"],
+  probe_download_tools: ["探测目标机下载工具", "Probe download tools"],
+  download_to_target: ["下载到目标机", "Download to target"],
+  download_to_computer: ["下载到当前电脑 / 手机", "Download to this computer / phone"],
+  run_shell_command: ["执行 Shell 命令", "Run shell command"],
+  monitor_serial_execution: ["持续观察执行", "Monitor execution"],
   read_serial_log: ["读取串口日志", "Read serial log"],
+  read_web_page: ["读取网页", "Read web page"],
   get_device_status: ["读取设备状态", "Read device status"],
   send_serial_input: ["请求发送串口输入", "Request serial input"],
   wait_for_serial_output: ["等待串口输出", "Wait for serial output"],
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -81,12 +104,16 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
       </div>
     </fieldset>
     <p id="agentConsole" class="agent-console"></p>
+    <details class="agent-history" id="agentHistory"><summary data-ai="history"></summary>
+      <p data-ai="taskNote"></p><p id="agentProfile"></p>
+      <div class="agent-actions"><button class="btn" type="button" id="agentProbe" data-ai="refreshProfile"></button><button class="btn" type="button" id="agentForget" data-ai="forgetTasks"></button></div>
+      <div id="agentTasks"></div><p id="agentStorageError" role="status"></p></details>
     <div id="agentMessages" class="agent-messages" role="log" aria-live="polite"><p class="agent-empty" data-ai="empty"></p></div>
     <p id="agentStatus" class="agent-status" role="status"></p>
     <form id="agentForm" class="agent-form"><label class="agent-question"><span data-ai="question"></span>
       <textarea id="agentQuestion" rows="1" maxlength="4000" required></textarea></label>
       <div class="agent-actions"><button class="btn" id="agentStop" type="button" data-ai="stop" disabled></button>
-      <button class="btn btn-primary" id="agentAsk" type="submit" data-ai="send"></button></div></form>`;
+      <button class="btn btn-primary" id="agentAsk" type="submit"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button></div></form>`;
   const terminalPeek = document.createElement("button");
   terminalPeek.type = "button";
   terminalPeek.className = "agent-terminal-peek";
@@ -117,15 +144,76 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   let activeInputRow = null;
   const toolRows = new Map();
   const executionRows = new Map();
-  const device = createDeviceExecutor({ getStatus, readLog, prepareInput, sendInput, onRecord: renderExecution });
+  let bindingController = null;
+  let bindingState = null;
+  let rememberedProfile = null;
+  let autoIdentitySession = null;
+  const device = createDeviceExecutor({ getStatus: () => ({...getStatus(), targetBinding:bindingState, rememberedProfile}), readLog, prepareInput, sendInput, onRecord: renderExecution });
   let observeTimer = null;
+  const taskStore = createTaskStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
+  let currentTask = null, recovery = null;
+  let taskTimer = null;
+  let historySignature = "";
+  function persistTask() {
+    if (!currentTask) return;
+    try { taskStore.save(currentTask); } catch { $("agentStorageError").textContent = text("storageError"); }
+  }
+  function scheduleTaskSave() {
+    if (taskTimer !== null) return;
+    taskTimer = setTimeout(() => { taskTimer = null; persistTask(); }, 500);
+  }
+  function refreshHistory() {
+    const status = device.getStatus(), profile = status.profile;
+    $("agentProfile").textContent = profile ? [profile.stale && text("staleProfile"), profile.model || profile.system, profile.os, profile.storage, profile.tools.join(", ")].filter(Boolean).join("\n") : text("noProfile");
+    $("agentProbe").disabled = busy || !status.connected;
+    $("agentForget").disabled = busy;
+    const tasks = taskStore.list(deviceIdentity(status));
+    const signature = JSON.stringify([deviceIdentity(status),busy,tasks,getLang()]);
+    if (signature === historySignature) return;
+    historySignature = signature;
+    const list = $("agentTasks"), expanded = new Set([...list.querySelectorAll("details[open]")].map(el => el.dataset.task));
+    list.replaceChildren();
+    for (const task of tasks) {
+      const row = document.createElement("details"), title = document.createElement("summary"), description = document.createElement("p"), restore = document.createElement("button");
+      row.dataset.task = task.id; row.open = expanded.has(task.id);
+      title.textContent = `${task.status} · ${task.goal}`;
+      description.textContent = task.summary || "";
+      restore.type = "button"; restore.className = "btn"; restore.textContent = text("recover"); restore.disabled = busy;
+      restore.addEventListener("click", () => {
+        recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions};
+        $("agentQuestion").value = `${text("recover")}: ${task.goal}`;
+        $("agentQuestion").focus();
+      });
+      row.append(title, description, restore); list.append(row);
+    }
+  }
+  $("agentProbe").addEventListener("click", () => {
+    recovery = null;
+    $("agentQuestion").value = getLang().startsWith("zh") ? "请使用 probe_device_profile 探测当前目标机，观察执行完成后展示档案。" : "Use probe_device_profile to inspect the current target and report the completed profile.";
+    $("agentForm").requestSubmit();
+  });
+  $("agentForget").addEventListener("click", () => {
+    try { taskStore.clear(deviceIdentity(device.getStatus())); currentTask = null; recovery = null; refreshHistory(); }
+    catch { $("agentStorageError").textContent = text("storageError"); }
+  });
+  window.addEventListener("pagehide", persistTask);
+  setInterval(() => { if (opened && busy && !document.hidden) device.observe(); }, 1000);
+
 
   function refreshLang() {
     for (const el of dialog.querySelectorAll("[data-ai]")) el.textContent = text(el.dataset.ai);
     button.title = text(opened ? "exitMode" : "enterMode");
     button.setAttribute("aria-label", button.title);
     terminalPeek.textContent = text("showTerminal");
+    const modifier = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+    const focusKeys = `${modifier}+Shift+K`, sendKeys = `${modifier}+Enter`;
     $("agentQuestion").placeholder = text("question");
+    $("agentQuestion").title = text("shortcuts").replace("{focus}", focusKeys).replace("{send}", sendKeys);
+    $("agentQuestion").setAttribute("aria-keyshortcuts", "Control+Shift+K Meta+Shift+K");
+    $("agentAsk").title = `${text("send")} (${sendKeys})`;
+    $("agentAsk").setAttribute("aria-label", text("send"));
+    $("agentAsk").setAttribute("aria-keyshortcuts", "Control+Enter Meta+Enter");
+    button.title += ` (${focusKeys})`;
     const modeLabel = executionMode === "auto" ? "Auto" : text(executionMode === "full-auto" ? "fullAuto" : executionMode);
     $("agentActiveMode").textContent = modeLabel;
     modeButton.setAttribute("aria-label", `${text("shiftMode")} · ${modeLabel}`);
@@ -136,7 +224,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     $("agentModeClose").setAttribute("aria-label", text("closePicker"));
     $("agentNew").title = text("clear");
     $("agentNew").setAttribute("aria-label", text("clear"));
-    refreshConsole();
+    refreshConsole(); refreshHistory();
   }
   function addMessage(role, content = "") {
     messages.querySelector(".agent-empty")?.remove();
@@ -146,7 +234,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     label.textContent = text(role);
     const body = document.createElement("div");
     body.className = "agent-message-text";
-    body.textContent = content;
+    if (role === "assistant") renderAssistantMarkdown(body, content);
+    else body.textContent = content;
     row.append(label, body);
     messages.append(row);
     messages.scrollTop = messages.scrollHeight;
@@ -154,6 +243,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   }
   function setBusy(value) {
     busy = value;
+    refreshHistory();
     settings.setBusy(value);
     $("agentAsk").disabled = $("agentNew").disabled = value;
     $("agentStop").disabled = !value;
@@ -162,8 +252,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   // Cancelling a run keeps its history; only explicit context/session resets
   // discard the runner. The active prompt must still settle before another ask.
   function stop(reason, { preserveConversation = true } = {}) {
+    if (currentTask && busy) { currentTask.status = "interrupted"; persistTask(); }
     version++;
     runner?.abort();
+    bindingController?.abort();
     device.cancel();
     if (!preserveConversation) { runner = null; fingerprint = ""; }
     activeInputRow = null;
@@ -172,6 +264,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     // The active prompt's finally block unlocks the UI once Pi settles.
   }
   function renderExecution(record) {
+    if (currentTask) {
+      currentTask.executions = [...currentTask.executions.filter(e => e.id !== record.id), record];
+      scheduleTaskSave();
+    }
     let body = executionRows.get(record.id);
     if (!body) {
       body = activeInputRow || addMessage("send_serial_input");
@@ -180,11 +276,30 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     }
     const waiting = record.state === "awaiting-approval";
     const heading = waiting ? text("approval") : `${record.mode} · ${text(`execution-${record.state}`)}`;
-    const details = record.delivery === "sent" ? `${text("delivered")}\n${text(`observation-${record.observation}`)}`
+    const details = record.executionStatus === "completed" ? `Exit code: ${record.exitCode} · ${text("verificationNeeded")}` : record.delivery === "sent" ? `${text("delivered")}\n${text(`observation-${record.observation}`)}`
       : record.delivery === "unknown" ? text("deliveryUnknown") : "";
-    body.textContent = [heading, JSON.stringify(record.payload), details, record.error,
-      record.evidence && `${text("evidence")}\n${record.evidence.length > 900 ? "…\n" : ""}${record.evidence.slice(-900)}`,
-      (record.evidenceTruncated || record.evidence.length > 900) && text("truncated")].filter(Boolean).join("\n");
+    const expanded = body.querySelector("details")?.open || false;
+    body.replaceChildren();
+    const status = document.createElement("p");
+    if (record.executionStatus === "completed" || record.observationClosed || ["denied","cancelled","failed"].includes(record.state)) body.dataset.finishedAt ||= String(Date.now());
+    const elapsed = Math.max(0, Math.floor((Number(body.dataset.finishedAt) || Date.now()) - Date.parse(record.createdAt || new Date().toISOString())) / 1000);
+    status.textContent = `${heading} · ${elapsed.toFixed(1)} s\n${details}${record.waitingFor ? "\n" + text(`console-${record.waitingFor}`) : ""}${record.error ? "\n" + record.error : ""}`;
+    const command = document.createElement("pre"), copy = document.createElement("button");
+    command.textContent = JSON.stringify(record.payload);
+    copy.type = "button"; copy.className = "btn"; copy.textContent = text("copy");
+    copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(record.payload); copy.textContent = text("copied"); } catch { copy.textContent = text("copyFailed"); } });
+    body.append(status, command, copy);
+    if (record.download) {
+      const download = document.createElement("p");
+      download.textContent = `${text("download_to_target")} · ${record.download.path}\n${record.download.downloader} · ${record.download.status || "in progress"}\n${record.download.bytes ?? "?"} bytes · SHA-256: ${record.download.sha256 || "pending"}\nExpected SHA-256: ${record.download.expectedSha256 || "not provided (computed only)"}`;
+      body.append(download);
+    }
+    if (record.evidence) {
+      const log = document.createElement("details"), summary = document.createElement("summary"), output = document.createElement("pre");
+      log.open = expanded; summary.textContent = text("logs");
+      output.textContent = record.evidence.slice(-4000) + (record.evidenceTruncated ? "\n" + text("truncated") : "");
+      log.append(summary,output); body.append(log);
+    }
     let actions = body.parentElement.querySelector(".agent-actions");
     if (waiting && !actions) {
       actions = document.createElement("div");
@@ -206,7 +321,21 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     refreshConsole();
   }
   function refreshConsole() {
+    const status = device.getStatus();
+    if (bindingState?.verified && status.profile && !status.profile.stale) {
+      try { localStorage.setItem(`linkr-target-profile:${bindingState.targetId}`, JSON.stringify(status.profile)); } catch { /* optional history cache */ }
+    }
     $("agentConsole").textContent = `${text("consoleHint")} · ${text(`console-${device.getStatus().console.kind}`)}`;
+  }
+  function maybeVerifyIdentity() {
+    const status = device.getStatus();
+    if (busy || bindingState?.verified || !status.connected || status.transport !== "ble" ||
+        status.inputPending || status.console.kind !== "shell" || autoIdentitySession === status.sessionId) return;
+    autoIdentitySession = status.sessionId;
+    api.targetBinding("verify", { automatic: true }).catch(() => {
+      // Missing IDs, mismatch, interrupted commands and login prompts never
+      // authorize historical data, and are not automatically retried.
+    });
   }
   function logsChanged() {
     if (observeTimer !== null) return;
@@ -214,9 +343,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
       observeTimer = null;
       device.observe();
       refreshConsole();
+      refreshHistory();
+      maybeVerifyIdentity();
     }, 100);
   }
   function clearConversation() {
+    currentTask = null; recovery = null;
     device.reset();
     executionRows.clear();
     messages.replaceChildren();
@@ -226,25 +358,29 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
     if (event.type === "message_start" && event.message.role === "assistant") answer = null;
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       answer ??= addMessage("assistant");
-      answer.textContent += event.assistantMessageEvent.delta;
+      renderAssistantMarkdown(answer, event.assistantMessageEvent.delta, { append: true });
+      if (currentTask) { currentTask.summary = (currentTask.summary + event.assistantMessageEvent.delta).slice(-4000); scheduleTaskSave(); }
       messages.scrollTop = messages.scrollHeight;
     }
     if (event.type === "tool_execution_start") {
       const body = addMessage(event.toolName, text("working"));
       toolRows.set(event.toolCallId, body);
-      if (event.toolName === "send_serial_input") activeInputRow = body;
+      if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = body;
     }
     if (event.type === "tool_execution_end") {
       let preview = event.result?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "";
       if (!event.isError) {
         try {
           const value = JSON.parse(preview);
+          if (event.toolName === "read_web_page") preview = [value.title, value.url, value.text?.slice(0, 1600),
+            (value.truncated || value.text?.length > 1600) && text("truncated")].filter(Boolean).join("\n");
           if (event.toolName === "read_serial_log" || event.toolName === "wait_for_serial_output") preview = [
             value.waitStatus && text(`wait-${value.waitStatus}`), value.text || text("noOutput"),
           ].filter(Boolean).join("\n");
           if (event.toolName === "send_serial_input") preview = text("delivered");
           if (event.toolName === "get_device_status") preview = [text(value.connected ? "connected" : "disconnected"), value.device, value.transport?.toUpperCase(), value.uart, text(`console-${value.console?.kind || "unknown"}`)].filter(Boolean).join(" · ");
-          if (event.toolName === "inspect_serial_execution") preview = [
+          if (["inspect_serial_execution", "monitor_serial_execution"].includes(event.toolName)) preview = [
+            value.executionStatus === "completed" && `Exit code: ${value.exitCode} · ${text("verificationNeeded")}`,
             value.delivery === "sent" ? text("delivered") : text("deliveryUnknown"),
             text(`observation-${value.observation}`), value.waitStatus && text(`wait-${value.waitStatus}`), value.evidence?.slice(-1600),
             (value.evidenceTruncated || value.evidence?.length > 1600) && text("truncated"),
@@ -252,9 +388,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
         } catch { /* Tool errors can be plain text. */ }
       }
       const body = toolRows.get(event.toolCallId) || addMessage(event.toolName);
-      if (!body.dataset.execution) body.textContent = preview.slice(0, 2000) + (preview.length > 2000 ? "…" : "");
+      if (!body.dataset.execution && !body.dataset.download) body.textContent = preview.slice(0, 2000) + (preview.length > 2000 ? "…" : "");
       toolRows.delete(event.toolCallId);
-      if (event.toolName === "send_serial_input") activeInputRow = null;
+      if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = null;
     }
   }
   $("agentForm").addEventListener("submit", async (event) => {
@@ -266,14 +402,22 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
       openSettings();
       return;
     }
+    currentTask = {id:crypto.randomUUID(),deviceKey:deviceIdentity(device.getStatus()),goal:question,summary:"",status:"running",executions:[]};
+    persistTask();
+    const restored = recovery; recovery = null;
     setBusy(true);
     const runVersion = version;
-    const timer = setTimeout(() => stop("stopped"), 180000);
+    const timer = setTimeout(() => stop("stopped"), 900000);
     try {
       // Only explicitly saved configuration is used for model requests.
       const nextFingerprint = JSON.stringify(config);
       if (!runner || fingerprint !== nextFingerprint) {
         runner = await createSerialAgent({ config, device,
+          computerDownload: ({id,args,signal}) => {
+            const body = toolRows.get(id) || addMessage("download_to_computer");
+            body.textContent = ""; body.dataset.download = "computer";
+            return requestComputerDownload({container:body,args,signal,lang:getLang()});
+          },
           onEvent: (event) => onEvent(event, eventVersion) });
         fingerprint = nextFingerprint;
       }
@@ -281,15 +425,35 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
       eventVersion = runVersion;
       $("agentQuestion").value = "";
       addMessage("user", question);
-      const outcome = await runner.prompt(question);
+      const outcome = await runner.prompt(question, {recovery:restored});
+      if (currentTask?.status === "running") currentTask.status = outcome.limitReached ? "interrupted" : "answered";
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
     } catch (error) {
+      if (currentTask) currentTask.status = "failed";
       if (version === runVersion) addMessage("assistant", `${text("error")}${error.message}`);
     } finally {
+      persistTask();
       clearTimeout(timer);
       setBusy(false);
     }
   });
+  $("agentQuestion").addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat && !busy) $("agentForm").requestSubmit();
+    }
+  });
+  // Capture before xterm so the focus shortcut never becomes target UART input.
+  document.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229 || event.altKey || !event.shiftKey || !(event.ctrlKey || event.metaKey) || event.code !== "KeyK") return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.repeat) return;
+    void (async () => {
+      if (!opened) await openPanel();
+      if (opened) { showModePicker(false); $("agentQuestion").focus(); }
+    })();
+  }, true);
   $("agentStop").addEventListener("click", () => stop("stopped"));
   function positionModePicker() {
     if (modePicker.hidden) return;
@@ -434,19 +598,76 @@ export function createAgentPanel({ button, workspace, terminal, settings, openSe
   }
   button.addEventListener("click", openPanel);
   refreshLang();
-  return {
+  const api = {
+    async targetBinding(action, { automatic = false } = {}) {
+      if (busy) throw new Error("Agent is running; stop it first.");
+      const initial = getStatus();
+      if (!initial.connected || initial.transport !== "ble") throw new Error("Connect Bee over BLE to manage its Flash binding.");
+      const session = initial.sessionId;
+      let identityRevision = null;
+      const check = () => { bindingController?.signal.throwIfAborted(); if (getStatus().sessionId !== session || !getStatus().connected) throw new Error("Connection changed; verify binding again."); if (identityRevision !== null && getStatus().inputRevision !== identityRevision) throw new Error("Terminal input changed; verify target identity again."); };
+      stop(undefined, {preserveConversation:false});
+      currentTask = null; device.forgetProfile();
+      const controller = bindingController = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 35000);
+      setBusy(true);
+      try {
+        const savedId = bindingReply(await bindingControl("@linkr target?"));
+        check(); bindingState = {targetId:savedId,verified:false}; rememberedProfile = null;
+        if (automatic && !savedId) return {status:"unbound",targetId:null};
+        if (action === "clear") {
+          const cleared = bindingReply(await bindingControl("@linkr target clear")); check();
+          if (cleared !== null) throw new Error("Bee did not confirm removal.");
+          bindingState = null;
+          return {status:"cleared",targetId:null};
+        }
+        const marker = `LINKR_ID_${crypto.randomUUID().replaceAll("-", "")}`;
+        const candidate = crypto.randomUUID();
+        const command = targetIdentityCommand(action, candidate, marker);
+        if (automatic && getStatus().inputRevision !== initial.inputRevision) throw new Error("Terminal changed before identity verification.");
+        const record = await device.execute({text:command,appendEnter:true,trackExit:true}, controller.signal, {userApproved:true});
+        const observed = await monitorSerialExecution({inspect:()=>device.inspectExecution(record.id),signal:controller.signal,check,timeoutMs:30000});
+        if (observed.waitStatus === "awaiting-input" || observed.observation === "interrupted") {
+          const error = new Error("Complete sudo in the terminal, then bind again to verify the ID.");
+          error.code = "TARGET_SUDO_INPUT";
+          throw error;
+        }
+        const targetPath = observedTargetPath(observed, marker);
+        const targetId = observedTargetId(observed, marker); identityRevision = observed.sentRevision; check();
+        if (action === "regenerate" && targetId !== candidate) throw new Error("Target did not confirm the newly generated UUID; Bee binding was not changed.");
+        if (action === "verify" && savedId !== targetId) {
+          bindingState = {targetId:savedId,observedId:targetId,verified:false};
+          return {...bindingState,status:"mismatch",targetPath};
+        }
+        if (action !== "verify") {
+          const persisted = bindingReply(await bindingControl(`@linkr target=${targetId}`)); check();
+          if (persisted !== targetId) throw new Error("Target ID exists, but Bee Flash save was not confirmed. Verify before retrying.");
+        }
+        bindingState = {targetId,verified:true};
+        try {
+          const profile = JSON.parse(localStorage.getItem(`linkr-target-profile:${targetId}`));
+          rememberedProfile = profile ? {profile,historical:true} : null;
+        } catch { rememberedProfile = null; }
+        return {...bindingState,status:"verified",targetPath};
+      } finally { bindingController = null; clearTimeout(timer); setBusy(false); refreshHistory(); }
+    },
     settingsChanged() { stop(undefined, { preserveConversation: false }); },
     refreshLang,
     logsChanged,
     syncLayout,
     isOpen: () => opened,
+    isBusy: () => busy,
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),
     logsCleared() { stop("stopped", { preserveConversation: false }); clearConversation(); refreshConsole(); },
     connectionChanged(connected) {
+      bindingState = null; rememberedProfile = null;
+      autoIdentitySession = null;
       stop("changed", { preserveConversation: false });
       if (connected) clearConversation();
       else device.observe();
-      refreshConsole();
+      refreshConsole(); refreshHistory();
+      if (connected) logsChanged();
     },
   };
+  return api;
 }

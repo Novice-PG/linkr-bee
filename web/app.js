@@ -7,6 +7,14 @@ import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
 import { inputLeavesPendingLine } from "./agent_execution_policy.js";
+import {
+  createTerminalSessionTracker,
+  looksLikeShellPrompt,
+  normalizeTerminalGeometry,
+  terminalGeometryCommand,
+} from "./terminal_geometry.js";
+
+const terminalSessionTracker = createTerminalSessionTracker();
 
 const agentJournal = new SerialJournal();
 let agentPanel = null;
@@ -104,6 +112,12 @@ const state = {
   wifiStatus: { connected: false, ssid: "", ip: "down" },
   diagnostics: {},
   logSize: 0,
+  terminalGeometry: null,
+  terminalGeometrySynced: "",
+  terminalGeometrySyncInFlight: "",
+  terminalGeometrySyncTimer: null,
+  terminalGeometrySession: 0,
+  shellPromptVisible: false,
 };
 
 const LOG_CAP_BYTES = 4 * 1024 * 1024;
@@ -121,7 +135,7 @@ const elements = {
   deviceName: $("deviceName"),
   connectButton: $("connectButton"),
   disconnectButton: $("disconnectButton"),
-  reconnectButton: $("reconnectButton"),
+  switchDeviceButton: $("switchDeviceButton"),
   queryButton: $("queryButton"),
   diagnosticsPanel: $("diagnosticsPanel"),
   diagnosticsButton: $("diagnosticsButton"),
@@ -191,6 +205,7 @@ const elements = {
   bleModeBtn: $("bleModeBtn"),
   lanModeBtn: $("lanModeBtn"),
   wsHostField: $("wsHostField"),
+  blePairingHint: $("blePairingHint"),
   wsHostInput: $("wsHostInput"),
   wsHostError: $("wsHostError"),
   mobileConnectBtn: $("mobileConnectBtn"),
@@ -278,6 +293,7 @@ const I18N = {
     connect: "Connect",
     disconnect: "Disconnect",
     reconnect: "Reconnect",
+    switchDevice: "Switch device",
     queryUart: "Query UART",
     clear: "Clear",
     saveLog: "Save Log",
@@ -368,6 +384,8 @@ const I18N = {
     baud: "Baud",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
+    pairingHint: "New host: hold Bee GPIO1 to GND before connecting and accept system pairing. Bonded hosts reconnect without GPIO1.",
+    pairingFailed: "If pairing failed, hold GPIO1 to GND and reconnect. If the host lost its keys, forget its old system bond first. A full Bee bond table requires a factory reset.",
     saved: "Log saved",
     uartSet: "UART configured",
     wifiSet: "WiFi configured",
@@ -421,7 +439,8 @@ const I18N = {
     wifiWebdav: "WiFi 与 WebDAV",
     connect: "连接",
     disconnect: "断开",
-    reconnect: "重连",
+    reconnect: "重新连接",
+    switchDevice: "切换设备",
     queryUart: "查询 UART",
     clear: "清屏",
     saveLog: "保存日志",
@@ -512,6 +531,8 @@ const I18N = {
     baud: "波特率",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
+    pairingHint: "首次连接新主机：先将 Bee GPIO1 接地，再连接并接受系统配对。已绑定主机无需拉低 GPIO1。",
+    pairingFailed: "若配对失败，请将 GPIO1 接地后重连；主机密钥丢失时，先在系统中忽略旧绑定。Bee 绑定表已满时需恢复出厂。",
     saved: "日志已保存",
     uartSet: "UART 已配置",
     wifiSet: "WiFi 已配置",
@@ -699,6 +720,7 @@ function syncTransportControls() {
   elements.bleModeBtn.setAttribute("aria-pressed", String(!isWs));
   elements.lanModeBtn.setAttribute("aria-pressed", String(isWs));
   elements.wsHostField.hidden = !isWs;
+  elements.blePairingHint.hidden = isWs;
   document.querySelectorAll(".connect-icon-ble").forEach((icon) => {
     icon.toggleAttribute("hidden", isWs);
   });
@@ -719,7 +741,18 @@ function setTransportMode(mode) {
   setSupportText();
 }
 
+function connectionActionKey() {
+  return state.mode === "ble" && state.device ? "reconnect" : "connect";
+}
+
+function refreshConnectionActions() {
+  elements.connectButton.querySelector(".btn-label").textContent = t(connectionInFlight ? "connecting" : connectionActionKey());
+  elements.switchDeviceButton.hidden = state.mode !== "ble";
+  elements.switchDeviceButton.disabled = connectionInFlight || state.connected;
+}
+
 function refreshDynamicTexts() {
+  refreshConnectionActions();
   elements.statusText.textContent = t(
     state.connected ? "connected" : "disconnected",
   );
@@ -864,6 +897,111 @@ function fitTerminal() {
   }
 }
 
+function clearTerminalGeometrySyncTimer() {
+  clearTimeout(state.terminalGeometrySyncTimer);
+  state.terminalGeometrySyncTimer = null;
+}
+
+function resetTerminalGeometrySync() {
+  terminalSessionTracker.reset();
+  invalidateTerminalGeometrySync();
+  state.terminalGeometry = state.term
+    ? normalizeTerminalGeometry(state.term.cols, state.term.rows)
+    : null;
+}
+
+function invalidateTerminalGeometrySync() {
+  clearTerminalGeometrySyncTimer();
+  state.terminalGeometrySession += 1;
+  state.terminalGeometrySynced = "";
+  state.terminalGeometrySyncInFlight = "";
+  state.shellPromptVisible = false;
+}
+
+function markTerminalBusy() {
+  state.shellPromptVisible = false;
+  clearTerminalGeometrySyncTimer();
+}
+
+function scheduleTerminalGeometrySync() {
+  clearTerminalGeometrySyncTimer();
+  const geometry = state.terminalGeometry;
+  const session = state.terminalGeometrySession;
+  if (
+    !state.connected ||
+    serialInputPending ||
+    agentPanel?.isBusy?.() ||
+    !state.shellPromptVisible ||
+    !geometry ||
+    geometry.key === state.terminalGeometrySynced ||
+    geometry.key === state.terminalGeometrySyncInFlight
+  ) {
+    return;
+  }
+
+  state.terminalGeometrySyncTimer = setTimeout(() => {
+    state.terminalGeometrySyncTimer = null;
+    if (
+      !state.connected ||
+      serialInputPending ||
+      session !== state.terminalGeometrySession ||
+      agentPanel?.isBusy?.() ||
+      !state.shellPromptVisible ||
+      !terminalHasIdleShellPrompt() ||
+      geometry.key !== state.terminalGeometry?.key ||
+      geometry.key === state.terminalGeometrySynced ||
+      geometry.key === state.terminalGeometrySyncInFlight
+    ) {
+      return;
+    }
+
+    state.shellPromptVisible = false;
+    state.terminalGeometrySyncInFlight = geometry.key;
+    writeText(terminalGeometryCommand(geometry.cols, geometry.rows))
+      .then(() => {
+        if (session === state.terminalGeometrySession) {
+          state.terminalGeometrySynced = geometry.key;
+        }
+      })
+      .catch((error) => {
+        debugLine(`[terminal-size] ${error.message}`);
+      })
+      .finally(() => {
+        if (session === state.terminalGeometrySession &&
+            state.terminalGeometrySyncInFlight === geometry.key) {
+          state.terminalGeometrySyncInFlight = "";
+        }
+      });
+  }, 180);
+}
+
+function onTerminalResize({ cols, rows }) {
+  state.terminalGeometry = normalizeTerminalGeometry(cols, rows);
+  scheduleTerminalGeometrySync();
+}
+
+function terminalHasIdleShellPrompt() {
+  const buffer = state.term?.buffer.active;
+  const line = buffer?.getLine(buffer.baseY + buffer.cursorY);
+  if (!buffer || buffer.type !== "normal" || !line) return false;
+
+  // Readline can move back to the prompt while leaving an editable command
+  // to its right, or on wrapped rows. Neither case is an empty input line.
+  if (line.translateToString(true, buffer.cursorX).trim()) return false;
+  const nextLine = buffer.getLine(buffer.baseY + buffer.cursorY + 1);
+  if (nextLine?.isWrapped) return false;
+
+  const text = line.translateToString(false, 0, buffer.cursorX);
+  return looksLikeShellPrompt(text);
+}
+
+function onTerminalWriteParsed() {
+  state.shellPromptVisible = terminalHasIdleShellPrompt();
+  if (state.shellPromptVisible) {
+    scheduleTerminalGeometrySync();
+  }
+}
+
 let fitRaf = 0;
 function scheduleFit() {
   if (fitRaf) {
@@ -967,6 +1105,7 @@ function initTerminal() {
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
   subscribeTerminalInput(state.term, onTerminalData);
+  state.term.onResize(onTerminalResize);
   applyTerminalFont(state.fontFamily);
   fitTerminal();
 
@@ -990,7 +1129,7 @@ function flushTerminalWrites() {
     return;
   }
   if (chunks.length === 1) {
-    state.term.write(chunks[0]);
+    state.term.write(chunks[0], onTerminalWriteParsed);
     return;
   }
   let total = 0;
@@ -1005,7 +1144,7 @@ function flushTerminalWrites() {
     merged.set(bytes, offset);
     offset += bytes.length;
   }
-  state.term.write(merged);
+  state.term.write(merged, onTerminalWriteParsed);
 }
 
 function appendOutput(data) {
@@ -1449,7 +1588,11 @@ function onViewportScroll() {
   setAutoScroll(atBottom, false);
 }
 
+let connectionInFlight = false;
+
 function setConnecting(connecting) {
+  connecting = connecting || connectionInFlight;
+  elements.switchDeviceButton.disabled = connecting || state.connected;
   const btn = elements.connectButton;
   btn.classList.toggle("loading", connecting);
   btn.disabled = connecting || state.connected;
@@ -1461,7 +1604,7 @@ function setConnecting(connecting) {
       label.textContent = t("connecting");
     }
   } else if (label) {
-    label.textContent = t("connect");
+    label.textContent = t(connectionActionKey());
   }
   const mobileBtn = elements.mobileConnectBtn;
   if (mobileBtn) {
@@ -1475,7 +1618,7 @@ function setConnecting(connecting) {
     if (mobileLabel) {
       mobileLabel.textContent = connecting
         ? t("connecting")
-        : t(state.connected ? "disconnect" : "connect");
+        : t(state.connected ? "disconnect" : connectionActionKey());
     }
   }
 }
@@ -1491,6 +1634,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   const canControlWebdav =
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
+  const connectionChanged = state.connected !== connected;
   state.writeGeneration += 1;
   state.uartWriteError = "";
   state.mgmtWriteError = "";
@@ -1499,6 +1643,10 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   state.connected = connected;
   if (connected && !preserveJournal) agentJournal.reset();
   agentPanel?.connectionChanged(connected);
+  agentSettings?.connectionChanged();
+  if (connectionChanged) {
+    resetTerminalGeometrySync();
+  }
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = t(
     connected ? "connected" : "disconnected",
@@ -1513,21 +1661,21 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     : state.device
       ? state.device.name || state.device.id
       : "";
-  elements.connectButton.disabled = connected || !canConnect;
+  elements.connectButton.disabled = connectionInFlight || connected || !canConnect;
   if (elements.mobileConnectBtn) {
-    elements.mobileConnectBtn.disabled = !connected && !canConnect;
+    elements.mobileConnectBtn.disabled = connectionInFlight || (!connected && !canConnect);
     elements.mobileConnectBtn.classList.toggle("btn-primary", !connected);
     const mobileLabel =
       elements.mobileConnectBtn.querySelector(".btn-label");
     if (mobileLabel) {
-      mobileLabel.textContent = t(connected ? "disconnect" : "connect");
+      mobileLabel.textContent = t(connected ? "disconnect" : connectionActionKey());
     }
   }
   elements.disconnectButton.disabled = !connected;
-  elements.reconnectButton.disabled =
-    connected || (!isWs && !state.device);
-  elements.bleModeBtn.disabled = connected;
-  elements.lanModeBtn.disabled = connected;
+  elements.switchDeviceButton.disabled =
+    connectionInFlight || connected;
+  elements.bleModeBtn.disabled = connectionInFlight || connected;
+  elements.lanModeBtn.disabled = connectionInFlight || connected;
   elements.queryButton.disabled = !canControl;
   elements.diagnosticsButton.disabled = !canControl;
   elements.setUartButton.disabled = !canControl;
@@ -1559,6 +1707,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   document
     .querySelectorAll("#cheatList button[data-cmd]")
     .forEach((button) => (button.disabled = !connected));
+  refreshConnectionActions();
   if (connected) {
     setAutoScroll(true, true);
     state.term.focus();
@@ -1821,6 +1970,7 @@ function sendText(text) {
   if (!state.connected) {
     return Promise.resolve();
   }
+  markTerminalBusy();
   const payload = normalizeEnter(`${text}\n`);
   if (elements.localEchoInput.checked) {
     appendOutput(payload);
@@ -1859,6 +2009,7 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
     writeText(data).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
+  markTerminalBusy();
   const modifiers = pendingModifiers();
   const modified = Object.values(modifiers).some(Boolean);
   if (modified) data = applyInputModifiers(data, modifiers);
@@ -1870,7 +2021,7 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
   writeText(payload).catch((error) => appendLine(`[error] ${error.message}`));
 }
 
-async function sendControl(command) {
+async function sendControl(command, { returnResponse = false } = {}) {
   const sensitive = command.startsWith("@w=") || command.startsWith("@d=");
   appendLine(
     `[control] ${sensitive ? `${command.slice(0, 2)}=<redacted>` : command}`,
@@ -1944,9 +2095,9 @@ async function sendControl(command) {
       }
       responses.reject(requestId, error);
     }
-    await response;
+    const reply = await response;
     assertWriteSession(generation);
-    return requestId;
+    return returnResponse ? reply.text : requestId;
   });
   state.controlWriteQueue = operation.catch(() => {});
   return operation;
@@ -2108,6 +2259,7 @@ function handleIncomingBytes(bytes) {
   state.rxBytes += bytes.length;
   updateCounters();
   const text = rxDecoder.decode(bytes, { stream: true });
+  if (terminalSessionTracker.push(text)) invalidateTerminalGeometrySync();
   if (elements.debugInput.checked) {
     appendLine(`RX ${bytes.length}: ${JSON.stringify(text)}`);
   }
@@ -2227,7 +2379,18 @@ function connectWs() {
   });
 }
 
-async function connect() {
+async function connect({ chooseDevice = false } = {}) {
+  if (connectionInFlight || state.connected) return;
+  connectionInFlight = true;
+  try {
+    await connectOnce({ chooseDevice });
+  } finally {
+    connectionInFlight = false;
+    setConnecting(false);
+  }
+}
+
+async function connectOnce({ chooseDevice = false } = {}) {
   if (state.mode === "ws") {
     setConnecting(true);
     try {
@@ -2250,9 +2413,10 @@ async function connect() {
   }
 
   setConnecting(true);
-  const restoredAttempt = Boolean(state.device && state.deviceRestored);
-  let device = state.device;
+  const restoredAttempt = Boolean(!chooseDevice && state.device && state.deviceRestored);
+  let device = chooseDevice ? null : state.device;
   let transportConnected = false;
+  let pairingAttempted = false;
   try {
     await bleTransport.initialize();
     if (!device) {
@@ -2264,7 +2428,9 @@ async function connect() {
       rememberDevice(device);
     }
 
+    appendLine(`[pairing] ${t("pairingHint")}`);
     appendLine(`[connect] ${device.name || device.id}`);
+    pairingAttempted = true;
     await bleTransport.connect(device.id, onDisconnected);
     transportConnected = true;
     state.nusReady = true;
@@ -2368,6 +2534,10 @@ async function connect() {
     );
   } catch (error) {
     appendLine(`[error] ${error.message}`);
+    if (pairingAttempted) {
+      appendLine(`[pairing] ${t("pairingFailed")}`);
+      toast(t("pairingFailed"), "error");
+    }
     if (transportConnected && device) {
       try {
         await bleTransport.disconnect(device.id);
@@ -2794,8 +2964,8 @@ function bind() {
     disconnect().catch((error) => appendLine(`[error] ${error.message}`));
   });
 
-  elements.reconnectButton.addEventListener("click", () => {
-    connect().catch((error) => appendLine(`[error] ${error.message}`));
+  elements.switchDeviceButton.addEventListener("click", () => {
+    connect({ chooseDevice: true }).catch((error) => appendLine(`[error] ${error.message}`));
   });
 
   elements.queryButton.addEventListener("click", () => {
@@ -3098,6 +3268,7 @@ function init() {
   agentSettings = createAgentSettings({
     section: $("agentSettings"), tab: document.querySelector('[data-settings-target="ai"]'),
     getLang: () => lang, onChange: () => agentPanel?.settingsChanged(),
+    bindingAction: (action) => agentPanel.targetBinding(action),
   });
   setSettingsPage(localStorage.getItem("linkr-settings-page") || "connection");
   initTerminal();
@@ -3112,6 +3283,7 @@ function init() {
   agentPanel = createAgentPanel({
     button: $("agentButton"), getLang: () => lang,
     settings: agentSettings,
+    bindingControl: command => sendControl(command, {returnResponse:true}),
     openSettings: openAgentSettings,
     onClose: syncSidebarForViewport,
     workspace: $("terminalWorkspace"), terminal: elements.terminalCard,
@@ -3130,6 +3302,7 @@ function init() {
       inputPending: serialInputPending, inputRevision: serialInputRevision,
       uartWriteError: state.uartWriteError,
       transport: state.mode, device: elements.deviceName.textContent,
+      deviceId: state.mode === "ws" ? state.wsHost : state.deviceId || state.device?.id,
       uart: elements.uartInput.value, receivedBytes: state.rxBytes, sentBytes: state.txBytes }),
     readLog: (options) => agentJournal.read(options),
     prepareInput: ({ text, appendEnter }) => normalizeEnter(text + (appendEnter ? "\r" : "")),

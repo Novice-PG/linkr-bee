@@ -1,7 +1,23 @@
+import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
 import { loadAgentConfig, saveAgentConfig, clearAgentConfig, validateAgentConfig } from "./agent_config.js";
 
 const labels = {
+  bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
+  bindingTitle:["目标机绑定", "Target identity binding"],
+  bindingHint:["优先使用已有的系统 ID，其次是用户 ID。首次绑定优先写入 /var/lib/linkr/device-id，需要权限时尝试 sudo；请在串口输入密码。sudo 不可用或失败时改用 ~/.local/share/linkr/device-id（随登录用户变化）。输入密码后请再次点击绑定，核实后才保存到 Bee Flash。", "Existing system IDs take priority, then existing user IDs. New IDs prefer /var/lib/linkr/device-id using sudo when needed; enter the password in the terminal. If sudo is unavailable or fails, use ~/.local/share/linkr/device-id (per user). After entering a password, click Bind again to verify before saving to Bee Flash."],
+  bindingPath:["目标机保存路径", "Target save path"],
+  bindingSudo:["请在串口终端输入目标机 sudo 密码（不会显示字符）。完成并返回 Shell 提示符后，再点击“绑定当前目标机”核实并保存。若不使用 sudo，可在密码提示处按 Ctrl+D，等待命令回退到用户目录。", "Enter the target sudo password directly in the terminal (characters stay hidden). Once the shell prompt returns, click Bind current target again to verify and save. To decline sudo, press Ctrl+D at its password prompt and wait for the user-directory fallback."],
+  bindingVerify:["核实绑定", "Verify binding"], bindingBind:["绑定当前目标机", "Bind current target"],
+  bindingClear:["解除 Bee 绑定", "Unbind Bee"], bindingRegenerate:["重新生成并绑定", "Regenerate and bind"],
+  bindingRegenerateHint:["允许替换目标机现有 ID；旧档案保留，但不再自动关联。", "Allow replacing the target ID. Previous records remain but will no longer match automatically."],
+  bindingWorking:["正在核实目标机与 Bee；若串口提示 sudo 密码，请在终端输入，其他时候请勿输入命令或切换连接…", "Checking target and Bee. Enter sudo credentials in the terminal if prompted; otherwise do not send commands or switch connections…"],
+  bindingVerified:["目标机 ID 已核实，与 Bee Flash 绑定一致。", "Target UUID verified against Bee Flash binding."],
+  bindingCleared:["已清除 Bee 绑定；目标机 ID 文件和历史档案保留。", "Bee binding cleared; target ID file and historical records retained."],
+  bindingMismatch:["当前目标机与 Bee 保存的绑定不一致。核对目标机后可点击“绑定当前目标机”。", "Target does not match the stored Bee binding. Check the target before binding it."],
+  bindingPermission:["目标机当前用户无权写入 /var/lib/linkr。首次绑定可先在串口执行下面的命令，按提示输入目标机 sudo 密码，再点击“绑定当前目标机”：", "The target user cannot write /var/lib/linkr. For initial setup, run the following in the terminal, enter the target sudo password if prompted, then click Bind current target:"],
+  bindingError:["操作未完成：", "Operation incomplete: "],
+  bindingUnknown:["本次连接尚未核实绑定", "Binding not verified in this connection"],
   title: ["AI 配置", "AI configuration"],
   endpoint: ["API 地址", "API base URL"],
   endpointHint: ["兼容 Chat Completions，例如 https://api.example.com/v1", "Chat Completions compatible, e.g. https://api.example.com/v1"],
@@ -21,7 +37,7 @@ const labels = {
   busy: ["Agent 正在运行，请先返回对话并停止，再修改配置。", "Agent is running. Return to the conversation and stop it before editing configuration."],
 };
 
-export function createAgentSettings({ section, tab, getLang, onChange }) {
+export function createAgentSettings({ section, tab, getLang, onChange, bindingAction }) {
   if (!available) return null;
   section.hidden = tab.hidden = false;
   section.closest(".controls").classList.add("has-agent-settings");
@@ -81,6 +97,20 @@ export function createAgentSettings({ section, tab, getLang, onChange }) {
     resetErrors();
     showStatus("dirty");
   });
+  for (const [id, action] of [["targetVerify","verify"],["targetBind","bind"],["targetUnbind","clear"],["targetRegenerate","regenerate"]]) {
+    $(id).addEventListener("click", async () => {
+      if (busy || (action === "regenerate" && !$("targetRegenerateConfirm").checked)) return;
+      $("targetBindingStatus").textContent = text("bindingWorking");
+      $("targetBindingIdentity").textContent = "";
+      try {
+        const result = await bindingAction(action);
+        $("targetBindingIdentity").textContent = [result.targetId && `${text("bindingUuid")}: ${result.targetId}`, result.observedId && `${text("observedUuid")}: ${result.observedId}`, result.targetPath && `${text("bindingPath")}: ${result.targetPath}`].filter(Boolean).join("\n");
+        $("targetBindingStatus").textContent = text(result.status === "cleared" ? "bindingCleared" : result.status === "mismatch" ? "bindingMismatch" : "bindingVerified");
+      } catch(error) { $("targetBindingStatus").textContent = error.code === "TARGET_SUDO_INPUT" ? text("bindingSudo") : error.code === "TARGET_PERMISSION_DENIED" ? text("bindingPermission") + "\n" + TARGET_DIRECTORY_SETUP : text("bindingError") + error.message; }
+      finally { $("targetRegenerateConfirm").checked = false; $("targetRegenerate").disabled = true; }
+    });
+  }
+  $("targetRegenerateConfirm").addEventListener("change", () => { $("targetRegenerate").disabled = !$("targetRegenerateConfirm").checked; });
   function refreshLang() {
     for (const el of section.querySelectorAll("[data-ai-setting]")) el.textContent = text(el.dataset.aiSetting);
     renderStatus();
@@ -88,7 +118,8 @@ export function createAgentSettings({ section, tab, getLang, onChange }) {
   refreshLang();
   return {
     refreshLang,
+    connectionChanged() { $("targetBindingIdentity").textContent = ""; $("targetBindingStatus").textContent = text("bindingUnknown"); },
     getConfig: () => config && { ...config },
-    setBusy(value) { busy = value; $("agentSettingsFields").disabled = value; renderStatus(); },
+    setBusy(value) { busy = value; $("agentSettingsFields").disabled = value; $("targetBindingFields").disabled = value; renderStatus(); },
   };
 }

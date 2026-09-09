@@ -1,3 +1,4 @@
+import { monitorSerialExecution } from "../../web/serial_observation.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { waitForSerialOutput } from "../../web/serial_observation.js";
@@ -36,4 +37,33 @@ test("abort and session changes interrupt output observation", async () => {
   let checks = 0;
   await assert.rejects(waitForSerialOutput({ ...clock, after: 0,
     check: () => { if (++checks > 1) throw new Error("Session changed"); } }), /Session changed/);
+});
+
+test("execution monitoring waits through silence and returns explicit completion", async () => {
+  const { monitorSerialExecution } = await import("../../web/serial_observation.js");
+  let time = 0;
+  const result = await monitorSerialExecution({ timeoutMs: 30000, now: () => time,
+    sleep: async ms => { time += ms; },
+    inspect: () => ({ delivery: "sent", executionStatus: time >= 12000 ? "completed" : "unknown" }) });
+  assert.equal(time, 12000);
+  assert.equal(result.timedOut, false);
+});
+
+test("monitor deadline stays unresolved and cancellation does not send input", async () => {
+  const { monitorSerialExecution } = await import("../../web/serial_observation.js");
+  let time = 0;
+  const options = { timeoutMs: 1000, now: () => time, sleep: async ms => { time += ms; },
+    inspect: () => ({ delivery: "sent", executionStatus: "unknown" }) };
+  assert.equal((await monitorSerialExecution(options)).timedOut, true);
+  const abort = new AbortController();
+  await assert.rejects(monitorSerialExecution({ ...options, signal: abort.signal,
+    sleep: async () => abort.abort(new Error("Stopped")) }), /Stopped/);
+});
+
+test('monitor returns immediately for interactive input, but completion takes precedence', async () => {
+  const inspect=()=>({delivery:'sent',waitingFor:'sudo-password'});
+  const result=await monitorSerialExecution({inspect,sleep:()=>{throw new Error('must not wait');}});
+  assert.equal(result.waitStatus,'awaiting-input');
+  const done=await monitorSerialExecution({inspect:()=>({...inspect(),executionStatus:'completed'})});
+  assert.equal(done.waitStatus,undefined);
 });

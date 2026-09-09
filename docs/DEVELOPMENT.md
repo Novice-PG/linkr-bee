@@ -261,16 +261,17 @@ The shipped configuration enables
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
 
-### Open BLE access, persistence, and factory reset
+### GPIO1 pairing, persistence, and factory reset
 
-BLE pairing, bonding, and owner enforcement are currently disabled to keep the
-development workflow reliable. Any nearby central that connects to the
-Management or UART services can use the UART stream and all management commands, including WiFi,
-WebDAV, and WebSocket settings. Do not attach a sensitive console or deploy
-this development build in an untrusted radio environment.
+BLE uses LE Secure Connections Just Works pairing, bonding and encrypted GATT
+access. Hold GPIO1 low before a new host requests pairing. Existing bonds
+restore encryption without GPIO1; replacing lost host keys requires GPIO1 again.
+The default is eight bonds with no automatic eviction. A full table requires
+factory reset before adding more hosts. See [pairing and recovery](BLE_PAIRING.md).
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
+| BLE bonds | Up to eight host key records persisted by `CONFIG_BT_SETTINGS` | Board-specific factory reset clears all bonds and other settings |
 | BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
@@ -320,7 +321,7 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
-| `@w scan` | `@linkr wifi scan` | Scan nearby 2.4 GHz WiFi networks (pairing-free) |
+| `@w scan` | `@linkr wifi scan` | Scan nearby 2.4 GHz WiFi networks (encrypted BLE) |
 | `@w?` | `@linkr wifi?` | Query WiFi status |
 | `@w=SSID,pass` | `@linkr wifi=SSID,pass` | Join WiFi (RAM-only unless persistence enabled) |
 | `@w off` | `@linkr wifi off` | Clear WiFi config and disconnect |
@@ -727,6 +728,13 @@ The page can:
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns
   when the viewport or control-panel width changes
+- detect common Bash/BusyBox `$ ` and `# ` prompts and synchronize the remote
+  serial TTY with `stty rows <rows> cols <cols>` after login; synchronization
+  waits for an empty input line in the normal terminal buffer, including checks
+  for pending input and command text to the right of the cursor. Incoming login
+  prompts and Linux boot banners invalidate the size cache even if the accessory
+  stays connected. Prompt detection is heuristic and supports common plain-text
+  Linux consoles; custom prompts may not be recognized
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
 

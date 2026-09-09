@@ -51,7 +51,15 @@ boot?” The app runs the Pi agent loop locally; model inference uses the config
 service. This is not an on-device/offline language model.
 
 The implementation uses pi-mono's `@earendil-works/pi-agent-core` and `pi-ai`,
-pinned to 0.85.1. It exposes only these target-device tools:
+pinned to 0.85.1. It exposes these tools:
+
+- `read_web_page`: reads an HTTP(S) text page and returns text plus links, without
+  cookies or model credentials. Limited to 512 KiB per response, 16,000 characters
+  of extracted text, and 15 seconds. Web content is untrusted evidence. Browser
+  CORS/mixed-content rules still apply; this is not a search engine or binary
+  download manager. When blocked, the agent may use an available target shell's
+  `curl`/`wget` under the selected execution mode. Such downloads land on the
+  target, not the phone or desktop. Downloading does not authorize flashing.
 
 - `read_serial_log`: first reads the recent tail, then continues from its cursor.
   Use `recent: true` to reread the tail or `after` for an explicit range.
@@ -110,9 +118,9 @@ cancel ongoing work. The
 journal retains at most 128 Ki UTF-16 code units. Terminal control sequences are
 filtered continuously on receipt, so split packets, pages and buffer eviction do
 not expose control-sequence fragments as diagnostic evidence. Cursors still refer
-to the original UTF-16 offsets. Each question is limited to eight model turns,
-16 tool calls and three minutes. Exhausting an execution budget shows a stop
-notice; a completed answer on the eighth turn does not. The adapter bounds model context to 24,000
+to the original UTF-16 offsets. Each question is limited to 32 model turns,
+96 tool calls and 15 minutes. Exhausting an execution budget shows a stop
+notice; a completed answer on the final allowed turn does not. The adapter bounds model context to 24,000
 serialized characters by abbreviating older evidence and then replacing complete
 tool exchanges with mechanical history excerpts. It retains the current question,
 marks omitted evidence, and keeps tool calls paired with their results. Excerpts
@@ -265,6 +273,49 @@ The first release is intentionally foreground-only. Do not add iOS
 `bluetooth-central` background mode until disconnect/reconnect and power behavior
 have been tested on real hardware.
 
-The current firmware intentionally permits open BLE access. Do not publish the
-app as a remote-administration product until device ownership, pairing, or an
-equivalent authorization policy has been defined and implemented.
+For a new host, hold Bee GPIO1 to GND before connecting and accept OS pairing.
+Android checks the existing bond and creates one only when absent; iOS handles
+pairing on encrypted GATT reads. Existing bonds reconnect without GPIO1.
+See [pairing and recovery](../docs/BLE_PAIRING.md) for lost keys, the eight-host
+limit, factory reset, and required real-device acceptance checks.
+
+### Long-running shell tasks
+
+The agent can use `run_shell_command` for standalone POSIX-shell commands. The
+exact `sh -c` wrapper is subject to the current approval mode; subshell directory
+and environment changes do not persist. A unique, newline-terminated exit marker
+provides an observed exit code. Terminal echo, silence and prompt detection do
+not count as completion, and exit zero still requires a separate goal check.
+
+`monitor_serial_execution` observes the same execution id for up to 60 seconds,
+including silent periods. It can be called again after an unresolved timeout.
+Each question is bounded by 32 model turns, 96 tool calls and 15 minutes. Stop,
+backgrounding and disconnect still cancel observation; they do not stop a target
+process or authorize replay. Interactive consoles retain `send_serial_input`.
+
+### Download destinations and verification
+
+Downloads have separate tools and visible destinations:
+
+- `probe_download_tools` probes the target for curl/wget and sha256sum/shasum/openssl.
+  A successful, inspected probe from the current question is required by
+  `download_to_target`; absence of tools is reported rather than assumed away.
+- `download_to_target` requires an absolute target file path, reports native tool
+  progress and SHA-256/byte-count evidence, and refuses to overwrite an existing
+  destination. It downloads into a temporary file next to that path, checks an
+  optional expected SHA-256, then publishes the destination. Failed transfers or
+  mismatches can retain a `.part.*` file; its path is printed in serial evidence.
+- `download_to_computer` shows a save card in the app. A user gesture chooses a
+  file when the File System Access API is available; otherwise the checked bytes
+  are offered through an explicit browser download link. Byte progress and
+  SHA-256 are shown. No cookies/model credentials are sent to the file host.
+  Browser CORS rules apply and this buffered path is limited to 128 MiB. The
+  browser does not expose absolute local paths; fallback saves are reported as
+  requested, not confirmed disk writes. Native WebView saving is not yet tested.
+
+If destination is ambiguous, the agent must ask before downloading. A computed
+hash without a trusted expected hash is labelled computed-only. After a download
+starts, subsequent serial sends/downloads are blocked for that question: only
+observation and reporting continue. Installing or flashing requires a new user
+instruction. Cancellation stops local retrieval or target observation; it does
+not silently kill a running target download.

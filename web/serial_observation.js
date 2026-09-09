@@ -32,3 +32,22 @@ export async function waitForSerialOutput({ readLog, after, timeoutMs = 5000, se
     await sleep(Math.min(50, timeoutMs - (time - started)), signal);
   }
 }
+
+// Long-running commands can be silent between progress updates. Do not stop
+// on a quiet interval; only report a completion marker, interruption or deadline.
+export async function monitorSerialExecution({ inspect, timeoutMs = 30000, signal,
+  check = () => {}, now = () => performance.now(), sleep = pause }) {
+  const deadline = now() + Math.max(100, Math.min(60000, timeoutMs));
+  while (true) {
+    signal?.throwIfAborted();
+    check();
+    const record = inspect();
+    if (record.executionStatus === "completed" || record.observationClosed || record.delivery !== "sent") {
+      return { ...record, timedOut: false };
+    }
+    if (record.waitingFor) return {...record,timedOut:false,waitStatus:"awaiting-input",next:"Target is waiting for interaction. Report the prompt; passwords must be entered by the user directly in the terminal."};
+    if (now() >= deadline) return { ...record, timedOut: true,
+      next: "Execution is unresolved. Monitor this same id again; do not resend the command." };
+    await sleep(Math.min(500, deadline - now()), signal);
+  }
+}

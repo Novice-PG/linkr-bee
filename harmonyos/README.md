@@ -77,6 +77,11 @@ native request timeout.
 
 ## Validation boundary
 
+Firmware now requires encrypted, bonded BLE access. Hold Bee GPIO1 to GND and
+pair in the system Bluetooth UI before connecting a new host. Existing bonded
+hosts do not need GPIO1. Automatic pairing dialogs and lost-bond recovery still
+require a physical HarmonyOS device; see [pairing and recovery](../docs/BLE_PAIRING.md).
+
 The shared terminal now includes the Pi serial assistant. Its setup and tool
 behavior are documented in [the mobile guide](../mobile/README.md#built-in-serial-assistant-pi).
 The Pi runtime is included in the single inlined ArkWeb entry; no Node.js process

@@ -27,7 +27,7 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 - [SBC UART 设置](#sbc-uart-设置)
 - [WiFi 与 WebDAV 日志上传](#wifi-与-webdav-日志上传)
   - [UART over WebSocket（局域网桥）](#uart-over-websocket局域网桥)
-  - [开放 BLE 访问、持久化与恢复出厂](#开放-ble-访问持久化与恢复出厂)
+  - [GPIO1 配对、持久化与恢复出厂](#gpio1-配对持久化与恢复出厂)
 - [控制命令参考](#控制命令参考)
 - [测试选项](#测试选项)
 - [BLE 协议](#ble-协议)
@@ -213,12 +213,16 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 BLE 会话断开后，UART 采集继续向 WebSocket 客户端和日志上传器转发；
 BLE 路径丢弃的数据不会在重连后补发。
 
-### 开放 BLE 访问、持久化与恢复出厂
+### GPIO1 配对、持久化与恢复出厂
 
-为保证当前开发流程稳定，固件暂时关闭 BLE 配对、bond 与 owner 门禁。附近任何能够连接 Management 或 UART 服务的中心设备，都可以使用 UART 数据流以及 WiFi、WebDAV、WebSocket 等全部管理命令。不要把含敏感信息的 console 接到此开发固件，也不要在不可信的无线环境中部署。
+固件启用 LE Secure Connections Just Works 配对、绑定和加密 GATT 访问。
+新增主机或替换旧密钥时，需要在请求到达前将 GPIO1 拉低；已有绑定的加密重连
+无需操作 GPIO1。默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过恢复出厂
+清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
+| BLE 绑定 | `CONFIG_BT_SETTINGS` 在 NVS 中保留最多 8 台主机密钥 | 板级恢复出厂同时清除全部绑定和其他设置 |
 | BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | 板级恢复出厂会生成新的 identity/address，避免系统沿用旧名称缓存 |
 | WiFi SSID/PSK | 默认仅 RAM；`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才保存并在启动时重连 | `@w off` 停用并断开；恢复出厂会擦除 |
 | WebDAV 目标 | 匿名 URL 独立于 WiFi 凭据持久化设置，默认也会保存 | `@d off` 停用；恢复出厂会擦除 |
@@ -252,7 +256,7 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
-| `@w scan` | `@linkr wifi scan` | 扫描附近 2.4 GHz WiFi（无需配对） |
+| `@w scan` | `@linkr wifi scan` | 扫描附近 2.4 GHz WiFi（加密 BLE） |
 | `@w?` | `@linkr wifi?` | 查询 WiFi 状态 |
 | `@w=SSID,pass` | `@linkr wifi=SSID,pass` | 连接 WiFi（默认仅保存到 RAM） |
 | `@w off` | `@linkr wifi off` | 清除 WiFi 配置并断开 |
@@ -624,6 +628,11 @@ http://127.0.0.1:8765/
   字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
+- 识别常见 Bash/BusyBox 的 `$ ` 和 `# ` 提示符，登录后通过
+  `stty rows <行数> cols <列数>` 同步远端串口 TTY；同步要求普通终端缓冲区中的
+  空输入行，并检查待输入状态及光标右侧的命令内容。收到登录提示或 Linux 启动
+  标识时，即使桥接器连接未断开也会使尺寸缓存失效。提示符识别属于启发式判断，
+  支持常见纯文本 Linux 控制台，自定义提示符可能无法识别
 - 显示可选的本地回显和调试 I/O 跟踪
 - 将接收字节保存为日志文件
 
@@ -656,8 +665,8 @@ npm run build:harmony:hap
 Android/iOS 环境要求见 [`mobile/README.md`](../mobile/README.md)，HarmonyOS host
 接口见 [`harmonyos/README.md`](../harmonyos/README.md) 和
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md)，其中也包含调试
-签名和无设备测试说明。首版手机 App 仅支持前台运行。当前固件还允许开放 BLE
-访问，因此对外发布前还需要定义设备所有权、配对或等价的授权机制。
+签名和无设备测试说明。首版手机 App 仅支持前台运行。首次连接需要 GPIO1 物理授权并完成系统配对；
+浏览器设备选择授权与 BLE 绑定是两种独立状态。
 
 ---
 

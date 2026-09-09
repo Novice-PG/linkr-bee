@@ -20,7 +20,9 @@
     "@capacitor/core": "^8.0.0",
     "@capacitor/ios": "^8.0.0",
     "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1"
+    "@earendil-works/pi-ai": "0.85.1",
+    "dompurify": "3.4.15",
+    "marked": "18.0.12"
   },
   "devDependencies": {
     "@capacitor/cli": "8.4.3",

@@ -51,9 +51,24 @@ const config = { endpoint: "https://model.invalid/v1", model: "test-model", apiK
 const status = { sessionId: 1, connected: true };
 const call = (name, args) => ({ type: "toolCall", id: `call-${Math.random()}`, name, arguments: args });
 
+test("Pi exposes web evidence to the next model turn without serial writes", async () => {
+  let turns = 0;
+  const agent = makeAgent({ config, getStatus: () => status,
+    sendInput: () => assert.fail("web reading must not write UART"),
+    webReader: async ({ url }) => ({ url, text: "Board documentation", untrusted: true }),
+    stream: fakeStream(context => {
+      if (++turns === 1) return [call("read_web_page", { url: "https://docs.example.org" })];
+      assert.match(context.messages.at(-1).content[0].text, /Board documentation/);
+      return [{ type: "text", text: "Found the documentation." }];
+    }),
+  });
+  await agent.prompt("Read the board documentation");
+  assert.equal(turns, 2);
+});
+
 // Exercise the Pi adapter separately from the SDK-independent device executor.
 function makeAgent({ getStatus, readLog, sendInput, ...options }) {
-  return createSerialAgent({ ...options, device: {
+  return createSerialAgent({ runLimits: { maxTurns: 8, maxTools: 16 }, ...options, device: {
     mode: "auto", getStatus, readLog, execute: sendInput,
     inspectExecution: () => ({ executionStatus: "unknown" }),
   } });
@@ -308,4 +323,48 @@ test("input delivered just before abort still needs inspection when the dialogue
   assert.equal(device.getRecords()[0].delivery, "sent");
   await agent.prompt("Continue");
   assert.equal(sent.length, 1);
+});
+
+test("tracked commands share uncertain-send protection with serial input", async () => {
+  let round = 0;
+  let sends = 0;
+  let record;
+  const agent = createSerialAgent({ config, device: {
+    mode: 'full-auto', getStatus: () => status,
+    getRecords: () => record ? [record] : [],
+    execute: async () => { sends++; record = {id:'tracked-1',delivery:'unknown'}; throw new Error('delivery uncertain'); },
+  }, stream: fakeStream(() => {
+    round++;
+    if (round <= 2) return [call('run_shell_command', {command:'echo test'})];
+    return [{type:'text',text:'Delivery unresolved; do not repeat.'}];
+  }) });
+  await agent.prompt('Run a shell command');
+  assert.equal(sends, 1);
+});
+
+test('recovery blocks writes until fresh status and logs are reviewed in a later model round', async () => {
+  let turns=0, sends=0;
+  const agent=makeAgent({config,getStatus:()=>status,readLog:()=>({text:'root@board:~# ',cursor:20,latestCursor:20}),
+    sendInput:async()=>{sends++;return {id:'new-command',delivery:'sent'};},
+    stream:fakeStream(context=>{
+      turns++;
+      if(turns===1) return [call('run_shell_command',{command:'uname -a'})];
+      if(turns===2) {assert.match(context.messages.at(-1).content[0].text,/Recovered history/);return [call('get_device_status',{}),call('read_serial_log',{}),call('run_shell_command',{command:'uname -a'})];}
+      if(turns===3) {assert.equal(sends,0);return [call('run_shell_command',{command:'uname -a'})];}
+      return [{type:'text',text:'Observed current target'}];
+    })});
+  await agent.prompt('Verify previous task',{recovery:{goal:'old task',summary:'delivery unknown'}});
+  assert.equal(sends,1);
+});
+
+test('target tool check probes only requested safe command names', async()=>{
+ const sent=[];
+ let turns=0;
+ const agent=makeAgent({config,getStatus:()=>status,sendInput:async args=>{sent.push(args);return {id:'probe',delivery:'sent',executionStatus:'completed',exitCode:0};},
+ stream:fakeStream(()=> ++turns===1 ? [call('probe_tools',{names:['curl','sha256sum']})] : [{type:'text',text:'Checked tools.'}])});
+ await agent.prompt('Check curl and sha256sum');
+ assert.equal(sent.length,1);
+ assert.match(sent[0].text,/for t in 'curl' 'sha256sum'/);
+ assert.doesNotMatch(sent[0].text,/uname|df |os-release/);
+ assert.equal(sent[0].trackExit,true);
 });

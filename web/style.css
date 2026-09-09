@@ -979,7 +979,7 @@ body.terminal-fullscreen-fallback {
   width: 100%;
   min-height: 0;
   margin: 0;
-  padding: 10px;
+  padding: 0;
   overflow: hidden;
   background: var(--terminal);
   contain: layout;
@@ -988,6 +988,8 @@ body.terminal-fullscreen-fallback {
 .terminal-output .xterm {
   box-sizing: border-box;
   height: 100%;
+  /* FitAddon subtracts xterm padding, not its parent's padding. */
+  padding: 10px;
 }
 
 .terminal-output .xterm-viewport {
@@ -1170,7 +1172,7 @@ body.terminal-fullscreen-fallback {
     margin-left: auto;
   }
 
-  .terminal-output {
+  .terminal-output .xterm {
     padding: 8px;
   }
 
@@ -1929,7 +1931,7 @@ body,
     display: none;
   }
 
-  .terminal-output {
+  .terminal-output .xterm {
     padding: 5px;
   }
 
@@ -2359,6 +2361,9 @@ html.soft-keyboard-open .term-tool {
 
 html.soft-keyboard-open .terminal-output {
   min-height: 0;
+}
+
+html.soft-keyboard-open .terminal-output .xterm {
   padding: 5px;
 }
 
@@ -2472,7 +2477,7 @@ html.soft-keyboard-open .terminal-card .terminal-keyboard {
 #agentButton[hidden] { display: none; }
 .terminal-workspace { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .agent-panel[hidden], .agent-terminal-peek[hidden] { display: none; }
-.agent-panel { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.agent-panel { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; color: var(--text); background: var(--terminal); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 html.agent-mode, html.agent-mode body { height: 100%; overflow: hidden; }
 html.agent-mode.settings-drawer-layout .app-shell {
   position: fixed;
@@ -2513,7 +2518,7 @@ html.agent-keyboard-terminal .agent-console { display: none; }
 .agent-settings[hidden], .settings-tab[hidden] { display: none; }
 .agent-settings { flex: 0 0 auto; }
 .agent-settings fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
-.agent-settings input { width: 100%; min-height: 44px; font-size: 16px; }
+.agent-settings input:not([type="checkbox"]):not([type="radio"]) { width: 100%; min-height: 44px; font-size: 16px; }
 .agent-settings .btn { min-height: 44px; }
 .agent-settings .field-hint { overflow-wrap: anywhere; }
 #agentSettingsStatus:empty { display: none; }
@@ -2573,16 +2578,44 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
 @media (prefers-reduced-motion: reduce) { .agent-gear-track b, .agent-gear-chevron { transition: none; } }
 .agent-notice { flex: 0 0 auto; margin: 0; padding: 8px 16px; font-size: 12px; color: var(--muted); }
 .agent-console { flex: 0 0 auto; margin: 0; padding: 4px 10px; font-size: 12px; color: var(--muted); }
-.agent-messages { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 10px; }
+/* Desktop uses the top bar; touch drawers need their own preferences. */
+html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { display: none; }
+.agent-messages { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 10px; }
 .agent-empty { color: var(--muted); }
 .agent-message { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; background: var(--panel-2); }
-.agent-message b { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.agent-message > b { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .agent-message-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
+.agent-message-text.agent-markdown { white-space: normal; min-width: 0; max-width: 100%; }
+.agent-markdown > :first-child { margin-top: 0; }
+.agent-markdown > :last-child { margin-bottom: 0; }
+.agent-markdown p, .agent-markdown ul, .agent-markdown ol,
+.agent-markdown blockquote, .agent-markdown pre, .agent-table-scroll { margin: 0 0 12px; }
+.agent-markdown :is(h1, h2, h3, h4, h5, h6) { margin: 20px 0 8px; line-height: 1.35; font-weight: 650; }
+.agent-markdown h1 { font-size: 20px; }
+.agent-markdown h2 { font-size: 18px; }
+.agent-markdown :is(h3, h4, h5, h6) { font-size: 15px; }
+.agent-markdown :is(ul, ol) { padding-left: 24px; }
+.agent-markdown li + li { margin-top: 4px; }
+.agent-markdown li > :is(ul, ol) { margin: 4px 0; }
+.agent-markdown li > p { margin-bottom: 4px; }
+.agent-markdown code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.9em; background: var(--panel); border-radius: 4px; padding: 2px 4px; }
+.agent-markdown pre { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--terminal); overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+.agent-markdown pre code { padding: 0; background: none; border-radius: 0; }
+.agent-markdown blockquote { padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.agent-markdown blockquote > :last-child { margin-bottom: 0; }
+.agent-markdown a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.agent-markdown a:hover { text-decoration-thickness: 2px; }
+.agent-markdown hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.agent-table-scroll { max-width: 100%; overflow-x: auto; }
+.agent-markdown table { border-collapse: collapse; font-size: 13px; }
+.agent-markdown :is(th, td) { padding: 6px 10px; border: 1px solid var(--line); text-align: left; min-width: 80px; }
+.agent-markdown th { background: var(--panel); font-weight: 650; }
+.agent-markdown :is(a, .agent-table-scroll):focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .agent-message .agent-actions { margin-top: 12px; }
 .agent-user { border-color: var(--accent); }
 .agent-status { margin: 0; padding: 0 16px; font-size: 12px; color: var(--muted); }
 .agent-status:empty { display: none; }
-.agent-form { border-top: 1px solid var(--line); display: flex; align-items: flex-end; gap: 8px; }
+.agent-form { background: var(--panel-2); border-top: 1px solid var(--line-soft); display: flex; align-items: flex-end; gap: 8px; }
 .agent-question { flex: 1; min-width: 0; display: grid; gap: 6px; font-size: 12px; }
 .agent-question > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .agent-question textarea { width: 100%; height: 44px; min-height: 44px; max-height: 100px; resize: none; font: inherit; font-size: 16px; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
@@ -2597,3 +2630,26 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
 .agent-panel .agent-form #agentStop:disabled { display: none; }
 .agent-terminal-peek:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 @media (max-width: 380px) { .agent-header { gap: 4px; } .agent-header .agent-actions { gap: 4px; } .agent-header .btn { padding-inline: 8px; } }
+
+.agent-history { flex: 0 1 auto; min-height: 24px; max-height: 28%; overflow: auto; padding: 4px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.agent-history summary { cursor: pointer; overflow-wrap: anywhere; }
+.agent-history p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
+.agent-history details { margin-top: 12px; }
+.agent-message-text pre { max-width: 100%; overflow: auto; white-space: pre; font-size: 12px; }
+.agent-message-text summary { cursor: pointer; margin-top: 12px; }
+.agent-code-copy { margin-top: 8px; }
+/* Let a restored task use the available space when no chat is displayed. */
+.agent-panel:has(.agent-messages:empty) .agent-history { max-height: 65%; }
+
+.agent-panel.window-surface, .agent-messages { background: var(--terminal); }
+.agent-panel #agentAsk { display: inline-flex; justify-content: center; align-items: center; width: 44px; height: 44px; min-width: 44px; padding: 0; flex-shrink: 0; }
+.agent-panel #agentAsk:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.target-binding { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
+.target-binding h3 { font-size: 14px; margin: 0 0 8px; }
+.target-binding fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 12px; }
+.target-binding .check { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
+#targetBindingIdentity { overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.target-binding .check { min-height: 44px; padding-block: 8px; }
+.target-binding .check input[type="checkbox"] { box-sizing: border-box; width: 18px; min-width: 18px; max-width: 18px; height: 18px; min-height: 18px; flex: 0 0 18px; margin: 0; padding: 0; appearance: auto; accent-color: var(--accent-strong); }

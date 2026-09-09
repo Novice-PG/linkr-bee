@@ -10,7 +10,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260906-agent-sidebar-2" />
+    <link rel="stylesheet" href="./style.css?v=20260909-binding-checkbox-2" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
   </head>
   <body>
@@ -109,6 +109,7 @@
             <input id="wsHostInput" type="text" data-i18n-ph="placeholderWsHost" placeholder="192.168.1.50" spellcheck="false" autocomplete="off" aria-invalid="false" aria-describedby="wsHostError" aria-errormessage="wsHostError">
             <span id="wsHostError" class="field-error" role="alert" hidden></span>
           </label>
+          <p id="blePairingHint" class="field-hint" data-i18n="pairingHint">New host: hold Bee GPIO1 to GND before connecting and accept system pairing. Bonded hosts reconnect without GPIO1.</p>
           <div class="btn-grid">
             <button id="connectButton" class="btn btn-primary" type="button">
               <span class="spinner" aria-hidden="true"></span>
@@ -120,9 +121,9 @@
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 0 1 0 12.73M5.64 6.64a9 9 0 0 0 0 12.73"></path><line x1="12" y1="2" x2="12" y2="22" opacity="0"></line><line x1="2" y1="12" x2="22" y2="12"></line></svg>
               <span class="btn-label" data-i18n="disconnect">Disconnect</span>
             </button>
-            <button id="reconnectButton" class="btn" type="button" disabled="">
+            <button id="switchDeviceButton" class="btn" type="button" disabled="">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"></path></svg>
-              <span class="btn-label" data-i18n="reconnect">Reconnect</span>
+              <span class="btn-label" data-i18n="switchDevice">Switch device</span>
             </button>
             <button id="queryButton" class="btn" type="button" disabled="">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -344,6 +345,21 @@
           <p id="agentSettingsStatus" class="field-hint" role="status" aria-live="polite"></p>
           <p class="field-hint" data-ai-setting="storage"></p>
           <p class="field-hint" data-ai-setting="notice"></p>
+          <section class="target-binding" aria-labelledby="targetBindingTitle">
+            <h3 id="targetBindingTitle" data-ai-setting="bindingTitle"></h3>
+            <p class="field-hint" data-ai-setting="bindingHint"></p>
+            <p id="targetBindingIdentity" class="field-hint"></p>
+            <fieldset id="targetBindingFields">
+              <div class="btn-grid">
+                <button type="button" class="btn" id="targetVerify" data-ai-setting="bindingVerify"></button>
+                <button type="button" class="btn btn-primary" id="targetBind" data-ai-setting="bindingBind"></button>
+                <button type="button" class="btn" id="targetUnbind" data-ai-setting="bindingClear"></button>
+              </div>
+              <label class="check"><input id="targetRegenerateConfirm" type="checkbox"><span data-ai-setting="bindingRegenerateHint"></span></label>
+              <button type="button" class="btn" id="targetRegenerate" data-ai-setting="bindingRegenerate" disabled></button>
+            </fieldset>
+            <p id="targetBindingStatus" class="field-hint" role="status" aria-live="polite"></p>
+          </section>
         </section>
       </aside>
 
@@ -460,6 +476,6 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260908-agent-review"></script>
+    <script type="module" src="./app.js?v=20260908-agent-terminalsize"></script>
   </body>
 </html>

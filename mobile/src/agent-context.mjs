@@ -55,6 +55,15 @@ export function excerpt(value, limit) {
   return value.slice(0, head) + marker + value.slice(-(room - head));
 }
 
+export function evidenceExcerpt(value, limit) {
+  if (value.length <= limit) return value;
+  const errors = value.split("\n").filter(line => /(?:error|failed|failure|panic|fatal|no space|permission denied|not found|timed out)/i.test(line));
+  const key = [...new Set(errors)].slice(-6).map(line => line.slice(0,160)).join("\n");
+  if (!key) return excerpt(value,limit);
+  const block = "\n[Selected error lines; original order/positions omitted]\n" + key.slice(0,Math.max(0,Math.floor(limit/2)-80)) + "\n";
+  return excerpt(value, Math.max(100,limit-block.length)) + block;
+}
+
 function toolExcerpt(message, limit) {
   return { ...message, content: message.content.map((part) => {
     if (part.type !== "text" || part.text.length <= limit) return part;
@@ -62,13 +71,13 @@ function toolExcerpt(message, limit) {
       const data = JSON.parse(part.text);
       for (const key of ["text", "evidence"]) {
         if (typeof data[key] === "string" && data[key].length > limit) {
-          data[key] = excerpt(data[key], limit);
+          data[key] = evidenceExcerpt(data[key], limit);
           data.contextExcerpt = true;
           data.contextNote = "Evidence abbreviated in model context. Cursor offsets describe the original range; reread that range if needed.";
         }
       }
       return { ...part, text: JSON.stringify(data) };
-    } catch { return { ...part, text: excerpt(part.text, limit) }; }
+    } catch { return { ...part, text: evidenceExcerpt(part.text, limit) }; }
   }) };
 }
 
@@ -78,12 +87,13 @@ function summarize(messages) {
     const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     const calls = message.content.filter((part) => part.type === "toolCall").map((part) => ({ tool: part.name, input: part.arguments }));
     return [{ source: message.role, tool: message.toolName, error: message.isError || undefined,
-      excerpt: excerpt(text || JSON.stringify(calls), message.role === "user" ? 1000 : 1800) }];
+      excerpt: evidenceExcerpt(text || JSON.stringify(calls), message.role === "user" ? 1000 : 1800) }];
   });
 }
 
 function memoryMessage(template, entries) {
-  const recent = entries.slice(-12);
+  const unique = entries.filter((entry,i) => entries.findLastIndex(other => other.source === entry.source && other.tool === entry.tool && other.excerpt === entry.excerpt) === i);
+  const recent = unique.slice(-12);
   // Keep the summary itself bounded, even across many compactions.
   while (JSON.stringify(recent).length > 6000 && recent.length > 1) recent.shift();
   return { ...template, role: "assistant", stopReason: "stop", errorMessage: undefined,

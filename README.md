@@ -116,6 +116,7 @@ installations, not a replacement for BLE.
 ### Terminal behavior
 
 - Full ANSI/VT terminal rendering through xterm.js, including 256-color output.
+- Prompt-aware Linux terminal-size synchronization after login and viewport changes.
 - Raw, CR, LF, and CRLF Enter-key modes for different bootloaders and shells.
 - Configurable font stack, font size, local echo, transfer chunk size, and I/O debug view.
 - Selection copy, log export, auto-scroll control, fullscreen, and `Ctrl-C`.
@@ -210,10 +211,13 @@ for end-to-end UART and BLE validation on the intended hardware.
 
 ## Security
 
-The current firmware intentionally permits open BLE access and does not require
-pairing or bonding. Treat Linkr Bee as a local physical-console accessory. Do
-not expose it as a remote-administration interface until an ownership and
-authorization model has been implemented.
+BLE UART and management require an encrypted, bonded connection. For a new
+host, hold **GPIO1 to GND** before connecting and accept the host's pairing
+prompt. Release GPIO1 after pairing; saved hosts reconnect without it. Up to
+eight bonds are retained across reboots. See [pairing and recovery](docs/BLE_PAIRING.md).
+This gate protects BLE; LAN WebSocket access uses its separate network/token policy.
+
+- [Agent task recovery, device profiles and hardware validation (Chinese)](docs/AGENT_VALIDATION.zh-CN.md)
 
 ## License
 
