@@ -6,7 +6,16 @@
 	};
 
 	aliases {
+		linkr-pairing = &linkr_pairing;
 		linkr-factory-reset = &linkr_factory_reset;
+	};
+
+	linkr_pairing_keys {
+		compatible = "gpio-keys";
+		linkr_pairing: pairing {
+			label = "Linkr pairing authorization";
+			gpios = <&gpio0 1 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
 	};
 
 	linkr_factory_reset_keys {

@@ -16,7 +16,8 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/gatt.h>
-#include <zephyr/bluetooth/services/nus.h>
+#include "ble_nus.h"
+#include "ble_security.h"
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
@@ -29,6 +30,7 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/version.h>
 
+#include "target_binding.h"
 #include "ble_mgmt.h"
 #include "ble_uart_reliable.h"
 #include "wifi.h"
@@ -530,7 +532,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	ble_diag.connected_count++;
 	schedule_ble_diag_marker_write();
 #endif
-	LOG_INF("BLE connected");
+	LOG_INF("BLE connected; requesting encryption");
+	linkr_ble_security_connected(conn);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -973,6 +976,11 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 	LOG_INF("Control command received");
+	char target_response[80];
+	if (linkr_target_command(body, target_response, sizeof(target_response))) {
+		(void)send_control_response(conn, "%s", target_response);
+		return true;
+	}
 
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
 		(void)send_control_response(conn,
@@ -1241,7 +1249,7 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 		packet.len = MIN(len, sizeof(packet.data));
 		memcpy(packet.data, bytes, packet.len);
 
-		int err = bt_nus_send(conn, packet.data, packet.len);
+		int err = linkr_nus_send(conn, packet.data, packet.len);
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 		ble_diag.rx_count++;
@@ -1366,11 +1374,11 @@ static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len
 
 	while (len > 0) {
 		uint16_t chunk_len = MIN(len, mtu_payload);
-		int err = bt_nus_send(conn, data, chunk_len);
+		int err = linkr_nus_send(conn, data, chunk_len);
 
 		if (err == -ENOMEM || err == -EAGAIN) {
 			k_sleep(K_MSEC(10));
-			err = bt_nus_send(conn, data, chunk_len);
+			err = linkr_nus_send(conn, data, chunk_len);
 		}
 
 		if (err) {
@@ -1566,7 +1574,7 @@ static void ble_diag_active_notify_thread(void)
 		}
 
 		len = snprintk(msg, sizeof(msg), "diag-ping:%u\n", seq++);
-		err = bt_nus_send(conn, msg, len);
+		err = linkr_nus_send(conn, msg, len);
 		bt_conn_unref(conn);
 
 		ble_diag.last_active_notify_err = err;
@@ -1715,9 +1723,15 @@ int main(void)
 
 	k_mutex_init(&conn_lock);
 	k_work_init_delayable(&advertise_work, advertise_retry);
-	err = bt_nus_cb_register(&nus_callbacks, NULL);
+	err = bt_nus_inst_cb_register(&linkr_nus, &nus_callbacks, NULL);
 	if (err) {
 		LOG_ERR("NUS callback registration failed: %d", err);
+		return err;
+	}
+
+	err = linkr_ble_security_init();
+	if (err) {
+		LOG_ERR("BLE security init failed: %d", err);
 		return err;
 	}
 

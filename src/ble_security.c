@@ -1,0 +1,105 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+#include <errno.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/logging/log.h>
+#include "ble_security.h"
+
+LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
+
+#if defined(CONFIG_SOC_SERIES_ESP32C3) && !defined(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE)
+#error "ESP32-C3 pairing requires controller link encryption support"
+#endif
+
+static const struct gpio_dt_spec pairing_gpio =
+	GPIO_DT_SPEC_GET(DT_ALIAS(linkr_pairing), gpios);
+
+static enum bt_security_err pairing_accept(
+	struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(feat);
+	/* Applies to every new key exchange, including replacement of a bond.
+	 * Existing LTK encryption does not invoke this callback. A GPIO read
+	 * failure must fail closed, not be mistaken for an active-low input. */
+	if (gpio_pin_get_dt(&pairing_gpio) != 1) {
+		LOG_WRN("Pairing denied: hold GPIO1 low before requesting pairing");
+		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+	}
+	LOG_INF("Pairing authorized by GPIO1");
+	return BT_SECURITY_ERR_SUCCESS;
+}
+
+static void pairing_complete(struct bt_conn *conn, bool bonded)
+{
+	if (!bonded) {
+		LOG_ERR("Pairing completed without a bond; disconnecting");
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+		return;
+	}
+	/* Zephyr BT_SETTINGS persists the negotiated keys; never log them. */
+	LOG_INF("BLE pairing complete (bonded)");
+}
+
+static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
+{
+	LOG_WRN("BLE pairing failed: %u", reason);
+	(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+}
+
+static void security_changed(struct bt_conn *conn, bt_security_t level,
+			     enum bt_security_err err)
+{
+	if (err || level < BT_SECURITY_L2) {
+		LOG_WRN("BLE encryption failed: %u", err);
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+		return;
+	}
+	LOG_INF("BLE encrypted link ready (level %u)", level);
+}
+
+static const struct bt_conn_auth_cb auth_callbacks = {
+	.pairing_accept = pairing_accept,
+};
+
+static struct bt_conn_auth_info_cb auth_info_callbacks = {
+	.pairing_complete = pairing_complete,
+	.pairing_failed = pairing_failed,
+};
+
+BT_CONN_CB_DEFINE(linkr_security_callbacks) = {
+	.security_changed = security_changed,
+};
+
+int linkr_ble_security_init(void)
+{
+	int err;
+
+	if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
+	err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
+	if (err) return err;
+	err = bt_conn_auth_cb_register(&auth_callbacks);
+	if (err) return err;
+	return bt_conn_auth_info_cb_register(&auth_info_callbacks);
+}
+
+void linkr_ble_security_connected(struct bt_conn *conn)
+{
+	struct bt_conn_info info;
+	int err = bt_conn_get_info(conn, &info);
+
+	if (!err && !bt_le_bond_exists(info.id, bt_conn_get_dst(conn))) {
+		/* The host initiates its first pairing explicitly or in response to
+		 * an encrypted GATT access. Avoid racing Android createBond(). */
+		LOG_INF("Unbonded host: waiting for GPIO1-authorized pairing");
+		return;
+	}
+	/* Restore encryption using the saved LTK without forcing a new pairing. */
+	if (!err) err = bt_conn_set_security(conn, BT_SECURITY_L2);
+
+	if (err) {
+		LOG_WRN("Cannot request BLE encryption: %d", err);
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+	}
+}

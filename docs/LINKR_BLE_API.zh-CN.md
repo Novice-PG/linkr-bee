@@ -171,9 +171,17 @@ WiFi 扫描也使用异步 Event：先返回 `OK accepted`，再发送同一 ID 
 | `@d=http://host/path/` | 设置匿名 HTTP WebDAV URL |
 | `@d off` | 禁用 WebDAV |
 | `@s?` / `@s on` / `@s off` | 查询、启用或禁用 LAN WebSocket bridge |
+| `@linkr target?` | 查询 Bee 保存的目标机 UUID，无关联时返回 `OK target=none` |
+| `@linkr target=<UUID>` | 保存小写、带连字符的 36 字符 UUID；相同值不重复写入 |
+| `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
 
 长形式 `@linkr info?`、`@linkr wifi=...` 等仍可使用。WebDAV 查询响应使用完整
 Management payload，不再受旧 NUS 128 字节响应缓冲区截断。
+
+目标机 UUID 存储在 settings 的 `linkr_target/v1`，与 Bee 自身 Device ID、BLE
+绑定密钥相互独立。写入成功返回 `OK target=<UUID>`，失败返回 `ERR target storage <code>`。
+它仅用于关联档案；客户端仍须从当前 UART 目标机读取 ID 并比对，不能将缓存 UUID
+作为目标机身份认证或本次连接已核实的证据。
 
 ## 7. Reliable UART 帧和恢复
 
@@ -221,7 +229,7 @@ TX。若应用发现 sequence gap，应停止转发并重连/重读 State，不�
 ## 8. 推荐接入顺序
 
 1. 按 Management Service UUID 扫描；
-2. 连接 GATT，读取 Protocol Info，拒绝未知 major；
+2. 连接 GATT 并完成系统加密/绑定（新主机需先拉低 GPIO1），读取 Protocol Info，拒绝未知 major；
 3. 读取 Device ID，完成配件绑定或核对；
 4. 订阅 Management Response / Event；
 5. 读取 Reliable UART State；
@@ -232,12 +240,15 @@ TX。若应用发现 sequence gap，应停止转发并重连/重读 State，不�
 
 ## 9. 安全模型
 
-当前开发固件关闭 BLE pairing、bonding 和 owner 限制。任何附近的 BLE central
-都能连接、读 UART、改 WiFi/WebDAV/WebSocket 配置。板级恢复出厂仍会清除
-settings 并生成新 BLE identity，但它不是无线访问控制。
+Management、Reliable UART、兼容 NUS 的值读写和 CCC 读写均要求加密连接，
+通知/指示同样受加密权限保护。未绑定连接只可发现服务，不能使用数据或管理功能。
+配对采用 LE Secure Connections Just Works，要求绑定；请求到达时 GPIO1 需为低。
+该检查同样适用于替换旧绑定密钥，已有密钥的加密重连不触发它。
 
-量产前必须另行确定配对/授权模型；API v1 的通道分离、Device ID、request ID
-和可靠 UART 只解决协议正确性，不提供身份认证或机密性。
+最多保留 8 个绑定，NVS 在正常重启后恢复。恢复出厂会清除绑定及其他设置。
+GPIO1 低电平窗口允许附近主机申请配对，不能验证某一台主机的身份；Just Works
+不提供 MITM 身份核验。Device ID 与浏览器的设备授权不能替代加密绑定。
+本次策略不改变 LAN WebSocket 的网络/token 访问控制。详见 [配对说明](BLE_PAIRING.md)。
 
 ## 10. 验收清单
 

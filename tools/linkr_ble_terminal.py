@@ -516,7 +516,7 @@ async def run(args: argparse.Namespace) -> None:
             args.query_info, args.query_uart, args.uart, args.wifi,
             args.wifi_scan, args.wifi_off,
             args.query_wifi, args.webdav, args.webdav_off,
-            args.query_webdav, args.loopback_test is not None,
+            args.query_webdav, args.loopback_test is not None, args.pair,
         ))
         if args.no_terminal and not has_control_action:
             return
@@ -541,6 +541,7 @@ async def run(args: argparse.Namespace) -> None:
         loop.call_soon_threadsafe(disconnected.set)
 
     stderr("Connecting...")
+    stderr("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
 
     try:
@@ -549,7 +550,10 @@ async def run(args: argparse.Namespace) -> None:
             stderr(f"Connected: {client.address}")
 
             if args.pair:
-                stderr("Pairing is disabled by this firmware; --pair is a no-op")
+                if sys.platform == "darwin":
+                    stderr("macOS requests pairing when the encrypted service is read; accept the system dialog.")
+                else:
+                    await client.pair()
 
             def on_notify(_char, data: bytearray) -> None:
                 payload = bytes(data)
@@ -724,7 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
     parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
     parser.add_argument("--pair", action="store_true",
-                        help="deprecated no-op; BLE pairing is disabled")
+                        help="request OS bonding (hold Bee GPIO1 low); macOS pairs on encrypted reads")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
     parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,

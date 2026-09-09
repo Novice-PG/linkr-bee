@@ -25,7 +25,17 @@ for board in $boards; do
   grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
-  grep -qx '# CONFIG_BT_SMP is not set' "$config"
+  grep -qx 'CONFIG_BT_SMP=y' "$config"
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
+    grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
+  fi
+  grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
+  grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
+  grep -qx 'CONFIG_BT_SETTINGS=y' "$config"
+  grep -qx 'CONFIG_BT_SMP_SC_PAIR_ONLY=y' "$config"
+  grep -qx 'CONFIG_BT_MAX_PAIRED=8' "$config"
+  grep -qx '# CONFIG_BT_KEYS_OVERWRITE_OLDEST is not set' "$config"
+  grep -qx '# CONFIG_BT_ZEPHYR_NUS_DEFAULT_INSTANCE is not set' "$config"
 done
 
 python3 -m compileall -q "$repo_dir/tools/linkr_ble_terminal.py"

@@ -734,6 +734,25 @@ static bool connect_device(DBusConnection *conn, const char *device_path)
     return true;
 }
 
+static bool pair_device(DBusConnection *conn, const char *device_path)
+{
+    DBusError err;
+    DBusMessage *request, *reply;
+    bool success;
+
+    msg("Hold Bee GPIO1 to GND; accept pairing in the system Bluetooth agent.");
+    dbus_error_init(&err);
+    request = dbus_message_new_method_call(BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair");
+    if (!request) return false;
+    reply = dbus_connection_send_with_reply_and_block(conn, request, 60000, &err);
+    dbus_message_unref(request);
+    success = reply != NULL || dbus_error_has_name(&err, "org.bluez.Error.AlreadyExists");
+    if (!success) msg("Pairing failed: %s", err.message ? err.message : "no reply");
+    if (reply) dbus_message_unref(reply);
+    dbus_error_free(&err);
+    return success;
+}
+
 static void disconnect_device(DBusConnection *conn)
 {
     DBusMessage *reply;
@@ -1513,7 +1532,7 @@ static void usage(const char *prog)
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices and exit\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
-            "  --pair                deprecated no-op; pairing is disabled\n"
+            "  --pair                request OS bonding; hold Bee GPIO1 low\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
@@ -1633,12 +1652,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    msg("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.");
     if (!connect_device(g_state.conn, match.path)) {
         return 1;
     }
 
-    if (opt.pair) {
-        msg("Pairing is disabled by this firmware; --pair is a no-op");
+    if (opt.pair && !pair_device(g_state.conn, match.path)) {
+        disconnect_device(g_state.conn);
+        return 1;
     }
 
     if (!discover_characteristics(g_state.conn)) {

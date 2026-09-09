@@ -120,6 +120,18 @@ function createNativeBleBackend(): NativeBleBackend {
         onDisconnect?.(disconnectedId);
       });
       connectedDeviceId = deviceId;
+      try {
+        // Android exposes explicit bonding; iOS negotiates it when the first
+        // encrypted characteristic is read. Never remove an existing bond.
+        if (Capacitor.getPlatform() === "android" && !(await BleClient.isBonded(deviceId))) {
+          await BleClient.createBond(deviceId, { timeout: 60000 });
+        }
+        if (connectedDeviceId !== deviceId) throw new Error("Bluetooth disconnected during pairing");
+      } catch (error) {
+        await BleClient.disconnect(deviceId).catch(() => {});
+        connectedDeviceId = null;
+        throw error;
+      }
     },
 
     async disconnect(deviceId) {
@@ -135,7 +147,7 @@ function createNativeBleBackend(): NativeBleBackend {
 
     async read(deviceId, serviceUuid, characteristicUuid) {
       await ensureInitialized();
-      return BleClient.read(deviceId, serviceUuid, characteristicUuid);
+      return BleClient.read(deviceId, serviceUuid, characteristicUuid, { timeout: 60000 });
     },
 
     async write(

@@ -136,7 +136,7 @@ ESP32-C5 DevKitC 差异：
   - `@d=http://host/path/` / `@d off` / `@d?`（匿名 HTTP WebDAV）
   - `@h`（help）
 - WiFi 默认启用但无线电关闭，`@w=` 后开启；凭据默认只在 RAM，只有启用 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才写入 NVS（要求 secure boot + flash encryption）
-- 当前开发固件未启用 BLE 配对、bond 或 owner 限制；Management、UART、WiFi/WebDAV/WebSocket 命令均为开放访问，只能在可信环境中使用
+- GPIO1 为配对授权输入，内部上拉、低有效；通过按钮或跳线接 GND。Management 与两个 UART 服务要求加密 BLE；绑定持久化，已绑定主机重连无需拉低 GPIO1。GPIO1 不执行恢复出厂。详见 [蓝牙配对](BLE_PAIRING.md)。
 
 ## 13. 量产要点
 

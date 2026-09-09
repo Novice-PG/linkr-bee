@@ -1,5 +1,11 @@
 menu "Linkr Bee bridge"
 
+# ESP32-C3 uses Espressif's controller, not Zephyr's BT_CTLR. The upstream
+# controller encryption default follows BT_CTLR_LE_ENC, which is unset with
+# this external controller even when the host enables SMP.
+config ESP32_BT_CTLR_LE_SECURITY_ENABLE
+	default y if BT_SMP && SOC_SERIES_ESP32C3
+
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"
 	default "0.2.0"
