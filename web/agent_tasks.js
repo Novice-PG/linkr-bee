@@ -24,6 +24,10 @@ export function createTaskStore(storage) {
       if (!task.deviceKey) return;
       const item = { id: task.id, deviceKey: task.deviceKey, updatedAt: Date.now(), goal: redactTaskText(task.goal),
         summary: redactTaskText(task.summary), status: task.status,
+        plan: (Array.isArray(task.plan) ? task.plan : []).slice(0,8).map(s=>({
+          title:redactTaskText(s.title), status:['pending','in_progress','completed','blocked'].includes(s.status)?s.status:'pending',
+          verification:redactTaskText(s.verification), nextAction:redactTaskText(s.nextAction),
+        })),
         executions: (task.executions || []).slice(-8).map(e => ({ delivery: e.delivery, exitCode: e.exitCode,
           executionStatus: e.executionStatus, path: redactTaskText(e.download?.path), observation: e.observation })) };
       const data = read().filter(t => t.id !== item.id); data.push(item);

@@ -29,8 +29,12 @@ export function extractWebPage(source, url, contentType) {
     links };
 }
 
-export async function readWebPage({ url, signal, fetchImpl = fetch, extract = extractWebPage }) {
+export async function readWebPage({ url, offset = 0, limit = 16000, find, signal, fetchImpl = fetch, extract = extractWebPage }) {
   url = webUrl(url);
+  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 16000 ||
+      (find !== undefined && (typeof find !== 'string' || !find.trim() || find.length > 200))) {
+    throw new Error('Invalid page offset, limit or search text.');
+  }
   const controller = new AbortController();
   const abort = () => controller.abort(signal.reason);
   signal?.throwIfAborted();
@@ -43,7 +47,7 @@ export async function readWebPage({ url, signal, fetchImpl = fetch, extract = ex
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const contentType = response.headers.get("content-type") || "";
     if (!/^(text\/|application\/(json|xhtml\+xml))/.test(contentType)) {
-      throw new Error("This URL is not a text page. Binary downloads must use the target's download tools.");
+      throw new Error("This URL is not a text page. Use the download tool for the destination chosen by the user.");
     }
     reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -59,8 +63,14 @@ export async function readWebPage({ url, signal, fetchImpl = fetch, extract = ex
     const finalUrl = webUrl(response.url || url);
     const page = extract(source, finalUrl, contentType);
     const text = page.text.replace(/[\t ]+/g, " ").replace(/\n\s*\n/g, "\n\n").trim();
-    return { url: finalUrl, title: page.title, text: text.slice(0, 16000), links: page.links,
-      truncated: text.length > 16000, untrusted: true };
+    const matchIndex = find === undefined ? null : text.toLowerCase().indexOf(find.toLowerCase(), offset);
+    const start = Math.min(text.length, find === undefined ? offset : matchIndex < 0 ? text.length : Math.max(offset,matchIndex-200));
+    const nextOffset = Math.min(text.length,start+limit);
+    return { url: finalUrl, title: page.title, text: text.slice(start,nextOffset), links: page.links,
+      offset:start,nextOffset,totalCharacters:text.length,hasMore:nextOffset<text.length,
+      matchIndex,matchFound:find === undefined ? null : matchIndex >= 0,
+      fetchedAt:new Date().toISOString(),
+      truncated: start>0 || nextOffset<text.length, untrusted: true };
   } catch (error) {
     if (controller.signal.aborted) throw controller.signal.reason;
     throw new Error(`Unable to read ${url}: ${error.message}. Browser CORS or network policy may block access. If a target shell is available, consider curl/wget under the current execution mode.`);

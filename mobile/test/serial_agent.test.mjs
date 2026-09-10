@@ -367,4 +367,86 @@ test('target tool check probes only requested safe command names', async()=>{
  assert.match(sent[0].text,/for t in 'curl' 'sha256sum'/);
  assert.doesNotMatch(sent[0].text,/uname|df |os-release/);
  assert.equal(sent[0].trackExit,true);
+ assert.deepEqual(sent[0].toolProbe,['curl','sha256sum']);
+});
+
+test('task plans reject unsupported completion and preserve blocked recovery details', async () => {
+ let turns=0;
+ const agent=makeAgent({config,getStatus:()=>status,sendInput:()=>assert.fail('plans must not write UART'),
+ stream:fakeStream(context=>{
+  if(++turns===1)return [call('update_task_plan',{steps:[{title:'Repair',status:'completed',verification:'',nextAction:''}]})];
+  if(turns===2){
+   assert.match(context.messages.at(-1).content[0].text,/verification for completed/);
+   return [call('update_task_plan',{steps:[{title:'Check service',status:'blocked',verification:'No service health output',nextAction:'Read service status after reconnect'}]})];
+  }
+  const plan=JSON.parse(context.messages.at(-1).content[0].text);
+  assert.equal(plan.verifiedByApplication,false);
+  assert.equal(plan.steps[0].status,'blocked');
+  return [{type:'text',text:'Blocked; inspect service state after reconnect.'}];
+ })});
+ await agent.prompt('Plan repair');assert.equal(turns,3);
+});
+
+test('log search finds literal evidence without consuming the incremental cursor or writing UART', async () => {
+ let turns=0;const queries=[];
+ const agent=makeAgent({config,getStatus:()=>status,sendInput:()=>assert.fail('read only'),
+ readLog:args=>{queries.push(args);return {text:'Boot\nERROR [disk] failed\n',start:10,cursor:40,latestCursor:90,truncated:true};},
+ stream:fakeStream(context=>{
+  if(++turns===1)return [call('search_serial_log',{query:'error [disk]',after:10})];
+  if(turns===2){const result=JSON.parse(context.messages.at(-1).content[0].text);
+   assert.equal(result.matches.length,1);assert.match(result.matches[0].excerpt,/failed/);
+   assert.equal(result.truncated,true);assert.equal(result.hasMore,true);
+   return [call('read_serial_log',{})];
+  }
+  return [{type:'text',text:'Disk failure observed; earlier logs are missing.'}];
+ })});
+ await agent.prompt('Find disk failure');
+ assert.equal(queries[0].after,10);assert.equal(queries[1].after,undefined);
+});
+
+test('Pi consumes steering before follow-ups and reports pending messages', async () => {
+ let turns=0;const consumed=[],queue=[];
+ const agent=makeAgent({config,getStatus:()=>status,sendInput:()=>assert.fail('no serial action'),
+ onEvent:e=>{if(e.type==='queued_input_consumed')consumed.push(e.item.text);if(e.type==='input_queue_changed')queue.push(e.items);},
+ stream:fakeStream(context=>{
+  turns++;
+  if(turns===1){agent.enqueue('Do later','followUp');agent.enqueue('Clarification','steer');}
+  else assert.equal(context.messages.at(-1).content,turns===2?'Clarification':'Do later');
+  return [{type:'text',text:'Handled.'}];
+ })});
+ await agent.prompt('Initial task');
+ assert.equal(turns,3);assert.deepEqual(consumed,['Clarification','Do later']);assert.deepEqual(queue.at(-1),[]);
+ assert.throws(()=>agent.enqueue('too late'),/No active task/);
+});
+
+test('queued messages are bounded and cleared before the next prompt', async () => {
+ let turns=0;
+ const agent=makeAgent({config,getStatus:()=>status,sendInput:()=>assert.fail('no serial action'),
+ stream:fakeStream(context=>{
+  if(++turns===1){
+   for(let i=0;i<8;i++)agent.enqueue('Queued '+i,'followUp');
+   assert.throws(()=>agent.enqueue('overflow'),/Queue is full/);
+   agent.clearQueue();
+  }else assert.equal(context.messages.at(-1).content[0].text,'New task');
+  return [{type:'text',text:'Done'}];
+ })});
+ await agent.prompt('Initial');await agent.prompt('New task');assert.equal(turns,2);
+});
+
+test('turn limit clears unconsumed follow-ups', async () => {
+ let turns=0;const consumed=[];
+ const agent=makeAgent({config,getStatus:()=>status,runLimits:{maxTurns:1,maxTools:10},
+ onEvent:e=>{if(e.type==='queued_input_consumed')consumed.push(e.item);},
+ stream:fakeStream(()=>{if(++turns===1)agent.enqueue('Must not run','followUp');return [{type:'text',text:'Done'}];})});
+ assert.equal((await agent.prompt('Initial')).limitReached,true);
+ await agent.prompt('Next');assert.equal(turns,2);assert.deepEqual(consumed,[]);
+});
+
+test('abort clears queued instructions and never replays them on a later prompt',async()=>{
+ let turns=0;const consumed=[];
+ const agent=makeAgent({config,getStatus:()=>status,onEvent:e=>{if(e.type==='queued_input_consumed')consumed.push(e.item);},
+ stream:fakeStream(()=>{if(++turns===1){agent.enqueue('Old follow-up','followUp');agent.abort();}
+ return [{type:'text',text:'Stopped'}];})});
+ await agent.prompt('First').catch(()=>{});
+ await agent.prompt('Fresh request');assert.equal(turns,2);assert.deepEqual(consumed,[]);
 });

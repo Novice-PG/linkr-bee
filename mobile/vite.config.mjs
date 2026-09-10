@@ -15,6 +15,9 @@ export default defineConfig({
   root: webDir,
   base: "./",
   cacheDir: path.join(mobileDir, "node_modules/.vite"),
+  server: {
+    headers: { "Cache-Control": "no-store" },
+  },
   optimizeDeps: {
     // Prebundle lazy agent dependencies before the first chat. Discovering
     // these after startup would make Vite reload an active serial session.

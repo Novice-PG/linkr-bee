@@ -35,3 +35,22 @@ test("web reader propagates cancellation without starting a request", async () =
   await assert.rejects(readWebPage({ url: "https://docs.example.org", signal: controller.signal,
     fetchImpl: () => assert.fail("must not fetch") }), /Stopped/);
 });
+
+test('web reader pages beyond the first excerpt and finds later sections', async () => {
+ const source='x'.repeat(17000)+'Needle: board details\n'+'z'.repeat(2000);
+ const fetchImpl=async()=>new Response(source,{headers:{'Content-Type':'text/plain'}});
+ const first=await readWebPage({url:'https://docs.example.org',fetchImpl});
+ const next=await readWebPage({url:'https://docs.example.org',fetchImpl,offset:first.nextOffset});
+ assert.equal(first.hasMore,true);assert.equal(next.hasMore,false);
+ assert.equal(first.text+next.text,source);
+ const found=await readWebPage({url:'https://docs.example.org',fetchImpl,find:'NEEDLE'});
+ assert.equal(found.matchFound,true);assert.equal(found.matchIndex,17000);assert.match(found.text,/board details/);
+ const missing=await readWebPage({url:'https://docs.example.org',fetchImpl,find:'absent'});
+ assert.equal(missing.matchFound,false);assert.equal(missing.text,'');
+});
+
+test('web reader rejects invalid paging without issuing requests', async () => {
+ for(const args of [{offset:-1},{limit:16001},{offset:0.5},{find:' '},{find:'x'.repeat(201)}]) {
+  await assert.rejects(readWebPage({url:'https://docs.example.org',...args,fetchImpl:()=>assert.fail('must not fetch')}),/Invalid/);
+ }
+});

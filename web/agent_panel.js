@@ -13,6 +13,12 @@ const labels = {
   storageError: ["任务记录无法保存，请检查浏览器存储空间。", "Cannot save tasks; check browser storage."],
   taskNote: ["摘要保存在此浏览器，可能含设备信息。恢复时重新核实，不自动重发命令。", "Summaries are stored in this browser and may contain device information. Recovery verifies current state without replaying commands."],
   probe_device_profile: ["探测设备档案", "Probe device profile"],
+  probe_tools: ["检查所需工具", "Check required tools"],
+  update_task_plan: ["任务计划与验证记录", "Task plan and verification"],
+  planAssessment: ["AI 记录的进度，请结合执行日志核实", "Progress recorded by AI; verify against execution logs"],
+  steer: ["补充本轮", "Add to current task"], followUp: ["排队下一步", "Queue next step"],
+  queueHelp: ["补充在当前工具结束后生效；排队在本轮结束后处理。停止会清空待处理消息。", "Add after the current tool finishes, or queue after this task. Stop clears pending messages."],
+  clearQueue: ["清空待处理", "Clear pending"],
   "console-sudo-password": ["等待 sudo 密码，请在终端输入", "Sudo password; enter in terminal"],
   "console-confirmation": ["等待交互确认", "Awaiting confirmation"], "console-pager": ["分页器等待输入", "Pager awaiting input"],
   copy: ["复制", "Copy"], copied: ["已复制", "Copied"], copyFailed: ["复制失败，请手动选择", "Copy failed; select manually"],
@@ -67,6 +73,9 @@ const labels = {
   monitor_serial_execution: ["持续观察执行", "Monitor execution"],
   read_serial_log: ["读取串口日志", "Read serial log"],
   read_web_page: ["读取网页", "Read web page"],
+  search_serial_log: ["查找串口日志", "Find serial evidence"],
+  noMatches: ["当前范围内没有匹配内容", "No matches in this window"],
+  readRange: ["读取范围", "Read range"],
   get_device_status: ["读取设备状态", "Read device status"],
   send_serial_input: ["请求发送串口输入", "Request serial input"],
   wait_for_serial_output: ["等待串口输出", "Wait for serial output"],
@@ -110,6 +119,11 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       <div id="agentTasks"></div><p id="agentStorageError" role="status"></p></details>
     <div id="agentMessages" class="agent-messages" role="log" aria-live="polite"><p class="agent-empty" data-ai="empty"></p></div>
     <p id="agentStatus" class="agent-status" role="status"></p>
+    <div id="agentQueueControls" class="agent-queue-controls" hidden>
+      <p data-ai="queueHelp"></p>
+      <div class="agent-actions"><button class="btn" type="button" id="agentSteer" data-ai="steer"></button><button class="btn" type="button" id="agentFollowUp" data-ai="followUp"></button></div>
+      <div id="agentQueue" role="status"></div><button class="btn" type="button" id="agentClearQueue" data-ai="clearQueue" hidden></button>
+    </div>
     <form id="agentForm" class="agent-form"><label class="agent-question"><span data-ai="question"></span>
       <textarea id="agentQuestion" rows="1" maxlength="4000" required></textarea></label>
       <div class="agent-actions"><button class="btn" id="agentStop" type="button" data-ai="stop" disabled></button>
@@ -177,10 +191,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       const row = document.createElement("details"), title = document.createElement("summary"), description = document.createElement("p"), restore = document.createElement("button");
       row.dataset.task = task.id; row.open = expanded.has(task.id);
       title.textContent = `${task.status} · ${task.goal}`;
-      description.textContent = task.summary || "";
+      description.textContent = [task.summary, formatPlan(task.plan)].filter(Boolean).join('\n');
       restore.type = "button"; restore.className = "btn"; restore.textContent = text("recover"); restore.disabled = busy;
       restore.addEventListener("click", () => {
-        recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions};
+        recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions,plan:task.plan};
         $("agentQuestion").value = `${text("recover")}: ${task.goal}`;
         $("agentQuestion").focus();
       });
@@ -241,12 +255,20 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     messages.scrollTop = messages.scrollHeight;
     return body;
   }
+  function formatPlan(steps) {
+    if (!Array.isArray(steps)) return '';
+    const labels = getLang().startsWith('zh') ? {pending:'待执行',in_progress:'进行中',completed:'已完成',blocked:'受阻'} :
+      {pending:'Pending',in_progress:'In progress',completed:'Completed',blocked:'Blocked'};
+    return text('planAssessment')+'\n'+steps.map((step,index)=>`${index+1}. [${labels[step.status] || step.status}] ${step.title}\n${step.verification || ''}${step.nextAction ? '\n→ '+step.nextAction : ''}`).join('\n');
+  }
   function setBusy(value) {
     busy = value;
     refreshHistory();
     settings.setBusy(value);
     $("agentAsk").disabled = $("agentNew").disabled = value;
     $("agentStop").disabled = !value;
+    $("agentQueueControls").hidden = !value;
+    $("agentSteer").disabled = $("agentFollowUp").disabled = true;
     $("agentStatus").textContent = value ? text("thinking") : "";
   }
   // Cancelling a run keeps its history; only explicit context/session resets
@@ -255,6 +277,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (currentTask && busy) { currentTask.status = "interrupted"; persistTask(); }
     version++;
     runner?.abort();
+    $("agentQueue").textContent = '';
+    $("agentClearQueue").hidden = true;
+    $("agentSteer").disabled = $("agentFollowUp").disabled = true;
     bindingController?.abort();
     device.cancel();
     if (!preserveConversation) { runner = null; fingerprint = ""; }
@@ -355,6 +380,15 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function onEvent(event, expectedVersion) {
     if (version !== expectedVersion) return;
+    if(event.type==='agent_start') $("agentSteer").disabled = $("agentFollowUp").disabled = false;
+    if(event.type==='input_queue_changed') {
+      $("agentQueue").textContent=event.items.map(item=>`${text(item.kind)}: ${item.text}`).join('\n');
+      $("agentClearQueue").hidden=!event.items.length;
+    }
+    if(event.type==='queued_input_consumed') {
+      addMessage('user',event.item.text);
+      if(currentTask){currentTask.goal=(currentTask.goal+'\n'+event.item.text).slice(0,4000);persistTask();}
+    }
     if (event.type === "message_start" && event.message.role === "assistant") answer = null;
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       answer ??= addMessage("assistant");
@@ -372,8 +406,19 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (!event.isError) {
         try {
           const value = JSON.parse(preview);
+          if (event.toolName === "update_task_plan") {
+            preview = formatPlan(value.steps);
+            if (currentTask) { currentTask.plan = value.steps; persistTask(); refreshHistory(); }
+          }
           if (event.toolName === "read_web_page") preview = [value.title, value.url, value.text?.slice(0, 1600),
+            Number.isInteger(value.offset) && `${text('readRange')}: ${value.offset}–${value.nextOffset} / ${value.totalCharacters}`,
+            value.matchFound === false && text('noMatches'),
             (value.truncated || value.text?.length > 1600) && text("truncated")].filter(Boolean).join("\n");
+          if (event.toolName === "search_serial_log") preview = [
+            `${text('readRange')}: ${value.start}–${value.cursor} / ${value.latestCursor}`,
+            value.matches?.length ? value.matches.map(m=>m.excerpt).join('\n…\n') : text('noMatches'),
+            (value.truncated || value.moreMatches) && text('truncated'),
+          ].filter(Boolean).join('\n');
           if (event.toolName === "read_serial_log" || event.toolName === "wait_for_serial_output") preview = [
             value.waitStatus && text(`wait-${value.waitStatus}`), value.text || text("noOutput"),
           ].filter(Boolean).join("\n");
@@ -406,6 +451,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     persistTask();
     const restored = recovery; recovery = null;
     setBusy(true);
+    $("agentQuestion").value = "";
     const runVersion = version;
     const timer = setTimeout(() => stop("stopped"), 900000);
     try {
@@ -423,10 +469,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       }
       if (version !== runVersion) { runner?.abort(); runner = null; return; }
       eventVersion = runVersion;
-      $("agentQuestion").value = "";
       addMessage("user", question);
       const outcome = await runner.prompt(question, {recovery:restored});
-      if (currentTask?.status === "running") currentTask.status = outcome.limitReached ? "interrupted" : "answered";
+      if (currentTask?.status === "running") currentTask.status = outcome.limitReached || currentTask.plan?.some(s=>s.status!=='completed') ? "interrupted" : "answered";
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
     } catch (error) {
       if (currentTask) currentTask.status = "failed";
@@ -441,9 +486,20 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
       event.preventDefault(); event.stopPropagation();
-      if (!event.repeat && !busy) $("agentForm").requestSubmit();
+      if (!event.repeat) { if(busy) queueInput('steer'); else $("agentForm").requestSubmit(); }
     }
   });
+  function queueInput(kind) {
+    const input=$("agentQuestion");
+    if(!input.value.trim()) return;
+    try {
+      if(!runner || !busy) throw new Error(text('stopped'));
+      runner.enqueue(input.value,kind); input.value='';
+    } catch(error) { $("agentStatus").textContent=error.message; }
+  }
+  $("agentSteer").addEventListener('click',()=>queueInput('steer'));
+  $("agentFollowUp").addEventListener('click',()=>queueInput('followUp'));
+  $("agentClearQueue").addEventListener('click',()=>runner?.clearQueue());
   // Capture before xterm so the focus shortcut never becomes target UART input.
   document.addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229 || event.altKey || !event.shiftKey || !(event.ctrlKey || event.metaKey) || event.code !== "KeyK") return;

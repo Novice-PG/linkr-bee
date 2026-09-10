@@ -29,3 +29,11 @@ test('context excerpts retain middle failures while remaining bounded',()=>{
   const excerpt=evidenceExcerpt(input,1200);
   assert.match(excerpt,/fatal: no space/); assert.match(excerpt,/omitted/); assert.ok(excerpt.length<=1200);
 });
+
+test('task plans preserve verification and next steps without saving credentials or commands', () => {
+ let stored='[]';const store=createTaskStore({getItem:()=>stored,setItem:(_key,value)=>stored=value});
+ store.save({id:'plan',deviceKey:'target:one',goal:'Repair service',status:'running',plan:[{title:'Check service',status:'blocked',verification:'token=secret-value',nextAction:'Reconnect and inspect status',command:'dangerous command'}]});
+ const saved=store.list('target:one')[0];
+ assert.equal(saved.status,'interrupted');assert.equal(saved.plan[0].verification,'token=[redacted]');
+ assert.equal(saved.plan[0].command,undefined);assert.match(saved.plan[0].nextAction,/Reconnect/);
+});

@@ -1005,3 +1005,56 @@ for (const matches of [true, false]) test('automatic identity waits for shell an
  expect(await page.evaluate(()=>window.identityCommands.length)).toBe(1);
  expect(await page.evaluate(()=>window.identityCommands[0])).not.toMatch(/uname|command -v|mkdir|sudo/);
 });
+
+test('blocked task plans render verification and persist recovery steps without serial writes', async ({page}) => {
+ await page.evaluate(()=>{window.__test.state.wsHost='plan-test-device';});
+ await mockModel(page,(_body,count)=>count===1 ? {tool:{name:'update_task_plan',args:{steps:[
+  {title:'Inspect service',status:'completed',verification:'Observed service failure in provided logs',nextAction:''},
+  {title:'Verify recovery',status:'blocked',verification:'Device unavailable',nextAction:'Reconnect and inspect current service state'},
+ ]}}} : {text:'Task is incomplete; reconnect before continuing.'});
+ await ask(page,'Plan the service repair');
+ await expect(page.locator('#agentMessages')).toContainText('[Blocked] Verify recovery');
+ await expect(page.locator('#agentMessages')).toContainText('Reconnect and inspect current service state');
+ await expect(page.locator('#agentAsk')).toBeEnabled();
+ const tasks=await page.evaluate(()=>JSON.parse(localStorage.getItem('linkr-agent-tasks-v1')));
+ expect(tasks.at(-1).status).toBe('interrupted');
+ expect(tasks.at(-1).plan[1].nextAction).toContain('Reconnect');
+ expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
+
+test('agent locates late documentation and serial errors without UART writes', async ({page})=>{
+ await page.route('https://docs.example.org/long',route=>route.fulfill({contentType:'text/plain',headers:{'access-control-allow-origin':'*'},body:'a'.repeat(17000)+'\nRECOVERY: inspect root filesystem'}));
+ await page.evaluate(()=>window.__test.handleIncomingBytes(new TextEncoder().encode('\nERROR [disk] unavailable\n')));
+ await mockModel(page,(body,count)=>{
+  if(count===1)return {tool:{name:'read_web_page',args:{url:'https://docs.example.org/long',find:'RECOVERY'}}};
+  const result=JSON.parse(body.messages.findLast(m=>m.role==='tool').content);
+  if(count===2){expect(result.matchFound).toBe(true);expect(result.offset).toBeGreaterThan(16000);return {tool:{name:'search_serial_log',args:{query:'ERROR [disk]'}}};}
+  expect(result.matches[0].excerpt).toContain('unavailable');return {text:'Located recovery documentation and disk error.'};
+ });
+ await ask(page,'Find recovery guidance and the disk error');
+ await expect(page.locator('#agentMessages')).toContainText('Located recovery documentation and disk error.');
+ await expect(page.locator('#agentMessages')).toContainText('Read range');
+ expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
+
+for(const width of [390,1280]) test(`running input queues support steering and follow-up at width ${width}`,async({page})=>{
+ await page.setViewportSize({width,height:844});
+ let release;const gate=new Promise(resolve=>release=resolve);
+ await mockModel(page,async(body,count)=>{
+  if(count===1){await gate;return {text:'Initial complete.'};}
+  const user=body.messages.findLast(m=>m.role==='user');
+  expect(user.content).toBe(count===2?'Use read-only checks':'Summarize afterwards');
+  return {text:count===2?'Applied clarification.':'Follow-up complete.'};
+ });
+ await ask(page,'Inspect the device');
+ await expect(page.locator('#agentQueueControls')).toBeVisible();
+ await expect(page.locator('#agentFollowUp')).toBeEnabled();
+ await page.locator('#agentQuestion').fill('Summarize afterwards');await page.locator('#agentFollowUp').click();
+ await page.locator('#agentQuestion').fill('Use read-only checks');await page.locator('#agentSteer').click();
+ await expect(page.locator('#agentQueue')).toContainText('Summarize afterwards');
+ await page.screenshot({path:`/private/tmp/linkr-queue-${width}.png`});
+ release();
+ await expect(page.locator('#agentMessages')).toContainText('Follow-up complete.');
+ await expect(page.locator('#agentQueueControls')).toBeHidden();
+ expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});

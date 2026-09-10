@@ -274,3 +274,41 @@ test(`completed device profile handles ${JSON.stringify(eol)}, becomes stale aft
   f.device.reset(); assert.equal(f.device.getStatus().profile,null);
 });
 }
+
+test('capabilities retain missing results, update after recheck and expire across sessions', async () => {
+ const f=fixture(); f.device.setMode('full-auto');
+ async function probe(available) {
+  const r=await f.device.execute({text:'true',appendEnter:true,trackExit:true,toolProbe:['curl']});
+  f.receive(`\n\rTOOL:curl:${available?'available':'missing'}\r\n${r.completionToken}:0\nroot@board:~# `);
+  f.device.inspectExecution(r.id); return r;
+ }
+ const r=await probe(false);
+ assert.equal(f.device.getStatus().toolCapabilities.curl.available,false);
+ assert.equal(f.device.getStatus().toolCapabilities.curl.executionId,r.id);
+ const copy=f.device.getStatus();copy.toolCapabilities.curl.available=true;
+ assert.equal(f.device.getStatus().toolCapabilities.curl.available,false);
+ await probe(true);assert.equal(f.device.getStatus().toolCapabilities.curl.available,true);
+ f.status.sessionId++;assert.equal(f.device.getStatus().toolCapabilities.curl.stale,true);
+ f.device.reset();assert.deepEqual(f.device.getStatus().toolCapabilities,{});
+});
+for (const reason of ['partial','conflicting','failed','interrupted']) test(`capabilities reject ${reason} output`, async () => {
+ const f=fixture();f.device.setMode('full-auto');
+ const r=await f.device.execute({text:'true',appendEnter:true,trackExit:true,toolProbe:['curl','wget']});
+ f.receive(`\nTOOL:curl:available\n${reason==='partial'?'':'TOOL:wget:missing\n'}${reason==='conflicting'?'TOOL:curl:missing\n':''}${r.completionToken}:${reason==='failed'?1:0}\nroot@board:~# `);
+ if(reason==='interrupted')f.status.inputRevision++;
+ f.device.inspectExecution(r.id);assert.deepEqual(f.device.getStatus().toolCapabilities,{});
+});
+
+test('capability freshness expires with age or a target reboot', async () => {
+ for (const reason of ['age','reboot']) {
+  const f=fixture();f.device.setMode('full-auto');
+  const r=await f.device.execute({text:'true',appendEnter:true,trackExit:true,toolProbe:['curl']});
+  f.receive(`\nTOOL:curl:available\n${r.completionToken}:0\nroot@board:~# `);f.device.inspectExecution(r.id);
+  const now=Date.now, observed=now();
+  try {
+   if(reason==='age') Date.now=()=>observed+300001;
+   else f.receive('\nLinux version 7.0\n');
+   assert.equal(f.device.getStatus().toolCapabilities.curl.stale,true);
+  } finally { Date.now=now; }
+ }
+});

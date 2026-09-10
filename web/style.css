@@ -2615,6 +2615,11 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
 .agent-user { border-color: var(--accent); }
 .agent-status { margin: 0; padding: 0 16px; font-size: 12px; color: var(--muted); }
 .agent-status:empty { display: none; }
+.agent-queue-controls { flex: 0 0 auto; padding: 6px 10px; border-top: 1px solid var(--line-soft); background: var(--panel-2); }
+.agent-queue-controls[hidden] { display: none; }
+.agent-queue-controls p { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.agent-queue-controls .agent-actions { flex-wrap: wrap; }
+#agentQueue { max-height: 72px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .agent-form { background: var(--panel-2); border-top: 1px solid var(--line-soft); display: flex; align-items: flex-end; gap: 8px; }
 .agent-question { flex: 1; min-width: 0; display: grid; gap: 6px; font-size: 12px; }
 .agent-question > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

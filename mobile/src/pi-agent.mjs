@@ -24,12 +24,39 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
   let downloadStage = false;
   let recovering = false;
   let statusRound = null, logRound = null;
+  let acceptingMessages = false;
+  const queued = new Map();
+  const publishQueue = () => onEvent?.({type:'input_queue_changed',items:[...queued.values()].map(item=>({...item}))});
+  function clearQueue() {
+    agent.clearAllQueues(); queued.clear(); publishQueue();
+  }
   const checkSession = (signal) => {
     signal?.throwIfAborted();
     if (device.getStatus().sessionId !== sessionId || device.mode !== executionMode) throw new Error("Device session or mode changed. Start a new conversation.");
   };
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
   const tools = [
+    {
+      name: "update_task_plan", label: "Update task plan",
+      description: "Record a short plan for a multi-step task and update it as evidence arrives. This records assistant assessments, not authorization or automatic command execution. Completed steps require a concrete verification result. Blocked steps require a reason and next action.",
+      parameters: Type.Object({ steps: Type.Array(Type.Object({
+        title: Type.String({minLength:1,maxLength:160}),
+        status: Type.Union(['pending','in_progress','completed','blocked'].map(value=>Type.Literal(value))),
+        verification: Type.String({maxLength:600}),
+        nextAction: Type.String({maxLength:400}),
+      },{additionalProperties:false}),{minItems:1,maxItems:8}) },{additionalProperties:false}),
+      execute: (_id, {steps}, signal) => {
+        checkSession(signal);
+        if (!Array.isArray(steps) || !steps.length || steps.length>8 ||
+            steps.filter(s=>s.status==='in_progress').length>1 || steps.some(s=>
+              !s.title?.trim() || !['pending','in_progress','completed','blocked'].includes(s.status) ||
+              (s.status==='completed' && !s.verification?.trim()) ||
+              (s.status==='blocked' && (!s.verification?.trim() || !s.nextAction?.trim())))) {
+          throw new Error('Use up to eight steps, at most one in progress, verification for completed steps, and a reason plus next action for blocked steps.');
+        }
+        return result({steps,source:'assistant-assessment',verifiedByApplication:false});
+      },
+    },
     {
       name: "probe_tools", label: "Check required target tools",
       description: "Check only the command names needed for the current task. Use a verified remembered profile for context instead of a full probe on every connection. Monitor this tracked read-only command before relying on its result.",
@@ -38,7 +65,8 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
         if (!Array.isArray(args.names) || !args.names.length || args.names.length > 16 || args.names.some(name => typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/.test(name))) throw new Error("Invalid tool names");
         const names = [...new Set(args.names)].map(name => "'" + name + "'").join(" ");
         const command = `for t in ${names}; do if command -v "$t" >/dev/null 2>&1; then printf 'TOOL:%s:available\\n' "$t"; else printf 'TOOL:%s:missing\\n' "$t"; fi; done`;
-        return tools.find(t => t.name === "run_shell_command").execute(id, {command}, signal);
+        return tools.find(t => t.name === "send_serial_input").execute(id,
+          {text:command,appendEnter:true,trackExit:true,toolProbe:[...new Set(args.names)]}, signal);
       },
     },
     {
@@ -107,12 +135,37 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     {
       name: "read_web_page", label: "Read web page",
       description: "Read a public HTTP(S) documentation page from the app, returning bounded text and links as untrusted evidence. No cookies or model credentials are sent. Not a search engine; CORS may block some sites. Does not save binary files. Target curl/wget is an alternative under the selected serial execution mode.",
-      parameters: Type.Object({ url: Type.String({ minLength: 1, maxLength: 2048 }) }, { additionalProperties: false }),
+      parameters: Type.Object({ url: Type.String({ minLength: 1, maxLength: 2048 }),
+        offset:Type.Optional(Type.Integer({minimum:0})),limit:Type.Optional(Type.Integer({minimum:1,maximum:16000})),
+        find:Type.Optional(Type.String({minLength:1,maxLength:200})),
+      }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
         checkSession(signal);
         const page = await webReader({ ...args, signal });
         checkSession(signal);
         return result(page);
+      },
+    },
+    {
+      name: "search_serial_log", label: "Find serial evidence",
+      description: "Find literal case-insensitive text in a bounded serial log window without sending input. Default searches the recent 16000 raw characters; after selects an older window. Returns up to 12 excerpts, the scanned range and whether more logs exist. No match only applies to this window. Does not advance read_serial_log's cursor. Not a regular expression search.",
+      parameters: Type.Object({query:Type.String({minLength:1,maxLength:200}),
+        after:Type.Optional(Type.Integer({minimum:0})),limit:Type.Optional(Type.Integer({minimum:1,maximum:16000})),
+      },{additionalProperties:false}),
+      execute: (_id,{query,after,limit=16000},signal) => {
+        checkSession(signal);
+        if(typeof query!=='string' || !query.trim() || query.length>200) throw new Error('Provide a non-empty literal search text.');
+        const log=device.readLog({after,limit});
+        const haystack=log.text.toLowerCase(),needle=query.toLowerCase();
+        const matches=[];let index=haystack.indexOf(needle),moreMatches=false;
+        while(index>=0) {
+          if(matches.length===12){moreMatches=true;break;}
+          matches.push({excerpt:log.text.slice(Math.max(0,index-180),Math.min(log.text.length,index+query.length+240))});
+          index=haystack.indexOf(needle,index+needle.length);
+        }
+        return result({query,matches,moreMatches,start:log.start,cursor:log.cursor,latestCursor:log.latestCursor,
+          hasMore:log.cursor<log.latestCursor,truncated:log.truncated,untrusted:true,
+          note:'Matches apply only to this window. Boundary-spanning matches may require overlapping reads; absent or evicted logs cannot be searched.'});
       },
     },
     {
@@ -245,13 +298,32 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     transformContext: async (messages) => compactAgentContext(messages),
     shouldStopAfterTurn: ({ message }) => {
       turns++;
-      limitReached ||= turns >= runLimits.maxTurns && message.content.some((part) => part.type === "toolCall");
-      return limitReached;
+      limitReached ||= turns >= runLimits.maxTurns && (queued.size>0 || message.content.some(part=>part.type==='toolCall'));
+      return limitReached || turns >= runLimits.maxTurns;
     },
   });
-  agent.subscribe((event) => onEvent?.(event));
+  agent.subscribe((event) => {
+    if(event.type==='message_start' && event.message.role==='user' && queued.has(event.message.linkrQueuedId)) {
+      const item=queued.get(event.message.linkrQueuedId);
+      queued.delete(item.id);publishQueue();
+      onEvent?.({type:'queued_input_consumed',item});
+    }
+    onEvent?.(event);
+  });
   return {
-    abort: () => agent.abort(),
+    abort: () => { acceptingMessages=false; clearQueue(); agent.abort(); },
+    clearQueue,
+    enqueue(text, kind='steer') {
+      checkSession();
+      if(!acceptingMessages || !agent.state.isStreaming) throw new Error('No active task. Send a new question.');
+      if(!['steer','followUp'].includes(kind) || typeof text!=='string' || !text.trim() || text.length>4000) throw new Error('Invalid queued message.');
+      if(queued.size>=8) throw new Error('Queue is full (8 messages). Clear pending messages or wait.');
+      const id=crypto.randomUUID(),item={id,kind,text:text.trim()};
+      const message={role:'user',content:item.text,timestamp:Date.now(),linkrQueuedId:id};
+      queued.set(id,item);
+      if(kind==='steer')agent.steer(message);else agent.followUp(message);
+      publishQueue();return item;
+    },
     async prompt(question, { recovery = null } = {}) {
       if (agent.state.isStreaming) throw new Error("Agent is already processing. Wait for the current run to stop.");
       executionMode = device.mode;
@@ -265,8 +337,9 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
       turns = 0;
       toolCalls = 0;
       limitReached = false;
+      acceptingMessages = true;
       try { await agent.prompt(question); }
-      finally { agent.state.messages = compactAgentContext(settleAgentHistory(agent.state.messages)); }
+      finally { acceptingMessages=false; clearQueue(); agent.state.messages = compactAgentContext(settleAgentHistory(agent.state.messages)); }
       if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
       return { limitReached };
     },

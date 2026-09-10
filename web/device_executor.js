@@ -11,6 +11,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
   let active = null;
   const records = [];
   let profile = null;
+  let toolCapabilities = {};
   const snapshot = (record) => structuredClone(record);
   const publish = (record) => { if (records.includes(record)) onRecord?.(snapshot(record)); };
   function consoleState() {
@@ -85,6 +86,21 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           record.exitCode = Number(match[1]);
           record.executionStatus = "completed";
           record.observationClosed = true;
+          if (record.toolProbe && record.exitCode === 0 && !record.evidenceTruncated) {
+            const lines = record.evidence.replace(/\r/g, '').split('\n');
+            const observations = record.toolProbe.map(name => {
+              const matches = lines.filter(line => line === `TOOL:${name}:available` || line === `TOOL:${name}:missing`);
+              return matches.length === 1 ? {name, available:matches[0].endsWith(':available')} : null;
+            });
+            // Partial or conflicting output cannot replace verified capabilities.
+            if (observations.every(Boolean)) {
+              for (const {name,available} of observations) toolCapabilities[name] = {
+                available, observedAt:Date.now(), sessionId:record.sessionId,
+                executionId:record.id, cursor:record.observedEnd,
+                source:'untrusted-target-output', stale:false,
+              };
+            }
+          }
           if (record.download) record.download.status = record.exitCode === 0 && record.download.sha256 && Number.isFinite(record.download.bytes) ? "saved" : "failed-or-unverified";
           if (record.profileProbe && record.exitCode === 0) {
             const data = parseDeviceProfile(record.evidence);
@@ -116,8 +132,8 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       if (value !== mode) { cancel(); mode = value; }
     },
     cancel,
-    forgetProfile() { profile = null; },
-    reset() { cancel(); records.length = 0; profile = null; },
+    forgetProfile() { profile = null; toolCapabilities = {}; },
+    reset() { cancel(); records.length = 0; profile = null; toolCapabilities = {}; },
     getStatus() {
       const status = getStatus();
       if (profile) {
@@ -126,7 +142,15 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '') || recent.truncated;
         profile.cursor = recent.cursor ?? profile.cursor;
       }
-      return { ...status, executionMode: mode, console: consoleState(), profile };
+      for (const capability of Object.values(toolCapabilities)) {
+        const recent = readLog({after:capability.cursor,limit:4000});
+        capability.stale ||= !status.connected || status.sessionId !== capability.sessionId ||
+          Date.now()-capability.observedAt > 300000 || recent.truncated ||
+          /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '');
+        capability.cursor = recent.cursor ?? capability.cursor;
+      }
+      return { ...status, executionMode: mode, console: consoleState(), profile,
+        toolCapabilities:structuredClone(toolCapabilities) };
     },
     readLog(options) { return readLog(options); },
     getRecords() { return records.filter((record) => record.sessionId === getStatus().sessionId).map(snapshot); },
@@ -155,6 +179,11 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       if (!status.connected) throw new Error("Device is disconnected.");
       const download = args.download;
       const profileProbe = args.profileProbe;
+      const toolProbe = args.toolProbe;
+      if (toolProbe && (!Array.isArray(toolProbe) || !toolProbe.length || toolProbe.length > 16 ||
+          toolProbe.some(name => typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/.test(name)))) {
+        throw new Error('Invalid capability probe names.');
+      }
       let completionToken;
       if (args.trackExit) {
         if (status.inputPending || consoleState().kind !== "shell" || !args.appendEnter) {
@@ -165,7 +194,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         args = { text: `sh -c ${quoted}; printf '\\n%s:%s\\n' '${completionToken}' "$?"`, appendEnter: true };
         if (args.text.length > 2048) throw new Error("Tracked command is too long after shell quoting.");
       }
-      const record = { profileProbe, download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
+      const record = { profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
         payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
         executionStatus: "unknown", createdAt: new Date().toISOString(), evidence: "", observation: "no-output" };
       const controller = new AbortController();
