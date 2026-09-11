@@ -4,7 +4,25 @@ if (typeof document !== "undefined") {
   document.documentElement.dataset.platform = "harmonyos";
 }
 
+/* Client-side deadlines, per method.
+ *
+ * Anything that waits on a human must outlast any plausible decision time: the
+ * host only settles requestDevice after the user answers the "Select Linkr Bee"
+ * menu, and initialize after the Bluetooth permission prompt. A single short
+ * deadline for those made the page abandon a selection that was still open on
+ * screen. Host-only methods just cover the host's own internal budget; keep the
+ * connect value above HOST_CONNECT_WORST_CASE_MS in
+ * harmonyos/entry/src/main/ets/bridge/LinkrBleHost.ets so the page never gives
+ * up on a connect the radio is still completing. */
 const REQUEST_TIMEOUT_MS = 30000;
+const INTERACTIVE_TIMEOUT_MS = 180000;
+const METHOD_TIMEOUTS = {
+  initialize: INTERACTIVE_TIMEOUT_MS,
+  requestDevice: INTERACTIVE_TIMEOUT_MS,
+  connect: 60000,
+};
+const timeoutFor = (method) =>
+  METHOD_TIMEOUTS[method] || REQUEST_TIMEOUT_MS;
 const pending = new Map();
 const notificationCallbacks = new Map();
 const disconnectCallbacks = new Map();
@@ -45,10 +63,12 @@ function hostCall(method, args = {}) {
   }
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
+    // A host-side completion after this fires is still cleaned up by the
+    // caller's disconnect path, so a timeout can never leave a stale link.
     const timeoutId = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`HarmonyOS BLE request timed out: ${method}`));
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutFor(method));
     pending.set(id, {
       resolve,
       reject,
@@ -85,6 +105,12 @@ window.LinkrHarmonyBle = {
       callbackKey(deviceId, serviceUuid, characteristicUuid),
     );
     callback?.(Uint8Array.from(value || []));
+  },
+
+  notifyBatch(records) {
+    for (const item of records || []) {
+      window.LinkrHarmonyBle.notify(item.deviceId, item.serviceUuid, item.characteristicUuid, item.value);
+    }
   },
 
   disconnected(deviceId) {

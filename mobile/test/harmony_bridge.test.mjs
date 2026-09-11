@@ -146,9 +146,7 @@ test("Harmony bridge rejects device operations after a remote disconnect", async
 });
 
 test("Harmony bridge times out when the ArkTS host loses a response", async () => {
-  let timeoutCallback = () => {};
-  let timeoutDelay = 0;
-  let cleared = false;
+  const timers = [];
   const window = installBridge(
     {
       linkrBleHost: {
@@ -157,20 +155,55 @@ test("Harmony bridge times out when the ArkTS host loses a response", async () =
     },
     {
       setTimeout(callback, delay) {
-        timeoutCallback = callback;
-        timeoutDelay = delay;
-        return 7;
+        timers.push({ delay, callback });
+        return timers.length;
       },
-      clearTimeout(id) {
-        assert.equal(id, 7);
-        cleared = true;
-      },
+      clearTimeout() {},
     },
   );
 
-  const request = window.LinkrNativeBle.initialize();
-  assert.equal(timeoutDelay, 30000);
-  timeoutCallback();
-  await assert.rejects(request, /request timed out: initialize/);
-  assert.equal(cleared, false);
+  const initialized = window.LinkrNativeBle.initialize();
+  const picked = window.LinkrNativeBle.requestDevice();
+  const connected = window.LinkrNativeBle.connect("harmony-1", () => {});
+
+  // A device menu or permission prompt waits on a human, so those requests must
+  // not share the short IPC deadline; connect only has to outlast the host's own
+  // connect + MTU + discovery budget.
+  assert.deepEqual(
+    timers.map((timer) => timer.delay),
+    [180000, 180000, 60000],
+  );
+
+  for (const timer of timers) {
+    timer.callback();
+  }
+  await assert.rejects(initialized, /request timed out: initialize/);
+  await assert.rejects(picked, /request timed out: requestDevice/);
+  await assert.rejects(connected, /request timed out: connect/);
+
+  // A late host reply for an abandoned request is ignored rather than throwing.
+  window.LinkrHarmonyBle.resolve(1, null, null);
+});
+
+test('Harmony notification batches preserve frame boundaries and characteristic routing', async () => {
+  const {messages,window}=createHost();
+  const {createFragmentReassembler,parseReliableHeader}=await import('../../web/management_protocol.js');
+  const parser=createFragmentReassembler({headerSize:12,maxPayload:232,parseHeader:parseReliableHeader});
+  const frames=[],management=[];
+  for(const [name,callback] of [['uart',bytes=>frames.push(parser.push(bytes))],['management',bytes=>management.push([...bytes])]]) {
+    const request=window.LinkrNativeBle.startNotifications('device','service',name,callback);
+    window.LinkrHarmonyBle.resolve(messages.at(-1).id,null,null);await request;
+  }
+  const frame=seq=>{const b=new Uint8Array(13);b.set([76,82,1,0]);const d=new DataView(b.buffer);d.setUint32(4,seq,true);d.setUint16(8,1,true);b[12]=65;return [...b];};
+  window.LinkrHarmonyBle.notifyBatch([
+    {deviceId:'device',serviceUuid:'service',characteristicUuid:'uart',value:frame(1)},
+    {deviceId:'device',serviceUuid:'service',characteristicUuid:'management',value:[1,2,3]},
+    {deviceId:'device',serviceUuid:'service',characteristicUuid:'uart',value:frame(2)},
+  ]);
+  assert.deepEqual(frames.map(f=>f.status),['complete','complete']);
+  assert.deepEqual(frames.map(f=>f.meta.sequence),[1,2]);
+  assert.deepEqual(management,[[1,2,3]]);
+  window.LinkrHarmonyBle.disconnected('device');
+  window.LinkrHarmonyBle.notifyBatch([{deviceId:'device',serviceUuid:'service',characteristicUuid:'uart',value:frame(3)}]);
+  assert.equal(frames.length,2);
 });

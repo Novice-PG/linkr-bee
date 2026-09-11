@@ -71,11 +71,26 @@ function createNativeBleBackend(): NativeBleBackend {
   let initializePromise: Promise<void> | null = null;
   let connectedDeviceId: string | null = null;
 
-  const ensureInitialized = () => {
-    initializePromise ??= BleClient.initialize({
+  /* Only a successful initialization may stay cached. Caching a rejected
+   * promise would poison every later BLE call: one transient failure (adapter
+   * off, a permission race) would leave the app unable to connect until it is
+   * killed. */
+  const ensureInitialized = (): Promise<void> => {
+    if (initializePromise) {
+      return initializePromise;
+    }
+    let guarded: Promise<void>;
+    const attempt: Promise<void> = BleClient.initialize({
       androidNeverForLocation: true,
     });
-    return initializePromise;
+    guarded = attempt.catch((error: unknown) => {
+      if (initializePromise === guarded) {
+        initializePromise = null;
+      }
+      throw error;
+    });
+    initializePromise = guarded;
+    return guarded;
   };
 
   return {

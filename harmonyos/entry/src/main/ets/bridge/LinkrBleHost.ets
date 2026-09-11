@@ -7,6 +7,10 @@ import { webview } from '@kit.ArkWeb';
 import { promptAction, UIContext, window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { access, ble, constant } from '@kit.ConnectivityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+
+/* Matches EntryAbility: the domain shared by all Linkr Bee hilog records. */
+const DOMAIN = 0x4C42;
 
 const BLUETOOTH_PERMISSION: Permissions = 'ohos.permission.ACCESS_BLUETOOTH';
 const MANAGEMENT_SERVICE = '4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001';
@@ -14,6 +18,28 @@ const SCAN_DURATION_MS = 3000;
 const CONNECT_TIMEOUT_MS = 15000;
 const MTU_TIMEOUT_MS = 1500;
 const REQUESTED_MTU = 247;
+/* Each runJavaScript is an asynchronous IPC into the ArkWeb renderer. A
+ * 115200-baud console produces well over a hundred notifications per second, so
+ * firing one evaluation per notification queues them faster than they retire
+ * and the page falls behind. Coalesce everything that arrives while a call is
+ * in flight into one evaluation instead. */
+const NOTIFICATION_BATCH_BYTES = 4096;
+/* Safety valve, not the normal path: if the renderer is stalled for a long time
+ * the buffer is trimmed from the oldest end so memory stays bounded. This
+ * mirrors the firmware's own UART ring behaviour. */
+const NOTIFICATION_BUFFER_LIMIT = 131072;
+/* Must stay comfortably above the host's worst case (scan + connect + MTU +
+ * service discovery) so the page never abandons a connect the host is still
+ * completing. harmonyos/src/native-bootstrap.js keeps the client-side value. */
+const HOST_CONNECT_WORST_CASE_MS =
+  SCAN_DURATION_MS + CONNECT_TIMEOUT_MS + MTU_TIMEOUT_MS + 5000;
+
+interface PendingNotification {
+  deviceId: string;
+  serviceUuid: string;
+  characteristicUuid: string;
+  value: number[];
+}
 
 interface BridgeArgs {
   deviceId?: string;
@@ -51,6 +77,10 @@ export class LinkrBleHost {
   private suppressDisconnectEvent: boolean = false;
   private scanActive: boolean = false;
   private operationTail: Promise<void> = Promise.resolve();
+  private pendingNotifications: Array<PendingNotification> = [];
+  private pendingNotificationBytes: number = 0;
+  private notificationFlushActive: boolean = false;
+  private droppedNotificationBytes: number = 0;
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -429,6 +459,8 @@ export class LinkrBleHost {
   }
 
   private async disconnect(deviceId: string): Promise<void> {
+    this.pendingNotifications = this.pendingNotifications.filter((item: PendingNotification) => item.deviceId !== deviceId);
+    this.pendingNotificationBytes = this.pendingNotifications.reduce((sum: number, item: PendingNotification) => sum + item.value.length, 0);
     if (this.connectedDeviceId && this.connectedDeviceId !== deviceId) {
       throw new Error('Requested device is not connected');
     }
@@ -571,14 +603,67 @@ export class LinkrBleHost {
     deviceId: string,
     characteristic: ble.BLECharacteristic,
   ): void {
-    const value = Array.from(new Uint8Array(characteristic.characteristicValue));
-    this.runJavaScript(
-      `window.LinkrHarmonyBle.notify(` +
-        `${JSON.stringify(deviceId)},` +
-        `${JSON.stringify(characteristic.serviceUuid)},` +
-        `${JSON.stringify(characteristic.characteristicUuid)},` +
-        `${JSON.stringify(value)});`,
-    );
+    const value = new Uint8Array(characteristic.characteristicValue);
+    this.pendingNotifications.push({ deviceId, serviceUuid: characteristic.serviceUuid,
+      characteristicUuid: characteristic.characteristicUuid, value: Array.from(value) });
+    this.pendingNotificationBytes += value.length;
+
+    // Keep the newest bytes: the terminal is most useful near the live end of a
+    // log, and an unbounded queue is what stalls the renderer.
+    while (
+      this.pendingNotificationBytes > NOTIFICATION_BUFFER_LIMIT &&
+      this.pendingNotifications.length > 1
+    ) {
+      const dropped = this.pendingNotifications.shift();
+      const droppedLength = dropped === undefined ? 0 : dropped.value.length;
+      this.pendingNotificationBytes -= droppedLength;
+      this.droppedNotificationBytes += droppedLength;
+    }
+
+    void this.flushNotifications();
+  }
+
+  private async flushNotifications(): Promise<void> {
+    if (this.notificationFlushActive) {
+      return; // The running flush delivers whatever was just appended.
+    }
+    this.notificationFlushActive = true;
+    try {
+      while (this.pendingNotificationBytes > 0) {
+        let size = 0;
+        let count = 0;
+        while (
+          count < this.pendingNotifications.length &&
+          size < NOTIFICATION_BATCH_BYTES
+        ) {
+          size += this.pendingNotifications[count].value.length;
+          count++;
+        }
+
+        // One IPC carries multiple records; never merge ATT payloads or routes.
+        const batch = this.pendingNotifications.splice(0, count);
+        this.pendingNotificationBytes -= size;
+
+        const dropped = this.droppedNotificationBytes;
+        this.droppedNotificationBytes = 0;
+        if (dropped > 0) {
+          // Reported out of band: injecting a marker into the byte stream would
+          // corrupt the framed Management and Reliable UART characteristics,
+          // which share this callback.
+          hilog.warn(
+            DOMAIN,
+            'LinkrBee',
+            'dropped %{public}d BLE notification bytes',
+            dropped,
+          );
+        }
+        await this.runJavaScript(
+          `window.LinkrHarmonyBle.notifyBatch(${JSON.stringify(batch)});`,
+        );
+      }
+    } finally {
+      this.notificationFlushActive = false;
+    }
   }
 
   private async resolveRequest(

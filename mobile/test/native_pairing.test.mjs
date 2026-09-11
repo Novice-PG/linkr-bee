@@ -47,3 +47,35 @@ test("iOS leaves pairing to its encrypted characteristic read", async () => {
   await ble.read("bee", "management", "protocol");
   assert.deepEqual(calls, ["connect", "encrypted read"]);
 });
+
+test("a failed BLE initialization is retried instead of staying cached", async () => {
+  let attempts = 0;
+  const BleClient = {
+    initialize: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("adapter off");
+      }
+    },
+  };
+  const window = {};
+  vm.runInNewContext(source, {
+    window,
+    exports: {},
+    require: (name) =>
+      name === "@capacitor/core"
+        ? { Capacitor: { getPlatform: () => "ios", isNativePlatform: () => true } }
+        : { BleClient },
+  });
+  await window.LinkrNativeBleReady;
+
+  await assert.rejects(window.LinkrNativeBle.initialize(), /adapter off/);
+  // The rejected attempt must not stay cached, or one transient failure would
+  // break every later BLE call until the app is restarted.
+  await window.LinkrNativeBle.initialize();
+  assert.equal(attempts, 2);
+
+  // A successful initialization is still cached.
+  await window.LinkrNativeBle.initialize();
+  assert.equal(attempts, 2);
+});
