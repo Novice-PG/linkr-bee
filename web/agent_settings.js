@@ -1,6 +1,6 @@
 import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
-import { loadAgentConfig, saveAgentConfig, clearAgentConfig, validateAgentConfig } from "./agent_config.js";
+import { loadAgentConfig, saveAgentConfig, clearAgentConfig, validateAgentConfig, endpointSecurity } from "./agent_config.js";
 
 const labels = {
   bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
@@ -29,6 +29,9 @@ const labels = {
   saved: ["配置已保存到当前设备。", "Configuration saved on this device."],
   cleared: ["已清除当前设备上的 AI 配置。", "AI configuration cleared from this device."],
   dirty: ["修改尚未保存。", "Changes have not been saved."],
+  plaintextKeyWarning: ["警告：该地址使用明文 http 且非本机回环，API Key 与串口日志会在网络中明文传输；请改用 https，或把服务放在 localhost。", "Warning: this endpoint uses plain http and is not loopback, so the API key and serial logs travel the network in cleartext. Use https, or host the service on localhost."],
+  plaintextKeyConfirm: ["该地址使用明文 http 且非本机回环，API Key 会以明文发送。仍要保存吗？", "This endpoint uses plain http and is not loopback, so the API key will be sent in cleartext. Save anyway?"],
+  plaintextKeyBlocked: ["已取消保存：明文 http 端点需要确认后才会保存 API Key。", "Save cancelled: a plaintext http endpoint needs confirmation before an API key is stored."],
   readError: ["无法读取本地配置，请重新填写并保存。", "Could not read local configuration. Enter it again and save."],
   saveError: ["保存失败，请检查应用 / 浏览器是否允许本地存储后重试。", "Save failed. Check that app / browser storage is allowed, then retry."],
   clearError: ["清除失败，本地配置仍保留，请重试。", "Clear failed. The saved configuration is still present; retry."],
@@ -49,8 +52,15 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   let error = false;
   let busy = false;
   function renderStatus() {
-    $("agentSettingsStatus").textContent = text(busy ? "busy" : status);
-    $("agentSettingsStatus").classList.toggle("field-error", !busy && error);
+    // The plaintext warning describes the saved configuration, so it stays
+    // visible next to whatever status the last action produced.
+    const exposed = endpointSecurity(config?.endpoint).exposesKey;
+    const el = $("agentSettingsStatus");
+    el.textContent = [
+      busy ? text("busy") : status ? text(status) : "",
+      exposed ? text("plaintextKeyWarning") : "",
+    ].filter(Boolean).join(" ");
+    el.classList.toggle("field-error", (!busy && error) || exposed);
   }
   function showStatus(next, failed = false) { status = next; error = failed; renderStatus(); }
   function fill() {
@@ -74,6 +84,14 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
       return;
     }
     const previous = config;
+    // A credential must not reach a cleartext remote endpoint by accident.
+    const security = endpointSecurity(draft.endpoint);
+    if (security.exposesKey && draft.apiKey && !window.confirm(text("plaintextKeyConfirm"))) {
+      inputs.endpoint.setAttribute("aria-invalid", "true");
+      showStatus("plaintextKeyBlocked", true);
+      inputs.endpoint.focus();
+      return;
+    }
     try { config = saveAgentConfig(localStorage, draft); } catch {
       showStatus("saveError", true);
       return;
@@ -107,6 +125,9 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
         $("targetBindingIdentity").textContent = [result.targetId && `${text("bindingUuid")}: ${result.targetId}`, result.observedId && `${text("observedUuid")}: ${result.observedId}`, result.targetPath && `${text("bindingPath")}: ${result.targetPath}`].filter(Boolean).join("\n");
         $("targetBindingStatus").textContent = text(result.status === "cleared" ? "bindingCleared" : result.status === "mismatch" ? "bindingMismatch" : "bindingVerified");
       } catch(error) { $("targetBindingStatus").textContent = error.code === "TARGET_SUDO_INPUT" ? text("bindingSudo") : error.code === "TARGET_PERMISSION_DENIED" ? text("bindingPermission") + "\n" + TARGET_DIRECTORY_SETUP : text("bindingError") + error.message; }
+      // The regenerate confirmation is single-use and is dropped after every
+      // target action, not just regenerate: an armed "replace the target ID"
+      // state must never survive into a later, unrelated click.
       finally { $("targetRegenerateConfirm").checked = false; $("targetRegenerate").disabled = true; }
     });
   }

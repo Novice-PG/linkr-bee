@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig } from "../../web/agent_config.js";
+import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity } from "../../web/agent_config.js";
 
 function storage() {
   const values = new Map();
@@ -46,4 +46,28 @@ test("unavailable storage propagates save and clear failure", () => {
   assert.throws(() => loadAgentConfig(store), /blocked/);
   assert.throws(() => saveAgentConfig(store, config), /quota/);
   assert.throws(() => clearAgentConfig(store), /blocked/);
+});
+
+test("plaintext remote endpoints are reported, loopback and https are not", () => {
+  // A credential sent over cleartext to a remote host needs consent.
+  for (const endpoint of ["http://model.test/v1", "http://192.168.1.9:8080/v1", "http://[2001:db8::1]/v1", "http://model.test"]) {
+    const security = endpointSecurity(endpoint);
+    assert.equal(security.plaintext, true, endpoint);
+    assert.equal(security.exposesKey, true, endpoint);
+  }
+
+  // A local model server never leaves the machine, so it stays unremarkable.
+  for (const endpoint of ["http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "http://127.9.9.9/v1", "http://[::1]:8080/v1", "http://ollama.localhost/v1"]) {
+    const security = endpointSecurity(endpoint);
+    assert.equal(security.plaintext, true, endpoint);
+    assert.equal(security.exposesKey, false, endpoint);
+  }
+
+  // https is encrypted regardless of host, and junk must not claim to be safe
+  // or unsafe by accident.
+  assert.deepEqual(endpointSecurity("https://model.test/v1"), { plaintext: false, loopback: false, exposesKey: false });
+  assert.deepEqual(endpointSecurity("https://localhost/v1"), { plaintext: false, loopback: true, exposesKey: false });
+  for (const bad of ["", "not a url", null, undefined, "ftp://model.test"]) {
+    assert.equal(endpointSecurity(bad).exposesKey, false, String(bad));
+  }
 });

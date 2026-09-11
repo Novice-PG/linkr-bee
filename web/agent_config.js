@@ -1,5 +1,26 @@
 export const AGENT_CONFIG_KEY = "linkr-agent-model";
 
+/* Plain http sends the API key and the serial logs in cleartext. A local model
+ * server reached over loopback never leaves the machine, so it stays a normal
+ * configuration; anything else is reported so the UI can ask for consent before
+ * a credential is stored and transmitted. */
+export function endpointSecurity(endpoint) {
+  let url;
+  try {
+    url = new URL(String(endpoint ?? ""));
+  } catch {
+    return { plaintext: false, loopback: false, exposesKey: false };
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback =
+    host === "localhost" ||
+    host === "::1" ||
+    host.endsWith(".localhost") ||
+    /^127\./.test(host);
+  const plaintext = url.protocol === "http:";
+  return { plaintext, loopback, exposesKey: plaintext && !loopback };
+}
+
 export function validateAgentConfig({ endpoint, model, apiKey = "" } = {}) {
   let url;
   try { url = new URL(endpoint); } catch { throw new Error("endpoint"); }

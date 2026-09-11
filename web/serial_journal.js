@@ -55,7 +55,12 @@ export class SerialJournal {
       }
       visible += keep ? char : "\0";
     }
-    this.text = (this.text + visible).slice(-this.capacity);
+    let retained = (this.text + visible).slice(-this.capacity);
+    // Never begin the retained window on a low surrogate: the split pair would
+    // surface as a replacement character in the journal and to the agent.
+    const first = retained.charCodeAt(0);
+    if (first >= 0xdc00 && first <= 0xdfff) retained = retained.slice(1);
+    this.text = retained;
     this.updatedAt = new Date().toISOString();
   }
 

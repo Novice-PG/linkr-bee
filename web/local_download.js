@@ -7,7 +7,11 @@ export async function fetchDownload({ url, sha256, signal, onProgress = () => {}
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const declared = Number(response.headers.get("content-length"));
   const total = declared > 0 ? declared : null;
-  if (total > maxBytes) { await response.body.cancel(); throw new Error("Browser download limit is 128 MiB; use target download for larger files."); }
+  if (total > maxBytes) {
+    // A null body (HEAD-like or opaque responses) must not mask the real error.
+    try { await response.body?.cancel(); } catch { /* nothing to release */ }
+    throw new Error("Browser download limit is 128 MiB; use target download for larger files.");
+  }
   const reader = response.body.getReader(), chunks = [];
   let bytes = 0;
   try {
@@ -40,7 +44,7 @@ export function requestComputerDownload({ container, args, signal, lang = "en" }
     const status = document.createElement("div"), progress = document.createElement("progress"), button = document.createElement("button");
     button.type = "button"; button.className = "btn btn-primary";
     button.textContent = zh ? "选择保存位置并下载" : "Choose location and download";
-    status.textContent = `${zh ? "保存到：当前电脑 / 手机" : "Destination: this computer / phone"}\n${fileName}\n${args.url}\nSHA-256: ${args.sha256 || (zh ? "未提供预期值，将计算校验值" : "No expected hash; compute only")}`;
+    status.textContent = `${zh ? "保存到：当前电脑 / 手机" : "Destination: this computer / phone"}\n${fileName}\n${args.url}\n${zh ? "该网络请求由本机浏览器发起" : "This browser makes the network request above"}\nSHA-256: ${args.sha256 || (zh ? "未提供预期值，将计算校验值" : "No expected hash; compute only")}`;
     progress.hidden = true;
     container.append(status, progress, button);
     let handle, objectUrl;
