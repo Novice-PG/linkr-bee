@@ -12,6 +12,12 @@ manifest:
           - hal_espressif
           - mbedtls
           - tf-psa-crypto
+          # The ESP32-C5 controller implements its Security Manager crypto with
+          # CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS, which Zephyr satisfies from
+          # the legacy mbedTLS modules vendored by hostap
+          # (modules/mbedtls/legacy_support.cmake). Without this module the C5
+          # build fails to configure and pairing cannot be enabled at all.
+          - hostap
 
   self:
     path: linkr-bee

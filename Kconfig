@@ -6,6 +6,24 @@ menu "Linkr Bee bridge"
 config ESP32_BT_CTLR_LE_SECURITY_ENABLE
 	default y if BT_SMP && SOC_SERIES_ESP32C3
 
+# C2/C5/C6/H2 use the newer Espressif controller, whose menu in Zephyr
+# (drivers/bluetooth/hci/Kconfig.esp32) declares ESP32_BT_LE_* instead of the
+# legacy ESP32_BT_CTLR_* symbols. Those carry the same BT_CTLR_LE_ENC-based
+# default, so they also fall back to "n" here: the controller would have no
+# Security Manager, no link-layer encryption and no crypto stack while every
+# Linkr GATT attribute is read/write-ENCRYPT only. Enable the whole group
+# whenever the host requires pairing, mirroring the C3 override above.
+if SOC_SERIES_ESP32C2 || SOC_SERIES_ESP32C5 || SOC_SERIES_ESP32C6 || SOC_SERIES_ESP32H2
+config ESP32_BT_LE_SECURITY_ENABLE
+	default y if BT_SMP
+
+config ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION
+	default y if BT_SMP
+
+config ESP32_BT_LE_CRYPTO_STACK_MBEDTLS
+	default y if BT_SMP
+endif
+
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"
 	default "0.2.0"

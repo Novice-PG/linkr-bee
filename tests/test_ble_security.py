@@ -42,6 +42,45 @@ class BleSecurityTests(unittest.TestCase):
         self.assertIn("pairing requires controller link encryption support", disabled.stderr)
         subprocess.run([*command, "-DCONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=1"], check=True)
 
+    def test_c5_build_requires_controller_security_and_encryption(self):
+        """C2/C5/C6/H2 use the newer Espressif controller menu, whose security
+        symbols are separate from the legacy ESP32_BT_CTLR_* set. Every Linkr
+        GATT attribute is encryption-only, so each of them is load-bearing."""
+        required = ["CONFIG_ESP32_BT_LE_SECURITY_ENABLE",
+                    "CONFIG_ESP32_BT_LE_SM_SC",
+                    "CONFIG_ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION",
+                    "CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS"]
+        command = [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-fsyntax-only",
+                   "-DCONFIG_SOC_SERIES_ESP32C5=1", "-I", self.tmp.name,
+                   str(ROOT / "tests/ble_security_harness.c")]
+
+        disabled = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(disabled.returncode, 0)
+        self.assertIn("pairing requires controller security and encryption support",
+                      disabled.stderr)
+
+        for missing in required:
+            partial = [f"-D{name}=1" for name in required if name != missing]
+            failed = subprocess.run([*command, *partial], capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0, f"{missing} must be required")
+
+        subprocess.run([*command, *[f"-D{name}=1" for name in required]], check=True)
+
+    def test_kconfig_and_manifest_support_the_new_controller(self):
+        """Guard the build wiring the C5 security fix depends on."""
+        kconfig = (ROOT / "Kconfig").read_text()
+        for symbol in ["ESP32_BT_LE_SECURITY_ENABLE",
+                       "ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION",
+                       "ESP32_BT_LE_CRYPTO_STACK_MBEDTLS"]:
+            self.assertIn(f"config {symbol}", kconfig)
+        self.assertIn("SOC_SERIES_ESP32C5", kconfig)
+
+        # The C5 controller implements its SM crypto with
+        # ESP32_BT_LE_CRYPTO_STACK_MBEDTLS, which Zephyr satisfies from the
+        # legacy mbedTLS modules vendored by hostap. Without the module the
+        # build fails to configure instead of silently losing pairing.
+        self.assertIn("hostap", (ROOT / "west.yml").read_text())
+
     def test_no_plaintext_custom_gatt_attributes_or_default_nus(self):
         for name in ["ble_nus.c", "ble_uart_reliable.c", "ble_mgmt.c"]:
             source = (ROOT / "src" / name).read_text()

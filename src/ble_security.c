@@ -8,8 +8,24 @@
 
 LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
 
-#if defined(CONFIG_SOC_SERIES_ESP32C3) && !defined(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE)
+/* Every Linkr GATT attribute is encryption-only, so pairing must never run on a
+ * controller whose Security Manager was compiled out. The symbol differs by
+ * controller generation: C3 uses the legacy ESP32_BT_CTLR_* menu, while
+ * C2/C5/C6/H2 use the newer ESP32_BT_LE_* menu (see the matching overrides in
+ * Kconfig). Both paths default off because BT_CTLR_LE_ENC is unset when the
+ * Espressif controller is used instead of Zephyr's own BT_CTLR. */
+#if defined(CONFIG_SOC_SERIES_ESP32C3) && \
+	!defined(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE)
 #error "ESP32-C3 pairing requires controller link encryption support"
+#endif
+
+#if (defined(CONFIG_SOC_SERIES_ESP32C2) || defined(CONFIG_SOC_SERIES_ESP32C5) || \
+     defined(CONFIG_SOC_SERIES_ESP32C6) || defined(CONFIG_SOC_SERIES_ESP32H2)) && \
+	(!defined(CONFIG_ESP32_BT_LE_SECURITY_ENABLE) ||                    \
+	 !defined(CONFIG_ESP32_BT_LE_SM_SC) ||                              \
+	 !defined(CONFIG_ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION) ||          \
+	 !defined(CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS))
+#error "ESP32-C2/C5/C6/H2 pairing requires controller security and encryption support"
 #endif
 
 static const struct gpio_dt_spec pairing_gpio =
