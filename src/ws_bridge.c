@@ -41,6 +41,9 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
 /* Bound a single TX send so a client that stops reading (full TCP window) is
  * dropped instead of blocking its handler thread forever. */
 #define WS_TX_TIMEOUT_MS 3000
+/* Upper bound on the post-poll recv under the shared RX lock. poll() already
+ * saw data ready, so this only covers a frame split across TCP segments. */
+#define WS_AUTH_RECV_TIMEOUT_MS 500
 
 BUILD_ASSERT((WS_TX_BUF_SIZE & (WS_TX_BUF_SIZE - 1)) == 0,
 	     "LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE must be a power of two");
@@ -359,7 +362,6 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	struct zsock_pollfd fds[1];
 	uint32_t message_type;
 	uint64_t remaining;
-	int64_t deadline;
 	size_t token_len;
 	bool authenticated = false;
 	int received;
@@ -383,25 +385,25 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	fds[0].fd = client->sock;
 	fds[0].events = ZSOCK_POLLIN;
 
-	k_mutex_lock(&ws_rx_lock, K_FOREVER);
-	/* The deadline starts once the shared RX scratch buffer is ours: waiting
-	 * behind another client's parser must not consume this client's window. */
-	deadline = k_uptime_get() + WS_AUTH_TIMEOUT_MS;
+	/* Wait for the token frame *outside* the shared RX lock: holding it across
+	 * the whole auth window would let one client that never sends a token
+	 * stall every other client's UART path for up to WS_AUTH_TIMEOUT_MS. */
 	if (zsock_poll(fds, 1, WS_AUTH_TIMEOUT_MS) <= 0) {
-		goto out;
+		return false;
 	}
 	if (!(fds[0].revents & ZSOCK_POLLIN) ||
 	    (fds[0].revents &
 	     (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL))) {
-		goto out;
+		return false;
 	}
-	/* poll() only proves that some bytes are ready. Let recv finish a frame
-	 * split across TCP packets, while keeping the auth deadline. */
-	int32_t timeout_ms = (int32_t)MAX(deadline - k_uptime_get(), 0);
 
+	/* Only the recv that touches the shared scratch buffer needs the lock.
+	 * poll() already reported data ready, so this stays short; the bounded
+	 * timeout still lets recv finish a frame split across TCP packets. */
+	k_mutex_lock(&ws_rx_lock, K_FOREVER);
 	received = websocket_recv_msg(client->sock, ws_rx_buf,
 				      sizeof(ws_rx_buf) - 1, &message_type,
-				      &remaining, timeout_ms);
+				      &remaining, WS_AUTH_RECV_TIMEOUT_MS);
 	authenticated = received > 0 && remaining == 0 &&
 			(message_type & WEBSOCKET_FLAG_TEXT) &&
 			(message_type & WEBSOCKET_FLAG_FINAL) &&
@@ -410,7 +412,6 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	if (authenticated && ws_client_rx_drain_locked(client, slot) != 0) {
 		authenticated = false;
 	}
-out:
 	k_mutex_unlock(&ws_rx_lock);
 
 	if (!authenticated || ws_send_text(client, WS_AUTH_OK_FRAME) < 0) {
