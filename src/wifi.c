@@ -81,13 +81,16 @@ static struct net_if *wifi_iface;
 
 /* Asynchronous scan state. linkr_wifi_scan() references conn for the lifetime
  * of the scan; results are streamed through scan_respond and released on
- * NET_EVENT_WIFI_SCAN_DONE. */
+ * NET_EVENT_WIFI_SCAN_DONE. A watchdog releases the scan even if the driver
+ * never reports completion, so a lost event cannot wedge the bridge. */
+#define WIFI_SCAN_TIMEOUT_MS 15000
 static linkr_wifi_respond_fn scan_respond;
 static struct bt_conn *scan_conn;
 static atomic_t scan_in_progress;
 static struct k_work wifi_scan_work;
 static struct k_mutex scan_cache_lock;
 static struct k_work_delayable wifi_retry_work;
+static struct k_work_delayable wifi_scan_timeout_work;
 static struct k_work_delayable wifi_operation_timeout_work;
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
@@ -928,6 +931,8 @@ void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn)
     scan_respond = fn;
 }
 
+static void wifi_scan_release(void);
+
 static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
                                     unsigned long long mgmt_event,
                                     struct net_if *iface)
@@ -958,21 +963,35 @@ static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
 		if (scan_respond(scan_conn, ok ? "@scan done" : "@scan error") != 0) {
 			LOG_WRN("WiFi scan completion event could not be queued");
 		}
-        if (scan_conn) {
-            bt_conn_unref(scan_conn);
-            scan_conn = NULL;
-        }
-        atomic_set(&scan_in_progress, 0);
+        wifi_scan_release();
     }
 }
 
 static void wifi_scan_release(void)
 {
+    (void)k_work_cancel_delayable(&wifi_scan_timeout_work);
     if (scan_conn) {
         bt_conn_unref(scan_conn);
         scan_conn = NULL;
     }
     atomic_set(&scan_in_progress, 0);
+}
+
+/* Watchdog: a driver that never reports NET_EVENT_WIFI_SCAN_DONE (cancel or
+ * error path) would otherwise leave scan_in_progress set forever, wedging all
+ * later @w scan requests and leaking the referenced connection. */
+static void wifi_scan_timeout_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    if (!atomic_get(&scan_in_progress)) {
+        return;
+    }
+    LOG_WRN("WiFi scan timed out; releasing");
+    if (scan_respond) {
+        (void)scan_respond(scan_conn, "@scan error");
+    }
+    wifi_scan_release();
 }
 
 static void wifi_scan_work_handler(struct k_work *work)
@@ -999,6 +1018,10 @@ static void wifi_scan_work_handler(struct k_work *work)
         return;
     }
 
+    /* Arm the watchdog so a driver that never reports completion cannot wedge
+     * the scan state. */
+    (void)k_work_reschedule(&wifi_scan_timeout_work,
+                            K_MSEC(WIFI_SCAN_TIMEOUT_MS));
     LOG_INF("WiFi scan started");
 }
 
@@ -1759,7 +1782,8 @@ int linkr_wifi_init(void)
 	k_work_init_delayable(&wifi_operation_timeout_work,
 			      wifi_operation_timeout_handler);
     k_work_init(&wifi_scan_work, wifi_scan_work_handler);
-	atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);
+    k_work_init_delayable(&wifi_scan_timeout_work, wifi_scan_timeout_handler);
+    atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);
 
     k_thread_create(&wifi_connect_thread, wifi_connect_stack,
                     K_THREAD_STACK_SIZEOF(wifi_connect_stack),
