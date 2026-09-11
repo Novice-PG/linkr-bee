@@ -13,9 +13,11 @@
 #define WEBDAV_UPLOAD_CHUNK 512
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
 #define URL_MAX 192
+#define CRED_MAX 64
 #define K_MSEC(x) (x)
 #define K_FOREVER 0
 #define LOG_WRN(...) ((void)0)
+#define LOG_INF(...) ((void)0)
 #define snprintk snprintf
 #define IS_ENABLED(x) (x)
 
@@ -28,6 +30,8 @@ static bool log_boot_id_persisted = true;
 static uint64_t log_boot_id = 1;
 static uint32_t log_sequence;
 static char webdav_url[URL_MAX + 1] = "http://old/logs/";
+static char webdav_user[CRED_MAX + 1];
+static char webdav_pass[CRED_MAX + 1];
 struct webdav_url {
     char host[64];
     uint16_t port;
@@ -105,9 +109,37 @@ static void k_sleep(int ms)
 
 static int parse_webdav_url(const char *url, struct webdav_url *out)
 {
+    if (strncmp(url, "http://", 7) != 0 || !strchr(url + 7, '/')) {
+        return -EINVAL;
+    }
     sscanf(url, "http://%63[^/]", out->host);
     out->path = "/logs/";
     return 0;
+}
+
+/* Records what the production setters would persist; a failure can be injected
+ * to prove the setters validate before mutating RAM or flash. */
+static char saved_url[URL_MAX + 1];
+static char saved_user[CRED_MAX + 1];
+static char saved_pass[CRED_MAX + 1];
+static int save_calls;
+static bool save_fails;
+static int save_webdav_settings(const char *url, const char *user, const char *pass)
+{
+    ++save_calls;
+    if (save_fails) {
+        return -EIO;
+    }
+    snprintf(saved_url, sizeof(saved_url), "%s", url ? url : "");
+    snprintf(saved_user, sizeof(saved_user), "%s", user ? user : "");
+    snprintf(saved_pass, sizeof(saved_pass), "%s", pass ? pass : "");
+    return 0;
+}
+
+static void ring_buf_reset(int *ring)
+{
+    (void)ring;
+    ring_data = NULL;
 }
 
 static uint32_t ring_buf_get(int *ring, uint8_t *dst, size_t capacity)
@@ -185,6 +217,48 @@ int main(int argc, char **argv)
             ws_feeds != 101 || log_feeds != 101) {
             return 6;
         }
+        return 0;
+    }
+    if (!strcmp(scenario, "setters")) {
+        /* Exercises the production WebDAV setters. The summary line is asserted
+         * by tests/test_regressions.py so a failure names the property. */
+        int creds_rejected = linkr_webdav_set_config("http://new/logs/", "user", "pass") == -EPROTONOSUPPORT;
+        int url_rejected = linkr_webdav_set_config("ftp://new/logs/", NULL, NULL) == -EINVAL;
+        /* A rejected request must not touch RAM, the ring or flash. */
+        int untouched = save_calls == 0 && webdav_generation == 1 &&
+                        strcmp(webdav_url, "http://old/logs/") == 0 &&
+                        ring_data != NULL && webdav_configured == 1;
+        int retarget = 0, noop = 0, save_failure = 0, cleared = 0;
+
+        ring_data = "OLD_PRIVATE_LOG";
+        if (linkr_webdav_set_config("http://new/logs/", NULL, NULL) == 0) {
+            /* Publishes URL + generation and drops the old batch. */
+            retarget = webdav_generation == 2 && webdav_configured == 1 &&
+                       strcmp(webdav_url, "http://new/logs/") == 0 && ring_data == NULL &&
+                       upload_pending_bytes == 0 &&
+                       strcmp(saved_url, "http://new/logs/") == 0 &&
+                       webdav_user[0] == '\0' && webdav_pass[0] == '\0';
+        }
+
+        /* Re-applying the same URL must not invalidate the current batch. */
+        ring_data = "KEEP";
+        noop = linkr_webdav_set_config("http://new/logs/", NULL, NULL) == 0 &&
+               webdav_generation == 2 && ring_data != NULL;
+
+        /* A failed persist must not leave the new URL half-applied. */
+        save_fails = true;
+        save_failure = linkr_webdav_set_config("http://third/logs/", NULL, NULL) == -EIO &&
+                       webdav_generation == 2 && strcmp(webdav_url, "http://new/logs/") == 0;
+        save_fails = false;
+
+        ring_data = "OLD_PRIVATE_LOG";
+        cleared = linkr_webdav_clear_config() == 0 && webdav_configured == 0 &&
+                  webdav_generation == 3 && ring_data == NULL && saved_url[0] == '\0';
+
+        printf("SETTERS|creds_rejected=%d|url_rejected=%d|untouched=%d|retarget=%d|"
+               "noop=%d|save_failure=%d|cleared=%d\n",
+               creds_rejected, url_rejected, untouched, retarget, noop, save_failure,
+               cleared);
         return 0;
     }
     if (!setjmp(finished)) {

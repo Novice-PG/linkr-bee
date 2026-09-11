@@ -17,6 +17,21 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def extract(source, start_marker, end_marker, required):
+    """Slice a production block by literal anchors.
+
+    A moved anchor should fail loudly rather than quietly compile a different
+    function, so the intended definitions are asserted to be inside the block.
+    Truncation itself cannot pass unnoticed: the harness compiles with -Werror.
+    """
+    start = source.index(start_marker)
+    block = source[start:source.index(end_marker, start)]
+    for name in required:
+        if f"{name}(" not in block:
+            raise AssertionError(f"{name} is missing from the extracted block")
+    return block
+
+
 class FirmwareTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -26,12 +41,18 @@ class FirmwareTests(unittest.TestCase):
         # Compile the actual production function bodies against deterministic
         # host fakes, so the tests exercise retry control flow without a board.
         wifi = (ROOT / "src/wifi.c").read_text()
-        upload = wifi[wifi.index("static void upload_thread(void *a"):]
-        upload = upload[:upload.index("\n/* ---")]
+        # The WebDAV setters are what publish a new URL + generation and clear
+        # the ring. Without them compiled in, the retarget scenarios could only
+        # simulate that transition and would pass with a broken setter.
+        setters = extract(wifi, "static void discard_log_buffer(void)", "\n/* ---",
+                          ["discard_log_buffer", "linkr_webdav_set_config",
+                           "linkr_webdav_clear_config"])
+        upload = extract(wifi, "static void upload_thread(void *a", "\n/* ---",
+                         ["upload_thread"])
         main = (ROOT / "src/main.c").read_text()
-        forward = main[main.index("static int uart_forward_chunk("):]
-        forward = forward[:forward.index("\n#endif")]
-        (directory / "production_functions.inc").write_text(upload + forward)
+        forward = extract(main, "static int uart_forward_chunk(", "\n#endif",
+                          ["uart_forward_chunk"])
+        (directory / "production_functions.inc").write_text(setters + upload + forward)
         config = dict(
             line.split("=", 1) for line in (ROOT / "prj.conf").read_text().splitlines()
             if line.startswith("CONFIG_")
@@ -73,10 +94,20 @@ class FirmwareTests(unittest.TestCase):
     def test_default_firmware_keeps_lan_and_logs_flowing_after_ble_disconnect(self):
         self.run_scenario("forward")
 
+    def test_webdav_setters_reject_before_mutating_and_publish_atomically(self):
+        """The production setters, not a simulation of them."""
+        (summary,) = self.run_scenario("setters")
+        self.assertEqual(summary[0], "SETTERS")
+        checks = dict(field.split("=", 1) for field in summary[1:])
+        for name in ["creds_rejected", "url_rejected", "untouched", "retarget",
+                     "noop", "save_failure", "cleared"]:
+            self.assertEqual(checks.get(name), "1", f"{name} failed: {checks}")
+
 
 class TerminalTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise_terminal(self, loopback=False, fail_loopback=False):
-        # Import the real CLI with only its hardware dependency replaced.
+    @staticmethod
+    def load_terminal():
+        """Import the real CLI with only its hardware dependency replaced."""
         spec = importlib.util.spec_from_file_location(
             "linkr_terminal_test", ROOT / "tools/linkr_ble_terminal.py")
         terminal = importlib.util.module_from_spec(spec)
@@ -84,6 +115,61 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         bleak.BleakClient = bleak.BleakScanner = object
         with patch.dict(sys.modules, {"bleak": bleak, spec.name: terminal}):
             spec.loader.exec_module(terminal)
+        return terminal
+
+    async def test_real_loopback_test_verifies_the_echoed_payload(self):
+        """The production loopback_test, not the stub the other tests install."""
+        terminal = self.load_terminal()
+        cfg = terminal.TerminalConfig(
+            escape=b"\x1d", enter="cr", local_echo=False, line_mode=False,
+            debug_io=False, write_size=20, write_response=True, write_delay=0.0)
+        payload = b"linkr-loopback-test"
+
+        async def run(echo, stale=(), split=False):
+            queue: asyncio.Queue = asyncio.Queue()
+            for item in stale:
+                queue.put_nowait(item)
+
+            class Client:
+                def __init__(self):
+                    self.chunks = []
+
+                async def write_gatt_char(self, uuid, chunk, response=True):
+                    self.chunks.append(bytes(chunk))
+                    if echo is None:
+                        return
+                    if split:
+                        queue.put_nowait(echo[:4])
+                        queue.put_nowait(echo[4:])
+                    else:
+                        queue.put_nowait(echo)
+
+            client = Client()
+            with patch.object(terminal, "stderr"):
+                result = await terminal.loopback_test(
+                    client, payload, cfg, queue, timeout=0.25)
+            return result, client, queue
+
+        # Stale bytes left over from boot output are drained, then the echo matches.
+        ok, client, _ = await run(payload, stale=(b"stale", b"boot log"))
+        self.assertTrue(ok)
+        # The payload is written in write_size chunks.
+        self.assertTrue(client.chunks)
+        self.assertTrue(all(len(chunk) <= cfg.write_size for chunk in client.chunks))
+        self.assertEqual(b"".join(client.chunks), payload)
+
+        # An echo split across notifications still matches.
+        ok, _, _ = await run(payload, split=True)
+        self.assertTrue(ok)
+
+        # Silence, and an echo that never contains the payload, must both fail.
+        ok, _, _ = await run(None)
+        self.assertFalse(ok)
+        ok, _, _ = await run(b"unrelated output")
+        self.assertFalse(ok)
+
+    async def exercise_terminal(self, loopback=False, fail_loopback=False):
+        terminal = self.load_terminal()
 
         queued = []
         original_put = asyncio.Queue.put_nowait
@@ -143,6 +229,10 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         args = terminal.build_parser().parse_args(
             ["--loopback-test", "echo"] if loopback else [])
         output = io.BytesIO()
+        # terminal_loop() reads the process stdin, which needs a pty to drive, so
+        # it is stubbed here; these tests are about run()'s notify-queue
+        # lifecycle. loopback_test() is covered for real by
+        # test_real_loopback_test_verifies_the_echoed_payload.
         with patch.object(terminal, "BleakClient", return_value=client), \
              patch.object(terminal, "find_device", AsyncMock(return_value="device")), \
              patch.object(terminal, "configure_ble_write_size"), \
