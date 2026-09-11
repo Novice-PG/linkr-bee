@@ -20,13 +20,28 @@ jobs:
   host:
     name: Host regression tests
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python3 -m unittest discover -s tests -v
+      # The C reference client is a shipped artifact. Nothing else compiles it,
+      # so without this step it can rot unnoticed.
+      - name: Build the C reference terminal
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          make -C tools clean all
+      - name: Check the helper scripts
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q tools/linkr_ble_terminal.py
+          sh -n tools/serve_web.sh
+          sh -n tools/flash_firmware.sh
+          sh -n tools/verify.sh
 
   mobile:
     name: Web and mobile
@@ -151,6 +166,20 @@ jobs:
           grep -qx '# CONFIG_BT_KEYS_OVERWRITE_OLDEST is not set' "${config}"
           grep -qx '# CONFIG_BT_ZEPHYR_NUS_DEFAULT_INSTANCE is not set' "${config}"
           grep -qx 'CONFIG_BUILD_OUTPUT_BIN=y' "${config}"
+          # Controller-side pairing support differs per Espressif generation:
+          # C3 uses the legacy ESP32_BT_CTLR_* menu, C5 the newer
+          # ESP32_BT_LE_* menu. Without these the controller has no Security
+          # Manager while every Linkr GATT attribute requires encryption.
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "${config}"; then
+            grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "${config}"
+          fi
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32C5=y' "${config}"; then
+            grep -qx 'CONFIG_ESP32_BT_LE_SECURITY_ENABLE=y' "${config}"
+            grep -qx 'CONFIG_ESP32_BT_LE_SM_SC=y' "${config}"
+            grep -qx '# CONFIG_ESP32_BT_LE_SM_LEGACY is not set' "${config}"
+            grep -qx 'CONFIG_ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION=y' "${config}"
+            grep -qx 'CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS=y' "${config}"
+          fi
 
       - name: Package firmware
         shell: bash

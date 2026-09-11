@@ -77,6 +77,9 @@ struct app_state {
     int mtu_write_size;
     bool connected;
     bool notifications_started;
+    /* Set from the D-Bus filter when org.bluez.Device1.Connected drops. The
+     * terminal loop polls it so a lost link is reported instead of blocking. */
+    _Atomic bool link_lost;
 
     /* stdin -> ble write queue */
     pthread_mutex_t tx_lock;
@@ -263,6 +266,23 @@ static int iter_get_basic(DBusMessageIter *iter, int type, void *val)
     }
     dbus_message_iter_get_basic(iter, val);
     return 0;
+}
+
+/* True when the iterator holds a variant boolean set to false. Property values
+ * in a PropertiesChanged dict are always wrapped in a variant. */
+static bool variant_is_false(DBusMessageIter *iter)
+{
+    DBusMessageIter value;
+    dbus_bool_t boolean = TRUE;
+
+    if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_VARIANT) {
+        return false;
+    }
+    dbus_message_iter_recurse(iter, &value);
+    if (iter_get_basic(&value, DBUS_TYPE_BOOLEAN, &boolean) != 0) {
+        return false;
+    }
+    return !boolean;
 }
 
 static const char *iter_get_string(DBusMessageIter *iter)
@@ -891,6 +911,41 @@ static void configure_write_chunk(void)
 /* Notifications                                                            */
 /* ------------------------------------------------------------------------ */
 
+/* Watch org.bluez.Device1.Connected. BlueZ clears it when the link drops, and
+ * without this the terminal keeps waiting for a peer that is already gone. */
+static void handle_device_properties(DBusMessage *msg, DBusMessageIter *iter)
+{
+    const char *path = dbus_message_get_path(msg);
+    DBusMessageIter changed;
+
+    if (!path || !g_state.device_path[0] ||
+        strcmp(path, g_state.device_path) != 0) {
+        return;
+    }
+    /* iter sits on the interface name; the changed-properties dict follows. */
+    dbus_message_iter_next(iter);
+    if (dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+        return;
+    }
+    dbus_message_iter_recurse(iter, &changed);
+    while (dbus_message_iter_get_arg_type(&changed) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter kv;
+        const char *key;
+
+        dbus_message_iter_recurse(&changed, &kv);
+        if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0) {
+            return;
+        }
+        dbus_message_iter_next(&kv);
+        if (strcmp(key, "Connected") == 0 && variant_is_false(&kv)) {
+            g_state.connected = false;
+            atomic_store(&g_state.link_lost, true);
+            return;
+        }
+        dbus_message_iter_next(&changed);
+    }
+}
+
 static DBusHandlerResult filter_signals(DBusConnection *conn,
                                         DBusMessage *msg, void *user_data)
 {
@@ -911,6 +966,12 @@ static DBusHandlerResult filter_signals(DBusConnection *conn,
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
     dbus_message_iter_get_basic(&iter, &iface);
+
+    /* The link state lives on Device1, not on the characteristic. */
+    if (strcmp(iface, DEVICE_IFACE) == 0) {
+        handle_device_properties(msg, &iter);
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
     if (strcmp(iface, CHAR_IFACE) != 0) {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
@@ -1423,6 +1484,7 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
 {
     pthread_t tid;
     int err;
+    bool lost = false;
 
     msg("Terminal open. Press Ctrl-] to exit.");
 
@@ -1439,6 +1501,11 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
         dbus_connection_read_write_dispatch(conn, 20);
         process_queued_rx(opt);
 
+        if (atomic_load(&g_state.link_lost)) {
+            lost = true;
+            break;
+        }
+
         n = tx_dequeue(buf, sizeof(buf), 20);
 
         if (n > 0) {
@@ -1451,6 +1518,15 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
         if (tx_finished()) {
             break;
         }
+    }
+
+    if (lost) {
+        msg("\nBLE disconnected.");
+        /* The reader thread is blocked in read()/fgets() and only returns on the
+         * next keystroke, so joining it here would hang the client. Let process
+         * exit reclaim it after the terminal is restored. */
+        atomic_store(&g_state.tx_done, true);
+        return;
     }
 
     pthread_join(tid, NULL);

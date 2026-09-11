@@ -138,6 +138,39 @@ run_esptool() {
     fi
 }
 
+# Releases ship a SHA256SUMS next to the image. Verify it when present so a
+# truncated or substituted download never reaches the board.
+verify_checksum() {
+    checksums="$(dirname -- "$IMAGE")/SHA256SUMS"
+    [ -f "$checksums" ] || return 0
+
+    expected=$(awk -v name="$(basename -- "$IMAGE")" \
+        '$2 == name || $2 == "*" name { print $1; exit }' "$checksums")
+    if [ -z "$expected" ]; then
+        echo "SHA256SUMS does not list $(basename -- "$IMAGE"); skipping verification" >&2
+        return 0
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$IMAGE" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$IMAGE" | awk '{print $1}')
+    else
+        echo "no sha256 tool found; skipping checksum verification" >&2
+        return 0
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        echo "Checksum mismatch for $IMAGE" >&2
+        echo "  expected $expected" >&2
+        echo "  actual   $actual" >&2
+        exit 1
+    fi
+    echo "Checksum verified: $expected"
+}
+
+verify_checksum
+
 echo "Flashing $IMAGE to $PORT ($CHIP, address $FLASH_ADDRESS) at $BAUD baud"
 run_esptool --chip "$CHIP" --port "$PORT" --baud "$BAUD" \
     write-flash "$FLASH_ADDRESS" "$IMAGE"
