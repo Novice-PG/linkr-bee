@@ -357,14 +357,21 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE
 	  the UART drops oldest data instead of blocking the bridge.
 
 config LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN
-	string "Optional first-frame auth token for WebSocket clients"
+	string "Optional build-time WebSocket auth token override"
 	default ""
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 	help
-	  When non-empty, clients must send this token as their first
-	  WebSocket text frame within 3 seconds or the connection is closed.
-	  This is a lightweight LAN deterrent, not real security; use a
-	  trusted network.
+	  When empty (the default), the first boot mints a random 128-bit token
+	  and stores it in settings. Clients must send the token as their first
+	  WebSocket text frame within 3 seconds; on success the bridge replies
+	  "@ws auth=ok" before the first UART byte. "@s?" reports the token over
+	  the encrypted BLE management channel, "@s token" rotates it, and
+	  "@s token=<value>" sets one explicitly.
+
+	  Set this only to pin a provisioning-time token: it must be exactly 32
+	  lowercase hex characters and takes precedence over the generated token.
+	  The token is LAN access control, not transport security: the socket is
+	  plain ws:// and its bytes are visible to the local network.
 
 config LINKR_BLE_BRIDGE_WS_BRIDGE_STACK
 	int "WebSocket bridge per-client thread stack size"

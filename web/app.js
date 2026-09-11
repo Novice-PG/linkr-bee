@@ -1,6 +1,20 @@
 "use strict";
 
-import { ManagementResponseTracker } from "./management_protocol.js";
+import { createLanTokenStore } from "./lan_token_store.js";
+
+import {
+  ManagementResponseTracker,
+  MGMT_API_MAJOR,
+  MGMT_FRAME_ERRORS,
+  MGMT_HEADER_SIZE,
+  RELIABLE_FRAME_ERRORS,
+  RELIABLE_UART_HEADER_SIZE,
+  createFragmentReassembler,
+  parseManagementHeader,
+  parseReliableHeader,
+  parseWifiEvent,
+  wifiProvisioningComplete,
+} from "./management_protocol.js";
 import { applyInputModifiers, terminalKeySequence } from "./terminal_keys.js";
 import { subscribeTerminalInput } from "./terminal_input.js";
 import { SerialJournal } from "./serial_journal.js";
@@ -35,14 +49,12 @@ const RELIABLE_UART_SERVICE = "4c4b0010-9a7e-4f4e-8b8a-3d6f12a0c001";
 const RELIABLE_UART_RX = "4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001";
 const RELIABLE_UART_TX = "4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001";
 const RELIABLE_UART_STATE = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001";
-const MGMT_HEADER_SIZE = 12;
-const MGMT_API_MAJOR = 1;
 const MGMT_CAP_WIFI = 1 << 0;
 const MGMT_CAP_WEBDAV = 1 << 1;
+const MGMT_CAP_WEBSOCKET = 1 << 2;
 const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
-const RELIABLE_UART_HEADER_SIZE = 12;
 const BLE_MAX_ATT_VALUE = 244;
 const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
@@ -74,12 +86,10 @@ const state = {
   reliableRxSequence: 1,
   reliableMaxPayload: 20,
   reliableWriteSize: BLE_MAX_ATT_VALUE,
-  reliableRx: null,
   deviceId: "",
   mgmtCapabilities: 0,
   mgmtMaxPayload: 512,
   nextRequestId: 1,
-  mgmtRx: null,
   mgmtResponses: new ManagementResponseTracker(),
   controlWriteQueue: Promise.resolve(),
   mgmtWriteError: "",
@@ -110,6 +120,10 @@ const state = {
   scanTimer: null,
   wifiRefreshTimers: [],
   wifiStatus: { connected: false, ssid: "", ip: "down" },
+  /* Accepted @w= provisioning operation: { id, ssid }. Cleared once the bridge
+   * reports a FINAL phase, or when the fallback poll takes over. */
+  wifiOperation: null,
+  wifiOperationTimer: null,
   diagnostics: {},
   logSize: 0,
   terminalGeometry: null,
@@ -208,6 +222,9 @@ const elements = {
   blePairingHint: $("blePairingHint"),
   wsHostInput: $("wsHostInput"),
   wsHostError: $("wsHostError"),
+  wsTokenField: $("wsTokenField"),
+  wsTokenInput: $("wsTokenInput"),
+  wsTokenError: $("wsTokenError"),
   mobileConnectBtn: $("mobileConnectBtn"),
 };
 
@@ -217,6 +234,14 @@ const FONT_FAMILY_KEY = "linkr-font-family";
 const LAST_DEVICE_ID_KEY = "linkr-last-device-id";
 const TRANSPORT_KEY = "linkr-transport";
 const WS_HOST_KEY = "linkr-ws-host";
+const lanTokens = createLanTokenStore(localStorage);
+/* LAN access handshake. The bridge announces whether a token is required, so
+ * the client never has to guess; UART data always arrives as binary frames, so
+ * these text frames are unambiguous. See src/ws_bridge.c. */
+const WS_AUTH_NONE_FRAME = "@ws auth=none";
+const WS_AUTH_REQUIRED_FRAME = "@ws auth=required";
+const WS_AUTH_OK_FRAME = "@ws auth=ok";
+const WS_HANDSHAKE_TIMEOUT_MS = 5000;
 
 const SYSTEM_TERMINAL_FONT =
   'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
@@ -266,10 +291,17 @@ const I18N = {
     lanMode: "LAN",
     wsHost: "Device address",
     placeholderWsHost: "192.168.1.50 or ws://host/ws",
+    wsToken: "Access token",
+    placeholderWsToken: "32 hex characters",
+    wsTokenHint: "Captured automatically while connected over BLE (from @s?). Leave blank only if LAN auth was disabled with @s token off.",
     lanHint: "LAN mode: reach the device's WebSocket over your network",
     wsMissingHost: "Enter the device address first.",
     wsUnreachable: "WebSocket {url} is unreachable.",
     wsTimeout: "WebSocket connection timed out after 15 seconds.",
+    wsAuthRejected: "LAN access token rejected. Read the current token with @s? over BLE.",
+    wsNoHandshake: "The bridge did not confirm LAN access; check the token or firmware version.",
+    wsTokenRequired: "This bridge requires an access token. Read it with @s? over BLE.",
+    wsTokenInvalid: "The access token must be 32 lowercase hex characters.",
     xtermFail: "Bundled xterm.js failed to load; check the web assets",
     connected: "Connected",
     disconnected: "Disconnected",
@@ -284,6 +316,9 @@ const I18N = {
     diagFirmware: "Firmware",
     diagUptime: "Uptime",
     diagOwner: "BLE access",
+    accessOpen: "open",
+    accessScoped: "scoped",
+    linkSecurity: "link L{level}",
     diagUart: "UART Buffer",
     diagWifi: "WiFi",
     diagUpload: "Upload Queue",
@@ -389,6 +424,14 @@ const I18N = {
     saved: "Log saved",
     uartSet: "UART configured",
     wifiSet: "WiFi configured",
+    wifiPhaseQueued: "WiFi request queued…",
+    wifiPhaseConnecting: "Connecting to {ssid}…",
+    wifiPhaseDhcp: "Connected to {ssid}; obtaining address…",
+    wifiPhaseOff: "Disconnecting WiFi…",
+    wifiAwaitingAddress: "The bridge reports ready but has no IPv4 address yet; waiting…",
+    wifiReady: "WiFi ready: {ssid}",
+    wifiConnectFailed: "WiFi provisioning failed (result {code}). Check the password and 2.4 GHz coverage, then retry.",
+    wifiEventTimeout: "The bridge sent no completion event; showing the polled status instead.",
     webdavSet: "WebDAV configured",
     sent: "Sent",
     cleared: "Screen cleared",
@@ -413,10 +456,17 @@ const I18N = {
     lanMode: "局域网",
     wsHost: "设备地址",
     placeholderWsHost: "192.168.1.50 或 ws://host/ws",
+    wsToken: "访问令牌",
+    placeholderWsToken: "32 位十六进制字符",
+    wsTokenHint: "连接 BLE 时会自动获取（来自 @s?）。仅在已用 @s token off 关闭局域网鉴权时才留空。",
     lanHint: "局域网模式:通过设备的 WebSocket 直连串口",
     wsMissingHost: "请先输入设备地址。",
     wsUnreachable: "无法连接 WebSocket {url}。",
     wsTimeout: "WebSocket 连接超过 15 秒未响应。",
+    wsAuthRejected: "局域网访问令牌被拒绝。请通过 BLE 执行 @s? 获取当前令牌。",
+    wsNoHandshake: "桥接器未确认局域网访问，请检查令牌或固件版本。",
+    wsTokenRequired: "该桥接器需要访问令牌。请通过 BLE 执行 @s? 获取。",
+    wsTokenInvalid: "访问令牌必须是 32 位小写十六进制字符。",
     xtermFail: "内置 xterm.js 加载失败，请检查网页静态资源",
     connected: "已连接",
     disconnected: "未连接",
@@ -431,6 +481,9 @@ const I18N = {
     diagFirmware: "固件",
     diagUptime: "运行时间",
     diagOwner: "BLE 访问",
+    accessOpen: "开放",
+    accessScoped: "受限",
+    linkSecurity: "链路 L{level}",
     diagUart: "UART 缓冲",
     diagWifi: "WiFi",
     diagUpload: "上传队列",
@@ -536,6 +589,14 @@ const I18N = {
     saved: "日志已保存",
     uartSet: "UART 已配置",
     wifiSet: "WiFi 已配置",
+    wifiPhaseQueued: "WiFi 请求已入队…",
+    wifiPhaseConnecting: "正在连接 {ssid}…",
+    wifiPhaseDhcp: "已连接 {ssid}，正在获取地址…",
+    wifiPhaseOff: "正在断开 WiFi…",
+    wifiAwaitingAddress: "桥接器已进入 ready，但尚无 IPv4 地址，继续等待…",
+    wifiReady: "WiFi 已就绪：{ssid}",
+    wifiConnectFailed: "WiFi 配网失败（result {code}）。请检查密码与 2.4 GHz 信号后重试。",
+    wifiEventTimeout: "桥接器未上报完成事件，改为显示轮询到的状态。",
     webdavSet: "WebDAV 已配置",
     sent: "已发送",
     cleared: "已清屏",
@@ -702,15 +763,28 @@ function setSupportText() {
     : t("unsupported");
 }
 
-function setWsHostError(message = "", focus = false, i18nKey = "") {
+function setFieldError(input, error, message = "", focus = false, i18nKey = "") {
   const hasError = Boolean(message);
-  elements.wsHostInput.setAttribute("aria-invalid", String(hasError));
-  elements.wsHostError.textContent = message;
-  elements.wsHostError.hidden = !hasError;
-  elements.wsHostError.dataset.i18nKey = hasError ? i18nKey : "";
+  input.setAttribute("aria-invalid", String(hasError));
+  error.textContent = message;
+  error.hidden = !hasError;
+  error.dataset.i18nKey = hasError ? i18nKey : "";
   if (hasError && focus) {
-    elements.wsHostInput.focus();
+    input.focus();
   }
+}
+
+function setWsHostError(message = "", focus = false, i18nKey = "") {
+  setFieldError(elements.wsHostInput, elements.wsHostError, message, focus, i18nKey);
+}
+
+function setWsTokenError(message = "", focus = false, i18nKey = "") {
+  setFieldError(elements.wsTokenInput, elements.wsTokenError, message, focus, i18nKey);
+}
+
+function clearWsErrors() {
+  setWsHostError();
+  setWsTokenError();
 }
 
 function syncTransportControls() {
@@ -720,6 +794,7 @@ function syncTransportControls() {
   elements.bleModeBtn.setAttribute("aria-pressed", String(!isWs));
   elements.lanModeBtn.setAttribute("aria-pressed", String(isWs));
   elements.wsHostField.hidden = !isWs;
+  elements.wsTokenField.hidden = !isWs;
   elements.blePairingHint.hidden = isWs;
   document.querySelectorAll(".connect-icon-ble").forEach((icon) => {
     icon.toggleAttribute("hidden", isWs);
@@ -734,9 +809,10 @@ function setTransportMode(mode) {
     return;
   }
   state.mode = mode;
+  if (mode === "ws") elements.wsTokenInput.value = lanTokens.selectHost(elements.wsHostInput.value);
   saveSetting(TRANSPORT_KEY, mode);
   syncTransportControls();
-  setWsHostError();
+  clearWsErrors();
   setConnected(false);
   setSupportText();
 }
@@ -874,6 +950,10 @@ function applyLang() {
   const wsErrorKey = elements.wsHostError.dataset.i18nKey;
   if (!elements.wsHostError.hidden && wsErrorKey) {
     setWsHostError(t(wsErrorKey), false, wsErrorKey);
+  }
+  const wsTokenErrorKey = elements.wsTokenError.dataset.i18nKey;
+  if (!elements.wsTokenError.hidden && wsTokenErrorKey) {
+    setWsTokenError(t(wsTokenErrorKey), false, wsTokenErrorKey);
   }
   updateToggleLabels();
   renderRefLists();
@@ -1326,19 +1406,131 @@ function clearWifiRefreshTimers() {
     clearTimeout(timer);
   }
   state.wifiRefreshTimers = [];
+  clearTimeout(state.wifiOperationTimer);
+  state.wifiOperationTimer = null;
+}
+
+/* WiFi provisioning is an asynchronous bridge operation. The documented
+ * completion signal is a FINAL @event whose phase is ready/failed/off, with a
+ * usable IPv4 address — the initial "OK wifi=accepted" only means the request
+ * was queued. Parsing lives in management_protocol.js so the contract is unit
+ * tested; polling is retained purely as a fallback for a bridge that never
+ * reports the event. */
+/* CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS is 30 s; allow for the
+ * disconnect/recovery cycle before giving up on the event stream. */
+const WIFI_EVENT_FALLBACK_MS = 45000;
+const WIFI_PHASE_KEYS = {
+  queued: "wifiPhaseQueued",
+  connecting: "wifiPhaseConnecting",
+  dhcp: "wifiPhaseDhcp",
+};
+
+function setWifiFeedback(key, replacements) {
+  let message = key ? t(key) : "";
+  for (const [name, value] of Object.entries(replacements || {})) {
+    message = message.replace(`{${name}}`, String(value));
+  }
+  elements.wifiFeedback.textContent = message;
+}
+
+function applyWifiEvent(event) {
+  const pending = state.wifiOperation;
+  const ssid = pending?.ssid || state.wifiStatus.ssid;
+
+  if (event.phase === "ready") {
+    if (!wifiProvisioningComplete(event)) {
+      if (pending) {
+        setWifiFeedback("wifiAwaitingAddress");
+        scheduleWifiStateRefresh();
+      }
+      return;
+    }
+    state.wifiOperation = null;
+    clearWifiRefreshTimers();
+    state.wifiStatus = { connected: true, ssid, ip: event.ip };
+    updateWifiConnectionView();
+    setWifiFeedback("");
+    toast(t("wifiReady").replace("{ssid}", ssid || "—"));
+    return;
+  }
+
+  if (event.phase === "failed") {
+    state.wifiOperation = null;
+    state.wifiStatus = { connected: false, ssid: "", ip: "down" };
+    updateWifiConnectionView();
+    setWifiFeedback("wifiConnectFailed", { code: event.result });
+    // Reconcile with the bridge: a retry may already be in progress.
+    scheduleWifiStateRefresh();
+    return;
+  }
+
+  if (event.phase === "off") {
+    state.wifiOperation = null;
+    clearWifiRefreshTimers();
+    state.wifiStatus = { connected: false, ssid: "", ip: "down" };
+    updateWifiConnectionView();
+    setWifiFeedback("");
+    return;
+  }
+
+  const key = WIFI_PHASE_KEYS[event.phase];
+  if (key && pending) {
+    state.wifiStatus.ssid = ssid;
+    setWifiFeedback(key, { ssid });
+  }
+}
+
+function handleWifiEventLine(line) {
+  const event = parseWifiEvent(line);
+  if (!event) {
+    return false;
+  }
+  /* While a user operation is pending only its own events drive the UI, so a
+   * background lease change cannot claim success or failure for it. With no
+   * operation pending, only id 0 (background lifecycle) is applied. */
+  const ours = state.wifiOperation
+    ? event.operation === state.wifiOperation.id
+    : event.operation === 0;
+  if (ours) {
+    applyWifiEvent(event);
+  }
+  return true;
+}
+
+function scheduleWifiOperationFallback() {
+  clearTimeout(state.wifiOperationTimer);
+  state.wifiOperationTimer = setTimeout(() => {
+    state.wifiOperationTimer = null;
+    if (!state.wifiOperation) {
+      return;
+    }
+    // The bridge never finished the documented event sequence. Fall back to
+    // polling so the user still sees the outcome.
+    state.wifiOperation = null;
+    appendLine("[warn] no WiFi completion event; falling back to status polling");
+    setWifiFeedback("wifiEventTimeout");
+    scheduleWifiStateRefresh();
+  }, WIFI_EVENT_FALLBACK_MS);
 }
 
 function hasManagementCapability(capability) {
   return (state.mgmtCapabilities & capability) !== 0;
 }
 
-function requestWifiState() {
+function requestDeviceState() {
   if (!state.connected || state.mode !== "ble") {
     return Promise.resolve();
   }
   const requests = [requestDiagnostics()];
   if (hasManagementCapability(MGMT_CAP_WIFI)) {
     requests.push(sendControl("@w?"));
+  }
+  if (hasManagementCapability(MGMT_CAP_WEBSOCKET)) {
+    // "@s?" is the only place the bridge reports its LAN access token, and the
+    // web UI has no other management-command entry point. Capturing it during
+    // the BLE session means the token field is already filled when the user
+    // switches to LAN mode. "@i?" diagnostics deliberately omit the token.
+    requests.push(sendControl("@s?"));
   }
   return Promise.all(requests);
 }
@@ -1347,7 +1539,7 @@ function scheduleWifiStateRefresh() {
   clearWifiRefreshTimers();
   state.wifiRefreshTimers = [1500, 3500, 7000].map((delay) =>
     setTimeout(() => {
-      requestWifiState().catch((error) =>
+      requestDeviceState().catch((error) =>
         appendLine(`[error] ${error.message}`),
       );
     }, delay),
@@ -1418,9 +1610,14 @@ function renderDiagnostics() {
   elements.diagUptime.textContent = sys.uptime_ms
     ? formatUptime(sys.uptime_ms)
     : "—";
-  elements.diagOwner.textContent = sys.owner != null
-    ? `open · L${sys.security || "?"}`
-    : "—";
+  // Follow the reported owner value instead of asserting "open" unconditionally,
+  // and name what the L<n> number actually is. "@info sys" reports owner=0 while
+  // no application-level access policy is active.
+  elements.diagOwner.textContent =
+    sys.owner != null && sys.security != null
+      ? `${sys.owner === "0" ? t("accessOpen") : t("accessScoped")} · ` +
+        t("linkSecurity").replace("{level}", sys.security)
+      : "—";
   elements.diagUart.textContent = uart.buffer
     ? `${uart.buffer} · drop ${uart.dropped || "0"}`
     : "—";
@@ -1475,6 +1672,22 @@ function feedManagementText(text) {
   }
 }
 
+function handleSocketStatusLine(line) {
+  const value = String(line).trim();
+  if (!value.startsWith("OK ws=")) {
+    return false;
+  }
+  const match = value.match(/(?:^|\s)token=(none|[0-9a-f]{32})(?:\s|$)/);
+  if (!match) {
+    return false;
+  }
+  elements.wsTokenInput.value = lanTokens.capture(
+    state.deviceId, match[1] === "none" ? "" : match[1],
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(state.wifiStatus.ip) ? state.wifiStatus.ip : "",
+  );
+  return true;
+}
+
 function handleRxLine(line) {
   const scanLine = String(line).trim();
   if (scanLine.startsWith("@info ")) {
@@ -1482,6 +1695,12 @@ function handleRxLine(line) {
     return;
   }
   if (handleWifiStatusLine(scanLine)) {
+    return;
+  }
+  if (handleWifiEventLine(scanLine)) {
+    return;
+  }
+  if (handleSocketStatusLine(scanLine)) {
     return;
   }
   if (!state.scanning) {
@@ -1710,7 +1929,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   refreshConnectionActions();
   if (connected) {
     setAutoScroll(true, true);
-    state.term.focus();
+    state.term?.focus();
   }
 }
 
@@ -2120,136 +2339,53 @@ function dispatchManagementMessage(message) {
   state.mgmtResponses.settle({ ...message, text });
 }
 
+/* Reassembly lives in management_protocol.js so the framing rules are unit
+ * tested; these handlers only map a reject reason to a user-visible message and
+ * apply the connection-level sequence rules. */
+const mgmtReassembler = createFragmentReassembler({
+  headerSize: MGMT_HEADER_SIZE,
+  maxPayload: () => state.mgmtMaxPayload,
+  parseHeader: parseManagementHeader,
+});
+const reliableReassembler = createFragmentReassembler({
+  headerSize: RELIABLE_UART_HEADER_SIZE,
+  maxPayload: () => state.reliableMaxPayload,
+  parseHeader: (bytes) => parseReliableHeader(bytes, state.reliableMaxPayload),
+});
+
 function onManagementIndication(value) {
-  const bytes = new Uint8Array(value);
-  let fragment = bytes;
-
-  if (!state.mgmtRx) {
-    if (
-      bytes.length < MGMT_HEADER_SIZE ||
-      bytes[0] !== 0x4c ||
-      bytes[1] !== 0x4b
-    ) {
-      appendLine("[error] orphaned management fragment");
-      return;
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (bytes[2] !== MGMT_API_MAJOR || (bytes[3] !== 2 && bytes[3] !== 3)) {
-      appendLine("[error] unsupported management response");
-      state.mgmtRx = null;
-      return;
-    }
-    state.mgmtRx = {
-      type: bytes[3],
-      requestId: view.getUint32(4, true),
-      expected: view.getUint16(8, true),
-      flags: view.getUint16(10, true),
-      payload: [],
-      received: 0,
-    };
-    if (
-      state.mgmtRx.expected === 0 ||
-      state.mgmtRx.expected > state.mgmtMaxPayload
-    ) {
-      appendLine("[error] oversized management response header");
-      state.mgmtRx = null;
-      return;
-    }
-    fragment = bytes.slice(MGMT_HEADER_SIZE);
-  }
-
-  const message = state.mgmtRx;
-  if (message.received + fragment.length > message.expected) {
-    appendLine("[error] oversized management response");
-    state.mgmtRx = null;
+  const result = mgmtReassembler.push(value);
+  if (result.status === "incomplete") return;
+  if (result.status === "error") {
+    appendLine(`[error] ${MGMT_FRAME_ERRORS[result.reason] || "invalid management response"}`);
     return;
   }
-  message.payload.push(fragment);
-  message.received += fragment.length;
-  if (message.received !== message.expected) {
-    return;
-  }
-
-  const payload = new Uint8Array(message.expected);
-  let offset = 0;
-  for (const chunk of message.payload) {
-    payload.set(chunk, offset);
-    offset += chunk.length;
-  }
-  state.mgmtRx = null;
-  dispatchManagementMessage({ ...message, payload });
+  dispatchManagementMessage({ ...result.meta, payload: result.payload });
 }
 
 function onReliableUartIndication(value) {
-  const bytes = new Uint8Array(value);
-  let fragment = bytes;
-
-  if (!state.reliableRx) {
-    if (
-      bytes.length < RELIABLE_UART_HEADER_SIZE ||
-      bytes[0] !== 0x4c ||
-      bytes[1] !== 0x52
-    ) {
-      appendLine("[error] orphaned Reliable UART fragment");
-      return;
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (bytes[2] !== 1) {
-      appendLine("[error] unsupported Reliable UART version");
-      state.reliableRx = null;
-      return;
-    }
-    state.reliableRx = {
-      sequence: view.getUint32(4, true),
-      expected: view.getUint16(8, true),
-      chunks: [],
-      received: 0,
-    };
-    if (
-      state.reliableRx.sequence === 0 ||
-      state.reliableRx.expected === 0 ||
-      state.reliableRx.expected > state.reliableMaxPayload
-    ) {
-      appendLine("[error] invalid Reliable UART frame header");
-      state.reliableRx = null;
-      return;
-    }
-    fragment = bytes.slice(RELIABLE_UART_HEADER_SIZE);
-  }
-
-  const message = state.reliableRx;
-  if (message.received + fragment.length > message.expected) {
-    appendLine("[error] oversized Reliable UART frame");
-    state.reliableRx = null;
+  const result = reliableReassembler.push(value);
+  if (result.status === "incomplete") return;
+  if (result.status === "error") {
+    appendLine(`[error] ${RELIABLE_FRAME_ERRORS[result.reason] || "invalid Reliable UART frame"}`);
     return;
   }
-  message.chunks.push(fragment);
-  message.received += fragment.length;
-  if (message.received !== message.expected) {
-    return;
-  }
-
-  state.reliableRx = null;
+  const { sequence } = result.meta;
+  // u32 sequence with 0xffffffff -> 1 wraparound.
   const previous = state.reliableRxSequence === 1
     ? 0xffffffff
     : state.reliableRxSequence - 1;
-  if (message.sequence === previous) {
-    return;
+  if (sequence === previous) {
+    return; // Duplicate of the frame we already delivered.
   }
-  if (message.sequence !== state.reliableRxSequence) {
+  if (sequence !== state.reliableRxSequence) {
     appendLine(
-      `[error] Reliable UART sequence gap: expected ${state.reliableRxSequence}, got ${message.sequence}`,
+      `[error] Reliable UART sequence gap: expected ${state.reliableRxSequence}, got ${sequence}`,
     );
     return;
   }
   state.reliableRxSequence = nextSequence(state.reliableRxSequence);
-  const payload = new Uint8Array(message.expected);
-  let offset = 0;
-  for (const chunk of message.chunks) {
-    payload.set(chunk, offset);
-    offset += chunk.length;
-  }
-  handleIncomingBytes(payload);
+  handleIncomingBytes(result.payload);
 }
 
 function handleIncomingBytes(bytes) {
@@ -2281,8 +2417,9 @@ function onDisconnected() {
   state.reliableReady = false;
   state.reliableMaxPayload = 20;
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
-  state.reliableRx = null;
-  state.mgmtRx = null;
+  // Drop any half-received frame: the next connection restarts the sequence.
+  reliableReassembler.reset();
+  mgmtReassembler.reset();
   state.mgmtResponses.rejectAll(
     new Error("Disconnected before management response"),
   );
@@ -2294,6 +2431,7 @@ function onDisconnected() {
   state.diagnostics = {};
   rxDecoder = new TextDecoder();
   clearWifiRefreshTimers();
+  state.wifiOperation = null;
   clearTimeout(state.scanTimer);
   state.scanResults = [];
   updateWifiDatalist();
@@ -2312,50 +2450,106 @@ function connectWs() {
       reject(new Error(t("wsMissingHost")));
       return;
     }
-    setWsHostError();
+    const token = elements.wsTokenInput.value.trim().toLowerCase();
+    if (token && !/^[0-9a-f]{32}$/.test(token)) {
+      setWsTokenError(t("wsTokenInvalid"), true, "wsTokenInvalid");
+      reject(new Error(t("wsTokenInvalid")));
+      return;
+    }
+    clearWsErrors();
     saveSetting(WS_HOST_KEY, host);
+    lanTokens.edit(token);
+    lanTokens.save();
     const url = /^wss?:\/\//.test(host) ? host : `ws://${host}/ws`;
     const ws = new WebSocket(url);
     let opened = false;
     let settled = false;
+    let sentToken = false;
 
-    const clearConnectTimer = () => clearTimeout(connectTimer);
-    const failConnect = (message) => {
+    const clearTimers = () => {
+      clearTimeout(connectTimer);
+      clearTimeout(handshakeTimer);
+    };
+    const failConnect = (message, { field = "host", i18nKey = "" } = {}) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearConnectTimer();
+      clearTimers();
       if (state.ws === ws) {
         state.ws = null;
+      }
+      if (field === "token") {
+        setWsTokenError(message, true, i18nKey);
+      } else {
+        setWsHostError(message, true, i18nKey);
       }
       reject(new Error(message));
     };
     const connectTimer = setTimeout(() => {
-      failConnect(t("wsTimeout"));
+      failConnect(t("wsTimeout"), { i18nKey: "wsTimeout" });
       ws.close();
     }, WS_CONNECT_TIMEOUT_MS);
+    let handshakeTimer = 0;
 
     state.ws = ws;
     state.wsHost = url;
     ws.binaryType = "arraybuffer";
     appendLine(`[connect] ${url}`);
 
+    const succeed = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimers();
+      opened = true;
+      clearWsErrors();
+      setConnected(true);
+      appendLine("[ready]");
+      resolve();
+    };
+
+    /* Before the handshake completes, text frames are protocol frames and are
+     * never terminal output. UART data always arrives as binary frames. */
+    const handleHandshakeFrame = (text) => {
+      const frame = String(text).trim();
+      if (frame === WS_AUTH_NONE_FRAME || frame === WS_AUTH_OK_FRAME) {
+        succeed();
+        return true;
+      }
+      if (frame === WS_AUTH_REQUIRED_FRAME) {
+        if (!token) {
+          failConnect(t("wsTokenRequired"), { field: "token", i18nKey: "wsTokenRequired" });
+          ws.close();
+          return true;
+        }
+        sentToken = true;
+        ws.send(token);
+        return true;
+      }
+      return false;
+    };
+
     ws.onopen = () => {
       if (settled || state.ws !== ws) {
         ws.close();
         return;
       }
-      settled = true;
-      clearConnectTimer();
-      opened = true;
-      setWsHostError();
-      setConnected(true);
-      appendLine("[ready]");
-      resolve();
+      handshakeTimer = setTimeout(() => {
+        failConnect(t("wsNoHandshake"), { i18nKey: "wsNoHandshake" });
+        ws.close();
+      }, WS_HANDSHAKE_TIMEOUT_MS);
     };
     ws.onmessage = (event) => {
-      if (state.ws !== ws || !opened) return;
+      if (state.ws !== ws) return;
+      if (!opened) {
+        if (typeof event.data === "string" && handleHandshakeFrame(event.data)) {
+          return;
+        }
+        appendLine("[warn] ignored LAN frame before the access handshake");
+        return;
+      }
       if (event.data instanceof ArrayBuffer) {
         handleIncomingBytes(new Uint8Array(event.data));
       } else if (typeof event.data === "string") {
@@ -2366,15 +2560,17 @@ function connectWs() {
       if (state.ws !== ws) return;
       if (opened) {
         onDisconnected();
+        return;
+      }
+      if (sentToken) {
+        failConnect(t("wsAuthRejected"), { field: "token", i18nKey: "wsAuthRejected" });
       } else {
         failConnect(t("wsUnreachable").replace("{url}", url));
       }
     };
     ws.onerror = () => {
-      if (state.ws !== ws) return;
-      if (!opened) {
-        failConnect(t("wsUnreachable").replace("{url}", url));
-      }
+      if (state.ws !== ws || opened) return;
+      failConnect(t("wsUnreachable").replace("{url}", url));
     };
   });
 }
@@ -2396,7 +2592,8 @@ async function connectOnce({ chooseDevice = false } = {}) {
     try {
       await connectWs();
     } catch (error) {
-      if (elements.wsHostError.hidden) {
+      // connectWs() already routed the message to the offending field.
+      if (elements.wsHostError.hidden && elements.wsTokenError.hidden) {
         setWsHostError(error.message, true);
       }
       appendLine(`[error] ${error.message}`);
@@ -2470,6 +2667,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
       ),
       (byte) => byte.toString(16).padStart(2, "0"),
     ).join("");
+    elements.wsTokenInput.value = lanTokens.selectDevice(state.deviceId);
     // Notifications can arrive before startNotifications resolves. Start the
     // evidence window before subscribing, and retain these first bytes when
     // the handshake completes. Retired callbacks cannot feed the next device.
@@ -2529,7 +2727,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     state.deviceRestored = false;
     setConnected(true, { preserveJournal: true });
     appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
-    requestWifiState().catch((error) =>
+    requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
   } catch (error) {
@@ -2538,13 +2736,18 @@ async function connectOnce({ chooseDevice = false } = {}) {
       appendLine(`[pairing] ${t("pairingFailed")}`);
       toast(t("pairingFailed"), "error");
     }
-    if (transportConnected && device) {
+    if (device) {
+      // Always attempt to release the transport, not just when we saw it
+      // connect: a native host can finish a connect after our own timeout, and
+      // leaving that link up would contradict the failed state shown here.
       try {
         await bleTransport.disconnect(device.id);
       } catch (_disconnectError) {
         // The transport may already have closed after a failed GATT operation.
       }
-      onDisconnected();
+      if (transportConnected) {
+        onDisconnected();
+      }
     }
     if (restoredAttempt) {
       localStorage.removeItem(LAST_DEVICE_ID_KEY);
@@ -2624,7 +2827,9 @@ function saveLog() {
   link.href = url;
   link.download = `linkr-ble-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
   link.click();
-  URL.revokeObjectURL(url);
+  // Release the blob after the browser has had time to start the download;
+  // revoking synchronously can cancel it in Firefox/Safari.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
   toast(t("saved"));
 }
 
@@ -2659,6 +2864,7 @@ function loadPersisted() {
   if (savedHost && elements.wsHostInput) {
     elements.wsHostInput.value = savedHost;
   }
+  elements.wsTokenInput.value = lanTokens.selectHost(elements.wsHostInput.value);
   updateBaudLabel();
 }
 
@@ -3070,10 +3276,14 @@ function bind() {
       return;
     }
     sendControl(`@w=${ssid},${password}`)
-      .then(() => {
+      .then((requestId) => {
+        // The reply only means "queued". Completion arrives as FINAL events
+        // carrying this request id as the operation id.
+        state.wifiOperation = { id: requestId, ssid };
         state.wifiStatus.ssid = ssid;
+        setWifiFeedback("wifiPhaseQueued", { ssid });
         toast(t("wifiSet"));
-        scheduleWifiStateRefresh();
+        scheduleWifiOperationFallback();
       })
       .catch((error) => appendLine(`[error] ${error.message}`));
   });
@@ -3096,9 +3306,12 @@ function bind() {
   });
   elements.wifiOffButton.addEventListener("click", () => {
     sendControl("@w off")
-      .then(() => {
+      .then((requestId) => {
+        state.wifiOperation = { id: requestId, ssid: "" };
         state.wifiStatus = { connected: false, ssid: "", ip: "down" };
         updateWifiConnectionView();
+        setWifiFeedback("wifiPhaseOff");
+        scheduleWifiOperationFallback();
       })
       .catch((error) => appendLine(`[error] ${error.message}`));
   });
@@ -3192,7 +3405,13 @@ function bind() {
   elements.settingsTabs.forEach((tab) => {
     tab.addEventListener("click", () => setSettingsPage(tab.dataset.settingsTarget));
   });
-  elements.wsHostInput.addEventListener("input", () => setWsHostError());
+  elements.wsHostInput.addEventListener("input", () => {
+    setWsHostError();
+    elements.wsTokenInput.value = lanTokens.selectHost(elements.wsHostInput.value);
+  });
+  elements.wsTokenInput.addEventListener("input", () => {
+    setWsTokenError(); lanTokens.edit(elements.wsTokenInput.value);
+  });
 
   let drawerTouchStart = null;
   elements.controls.addEventListener("touchstart", (event) => {

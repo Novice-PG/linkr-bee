@@ -76,6 +76,16 @@ tools/serve_web.sh  # Open http://127.0.0.1:8765/
 Use a Zephyr v4.4.1 west workspace. The default WiFi-enabled build also needs
 the Espressif HAL blobs (`modules/hal_espressif`) present in the manifest.
 
+The manifest allowlist also pulls in `hostap`. The ESP32-C5 controller
+implements its BLE Security Manager crypto with
+`CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS`, and Zephyr satisfies that from the
+legacy mbedTLS modules vendored by hostap
+(`zephyr/modules/mbedtls/legacy_support.cmake`). Without the module a C5 build
+fails to configure; it never silently loses pairing. `tools/verify.sh` and the
+CI workflow assert that the C3 (`ESP32_BT_CTLR_LE_SECURITY_ENABLE`) and C5
+(`ESP32_BT_LE_SECURITY_ENABLE`, `…_SM_SC`, `…_LL_CFG_FEAT_LE_ENCRYPTION`,
+`…_CRYPTO_STACK_MBEDTLS`) controller security symbols stay enabled.
+
 From that workspace:
 
 ```sh
@@ -243,11 +253,22 @@ WebSocket endpoint so LAN clients bypass BLE range and MTU limits entirely:
 - Clients: up to `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` (default 2),
   each with its own TX ring buffer; a slow client drops oldest data instead of
   stalling the bridge
-- Runtime control: `@s on|off|?`; the enabled flag is persisted in settings.
+- Runtime control: `@s on|off|?` plus `@s token…`; the enabled flag and the LAN
+  access token are persisted in settings.
   `@i?` reports
-  `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`
-- Optional deterrent: `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` requires
-  clients to send the token as their first text frame within 3 s
+  `@info ws state=up port=80 clients=N tx=… rx=… dropped=…` (no token)
+- Protocol: after the upgrade the bridge sends a text frame announcing whether a
+  token is required (`@ws auth=none` / `@ws auth=required`), and `@ws auth=ok`
+  once access is granted. UART bytes always travel as binary frames. See
+  [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) section 8.
+- Access token: a 128-bit token is generated on first boot and stored in
+  settings, so the LAN port is not open to the whole network by default.
+  `@s?` reports it over the encrypted BLE channel, `@s token` rotates it,
+  `@s token=<32 hex>` sets one, and `@s token off` restores unauthenticated
+  access. `@i?` never contains the token. The token gates access only: `ws://`
+  traffic stays readable on the local network.
+- Legacy override: `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` pins a
+  build-time token (32 lowercase hex) and takes precedence over the generated one
 - Disable entirely with `-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
 
 The Web Bluetooth terminal (`web/`) has a BLE/LAN switch in the Connection
@@ -338,9 +359,12 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
-| `@s?` | `@linkr ws?` | Query WebSocket bridge status |
-| `@s on` | `@linkr ws on` | Enable WebSocket bridge |
-| `@s off` | `@linkr ws off` | Disable WebSocket bridge |
+| `@s?` | `@linkr socket?` | Query WebSocket bridge status (includes the LAN token) |
+| `@s on` | `@linkr socket on` | Enable WebSocket bridge |
+| `@s off` | `@linkr socket off` | Disable WebSocket bridge |
+| `@s token` | `@linkr socket token` | Generate and store a new LAN access token |
+| `@s token=<32 hex>` | `@linkr socket token=<32 hex>` | Set the LAN access token |
+| `@s token off` | `@linkr socket token off` | Disable LAN auth (unauthenticated access) |
 
 ### UART Commands
 

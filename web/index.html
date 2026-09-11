@@ -109,6 +109,12 @@
             <input id="wsHostInput" type="text" data-i18n-ph="placeholderWsHost" placeholder="192.168.1.50" spellcheck="false" autocomplete="off" aria-invalid="false" aria-describedby="wsHostError" aria-errormessage="wsHostError">
             <span id="wsHostError" class="field-error" role="alert" hidden></span>
           </label>
+          <label class="field ws-host-field" id="wsTokenField" hidden>
+            <span class="field-label" data-i18n="wsToken">Access token</span>
+            <input id="wsTokenInput" type="text" data-i18n-ph="placeholderWsToken" placeholder="Read it with @s? over BLE" spellcheck="false" autocomplete="off" autocapitalize="none" aria-invalid="false" aria-describedby="wsTokenError" aria-errormessage="wsTokenError">
+            <span id="wsTokenError" class="field-error" role="alert" hidden></span>
+            <span class="field-hint" data-i18n="wsTokenHint">Shown by @s? on the encrypted BLE channel. Leave blank only if LAN auth was disabled with @s token off.</span>
+          </label>
           <p id="blePairingHint" class="field-hint" data-i18n="pairingHint">New host: hold Bee GPIO1 to GND before connecting and accept system pairing. Bonded hosts reconnect without GPIO1.</p>
           <div class="btn-grid">
             <button id="connectButton" class="btn btn-primary" type="button">

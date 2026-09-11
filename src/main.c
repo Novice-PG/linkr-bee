@@ -887,8 +887,14 @@ static int apply_uart_config(const struct uart_config *cfg)
 #endif
 	err = uart_configure(bridge_uart, cfg);
 	if (!err) {
+		unsigned int key = irq_lock();
+
 		active_uart_config = *cfg;
+		/* Serialize the reset against uart_to_ble_thread, which reads the
+		 * same ring under irq_lock(). Sharing only uart_config_lock would
+		 * let a concurrent consumer tear head/tail mid-reset. */
 		ring_buf_reset(&uart_rx_ring);
+		irq_unlock(key);
 	}
 	/* uart_configure() may fail after RX was disabled; always restore it. */
 	uart_rx_irq_enable();
@@ -992,7 +998,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    "@d?|@d=http://host/path/|@d off "
 #endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE)
-					    "@s?|@s on|@s off"
+					    "@s?|@s on|@s off|"
+					    "@s token[=<32 hex>]|@s token off"
 #endif
 					    "\r\n");
 		return true;
@@ -1148,7 +1155,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE)
 	/* ---- WebSocket bridge (@s / @linkr socket) ---- */
 	if (!strcmp(body, "socket?") || !strcmp(body, "s?")) {
-		char status[64];
+		char status[96];
 
 		linkr_ws_status(status, sizeof(status));
 		(void)send_control_response(conn, "OK %s\r\n", status);
@@ -1168,6 +1175,57 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 						: "OK ws off\r\n",
 					    err);
 		return true;
+	}
+	/* ---- LAN auth token (@s token...) ---- */
+	if (!strcmp(body, "socket token") || !strcmp(body, "s token")) {
+		char status[96];
+
+		err = linkr_ws_rotate_token();
+		if (err) {
+			(void)send_control_response(conn, "ERR ws token=%d\r\n",
+						    err);
+		} else {
+			linkr_ws_status(status, sizeof(status));
+			(void)send_control_response(conn, "OK %s\r\n", status);
+		}
+		return true;
+	}
+	if (!strcmp(body, "socket token off") || !strcmp(body, "s token off")) {
+		err = linkr_ws_set_token(NULL);
+		if (err) {
+			(void)send_control_response(conn, "ERR ws token=%d\r\n",
+						    err);
+		} else {
+			(void)send_control_response(conn,
+						    "OK ws token off "
+						    "(LAN access is unauthenticated)\r\n");
+		}
+		return true;
+	}
+	{
+		const char *token_value = NULL;
+
+		if (!strncmp(body, "socket token=", 13)) {
+			token_value = body + 13;
+		} else if (!strncmp(body, "s token=", 8)) {
+			token_value = body + 8;
+		}
+		if (token_value) {
+			char status[96];
+
+			err = linkr_ws_set_token(token_value);
+			if (err) {
+				(void)send_control_response(
+					conn,
+					"ERR ws token=%d (expected 32 lowercase hex)\r\n",
+					err);
+			} else {
+				linkr_ws_status(status, sizeof(status));
+				(void)send_control_response(conn, "OK %s\r\n",
+							    status);
+			}
+			return true;
+		}
 	}
 #endif /* CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE */
 #endif /* CONFIG_LINKR_BLE_BRIDGE_WIFI */

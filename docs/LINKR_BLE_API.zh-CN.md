@@ -170,7 +170,10 @@ WiFi 扫描也使用异步 Event：先返回 `OK accepted`，再发送同一 ID 
 | `@d?` | 查询完整 WebDAV 状态和 URL |
 | `@d=http://host/path/` | 设置匿名 HTTP WebDAV URL |
 | `@d off` | 禁用 WebDAV |
-| `@s?` / `@s on` / `@s off` | 查询、启用或禁用 LAN WebSocket bridge |
+| `@s?` / `@s on` / `@s off` | 查询、启用或禁用 LAN WebSocket bridge；查询结果包含 `token=` |
+| `@s token` | 生成并保存新的 32 位十六进制 LAN 访问令牌 |
+| `@s token=<32 位小写十六进制>` | 指定 LAN 访问令牌 |
+| `@s token off` | 关闭 LAN 鉴权，允许未认证客户端连接 |
 | `@linkr target?` | 查询 Bee 保存的目标机 UUID，无关联时返回 `OK target=none` |
 | `@linkr target=<UUID>` | 保存小写、带连字符的 36 字符 UUID；相同值不重复写入 |
 | `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
@@ -226,7 +229,29 @@ State 固定 16 字节：
 每次连接后都读取 State，以偏移 4 和 8 的值初始化两个方向的 sequence，再订阅
 TX。若应用发现 sequence gap，应停止转发并重连/重读 State，不能静默跳过。
 
-## 8. 推荐接入顺序
+## 8. LAN WebSocket 握手与访问令牌
+
+`ws://<device-ip>/ws` 升格为 WebSocket 后，桥接器先发送一个 **文本帧** 声明是否需要
+令牌，客户端据此决定下一步。串口数据始终使用 **二进制帧**，因此文本帧不会与串口
+内容混淆。
+
+```text
+bridge -> client  "@ws auth=none\r\n"       不需要令牌，随即开始转发串口
+bridge -> client  "@ws auth=required\r\n"   必须发送令牌
+client -> bridge  "<32 位小写十六进制>"      单个文本帧
+bridge -> client  "@ws auth=ok\r\n"         通过，随即开始转发串口
+```
+
+- 令牌不匹配时桥接器直接断开，不返回任何帧；3 秒内未收到令牌同样断开。
+- 收到 `auth=ok` 之前，客户端不得发送串口数据；`auth=required` 之后的第一帧会被
+  当作令牌消费，不会写入目标机。
+- 令牌为 128 位随机数，首次启动时生成并保存到 settings 的 `linkr/ws/en`，因此
+  同一次烧录在重启后保持稳定。`@s?` 会返回 `token=<值>`；`@s token` 重新生成，
+  `@s token=<值>` 指定，`@s token off` 关闭鉴权。
+- `@i?` 诊断输出 **不含** 令牌。令牌只经加密的 BLE 管理通道下发。
+- 令牌是局域网访问控制，不是传输加密：`ws://` 为明文，同网段仍可嗅探串口内容。
+
+## 9. 推荐接入顺序
 
 1. 按 Management Service UUID 扫描；
 2. 连接 GATT 并完成系统加密/绑定（新主机需先拉低 GPIO1），读取 Protocol Info，拒绝未知 major；
@@ -235,10 +260,11 @@ TX。若应用发现 sequence gap，应停止转发并重连/重读 State，不�
 5. 读取 Reliable UART State；
 6. 可先订阅 NUS TX，再订阅 Reliable UART TX；后者成为默认可靠模式；
 7. 管理命令走 Management，终端数据走 Reliable UART；
-8. 配网收到 `ready + ip-ready` 后，可连接 `ws://<device-ip>/ws` 切换到 LAN；
+8. 配网收到 `ready + ip-ready` 后，读取 `@s?` 取得 LAN 令牌，再连接
+   `ws://<device-ip>/ws` 完成第 8 节握手并切换到 LAN；
 9. 断线后重新读取 Protocol Info、Device ID 和 Reliable State，不沿用未核对状态。
 
-## 9. 安全模型
+## 10. 安全模型
 
 Management、Reliable UART、兼容 NUS 的值读写和 CCC 读写均要求加密连接，
 通知/指示同样受加密权限保护。未绑定连接只可发现服务，不能使用数据或管理功能。
@@ -248,9 +274,13 @@ Management、Reliable UART、兼容 NUS 的值读写和 CCC 读写均要求加�
 最多保留 8 个绑定，NVS 在正常重启后恢复。恢复出厂会清除绑定及其他设置。
 GPIO1 低电平窗口允许附近主机申请配对，不能验证某一台主机的身份；Just Works
 不提供 MITM 身份核验。Device ID 与浏览器的设备授权不能替代加密绑定。
-本次策略不改变 LAN WebSocket 的网络/token 访问控制。详见 [配对说明](BLE_PAIRING.md)。
+详见 [配对说明](BLE_PAIRING.md)。
 
-## 10. 验收清单
+LAN WebSocket 默认要求访问令牌（见第 8 节），令牌只在加密的 BLE 通道上以 `@s?`
+下发；只有显式执行 `@s token off` 才会回到无鉴权访问。无论是否启用令牌，`ws://`
+均为明文传输，不要把端口暴露到不受信任的网络。
+
+## 11. 验收清单
 
 - 按 Management UUID 能发现设备，不依赖名称；
 - Protocol Info 为 1.0，Device ID 长度为 16，重启后不变；
@@ -262,6 +292,9 @@ GPIO1 低电平窗口允许附近主机申请配对，不能验证某一台主�
 - Reliable UART 重复 sequence 不会重复写 UART；
 - indication 期间断线，重连订阅后相同 sequence 可重发并被客户端去重；
 - NUS 写入 `@i?` 会原样到 UART，不触发管理命令；
+- `@s?` 返回 32 位十六进制 `token=`，`@i?` 不含令牌；首次启动后该值在重启间保持；
+- LAN 客户端收到 `@ws auth=none` 或 `@ws auth=ok` 后才开始收发串口；
+- 用错误令牌连接会被断开且不写入目标机；`@s token off` 后连接收到 `auth=none`；
 - 恢复出厂后 BLE 地址变化，Device ID 保持不变。C3 使用 GPIO0，
   C5 DevKitC 使用 GPIO28（BOOT），均在启动时接地保持两秒。
 

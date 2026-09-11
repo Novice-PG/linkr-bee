@@ -203,7 +203,9 @@ WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,�
 - 端点:`ws://<设备 IP>/ws`(端口由 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` 决定,默认 80)
 - 协议:二进制 WebSocket 帧双向承载原始 UART 字节,没有任何额外封装——发什么就写进 UART,UART 收到什么就广播给所有已连接客户端
 - 客户端数:最多 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` 个(默认 2),每个客户端独立 TX 环形缓冲;慢客户端丢弃最旧数据,不会拖慢桥
-- 运行时控制:`@s on|off|?`;开关状态持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`
+- 运行时控制:`@s on|off|?`、`@s token…`;开关状态与局域网访问令牌都持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`（不含令牌）
+- 局域网访问令牌:首次启动生成 128 位随机令牌并保存,默认不再对全网开放。`@s?` 经加密 BLE 通道返回,`@s token` 重新生成,`@s token=<32 位十六进制>` 指定,`@s token off` 回到无鉴权。握手协议见 [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) 第 8 节
+- 兼容开关:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN`（32 位小写十六进制）用于产线固定令牌,优先级高于自动生成
 - 可选门槛:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 要求客户端在 3 秒内把 token 作为首条文本帧发送
 - 整体关闭:`-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
 
@@ -273,9 +275,12 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
-| `@s?` | `@linkr ws?` | 查询 WebSocket 桥状态 |
-| `@s on` | `@linkr ws on` | 启用 WebSocket 桥 |
-| `@s off` | `@linkr ws off` | 停用 WebSocket 桥 |
+| `@s?` | `@linkr socket?` | 查询 WebSocket 桥状态（含局域网令牌） |
+| `@s on` | `@linkr socket on` | 启用 WebSocket 桥 |
+| `@s off` | `@linkr socket off` | 停用 WebSocket 桥 |
+| `@s token` | `@linkr socket token` | 生成并保存新的局域网访问令牌 |
+| `@s token=<32 位十六进制>` | `@linkr socket token=<32 位十六进制>` | 指定局域网访问令牌 |
+| `@s token off` | `@linkr socket token off` | 关闭局域网鉴权（允许未认证访问） |
 
 ### UART 命令
 

@@ -27,6 +27,7 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/websocket.h>
+#include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
@@ -37,6 +38,9 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
 #define WS_TX_CHUNK 256
 #define WS_AUTH_TIMEOUT_MS 3000
 #define WS_POLL_MS 20
+/* Bound a single TX send so a client that stops reading (full TCP window) is
+ * dropped instead of blocking its handler thread forever. */
+#define WS_TX_TIMEOUT_MS 3000
 
 BUILD_ASSERT((WS_TX_BUF_SIZE & (WS_TX_BUF_SIZE - 1)) == 0,
 	     "LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE must be a power of two");
@@ -44,6 +48,9 @@ BUILD_ASSERT(sizeof(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN) <=
 		     WS_RX_BUF_SIZE,
 	     "WebSocket auth token must fit in one receive buffer");
 
+/* CLAIMED means the socket is registered but not yet authenticated: UART
+ * fan-out only targets ACTIVE clients, and the handshake frame is written
+ * before a client is promoted from CLAIMED to ACTIVE. */
 enum ws_client_state {
 	WS_CLIENT_FREE,
 	WS_CLIENT_CLAIMED,
@@ -91,30 +98,144 @@ static int ws_client_rx_drain_locked(struct ws_client *client, int slot);
 /* ------------------------------------------------------------------------ */
 
 #define WS_SETTINGS_MAGIC 0x4C575320 /* "LWS " */
-#define WS_SETTINGS_VERSION 1
+#define WS_SETTINGS_VERSION 2
+/* v1 stored only {magic, version, enabled}: no token, LAN access unauthenticated. */
+#define WS_SETTINGS_V1_VERSION 1
 
-struct ws_settings {
+/* 128-bit token rendered as lowercase hex: short enough to type from a phone,
+ * long enough that guessing it on a LAN is not practical. */
+#define WS_TOKEN_HEX_LEN 32
+
+struct ws_settings_v1 {
 	uint32_t magic;
 	uint8_t version;
 	uint8_t enabled;
 };
 
+struct ws_settings {
+	uint32_t magic;
+	uint8_t version;
+	uint8_t enabled;
+	char token[WS_TOKEN_HEX_LEN + 1];
+};
+
+static char ws_token[WS_TOKEN_HEX_LEN + 1];
+static bool ws_token_loaded;
+/* Set when a token is required but could not be obtained. The bridge then
+ * refuses to listen rather than exposing the target console unauthenticated. */
+static atomic_t ws_auth_blocked;
+K_MUTEX_DEFINE(ws_token_lock);
+
+static bool ws_token_hex_ok(const char *token)
+{
+	for (size_t i = 0; i < WS_TOKEN_HEX_LEN; i++) {
+		char ch = token[i];
+
+		if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Validate a NUL-terminated string: exactly WS_TOKEN_HEX_LEN lowercase hex. */
+static bool ws_token_str_valid(const char *token)
+{
+	return strlen(token) == WS_TOKEN_HEX_LEN && ws_token_hex_ok(token);
+}
+
+/* Validate the fixed-size settings field, which may be empty (auth disabled)
+ * and is not guaranteed to be terminated if the record was corrupted. */
+static bool ws_token_field_valid(const char *field, size_t capacity)
+{
+	if (field[capacity - 1] != '\0') {
+		return false;
+	}
+	if (!field[0]) {
+		return true;
+	}
+	return ws_token_str_valid(field);
+}
+
+/* Copy the token out for comparison. Returns 0 when LAN access is
+ * unauthenticated, otherwise the token length. */
+static size_t ws_token_snapshot(char *dest, size_t capacity)
+{
+	size_t len;
+
+	k_mutex_lock(&ws_token_lock, K_FOREVER);
+	len = strlen(ws_token);
+	if (len + 1 > capacity) {
+		len = 0;
+		dest[0] = '\0';
+	} else {
+		memcpy(dest, ws_token, len + 1);
+	}
+	k_mutex_unlock(&ws_token_lock);
+
+	return len;
+}
+
+/* Caller must hold ws_token_lock. */
+static int ws_token_generate_locked(void)
+{
+	uint8_t raw[WS_TOKEN_HEX_LEN / 2];
+	int err = sys_csrand_get(raw, sizeof(raw));
+
+	if (err) {
+		LOG_ERR("WebSocket token generation failed: %d", err);
+		return err;
+	}
+	for (size_t i = 0; i < sizeof(raw); i++) {
+		snprintk(&ws_token[i * 2], 3, "%02x", raw[i]);
+	}
+	ws_token[WS_TOKEN_HEX_LEN] = '\0';
+
+	return 0;
+}
+
 static int ws_settings_set(const char *name, size_t len,
 			   settings_read_cb read_cb, void *cb_arg)
 {
 	struct ws_settings settings;
+	struct ws_settings_v1 legacy;
 	ssize_t r;
 
-	if (!settings_name_steq(name, "en", NULL) ||
-	    len != sizeof(settings)) {
+	if (!settings_name_steq(name, "en", NULL)) {
 		return -ENOENT;
 	}
-	r = read_cb(cb_arg, &settings, sizeof(settings));
-	if (r == sizeof(settings) && settings.magic == WS_SETTINGS_MAGIC &&
-	    settings.version == WS_SETTINGS_VERSION && settings.enabled <= 1) {
+
+	if (len == sizeof(settings)) {
+		r = read_cb(cb_arg, &settings, sizeof(settings));
+		if (r != sizeof(settings) || settings.magic != WS_SETTINGS_MAGIC ||
+		    settings.version != WS_SETTINGS_VERSION ||
+		    settings.enabled > 1 ||
+		    !ws_token_field_valid(settings.token,
+					  sizeof(settings.token))) {
+			LOG_WRN("ignoring invalid saved WebSocket settings");
+			return 0;
+		}
 		atomic_set(&ws_enabled, settings.enabled);
+		k_mutex_lock(&ws_token_lock, K_FOREVER);
+		memcpy(ws_token, settings.token, sizeof(ws_token));
+		ws_token_loaded = true;
+		k_mutex_unlock(&ws_token_lock);
+		return 0;
 	}
-	return 0;
+
+	if (len == sizeof(legacy)) {
+		r = read_cb(cb_arg, &legacy, sizeof(legacy));
+		if (r == sizeof(legacy) && legacy.magic == WS_SETTINGS_MAGIC &&
+		    legacy.version == WS_SETTINGS_V1_VERSION &&
+		    legacy.enabled <= 1) {
+			/* Pre-token record: keep the flag and mint a token below. */
+			atomic_set(&ws_enabled, legacy.enabled);
+			ws_token_loaded = false;
+		}
+		return 0;
+	}
+
+	return -ENOENT;
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(linkr_ws, "linkr/ws", NULL, ws_settings_set,
@@ -128,7 +249,54 @@ static int ws_settings_save(bool enabled)
 		.enabled = enabled ? 1 : 0,
 	};
 
+	k_mutex_lock(&ws_token_lock, K_FOREVER);
+	memcpy(settings.token, ws_token, sizeof(settings.token));
+	k_mutex_unlock(&ws_token_lock);
+
 	return settings_save_one("linkr/ws/en", &settings, sizeof(settings));
+}
+
+/* Mint a token when none is available. A build-time token always wins, so
+ * provisioning can pin one without relying on first-boot randomness. */
+static int ws_token_resolve(void)
+{
+	static const char configured[] =
+		CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN;
+	int err;
+
+	if (configured[0]) {
+		if (!ws_token_str_valid(configured)) {
+			LOG_ERR("CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN must be "
+				"exactly %d lowercase hex characters",
+				WS_TOKEN_HEX_LEN);
+			atomic_set(&ws_auth_blocked, 1);
+			return -EINVAL;
+		}
+		k_mutex_lock(&ws_token_lock, K_FOREVER);
+		memcpy(ws_token, configured, WS_TOKEN_HEX_LEN + 1);
+		k_mutex_unlock(&ws_token_lock);
+		return 0;
+	}
+
+	if (ws_token_loaded) {
+		return 0;
+	}
+
+	k_mutex_lock(&ws_token_lock, K_FOREVER);
+	err = ws_token_generate_locked();
+	k_mutex_unlock(&ws_token_lock);
+	if (err) {
+		atomic_set(&ws_auth_blocked, 1);
+		return err;
+	}
+
+	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
+	if (err) {
+		/* The token works for this boot; only persistence failed. */
+		LOG_WRN("persisting WebSocket token failed: %d", err);
+	}
+	ws_token_loaded = true;
+	return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -160,34 +328,75 @@ static void ws_client_cleanup(struct ws_client *client)
 	atomic_set(&client->state, WS_CLIENT_FREE);
 }
 
+/* LAN handshake. The bridge announces whether a token is needed, so a client
+ * never has to guess: sending a stale token to a bridge that no longer requires
+ * one would otherwise be forwarded to the target console as UART input.
+ *
+ *   bridge -> client  "@ws auth=none"      no token; UART streaming starts
+ *   bridge -> client  "@ws auth=required"  send the token as one text frame
+ *   client -> bridge  "<32 lowercase hex>"
+ *   bridge -> client  "@ws auth=ok"        accepted; UART streaming starts
+ *
+ * A mismatch closes the connection without a reply. UART data is always sent as
+ * binary frames, so these text frames are unambiguous. */
+#define WS_AUTH_NONE_FRAME "@ws auth=none\r\n"
+#define WS_AUTH_REQUIRED_FRAME "@ws auth=required\r\n"
+#define WS_AUTH_OK_FRAME "@ws auth=ok\r\n"
+#define WS_HANDSHAKE_TIMEOUT_MS 1000
+
+static int ws_send_text(struct ws_client *client, const char *frame)
+{
+	return websocket_send_msg(client->sock, (const uint8_t *)frame,
+				  strlen(frame), WEBSOCKET_OPCODE_DATA_TEXT,
+				  false, true, WS_HANDSHAKE_TIMEOUT_MS);
+}
+
+/* Returns false when the client must be dropped. Promotes the client to
+ * WS_CLIENT_ACTIVE only once it may receive UART bytes. */
 static bool ws_client_auth(struct ws_client *client, int slot)
 {
-	static const char token[] = CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN;
+	char token[WS_TOKEN_HEX_LEN + 1];
 	struct zsock_pollfd fds[1];
 	uint32_t message_type;
 	uint64_t remaining;
 	int64_t deadline;
-	bool authenticated;
+	size_t token_len;
+	bool authenticated = false;
 	int received;
 
-	if (!token[0]) {
+	token_len = ws_token_snapshot(token, sizeof(token));
+
+	if (token_len == 0) {
+		/* No token configured: no first frame is consumed, so an ad-hoc
+		 * client can still write UART as soon as it sees auth=none. */
+		if (ws_send_text(client, WS_AUTH_NONE_FRAME) < 0) {
+			return false;
+		}
+		atomic_set(&client->state, WS_CLIENT_ACTIVE);
 		return true;
+	}
+
+	if (ws_send_text(client, WS_AUTH_REQUIRED_FRAME) < 0) {
+		return false;
 	}
 
 	fds[0].fd = client->sock;
 	fds[0].events = ZSOCK_POLLIN;
+
+	k_mutex_lock(&ws_rx_lock, K_FOREVER);
+	/* The deadline starts once the shared RX scratch buffer is ours: waiting
+	 * behind another client's parser must not consume this client's window. */
 	deadline = k_uptime_get() + WS_AUTH_TIMEOUT_MS;
 	if (zsock_poll(fds, 1, WS_AUTH_TIMEOUT_MS) <= 0) {
-		return false;
+		goto out;
 	}
 	if (!(fds[0].revents & ZSOCK_POLLIN) ||
 	    (fds[0].revents &
 	     (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL))) {
-		return false;
+		goto out;
 	}
-	k_mutex_lock(&ws_rx_lock, K_FOREVER);
 	/* poll() only proves that some bytes are ready. Let recv finish a frame
-	 * split across TCP packets, while keeping the original auth deadline. */
+	 * split across TCP packets, while keeping the auth deadline. */
 	int32_t timeout_ms = (int32_t)MAX(deadline - k_uptime_get(), 0);
 
 	received = websocket_recv_msg(client->sock, ws_rx_buf,
@@ -196,13 +405,22 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	authenticated = received > 0 && remaining == 0 &&
 			(message_type & WEBSOCKET_FLAG_TEXT) &&
 			(message_type & WEBSOCKET_FLAG_FINAL) &&
-			received == (int)strlen(token) &&
-			!memcmp(ws_rx_buf, token, received);
+			received == (int)token_len &&
+			!memcmp(ws_rx_buf, token, token_len);
 	if (authenticated && ws_client_rx_drain_locked(client, slot) != 0) {
 		authenticated = false;
 	}
+out:
 	k_mutex_unlock(&ws_rx_lock);
-	return authenticated;
+
+	if (!authenticated || ws_send_text(client, WS_AUTH_OK_FRAME) < 0) {
+		return false;
+	}
+
+	/* Fan-out only starts here: an unauthenticated socket must never be
+	 * eligible for UART bytes, and the handshake must stay the first frame. */
+	atomic_set(&client->state, WS_CLIENT_ACTIVE);
+	return true;
 }
 
 static bool ws_client_is_data_fragment(struct ws_client *client,
@@ -279,7 +497,7 @@ static int ws_client_tx_drain(struct ws_client *client)
 		}
 		err = websocket_send_msg(client->sock, buf, got,
 					 WEBSOCKET_OPCODE_DATA_BINARY, false,
-					 true, SYS_FOREVER_MS);
+					 true, WS_TX_TIMEOUT_MS);
 		if (err < 0) {
 			return err;
 		}
@@ -299,10 +517,12 @@ static void ws_client_thread(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		k_sem_take(&client->start_sem, K_FOREVER);
-		if (atomic_get(&client->state) != WS_CLIENT_ACTIVE) {
+		if (atomic_get(&client->state) != WS_CLIENT_CLAIMED) {
 			continue;
 		}
 
+		/* Publishes WS_CLIENT_ACTIVE only after the token is accepted and the
+		 * handshake frame is out, so UART fan-out cannot precede either. */
 		if (!ws_client_auth(client, slot)) {
 			LOG_WRN("[%d] WS auth failed", slot);
 			goto out;
@@ -379,7 +599,8 @@ static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
 	k_mutex_unlock(&client->tx_lock);
 
 	atomic_inc(&active_clients);
-	atomic_set(&client->state, WS_CLIENT_ACTIVE);
+	/* The slot stays CLAIMED until the client thread authenticates it; only
+	 * ws_client_auth() publishes WS_CLIENT_ACTIVE. */
 	k_sem_give(&client->start_sem);
 	return 0;
 }
@@ -436,8 +657,16 @@ static bool ws_service_is_listening(void)
 
 static int ws_server_start(void)
 {
-	int err = http_server_start();
+	int err;
 
+	if (atomic_get(&ws_auth_blocked)) {
+		/* Fail closed: without a token the LAN socket would expose the target
+		 * console to anyone who can reach the port. */
+		LOG_ERR("Refusing to start WS bridge: no auth token available");
+		return -EACCES;
+	}
+
+	err = http_server_start();
 	if (err && err != -EALREADY) {
 		LOG_ERR("HTTP server start failed: %d", err);
 		return err;
@@ -504,10 +733,79 @@ int linkr_ws_init(void)
 				     NET_EVENT_IPV4_ADDR_ADD |
 					     NET_EVENT_IPV4_ADDR_DEL);
 	net_mgmt_add_event_callback(&ws_net_cb);
+
+	/* Settings are already loaded by main.c, so this either adopts the
+	 * persisted token, adopts a build-time token, or mints one. */
+	(void)ws_token_resolve();
+
 	if (atomic_get(&ws_enabled) && linkr_wifi_has_ip()) {
 		return ws_server_start();
 	}
 	return 0;
+}
+
+int linkr_ws_set_token(const char *token)
+{
+	int err;
+
+	if (token && token[0] && !ws_token_str_valid(token)) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ws_token_lock, K_FOREVER);
+	if (token && token[0]) {
+		memcpy(ws_token, token, WS_TOKEN_HEX_LEN + 1);
+	} else {
+		/* Empty token means "no LAN authentication" and is only reachable
+		 * through an explicit command. */
+		ws_token[0] = '\0';
+	}
+	k_mutex_unlock(&ws_token_lock);
+	ws_token_loaded = true;
+	atomic_clear(&ws_auth_blocked);
+
+	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
+	if (err) {
+		LOG_WRN("persisting WebSocket token failed: %d", err);
+	}
+
+	/* Mirror linkr_ws_rotate_token(): recovering from a blocked boot (or any
+	 * enabled-but-not-listening state) must actually start the bridge. */
+	if (atomic_get(&ws_enabled) && linkr_wifi_has_ip() &&
+	    !ws_service_is_listening()) {
+		(void)ws_server_start();
+	}
+
+	LOG_INF("WebSocket LAN auth %s", (token && token[0]) ? "token set" : "disabled");
+	return err;
+}
+
+int linkr_ws_rotate_token(void)
+{
+	int err;
+	bool was_blocked = atomic_get(&ws_auth_blocked) != 0;
+
+	k_mutex_lock(&ws_token_lock, K_FOREVER);
+	err = ws_token_generate_locked();
+	k_mutex_unlock(&ws_token_lock);
+	if (err) {
+		return err;
+	}
+	ws_token_loaded = true;
+	atomic_clear(&ws_auth_blocked);
+
+	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
+	if (err) {
+		LOG_WRN("persisting WebSocket token failed: %d", err);
+	}
+
+	/* Recover from a boot where entropy was unavailable: the bridge refused to
+	 * listen, so start it now that a token exists. */
+	if (was_blocked && atomic_get(&ws_enabled) && linkr_wifi_has_ip()) {
+		(void)ws_server_start();
+	}
+	LOG_INF("WebSocket LAN auth token generated");
+	return err;
 }
 
 int linkr_ws_set_enabled(bool enabled)
@@ -522,7 +820,12 @@ int linkr_ws_set_enabled(bool enabled)
 	if (!enabled) {
 		ws_server_stop();
 	} else if (linkr_wifi_has_ip()) {
-		(void)ws_server_start();
+		/* Surface a fail-closed start (for example, no auth token) instead
+		 * of reporting OK while nothing is actually listening. */
+		err = ws_server_start();
+		if (err) {
+			return err;
+		}
 	}
 	return 0;
 }
@@ -573,12 +876,26 @@ void linkr_ws_feed(const uint8_t *data, size_t len)
 
 int linkr_ws_status(char *buf, size_t len)
 {
-	const char *state = !atomic_get(&ws_enabled) ? "off"
-			    : ws_service_is_listening() ? "on"
-							: "waiting";
+	char token[WS_TOKEN_HEX_LEN + 1];
+	const char *state;
+	size_t token_len;
 
-	return snprintk(buf, len, "ws=%s port=%u clients=%d", state,
-			ws_service_port, (int)atomic_get(&active_clients));
+	if (!atomic_get(&ws_enabled)) {
+		state = "off";
+	} else if (atomic_get(&ws_auth_blocked)) {
+		state = "blocked";
+	} else {
+		state = ws_service_is_listening() ? "on" : "waiting";
+	}
+
+	/* The token is only reported here, never in linkr_ws_diagnostics(): "@s?"
+	 * travels over the encrypted BLE management channel, while "@i?" output is
+	 * routinely pasted into bug reports. */
+	token_len = ws_token_snapshot(token, sizeof(token));
+
+	return snprintk(buf, len, "ws=%s port=%u clients=%d token=%s", state,
+			ws_service_port, (int)atomic_get(&active_clients),
+			token_len ? token : "none");
 }
 
 int linkr_ws_diagnostics(char *buf, size_t len)

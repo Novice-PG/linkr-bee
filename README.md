@@ -97,7 +97,7 @@ for clients that only need basic unframed forwarding.
 | Mode | Best for | Requirements | Available controls |
 | --- | --- | --- | --- |
 | Bluetooth LE | Direct local access and first-time setup | BLE-capable host; Web Bluetooth requires Chrome/Chromium over HTTPS or localhost | Terminal, UART, WiFi, WebDAV, and diagnostics |
-| LAN WebSocket | Reconnecting through an existing local network | Linkr Bee must already be connected to 2.4 GHz WiFi | Terminal data path |
+| LAN WebSocket | Reconnecting through an existing local network | Linkr Bee must already be connected to 2.4 GHz WiFi; the LAN access token read with `@s?` over BLE | Terminal data path |
 
 BLE is the primary provisioning and recovery path because it does not depend on
 the target or local network. LAN mode is an additional choice for established
@@ -215,7 +215,12 @@ BLE UART and management require an encrypted, bonded connection. For a new
 host, hold **GPIO1 to GND** before connecting and accept the host's pairing
 prompt. Release GPIO1 after pairing; saved hosts reconnect without it. Up to
 eight bonds are retained across reboots. See [pairing and recovery](docs/BLE_PAIRING.md).
-This gate protects BLE; LAN WebSocket access uses its separate network/token policy.
+
+The LAN WebSocket bridge requires a 128-bit access token that is generated on
+first boot and reported by `@s?` over the encrypted BLE channel. The browser
+captures it automatically while BLE is connected; `@s token` rotates it and
+`@s token off` restores unauthenticated access. The token gates access but does
+not encrypt the socket: `ws://` traffic is still visible on the local network.
 
 - [Agent task recovery, device profiles and hardware validation (Chinese)](docs/AGENT_VALIDATION.zh-CN.md)
 

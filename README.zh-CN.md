@@ -89,7 +89,7 @@ Nordic UART Service，兼容只需要基础无帧转发的已有客户端。
 | 模式 | 适用场景 | 使用条件 | 可用控制 |
 | --- | --- | --- | --- |
 | Bluetooth LE | 直接访问、首次配置和故障恢复 | 主机支持 BLE；Web Bluetooth 需要 Chrome/Chromium 和 HTTPS 或 localhost | 终端、UART、WiFi、WebDAV 和诊断 |
-| 局域网 WebSocket | 已接入本地网络后的再次连接 | Linkr Bee 已连接 2.4 GHz WiFi | 终端数据通道 |
+| 局域网 WebSocket | 已接入本地网络后的再次连接 | Linkr Bee 已连接 2.4 GHz WiFi，且需经 BLE 执行 `@s?` 取得访问令牌 | 终端数据通道 |
 
 BLE 是主要配置和恢复入口，因为它不依赖目标系统或本地网络。局域网模式是设备
 配置完成后的额外选择，并不替代 BLE。
@@ -203,7 +203,11 @@ UART 一侧使用 3.3 V 逻辑电平。必须与目标设备共地，并交叉�
 BLE 串口与管理服务要求加密连接及绑定。新增主机时，先将 **GPIO1 接地**，
 再连接并接受系统配对；完成后释放 GPIO1。已绑定主机无需拉低引脚即可重连，
 最多保存 8 台主机，重启后保留。操作与恢复方法见[蓝牙配对](docs/BLE_PAIRING.md)。
-此门禁仅保护 BLE；局域网 WebSocket 仍使用独立的网络/token 策略。
+
+局域网 WebSocket 桥默认要求 128 位访问令牌：首次启动时自动生成，只有经加密 BLE
+通道执行 `@s?` 才能读到。浏览器在 BLE 连接期间会自动获取该令牌；`@s token`
+可重新生成，`@s token off` 才回到无鉴权访问。令牌只控制访问，不提供加密：
+`ws://` 流量在同网段仍然可见。
 
 - [Agent 任务恢复、设备档案与实机验收](docs/AGENT_VALIDATION.zh-CN.md)
 
