@@ -194,8 +194,9 @@ secure credential storage are not part of this integration.
 
 Android/iOS load the Pi runtime when first needed. HarmonyOS includes it in the
 inlined ArkWeb bundle so rawfile imports work. Vite dev/production web builds
-also include the assistant; directly serving the unbuilt `web/` directory keeps
-the terminal available and hides the AI entry point.
+also include the assistant, and directly serving the unbuilt `web/` directory
+loads the prebuilt bundle from `web/vendor/agent/` — rebuild it with
+`tools/build_agent_bundle.sh` after changing the runtime or upgrading the SDK.
 
 ## Regression tests
 

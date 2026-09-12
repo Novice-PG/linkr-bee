@@ -30,8 +30,8 @@ target's own UART bytes and does not replace the target shell.
 - Save logs, upload them to WebDAV, and check firmware, UART buffer, WiFi, and
   transfer counters from the diagnostics panel.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
-- Assistant in the phone apps: searches the serial log and can run commands on the
-  target once you approve them.
+- Assistant in the browser and the phone apps: searches the serial log and can run
+  commands on the target once you approve them.
 
 ## What you need
 
@@ -110,10 +110,10 @@ hardware flow control off unless CTS and RTS are both wired.
 </p>
 
 On phones the terminal takes the available space and secondary settings move into a
-drawer. The Android, iOS, and HarmonyOS builds also include the assistant panel; the
-plain web terminal served by `tools/serve_web.sh` does not. See the
-[serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for the model
-endpoint it needs.
+drawer. The assistant is available in the browser and in the phone apps. A browser
+page calls the model endpoint directly, so the endpoint has to accept requests from
+the page: local model servers do, most hosted providers need a proxy. See the
+[serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for setup.
 
 ## LAN mode
 

@@ -26,7 +26,7 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 回车可按 raw、CR、LF、CRLF 发送，适配 Bootloader 和不同 Shell。
 - 日志导出、WebDAV 上传，诊断面板可查固件、UART 缓冲、WiFi 和收发计数。
 - 接入 2.4 GHz 网络后走局域网，不再需要蓝牙。
-- 手机 App 内置助手：检索串口日志，在你批准后向目标机执行命令。
+- 浏览器和手机 App 内置助手：检索串口日志，在你批准后向目标机执行命令。
 
 ## 需要什么
 
@@ -98,9 +98,9 @@ RX 接的是配件 TX，并且除非 CTS 和 RTS 都接了，否则关掉硬件�
   <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee 手机终端" width="360">
 </p>
 
-手机上终端优先占用空间，次要设置收进抽屉。Android、iOS 和 HarmonyOS 版本另外带助手
-面板，`tools/serve_web.sh` 提供的纯 Web 终端没有这个面板，助手需要的模型端点配置见
-[串口助手说明](mobile/README.md#built-in-serial-assistant-pi)。
+手机上终端优先占用空间，次要设置收进抽屉。浏览器和手机 App 都有助手面板。浏览器里的
+模型请求由页面直接发出，需要端点允许来自页面的请求：本地模型服务默认可以，多数云端
+服务需要自建代理。配置方法见[串口助手说明](mobile/README.md#built-in-serial-assistant-pi)。
 
 ## 局域网模式
 

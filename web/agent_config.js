@@ -32,6 +32,17 @@ export function validateAgentConfig({ endpoint, model, apiKey = "" } = {}) {
   return { endpoint: url.href.replace(/\/$/, ""), model: model.trim(), apiKey };
 }
 
+/* A request that never reached the model arrives as an opaque transport error:
+ * the host is unreachable, the browser blocked the cross-origin request (CORS),
+ * or the device is offline. Engines word it differently, and the OpenAI SDK
+ * wraps it as "Connection error." / APIConnectionError, so both are recognised.
+ * Reported separately because the fix is browser-side, not model-side. */
+export function isEndpointUnreachable(error) {
+  if (String(error?.name || "") === "APIConnectionError") return true;
+  const message = String(error?.message || error || "");
+  return /failed to fetch|fetch failed|networkerror|load failed|network request failed|connection error/i.test(message);
+}
+
 // Shared by browser, Capacitor and ArkWeb. Storage errors are surfaced by the UI;
 // never report a successful save or clear when the persistent write failed.
 export function loadAgentConfig(storage) {

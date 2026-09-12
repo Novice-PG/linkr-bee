@@ -1,0 +1,17 @@
+{
+  "entry": "mobile/src/agent-runtime.mjs",
+  "esbuild": "0.28.2",
+  "packages": {
+    "@earendil-works/chord": "0.85.1",
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-telemetry": "0.85.1",
+    "diff": "8.0.4",
+    "ignore": "7.0.5",
+    "openai": "6.40.0",
+    "partial-json": "0.1.7",
+    "typebox": "1.3.7",
+    "yaml": "2.9.0"
+  },
+  "sha256": "5e0d2633fb3beb809aaa4cff4aab85bf2ca92ebe5205586251e528ec653fbe14"
+}

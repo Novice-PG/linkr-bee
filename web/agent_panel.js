@@ -2,6 +2,7 @@ import { bindingReply, targetIdentityCommand, observedTargetId, observedTargetPa
 import { monitorSerialExecution } from "./serial_observation.js";
 import { createTaskStore, deviceIdentity } from "./agent_tasks.js";
 import { available, createSerialAgent } from "./agent_runtime.js";
+import { isEndpointUnreachable } from "./agent_config.js";
 import { createDeviceExecutor } from "./device_executor.js";
 import { requestComputerDownload } from "./local_download.js";
 import { renderAssistantMarkdown } from "./agent_markdown.js";
@@ -50,6 +51,7 @@ const labels = {
   changed: ["设备连接已改变，助手已停止。新连接将使用独立的日志和对话。", "Connection changed; assistant stopped. A new connection uses separate logs and conversation."],
   limit: ["已达到本轮排查步数上限，可以补充信息后继续提问。", "Diagnostic step limit reached. Add information or ask a follow-up."],
   error: ["请求失败：", "Request failed: "],
+  endpointUnreachable: ["模型端点没有响应浏览器请求。确认地址可达；浏览器直连还要求端点允许当前来源（CORS），云端服务通常需要自建代理。", "The model endpoint did not answer a browser request. Check that it is reachable; a direct browser call also requires the endpoint to allow this origin (CORS), and hosted providers usually need a proxy."],
   working: ["处理中…", "Working…"], noOutput: ["暂无新的串口输出。", "No new serial output."],
   delivered: ["输入已发送，尚未确认命令执行结果。", "Input sent; command completion is not yet confirmed."],
   "wait-settled": ["输出暂时稳定，仍需核对执行结果。", "Output settled; the execution result still needs verification."],
@@ -479,7 +481,11 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
     } catch (error) {
       if (currentTask) currentTask.status = "failed";
-      if (version === runVersion) addMessage("assistant", `${text("error")}${error.message}`);
+      if (version === runVersion) {
+        addMessage("assistant", `${text("error")}${error.message}`);
+        // A browser-side failure has a different fix from a model-side error.
+        if (isEndpointUnreachable(error)) addMessage("assistant", text("endpointUnreachable"));
+      }
     } finally {
       persistTask();
       clearTimeout(timer);

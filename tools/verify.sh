@@ -49,6 +49,7 @@ done
 
 python3 -m compileall -q "$repo_dir/tools/linkr_ble_terminal.py"
 sh -n "$repo_dir/tools/serve_web.sh"
+sh -n "$repo_dir/tools/build_agent_bundle.sh"
 sh -n "$repo_dir/tools/flash_firmware.sh"
 sh -n "$repo_dir/tools/build_terminal_binary.sh"
 

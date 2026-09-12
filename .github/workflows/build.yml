@@ -40,6 +40,7 @@ jobs:
           set -euo pipefail
           python3 -m compileall -q tools/linkr_ble_terminal.py
           sh -n tools/serve_web.sh
+          sh -n tools/build_agent_bundle.sh
           sh -n tools/flash_firmware.sh
           sh -n tools/build_terminal_binary.sh
           sh -n tools/verify.sh

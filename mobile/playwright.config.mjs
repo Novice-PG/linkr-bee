@@ -18,10 +18,20 @@ export default defineConfig({
       ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
       : {},
   },
-  webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 8765 --strictPort",
-    url: "http://127.0.0.1:8765",
-    reuseExistingServer: !process.env.CI,
-    stdout: "pipe",
-  },
+  webServer: [
+    {
+      command: "npm run dev -- --host 127.0.0.1 --port 8765 --strictPort",
+      url: "http://127.0.0.1:8765",
+      reuseExistingServer: !process.env.CI,
+      stdout: "pipe",
+    },
+    {
+      /* The plain hosting path documented for desktop users: no bundler, so the
+       * assistant comes from the vendored runtime in web/vendor/agent/. */
+      command: "node browser-test/static-server.mjs 8766 ../web",
+      url: "http://127.0.0.1:8766",
+      reuseExistingServer: !process.env.CI,
+      stdout: "pipe",
+    },
+  ],
 });

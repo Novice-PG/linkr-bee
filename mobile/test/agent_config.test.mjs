@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity } from "../../web/agent_config.js";
+import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable } from "../../web/agent_config.js";
 
 function storage() {
   const values = new Map();
@@ -69,5 +69,21 @@ test("plaintext remote endpoints are reported, loopback and https are not", () =
   assert.deepEqual(endpointSecurity("https://localhost/v1"), { plaintext: false, loopback: true, exposesKey: false });
   for (const bad of ["", "not a url", null, undefined, "ftp://model.test"]) {
     assert.equal(endpointSecurity(bad).exposesKey, false, String(bad));
+  }
+});
+
+test("only requests that never reached the endpoint are reported as unreachable", () => {
+  // Browser engines word a blocked or unreachable cross-origin request differently.
+  for (const message of ["Failed to fetch", "NetworkError when attempting to fetch resource.",
+    "Load failed", "Network request failed", "fetch failed", "Connection error."]) {
+    assert.equal(isEndpointUnreachable(new Error(message)), true, message);
+  }
+  // The OpenAI SDK wraps a transport failure in its own error type.
+  const connectionError = new Error("Connection error.");
+  connectionError.name = "APIConnectionError";
+  assert.equal(isEndpointUnreachable(connectionError), true);
+  for (const error of [new Error("401 Unauthorized"), new Error("model not found"),
+    new Error("endpoint"), new Error("The model returned an empty response"), null, undefined]) {
+    assert.equal(isEndpointUnreachable(error), false, String(error));
   }
 });

@@ -736,6 +736,21 @@ the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
 device chooser by the Management service UUID, which is more reliable than name-only
 filtering on macOS Chromium browsers.
 
+Plain static hosting has no bundler, so the assistant is shipped prebuilt in
+`web/vendor/agent/`. Rebuild it after changing the agent runtime or upgrading the
+SDK:
+
+```sh
+tools/build_agent_bundle.sh
+```
+
+`mobile/test/agent_bundle.test.mjs` fails when the committed bundle no longer
+matches `BUILD.json` or the installed package versions. The Vite (Capacitor) and
+ArkWeb builds alias `web/agent_runtime.js` to the source runtime and ignore this
+bundle. A browser calls the configured model endpoint directly, so that endpoint
+must allow the page's origin (CORS); local model servers do, and hosted providers
+usually need a proxy.
+
 The page can:
 
 - connect to devices advertising the Linkr Management Service UUID
