@@ -358,8 +358,8 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     streamFn: (model, context, options) => {
       checkSession(options?.signal);
       modelRound++;
-      return stream(model, context, { ...options, apiKey: config.apiKey || "keyless", maxTokens: 4096,
-        timeoutMs: 60000, maxRetries: 0 });
+      return stream(model, context, { ...options, apiKey: config.apiKey || "keyless",
+        headers: config.headers || {}, maxTokens: 4096, timeoutMs: 60000, maxRetries: 0 });
     },
     toolExecution: "sequential",
     beforeToolCall: async ({ toolCall }) => {

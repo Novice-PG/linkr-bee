@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable } from "../../web/agent_config.js";
+import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable, parseAgentHeaders, formatAgentHeaders } from "../../web/agent_config.js";
 
 function storage() {
   const values = new Map();
@@ -12,7 +12,7 @@ const config = { endpoint: "https://model.test/v1/", model: " model ", apiKey: "
 test("model settings round-trip endpoint, model and key, and can be removed", () => {
   const store = storage();
   const saved = saveAgentConfig(store, config);
-  assert.deepEqual(saved, { endpoint: "https://model.test/v1", model: "model", apiKey: "device-key" });
+  assert.deepEqual(saved, { endpoint: "https://model.test/v1", model: "model", apiKey: "device-key", headers: {} });
   assert.deepEqual(loadAgentConfig(store), saved);
   clearAgentConfig(store);
   assert.equal(loadAgentConfig(store), null);
@@ -86,4 +86,33 @@ test("only requests that never reached the endpoint are reported as unreachable"
     new Error("endpoint"), new Error("The model returned an empty response"), null, undefined]) {
     assert.equal(isEndpointUnreachable(error), false, String(error));
   }
+});
+
+test("extra request headers round-trip and cannot inject a new request line", () => {
+  assert.deepEqual(parseAgentHeaders("anthropic-dangerous-direct-browser-access: true"), { "anthropic-dangerous-direct-browser-access": "true" });
+  assert.deepEqual(parseAgentHeaders("X-Api-Key: secret\n\nX-Trace: abc  "), { "X-Api-Key": "secret", "X-Trace": "abc" });
+  assert.deepEqual(parseAgentHeaders(""), {});
+  assert.equal(formatAgentHeaders({ "X-Api-Key": "secret", "X-Trace": "abc" }), "X-Api-Key: secret\nX-Trace: abc");
+  assert.equal(formatAgentHeaders(undefined), "");
+
+  for (const bad of ["no colon", ": value", "Bad Name: value", "X-Test:", "X-Test: " + "x".repeat(257)]) {
+    assert.throws(() => parseAgentHeaders(bad), Error, bad);
+  }
+  // The text area is line-based, so one line is one header, and only the first
+  // colon separates the name (a URL value keeps its own colons).
+  assert.deepEqual(parseAgentHeaders("X-Test: ok\r\nX-Evil: 1"), { "X-Test": "ok", "X-Evil": "1" });
+  assert.deepEqual(parseAgentHeaders("Referer: https://host/x"), { Referer: "https://host/x" });
+  // A stored record is not line-based: a newline in a value must be rejected,
+  // otherwise it would add its own header to the request.
+  assert.throws(() => parseAgentHeaders(Array.from({ length: 9 }, (_, i) => `X-${i}: v`).join("\n")), /headers/);
+  assert.throws(() => validateAgentConfig({ endpoint: "https://host/v1", model: "m", headers: { "X-Test": "ok\nX-Evil: 1" } }), Error);
+});
+
+test("saved configuration carries the custom headers", () => {
+  const store = storage();
+  saveAgentConfig(store, { ...config, headers: { "X-Api-Key": "secret" } });
+  assert.deepEqual(loadAgentConfig(store).headers, { "X-Api-Key": "secret" });
+  // Records written before this field existed load with no headers.
+  store.setItem(AGENT_CONFIG_KEY, JSON.stringify({ endpoint: "https://model.test/v1", model: "m", apiKey: "k" }));
+  assert.deepEqual(loadAgentConfig(store).headers, {});
 });

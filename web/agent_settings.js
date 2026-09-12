@@ -1,6 +1,14 @@
 import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
-import { loadAgentConfig, saveAgentConfig, clearAgentConfig, validateAgentConfig, endpointSecurity } from "./agent_config.js";
+import {
+  clearAgentConfig,
+  endpointSecurity,
+  formatAgentHeaders,
+  loadAgentConfig,
+  parseAgentHeaders,
+  saveAgentConfig,
+  validateAgentConfig,
+} from "./agent_config.js";
 
 const labels = {
   bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
@@ -23,6 +31,9 @@ const labels = {
   endpointHint: ["兼容 Chat Completions，例如 https://api.example.com/v1", "Chat Completions compatible, e.g. https://api.example.com/v1"],
   model: ["模型名称", "Model ID"], key: ["API Key", "API key"],
   keyHint: ["无需密钥的本地服务可留空。", "Leave blank for a local service that does not require a key."],
+  headers: ["附加请求头", "Extra request headers"],
+  headersHint: ["每行一个 `名称: 值`。部分端点需要特定请求头才接受浏览器请求，例如 Anthropic 需要 anthropic-dangerous-direct-browser-access: true。", "One `Name: value` per line. Some endpoints only accept a browser request with a specific header, for example Anthropic needs anthropic-dangerous-direct-browser-access: true."],
+  headersError: ["请求头格式无效：每行一个 `名称: 值`，名称只能包含字母、数字和连字符。", "Invalid headers: use one `Name: value` per line, with names limited to letters, digits and hyphens."],
   save: ["保存配置", "Save configuration"], clear: ["清除配置", "Clear configuration"],
   storage: ["配置和 API Key 保存在当前设备的应用 / 浏览器存储中，刷新或重启后保留。清除配置或应用 / 网站数据后删除。", "Configuration and API key are saved in this device's app / browser storage across reloads and restarts. Clear the configuration or app / site data to remove them."],
   notice: ["提问后，助手会把所需串口日志发送到你配置的模型服务。", "When you ask a question, the assistant sends the requested serial logs to your configured model service."],
@@ -46,6 +57,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   section.closest(".controls").classList.add("has-agent-settings");
   const $ = (id) => section.querySelector(`#${id}`);
   const inputs = { endpoint: $("agentEndpoint"), model: $("agentModel"), apiKey: $("agentApiKey") };
+  const headersInput = $("agentHeaders");
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
   let config = null;
   let status = "";
@@ -65,9 +77,11 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   function showStatus(next, failed = false) { status = next; error = failed; renderStatus(); }
   function fill() {
     for (const [name, input] of Object.entries(inputs)) input.value = config?.[name] || "";
+    headersInput.value = formatAgentHeaders(config?.headers);
   }
   function resetErrors() {
     for (const input of Object.values(inputs)) input.removeAttribute("aria-invalid");
+    headersInput.removeAttribute("aria-invalid");
   }
   try { config = loadAgentConfig(localStorage); } catch { showStatus("readError", true); }
   fill();
@@ -76,7 +90,19 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     if (busy) return;
     resetErrors();
     const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
+    try { draft.headers = parseAgentHeaders(headersInput.value); } catch {
+      headersInput.setAttribute("aria-invalid", "true");
+      showStatus("headersError", true);
+      headersInput.focus();
+      return;
+    }
     try { validateAgentConfig(draft); } catch (error) {
+      if (error.message === "headers") {
+        headersInput.setAttribute("aria-invalid", "true");
+        showStatus("headersError", true);
+        headersInput.focus();
+        return;
+      }
       const name = error.message === "model" ? "model" : "endpoint";
       inputs[name].setAttribute("aria-invalid", "true");
       showStatus(`${name}Error`, true);

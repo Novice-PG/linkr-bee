@@ -54,7 +54,7 @@ test("invalid edits and denied storage keep the saved settings and report the fa
   await page.locator("#agentSettingsSave").tap();
   await expect(page.locator("#agentEndpoint")).toHaveAttribute("aria-invalid", "true");
   await expect(page.locator("#agentSettingsStatus")).toContainText("without credentials");
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual(config);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {} });
   await fillSettings(page, { ...config, model: "unsaved-model" });
   await page.evaluate(() => {
     Storage.prototype.setItem = () => { throw new DOMException("Storage blocked", "QuotaExceededError"); };
@@ -64,7 +64,7 @@ test("invalid edits and denied storage keep the saved settings and report the fa
   await expect(page.locator("#agentSettingsStatus")).toContainText("Save failed");
   await page.locator("#agentSettingsClear").tap();
   await expect(page.locator("#agentSettingsStatus")).toContainText("Clear failed");
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual(config);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {} });
 });
 
 test("Agent settings uses the same drawer and returns to the existing conversation draft", async ({ page }) => {
@@ -224,3 +224,35 @@ for (const expanded of [false, true]) {
     await context.close();
   });
 }
+
+test("extra request headers reject malformed input and reach the model request", async ({ page }) => {
+  let sentHeaders = null;
+  await page.route("https://agent.test/v1/chat/completions", async (route) => {
+    sentHeaders = route.request().headers();
+    const chunk = (delta, finish) => JSON.stringify({ id: "x", object: "chat.completion.chunk",
+      created: 1, model: "saved-model", choices: [{ index: 0, delta, finish_reason: finish }] });
+    await route.fulfill({ status: 200, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "*" },
+      contentType: "text/event-stream",
+      body: `data: ${chunk({ role: "assistant", content: "Headers received." }, null)}\n\ndata: ${chunk({}, "stop")}\n\ndata: [DONE]\n\n` });
+  });
+  await openSettings(page);
+  await fillSettings(page);
+  await page.locator("#agentHeaders").fill("Bad Name: value");
+  await page.locator("#agentSettingsSave").tap();
+  await expect(page.locator("#agentSettingsStatus")).toContainText(/Invalid headers|请求头格式无效/);
+  await expect(page.locator("#agentHeaders")).toHaveAttribute("aria-invalid", "true");
+
+  await page.locator("#agentHeaders").fill("anthropic-dangerous-direct-browser-access: true");
+  await saveSettings(page);
+  await page.reload();
+  await page.locator("#panelToggle").tap();
+  await expect(page.locator("#agentHeaders")).toHaveValue("anthropic-dangerous-direct-browser-access: true");
+  // Close the drawer before reaching for the toolbar behind it.
+  await page.locator("#drawerClose").tap();
+
+  await page.locator("#agentButton").click();
+  await page.locator("#agentQuestion").fill("Are you reachable?");
+  await page.locator("#agentAsk").click();
+  await expect(page.locator("#agentMessages")).toContainText("Headers received.");
+  expect(sentHeaders["anthropic-dangerous-direct-browser-access"]).toBe("true");
+});

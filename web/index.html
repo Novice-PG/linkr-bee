@@ -342,6 +342,10 @@
                 <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
                 <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
               </label>
+              <label class="field"><span class="field-label" data-ai-setting="headers">Extra request headers</span>
+                <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
+                <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
+              </label>
               <div class="btn-grid">
                 <button id="agentSettingsSave" class="btn btn-primary" type="submit" data-ai-setting="save">Save configuration</button>
                 <button id="agentSettingsClear" class="btn" type="button" data-ai-setting="clear">Clear configuration</button>

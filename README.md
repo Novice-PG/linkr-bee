@@ -113,7 +113,8 @@ hardware flow control off unless CTS and RTS are both wired.
 On phones the terminal takes the available space and secondary settings move into a
 drawer. The assistant is available in the browser and in the phone apps. A browser
 page calls the model endpoint directly, so the endpoint has to accept requests from
-the page: local model servers do, most hosted providers need a proxy. See the
+the page — most hosted providers and local model servers do. Anthropic needs one
+extra header; see the
 [serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for setup.
 
 ## LAN mode

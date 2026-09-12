@@ -450,3 +450,16 @@ test('abort clears queued instructions and never replays them on a later prompt'
  await agent.prompt('First').catch(()=>{});
  await agent.prompt('Fresh request');assert.equal(turns,2);assert.deepEqual(consumed,[]);
 });
+
+test("configured extra headers reach the provider request", async () => {
+  let seen;
+  const agent = makeAgent({ config: { ...config, headers: { "anthropic-dangerous-direct-browser-access": "true" } },
+    getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
+    sendInput: () => assert.fail("read-only turn must not write"),
+    stream: (model, context, options) => {
+      seen = options.headers;
+      return fakeStream(() => [{ type: "text", text: "ok" }])(model, context);
+    } });
+  await agent.prompt("hello");
+  assert.deepEqual(seen, { "anthropic-dangerous-direct-browser-access": "true" });
+});

@@ -745,11 +745,20 @@ tools/build_agent_bundle.sh
 ```
 
 `mobile/test/agent_bundle.test.mjs` fails when the committed bundle no longer
-matches `BUILD.json` or the installed package versions. The Vite (Capacitor) and
-ArkWeb builds alias `web/agent_runtime.js` to the source runtime and ignore this
-bundle. A browser calls the configured model endpoint directly, so that endpoint
-must allow the page's origin (CORS); local model servers do, and hosted providers
-usually need a proxy.
+matches `BUILD.json`, the bundled sources or the installed package versions. The
+Vite (Capacitor) and ArkWeb builds alias `web/agent_runtime.js` to the source
+runtime and ignore this bundle.
+
+A browser calls the configured model endpoint directly, so the endpoint must
+answer the page's origin. Verified with an `OPTIONS` preflight from
+`http://127.0.0.1:8765` (2026-09): DeepSeek, OpenAI, Moonshot, Zhipu,
+SiliconFlow, Gemini and OpenRouter all return `access-control-allow-origin`
+(echoing the origin or `*`), so they work without a proxy. Anthropic answers the
+preflight only when the request carries
+`anthropic-dangerous-direct-browser-access: true`, which the extra-headers field
+in the AI settings sends. Groq refused both the preflight and the request from a
+browser origin; an endpoint like that needs a proxy. A refusal is reported to the
+user as a browser-side failure instead of a silent error.
 
 The page can:
 

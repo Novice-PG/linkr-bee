@@ -38,9 +38,11 @@
   `web/agent_runtime.js` 改为按需动态加载该 bundle。
 - 静态入口不需要 npm、不需要构建即可使用助手；Vite / Capacitor / ArkWeb 构建仍走
   原有别名，行为不变。
-- 浏览器直连模型端点受 CORS 限制：本地模型（Ollama、LM Studio、llama.cpp）与
-  允许浏览器请求的网关可直接使用；云端厂商多数不返回 CORS 头，需要在提示中说明，
-  并给出可读的失败原因。
+- 浏览器直连模型端点需要端点接受页面来源。2026-09 用 `OPTIONS` 预检从
+  `http://127.0.0.1:8765` 实测：DeepSeek、OpenAI、Moonshot、智谱、SiliconFlow、
+  Gemini、OpenRouter 都返回 `access-control-allow-origin`，可直接使用；Anthropic
+  需要附加请求头 `anthropic-dangerous-direct-browser-access: true`；Groq 拒绝浏览器
+  来源，这类端点才需要代理。端点拒绝时给出可读的浏览器侧原因。
 - 验收：静态入口（`tools/serve_web.sh`）出现助手入口并能完成一次"提问 → 工具调用
   → 回答"；vendor 包与依赖版本一致，且有测试覆盖；纯 Web 路径不再零测试。
 
@@ -83,6 +85,11 @@
   组成，`applied=false` 表示配件没有报告目标值。
 - WiFi 密码只经蓝牙管理通道发送，不进入工具结果、任务记录或审批卡片（用户自己
   输入的问题文本仍按原样保留）。
+- AI 设置新增"附加请求头"字段（每行一个 `名称: 值`，最多 8 条），用于 Anthropic
+  这类需要特殊请求头的端点；名称与值都做了校验，存储记录无法借此注入新请求行。
+  相关测试：`mobile/test/agent_config.test.mjs`、
+  `mobile/test/serial_agent.test.mjs`（请求头确实发给 provider）、
+  `mobile/browser-test/agent_settings.spec.mjs`（保存、非法输入、实际请求携带）。
 - 测试：`mobile/test/accessory_control.test.mjs`（协议与校验）、
   `mobile/test/accessory_tools.test.mjs`（工具注入与拒绝路径）、
   `mobile/browser-test/accessory.spec.mjs`（审批、拒绝、密码不外泄）。
