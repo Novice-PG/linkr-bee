@@ -18,12 +18,12 @@
     "web/agent_config.js": "7f525fd63b0706a8904943cc991c755a4ff62c09a504a5e2afd867a64c2f54fe",
     "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
     "web/agent_execution_policy.js": "13b732aa8dee6030db2e1b167290876e8d1fd917caf94cb6516b62096e8f29ed",
-    "mobile/src/agent-prompt.mjs": "9e58f535eee05ec6dbcad5cc42816554a8b394e6699ab732c17eb45889c858d4",
+    "mobile/src/agent-prompt.mjs": "df871188b9764e0efdfcd3d7797f28da7a682b0d7a67e7904a0c712757f2c6b0",
     "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
     "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
     "mobile/src/agent-context.mjs": "67e2cda76ce337fc432392263c1b0c2bccbeb937ac07d7a6f15df031f258c70e",
-    "mobile/src/pi-agent.mjs": "a44f6aa2c8c79e11188246a26cd6851216fc7e2dc4461bbced7b74bf8a17f78e",
+    "mobile/src/pi-agent.mjs": "d5a7450e47593b5ab933cca932c573da16b6ce51746379a4c85b5a101f881d64",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "6dd8884da5a12305c4c81e90e0ccc78b5642961bf0d8d48b609f6f628432c95a"
+  "sha256": "548ae92d87912a2b8d4c0b559ee783ac9b2d8a212c958ef80746b345d9615028"
 }

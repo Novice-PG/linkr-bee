@@ -32,7 +32,9 @@ target's own UART bytes and does not replace the target shell.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
 - Assistant in the browser and the phone apps: searches the serial log, runs
   commands on the target once you approve them, and changes the bridge's own
-  UART, WiFi and log-upload settings under the same approval.
+  UART, WiFi and log-upload settings under the same approval. It remembers facts
+  about each target between sessions, counts the tokens it used, and can export
+  the whole diagnosis as a Markdown report.
 
 ## What you need
 

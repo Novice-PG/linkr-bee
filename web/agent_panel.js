@@ -7,6 +7,9 @@ import { createDeviceExecutor } from "./device_executor.js";
 import { requestComputerDownload } from "./local_download.js";
 import { renderAssistantMarkdown } from "./agent_markdown.js";
 import { requestAccessoryApproval } from "./accessory_control.js";
+import { createNoteStore } from "./agent_notes.js";
+import { addUsage, emptyUsage, estimateCost, formatCost, formatTokens, loadPricing } from "./agent_usage.js";
+import { buildTaskReport } from "./agent_report.js";
 
 /* Smallest usable picker height. The list scrolls, so staying clear of the
  * composer matters more than showing every mode at once. */
@@ -71,6 +74,13 @@ const labels = {
   "observation-prompt-returned": ["检测到 Shell 提示符返回，仍需核对输出。", "A shell prompt returned; the output still needs verification."],
   "observation-interrupted": ["连接或终端输入已变化，已停止关联后续输出。", "Connection or terminal input changed; subsequent output is no longer attributed to this action."],
   verificationNeeded: ["命令已结束，目标结果仍需验证", "Command completed; verify the intended result"],
+  usageTokens: ["本轮 token", "Tokens this conversation"],
+  usageCost: ["估算费用", "Estimated cost"],
+  usageNoPrice: ["未配置费率", "Prices not set"],
+  notesTitle: ["设备笔记（跨连接保留）", "Device notes (kept across reconnects)"],
+  noteDelete: ["删除", "Delete"],
+  exportReport: ["导出报告", "Export report"],
+  remember_target_note: ["记录设备事实", "Remember a target fact"],
   evidence: ["后续串口输出：", "Subsequent serial output:"], truncated: ["输出已截断。", "Output truncated."],
   connected: ["已连接", "Connected"], disconnected: ["未连接", "Disconnected"],
   probe_download_tools: ["探测目标机下载工具", "Probe download tools"],
@@ -127,10 +137,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     <p id="agentConsole" class="agent-console"></p>
     <details class="agent-history" id="agentHistory"><summary data-ai="history"></summary>
       <p data-ai="taskNote"></p><p id="agentProfile"></p>
-      <div class="agent-actions"><button class="btn" type="button" id="agentProbe" data-ai="refreshProfile"></button><button class="btn" type="button" id="agentForget" data-ai="forgetTasks"></button></div>
+      <div id="agentNotes"></div>
+      <div class="agent-actions"><button class="btn" type="button" id="agentProbe" data-ai="refreshProfile"></button><button class="btn" type="button" id="agentExport" data-ai="exportReport"></button><button class="btn" type="button" id="agentForget" data-ai="forgetTasks"></button></div>
       <div id="agentTasks"></div><p id="agentStorageError" role="status"></p></details>
     <div id="agentMessages" class="agent-messages" role="log" aria-live="polite"><p class="agent-empty" data-ai="empty"></p></div>
     <p id="agentStatus" class="agent-status" role="status"></p>
+    <p id="agentUsage" class="agent-usage" role="status"></p>
     <div id="agentQueueControls" class="agent-queue-controls" hidden>
       <p data-ai="queueHelp"></p>
       <div class="agent-actions"><button class="btn" type="button" id="agentSteer" data-ai="steer"></button><button class="btn" type="button" id="agentFollowUp" data-ai="followUp"></button></div>
@@ -174,12 +186,33 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let bindingState = null;
   let rememberedProfile = null;
   let autoIdentitySession = null;
-  const device = createDeviceExecutor({ getStatus: () => ({...getStatus(), targetBinding:bindingState, rememberedProfile}), readLog, prepareInput, sendInput, onRecord: renderExecution });
+  /* Notes are part of the status the assistant sees, so get_device_status shows
+   * them without a separate tool; the executor keeps them out of its own
+   * decisions, they are context for the model. */
+  const agentStatus = () => { const status = {...getStatus(), targetBinding:bindingState, rememberedProfile};
+    return {...status, notes: noteStore.list(deviceIdentity(status))}; };
+  const device = createDeviceExecutor({ getStatus: agentStatus, readLog, prepareInput, sendInput, onRecord: renderExecution });
   let observeTimer = null;
   const taskStore = createTaskStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
+  const noteStore = createNoteStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
+  let conversationUsage = emptyUsage();
   let currentTask = null, recovery = null;
   let taskTimer = null;
   let historySignature = "";
+  /* Token use is per conversation: it resets with the conversation, not with the
+   * page, and prices are display-only so editing them never stops a run. */
+  function renderUsage() {
+    const el = $("agentUsage");
+    if (!conversationUsage.messages) { el.textContent = ""; return; }
+    const cost = estimateCost(conversationUsage, loadPricing(localStorage));
+    el.textContent = [
+      `${text("usageTokens")} ${formatTokens(conversationUsage.totalTokens)}`,
+      `↑${formatTokens(conversationUsage.input)} ↓${formatTokens(conversationUsage.output)}`
+        + (conversationUsage.cacheRead ? ` ⚡${formatTokens(conversationUsage.cacheRead)}` : ""),
+      cost ? `${text("usageCost")} ~$${formatCost(cost.total)}` : text("usageNoPrice"),
+    ].join(" · ");
+  }
+
   function persistTask() {
     if (!currentTask) return;
     try { taskStore.save(currentTask); } catch { $("agentStorageError").textContent = text("storageError"); }
@@ -193,10 +226,33 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     $("agentProfile").textContent = profile ? [profile.stale && text("staleProfile"), profile.model || profile.system, profile.os, profile.storage, profile.tools.join(", ")].filter(Boolean).join("\n") : text("noProfile");
     $("agentProbe").disabled = busy || !status.connected;
     $("agentForget").disabled = busy;
-    const tasks = taskStore.list(deviceIdentity(status));
-    const signature = JSON.stringify([deviceIdentity(status),busy,tasks,getLang()]);
+    const key = deviceIdentity(status);
+    const tasks = taskStore.list(key);
+    const notes = noteStore.list(key);
+    $("agentExport").disabled = !tasks.length && !notes.length && !device.getRecords().length;
+    const signature = JSON.stringify([key,busy,tasks,notes,getLang()]);
     if (signature === historySignature) return;
     historySignature = signature;
+    const notesList = $("agentNotes");
+    notesList.replaceChildren();
+    if (notes.length) {
+      const heading = document.createElement("p");
+      heading.textContent = text("notesTitle");
+      notesList.append(heading);
+      for (const note of notes) {
+        const row = document.createElement("p");
+        row.className = "agent-note";
+        row.textContent = note.evidence ? `${note.text} — ${note.evidence}` : note.text;
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.className = "btn"; remove.textContent = text("noteDelete");
+        remove.addEventListener("click", () => {
+          try { noteStore.remove(key, note.id); } catch { $("agentStorageError").textContent = text("storageError"); }
+          historySignature = ""; refreshHistory();
+        });
+        row.append(" ", remove);
+        notesList.append(row);
+      }
+    }
     const list = $("agentTasks"), expanded = new Set([...list.querySelectorAll("details[open]")].map(el => el.dataset.task));
     list.replaceChildren();
     for (const task of tasks) {
@@ -385,6 +441,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     }, 100);
   }
   function clearConversation() {
+    conversationUsage = emptyUsage();
+    renderUsage();
     currentTask = null; recovery = null;
     device.reset();
     executionRows.clear();
@@ -400,6 +458,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if(event.type==='queued_input_consumed') {
       addMessage('user',event.item.text);
       if(currentTask){currentTask.goal=(currentTask.goal+'\n'+event.item.text).slice(0,4000);persistTask();}
+    }
+    if (event.type === "message_end" && event.message.role === "assistant" && event.message.usage) {
+      conversationUsage = addUsage(conversationUsage, event.message.usage);
+      renderUsage();
     }
     if (event.type === "message_start" && event.message.role === "assistant") answer = null;
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -450,6 +512,21 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = null;
     }
   }
+  $("agentExport").addEventListener("click", () => {
+    const status = device.getStatus();
+    const key = deviceIdentity(status);
+    const report = buildTaskReport({
+      lang: getLang(), device: key || status.device || "",
+      task: currentTask, tasks: taskStore.list(key), records: device.getRecords(), notes: noteStore.list(key),
+    });
+    const url = URL.createObjectURL(new Blob([report], { type: "text/markdown" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `linkr-agent-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
   $("agentForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const question = $("agentQuestion").value.trim();
@@ -486,6 +563,14 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
               body.textContent = "";
               await requestAccessoryApproval({ container: body, command, lang: getLang(), signal });
               return accessory.execute({ action, args, command, signal });
+            },
+          },
+          notes: {
+            remember: async ({text: noteText, evidence, signal}) => {
+              signal?.throwIfAborted();
+              const stored = noteStore.add(deviceIdentity(device.getStatus()), { text: noteText, evidence });
+              historySignature = ""; refreshHistory();
+              return stored;
             },
           },
           computerDownload: ({id,args,signal}) => {

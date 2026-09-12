@@ -9,6 +9,7 @@ import {
   saveAgentConfig,
   validateAgentConfig,
 } from "./agent_config.js";
+import { loadPricing, savePricing } from "./agent_usage.js";
 
 const labels = {
   bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
@@ -33,6 +34,9 @@ const labels = {
   keyHint: ["无需密钥的本地服务可留空。", "Leave blank for a local service that does not require a key."],
   headers: ["附加请求头", "Extra request headers"],
   headersHint: ["每行一个 `名称: 值`。部分端点需要特定请求头才接受浏览器请求，例如 Anthropic 需要 anthropic-dangerous-direct-browser-access: true。", "One `Name: value` per line. Some endpoints only accept a browser request with a specific header, for example Anthropic needs anthropic-dangerous-direct-browser-access: true."],
+  pricing: ["Token 单价（每 100 万，可选）", "Token prices per 1M (optional)"],
+  pricingHint: ["填了就按它估算本轮费用，只用于显示，留空则只显示 token 数。", "When set, the conversation shows an estimated cost; leave blank to show token counts only."],
+  pricingError: ["单价必须是 0 到 100000 之间的数字。", "Prices must be numbers between 0 and 100000."],
   headersError: ["请求头格式无效：每行一个 `名称: 值`，名称只能包含字母、数字和连字符。", "Invalid headers: use one `Name: value` per line, with names limited to letters, digits and hyphens."],
   save: ["保存配置", "Save configuration"], clear: ["清除配置", "Clear configuration"],
   storage: ["配置和 API Key 保存在当前设备的应用 / 浏览器存储中，刷新或重启后保留。清除配置或应用 / 网站数据后删除。", "Configuration and API key are saved in this device's app / browser storage across reloads and restarts. Clear the configuration or app / site data to remove them."],
@@ -58,6 +62,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   const $ = (id) => section.querySelector(`#${id}`);
   const inputs = { endpoint: $("agentEndpoint"), model: $("agentModel"), apiKey: $("agentApiKey") };
   const headersInput = $("agentHeaders");
+  const priceInputs = { input: $("agentPriceInput"), output: $("agentPriceOutput") };
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
   let config = null;
   let status = "";
@@ -78,10 +83,13 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   function fill() {
     for (const [name, input] of Object.entries(inputs)) input.value = config?.[name] || "";
     headersInput.value = formatAgentHeaders(config?.headers);
+    const pricing = loadPricing(localStorage);
+    for (const [name, input] of Object.entries(priceInputs)) input.value = pricing[name] ? String(pricing[name]) : "";
   }
   function resetErrors() {
     for (const input of Object.values(inputs)) input.removeAttribute("aria-invalid");
     headersInput.removeAttribute("aria-invalid");
+    for (const input of Object.values(priceInputs)) input.removeAttribute("aria-invalid");
   }
   try { config = loadAgentConfig(localStorage); } catch { showStatus("readError", true); }
   fill();
@@ -120,6 +128,15 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     }
     try { config = saveAgentConfig(localStorage, draft); } catch {
       showStatus("saveError", true);
+      return;
+    }
+    /* Prices are display-only, so they are stored apart from the model
+     * configuration: editing them must not restart the conversation. */
+    try { savePricing(localStorage, { input: priceInputs.input.value, output: priceInputs.output.value }); }
+    catch {
+      priceInputs.input.setAttribute("aria-invalid", "true");
+      showStatus("pricingError", true);
+      priceInputs.input.focus();
       return;
     }
     fill();

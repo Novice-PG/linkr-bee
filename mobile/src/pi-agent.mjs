@@ -10,7 +10,7 @@ import { readWebPage } from "./web-reader.mjs";
 import { compactAgentContext, settleAgentHistory } from "./agent-context.mjs";
 export { validateAgentConfig } from "../../web/agent_config.js";
 
-export function createSerialAgent({ config, device, onEvent, stream = streamSimple, webReader = readWebPage, computerDownload, accessory = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = streamSimple, webReader = readWebPage, computerDownload, accessory = null, notes = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
   config = validateAgentConfig(config);
   const sessionId = device.getStatus().sessionId;
   let executionMode = device.mode;
@@ -342,9 +342,32 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
     );
   }
 
+  /* Durable notes about a target. The panel stores them per device identity and
+   * shows them back through get_device_status on later sessions, so the model
+   * decides what is worth keeping but never owns the storage. */
+  if (notes) {
+    tools.push({
+      name: "remember_target_note", label: "Remember a target fact",
+      description: "Store one durable fact about this target for later sessions: a console quirk, the UART format that works, tools that are present or missing, a known-broken peripheral. Only record what evidence in this conversation showed, and say which observation supports it. Never store credentials or API keys, never a hypothesis you have not verified, and never transient state such as current disk usage, uptime or process lists. The note comes back in get_device_status.notes; repeating a fact already stored is not an error. The user can delete notes at any time.",
+      parameters: Type.Object({
+        text: Type.String({ minLength: 1, maxLength: 600 }),
+        evidence: Type.String({ minLength: 1, maxLength: 200 }),
+      }, { additionalProperties: false }),
+      execute: async (_id, { text, evidence }, signal) => {
+        checkSession(signal);
+        const stored = await notes.remember({ text, evidence, signal });
+        return result({
+          source: "assistant-note",
+          stored: { id: stored.id, text: stored.text, evidence: stored.evidence, duplicate: stored.duplicate },
+          note: "This is the assistant's own record, not device evidence; it is shown to you when this target is connected again.",
+        });
+      },
+    });
+  }
+
   const agent = new Agent({
     initialState: {
-      systemPrompt: serialSystemPrompt(executionMode, { accessory: Boolean(accessory) }),
+      systemPrompt: serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) }),
       model: {
         id: config.model, name: config.model, provider: "linkr-custom",
         api: "openai-completions", baseUrl: config.endpoint,
@@ -412,7 +435,7 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
       if (agent.state.isStreaming) throw new Error("Agent is already processing. Wait for the current run to stop.");
       executionMode = device.mode;
       checkSession();
-      agent.state.systemPrompt = serialSystemPrompt(executionMode, { accessory: Boolean(accessory) });
+      agent.state.systemPrompt = serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) });
       agent.state.messages = compactAgentContext(settleAgentHistory(agent.state.messages));
       downloadStage = false;
       recovering = !!recovery; statusRound = null; logRound = null;

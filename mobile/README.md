@@ -192,6 +192,16 @@ The endpoint must allow requests from the app's WebView origin
 a trusted local development network. Subscription/OAuth login and native
 secure credential storage are not part of this integration.
 
+Facts the assistant verified about a target — console quirks, the UART format
+that works, tools that are missing — can be stored as device notes
+(`remember_target_note`). They are kept per device identity, redacted like task
+summaries, capped per device, shown in the panel where the user can delete them,
+and returned to the assistant through `get_device_status.notes` on later
+sessions. The panel also shows the tokens each conversation used and an
+estimated cost when you enter the endpoint's prices (display-only, stored apart
+from the model configuration), and exports the goal, plan, executions and notes
+as a Markdown report.
+
 The assistant can also read Linkr Bee's own diagnostics and change its UART
 format, WiFi and WebDAV configuration over the encrypted management channel.
 `get_accessory_diagnostics` is read-only; every change waits for one explicit

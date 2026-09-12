@@ -346,6 +346,13 @@
                 <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
                 <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
               </label>
+              <label class="field"><span class="field-label" data-ai-setting="pricing">Token prices per 1M (optional)</span>
+                <span class="field-row pricing">
+                  <input id="agentPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="input" aria-label="input price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
+                  <input id="agentPriceOutput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="output" aria-label="output price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
+                </span>
+                <span id="agentPricingHint" class="field-hint" data-ai-setting="pricingHint"></span>
+              </label>
               <div class="btn-grid">
                 <button id="agentSettingsSave" class="btn btn-primary" type="submit" data-ai-setting="save">Save configuration</button>
                 <button id="agentSettingsClear" class="btn" type="button" data-ai-setting="clear">Clear configuration</button>
