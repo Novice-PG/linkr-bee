@@ -30,8 +30,9 @@ target's own UART bytes and does not replace the target shell.
 - Save logs, upload them to WebDAV, and check firmware, UART buffer, WiFi, and
   transfer counters from the diagnostics panel.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
-- Assistant in the browser and the phone apps: searches the serial log and can run
-  commands on the target once you approve them.
+- Assistant in the browser and the phone apps: searches the serial log, runs
+  commands on the target once you approve them, and changes the bridge's own
+  UART, WiFi and log-upload settings under the same approval.
 
 ## What you need
 

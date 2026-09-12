@@ -25,6 +25,15 @@ test("the bundle is browser-loadable", () => {
   assert.doesNotMatch(source, /["']@earendil-works\//, "bundle must not leave bare import specifiers");
 });
 
+test("the bundle was built from the current source files", () => {
+  const sources = build.sources || {};
+  assert.ok(Object.keys(sources).length > 0, "BUILD.json must record the bundled project sources");
+  for (const [file, digest] of Object.entries(sources)) {
+    const actual = createHash("sha256").update(readFileSync(`${ROOT}${file}`)).digest("hex");
+    assert.equal(actual, digest, `${file} changed after the bundle was built; rerun tools/build_agent_bundle.sh`);
+  }
+});
+
 test("every bundled package is still at the version it was built from", () => {
   for (const [name, version] of Object.entries(build.packages)) {
     const manifest = JSON.parse(readFileSync(`${ROOT}mobile/node_modules/${name}/package.json`, "utf8"));

@@ -1,6 +1,21 @@
 "use strict";
 
 import { createLanTokenStore } from "./lan_token_store.js";
+import {
+  DIAGNOSTICS_COMMAND,
+  UART_QUERY_COMMAND,
+  WIFI_QUERY_COMMAND,
+  WEBDAV_QUERY_COMMAND,
+  parseInfoGroups,
+  parseUartSettings,
+  parseWebdavStatus,
+  parseWifiStatus,
+  redactCommand,
+  replyStatus,
+  setUartCommand,
+  webdavCommand,
+  wifiCommand,
+} from "./accessory_control.js";
 
 import {
   ManagementResponseTracker,
@@ -60,6 +75,10 @@ const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
 const WIFI_SCAN_TIMEOUT_MS = 50000;
+/* Assistant-facing state: one in-flight `@i?` collection and the waiters for a
+ * scan the assistant started. Both settle from the existing event handlers. */
+let infoCollection = null;
+const scanWaiters = [];
 const WS_CONNECT_TIMEOUT_MS = 15000;
 const bleTransport = window.LinkrBleTransport;
 const coarsePointerMedia = window.matchMedia("(pointer: coarse)");
@@ -1644,6 +1663,12 @@ function renderDiagnostics() {
 
 function handleInfoLine(line) {
   const payload = line.slice("@info ".length).trim();
+  /* The assistant reads diagnostics as one collection: `@i?` answers with
+   * several "@info <group> …" frames terminated by "@info done". */
+  if (infoCollection) {
+    infoCollection.lines.push(String(line).trim());
+    if (payload === "done") settleInfoCollection(true);
+  }
   if (payload === "done") {
     renderDiagnostics();
     toast(t("diagnosticsUpdated"));
@@ -1663,6 +1688,40 @@ function handleInfoLine(line) {
     }
   }
   state.diagnostics[group] = fields;
+}
+
+/* Settle the assistant's diagnostics collection. A missing "@info done" (lost
+ * frame, disconnect, aborted run) still resolves, flagged as unsettled, so the
+ * model is told the reading is incomplete instead of waiting forever. */
+function settleInfoCollection(settled) {
+  const collection = infoCollection;
+  if (!collection) return;
+  infoCollection = null;
+  clearTimeout(collection.timer);
+  collection.signal?.removeEventListener("abort", collection.onAbort);
+  collection.resolve({ lines: collection.lines, groups: parseInfoGroups(collection.lines), settled });
+}
+
+/* Read `@i?` as one collection of "@info …" frames for the assistant. The
+ * button path keeps its own requestDiagnostics() and shares state.diagnostics. */
+function collectAccessoryDiagnostics({ signal, timeoutMs = 8000 } = {}) {
+  if (infoCollection) {
+    return Promise.reject(new Error("A diagnostics request is already in flight."));
+  }
+  return new Promise((resolve, reject) => {
+    const collection = { lines: [], resolve, signal, timer: 0, onAbort: null };
+    collection.timer = setTimeout(() => settleInfoCollection(false), timeoutMs);
+    collection.onAbort = () => settleInfoCollection(false);
+    signal?.addEventListener("abort", collection.onAbort, { once: true });
+    infoCollection = collection;
+    sendControl(DIAGNOSTICS_COMMAND).catch((error) => {
+      if (infoCollection !== collection) return;
+      infoCollection = null;
+      clearTimeout(collection.timer);
+      signal?.removeEventListener("abort", collection.onAbort);
+      reject(error);
+    });
+  });
 }
 
 function feedManagementText(text) {
@@ -1750,7 +1809,7 @@ async function scanWifi() {
     !hasManagementCapability(MGMT_CAP_WIFI) ||
     !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS)
   ) {
-    return;
+    return { networks: [], failed: true, unavailable: true };
   }
   state.scanning = true;
   state.scanResults = [];
@@ -1759,6 +1818,9 @@ async function scanWifi() {
   elements.wifiScanButton.disabled = true;
   clearTimeout(state.scanTimer);
   state.scanTimer = setTimeout(finishScan, WIFI_SCAN_TIMEOUT_MS);
+  /* Resolve when the device reports completion, so the assistant can cite the
+   * networks instead of assuming the scan worked. */
+  const outcome = new Promise((resolve) => scanWaiters.push(resolve));
   try {
     await sendControl(WIFI_SCAN_CMD);
     toast(t("scanning"));
@@ -1766,6 +1828,7 @@ async function scanWifi() {
     appendLine("[error] " + error.message);
     finishScan(true);
   }
+  return outcome;
 }
 
 function finishScan(failed = false) {
@@ -1775,6 +1838,9 @@ function finishScan(failed = false) {
   state.scanning = false;
   clearTimeout(state.scanTimer);
   updateWifiDatalist();
+  /* An assistant-driven scan waits for exactly this outcome. */
+  const outcome = { networks: failed ? [] : [...state.scanResults], failed };
+  for (const resolve of scanWaiters.splice(0)) resolve(outcome);
   elements.wifiScanButton.disabled = !(
     state.connected &&
     hasManagementCapability(MGMT_CAP_WIFI) &&
@@ -3520,6 +3586,77 @@ function bind() {
   );
 }
 
+function accessoryCapability() {
+  if (state.mode !== "ble" || !state.mgmtReady) {
+    return {
+      available: false,
+      reason: "Accessory settings need a Bluetooth LE connection; LAN mode carries the terminal data path only.",
+    };
+  }
+  return {
+    available: true,
+    wifi: hasManagementCapability(MGMT_CAP_WIFI),
+    webdav: hasManagementCapability(MGMT_CAP_WEBDAV),
+    asyncEvents: hasManagementCapability(MGMT_CAP_ASYNC_EVENTS),
+  };
+}
+
+function accessoryCommand(action, args = {}) {
+  switch (action) {
+    case "set-uart": return setUartCommand(args);
+    case "set-wifi": return wifiCommand(args);
+    case "set-webdav": return webdavCommand(args);
+    default: throw new Error(`Unknown accessory action: ${action}`);
+  }
+}
+
+/* Read one status command until it reports a terminal state or the deadline
+ * passes, so a "queued" acknowledgement is never mistaken for the result. */
+async function pollAccessoryStatus(command, parse, isSettled, { signal, timeoutMs = 20000, intervalMs = 1500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let value = null;
+  for (;;) {
+    signal?.throwIfAborted();
+    value = parse(await sendControl(command, { returnResponse: true }));
+    if (value && isSettled(value)) return { value, settled: true };
+    if (Date.now() >= deadline) return { value, settled: false };
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+async function executeAccessoryChange({ action, args = {}, command, signal }) {
+  signal?.throwIfAborted();
+  const reply = String((await sendControl(command, { returnResponse: true })) ?? "");
+  const status = replyStatus(reply);
+  const evidence = { command: redactCommand(command), reply: redactSecrets(reply), accepted: status.ok };
+  if (!status.ok) {
+    return { ...evidence, error: status.error || "The accessory did not accept the command." };
+  }
+  if (action === "set-uart") {
+    const wanted = setUartCommand(args);
+    const queried = await pollAccessoryStatus(
+      UART_QUERY_COMMAND, parseUartSettings,
+      (value) => `@u=${value.baud},${value.dataBits},${value.parity},${value.stopBits},${value.flow}` === wanted,
+      { signal, timeoutMs: 6000, intervalMs: 800 },
+    );
+    return { ...evidence, confirmed: queried.value, settled: queried.settled,
+      applied: Boolean(queried.value) && `@u=${queried.value.baud},${queried.value.dataBits},${queried.value.parity},${queried.value.stopBits},${queried.value.flow}` === wanted };
+  }
+  if (action === "set-wifi") {
+    const wantOff = String(args.action ?? "connect").toLowerCase() === "off";
+    const queried = await pollAccessoryStatus(
+      WIFI_QUERY_COMMAND, parseWifiStatus,
+      (value) => (wantOff ? value.state === "off" : value.state === "connected"), { signal },
+    );
+    return { ...evidence, status: queried.value, settled: queried.settled,
+      applied: Boolean(queried.value) && (wantOff ? queried.value.state === "off" : queried.value.state === "connected") };
+  }
+  const wantOff = String(args.action ?? "on").toLowerCase() === "off";
+  const queried = await pollAccessoryStatus(WEBDAV_QUERY_COMMAND, parseWebdavStatus, () => true, { signal, timeoutMs: 6000 });
+  return { ...evidence, status: queried.value, settled: queried.settled,
+    applied: Boolean(queried.value) && (wantOff ? queried.value.state === "off" : queried.value.state === "on") };
+}
+
 function init() {
   loadPersisted();
   agentSettings = createAgentSettings({
@@ -3541,6 +3678,17 @@ function init() {
     button: $("agentButton"), getLang: () => lang,
     settings: agentSettings,
     bindingControl: command => sendControl(command, {returnResponse:true}),
+    /* The assistant configures Linkr Bee itself over the encrypted management
+     * channel. Approval happens in the panel, which owns the tool row and the
+     * user's click; these helpers own the protocol and read every setting back
+     * so a tool result is evidence rather than an acknowledgement. */
+    accessory: {
+      capability: accessoryCapability,
+      command: accessoryCommand,
+      execute: executeAccessoryChange,
+      diagnostics: collectAccessoryDiagnostics,
+      scan: scanWifi,
+    },
     openSettings: openAgentSettings,
     onClose: syncSidebarForViewport,
     workspace: $("terminalWorkspace"), terminal: elements.terminalCard,

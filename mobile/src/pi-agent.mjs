@@ -10,7 +10,7 @@ import { readWebPage } from "./web-reader.mjs";
 import { compactAgentContext, settleAgentHistory } from "./agent-context.mjs";
 export { validateAgentConfig } from "../../web/agent_config.js";
 
-export function createSerialAgent({ config, device, onEvent, stream = streamSimple, webReader = readWebPage, computerDownload, runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = streamSimple, webReader = readWebPage, computerDownload, accessory = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
   config = validateAgentConfig(config);
   const sessionId = device.getStatus().sessionId;
   let executionMode = device.mode;
@@ -258,9 +258,93 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
       },
     },
   ];
+
+  /* Accessory tools configure Linkr Bee itself over the encrypted management
+   * channel; the panel injects this capability only when the app can reach it.
+   * Every change is approved by the user in the panel and then read back, so a
+   * result carries the accessory's own reply instead of an acknowledgement. */
+  if (accessory) {
+    const requireCapability = (name, label) => {
+      const capability = accessory.capability();
+      if (!capability.available) throw new Error(capability.reason);
+      if (!capability[name]) throw new Error(`This accessory firmware does not provide ${label}.`);
+      return capability;
+    };
+    const change = (action, capabilityName, capabilityLabel) => async (id, args, signal) => {
+      checkSession(signal);
+      if (capabilityName) requireCapability(capabilityName, capabilityLabel);
+      const evidence = await accessory.change({ id, action, args, signal });
+      return result({
+        source: "accessory-management-channel",
+        ...evidence,
+        note: "The reply and the follow-up read describe the accessory. They say nothing about the target console.",
+      });
+    };
+    tools.push(
+      {
+        name: "get_accessory_diagnostics", label: "Read accessory diagnostics",
+        description: "Read Linkr Bee's own diagnostics over the encrypted management channel: firmware and Zephyr version, uptime, UART buffer and dropped bytes, WiFi and IP state, WebDAV queue and counters, LAN bridge state. Read-only, never needs approval. This describes the bridge, not the target: use get_device_status and the serial tools for the target.",
+        parameters: Type.Object({}, { additionalProperties: false }),
+        execute: async (_id, _args, signal) => {
+          checkSession(signal);
+          requireCapability("available", "accessory management");
+          const reading = await accessory.diagnostics({ signal });
+          return result({ source: "accessory-management-channel", command: "@i?",
+            settled: reading.settled, groups: reading.groups, lines: reading.lines.slice(0, 24) });
+        },
+      },
+      {
+        name: "set_uart_config", label: "Change bridge UART settings",
+        description: "Change the bridge UART format Linkr Bee uses to talk to the target. Requires one explicit user approval, in every execution mode. The tool reads the setting back: applied=false means the accessory did not report the requested values, so never claim success then. This is the bridge side only; if the target prints unreadable bytes at the new format, say what the user must change on the target or ask which format it uses instead of guessing.",
+        parameters: Type.Object({
+          baud: Type.Integer({ minimum: 300, maximum: 3000000 }),
+          dataBits: Type.Optional(Type.Integer({ minimum: 5, maximum: 8 })),
+          parity: Type.Optional(Type.Union(["n", "e", "o"].map((value) => Type.Literal(value)))),
+          stopBits: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2)])),
+          flow: Type.Optional(Type.Union(["none", "rtscts"].map((value) => Type.Literal(value)))),
+        }, { additionalProperties: false }),
+        execute: change("set-uart"),
+      },
+      {
+        name: "wifi_scan", label: "Scan nearby WiFi",
+        description: "Ask the accessory to scan nearby 2.4 GHz networks and return what it observed. Requires one explicit user approval. Only 2.4 GHz networks are visible to this firmware; an empty list means nothing was heard in this scan, not that no network exists.",
+        parameters: Type.Object({}, { additionalProperties: false }),
+        execute: async (_id, _args, signal) => {
+          checkSession(signal);
+          requireCapability("wifi", "WiFi control");
+          const capability = accessory.capability();
+          if (!capability.asyncEvents) throw new Error("This accessory firmware does not report scan results.");
+          const outcome = await accessory.scan({ signal });
+          return result({ source: "accessory-management-channel", command: "@w scan",
+            failed: Boolean(outcome.failed), networks: (outcome.networks || []).slice(0, 20),
+            note: "Observed by the accessory during this scan; signal strength and channel are its report." });
+        },
+      },
+      {
+        name: "set_wifi", label: "Configure accessory WiFi",
+        description: "Join or leave the WiFi network the accessory uses for LAN mode and WebDAV upload. Requires one explicit user approval. The password travels only over the encrypted Bluetooth channel and is never echoed back: never repeat it in your answer, and never send a WiFi password through the serial tools. The tool waits for the accessory to report the resulting state; applied=false with settled=true means it did not connect, so report the observed state instead of assuming success.",
+        parameters: Type.Object({
+          action: Type.Union([Type.Literal("connect"), Type.Literal("off")]),
+          ssid: Type.Optional(Type.String({ maxLength: 32 })),
+          password: Type.Optional(Type.String({ maxLength: 64 })),
+        }, { additionalProperties: false }),
+        execute: change("set-wifi", "wifi", "WiFi control"),
+      },
+      {
+        name: "set_webdav", label: "Configure log upload",
+        description: "Enable or disable uploading captured UART logs to a WebDAV endpoint. Requires one explicit user approval. Only enable it for an endpoint the user trusts: the accessory sends the log there over the network it joined. The tool reads the target back afterwards; applied=false means the accessory did not report the requested state.",
+        parameters: Type.Object({
+          action: Type.Union([Type.Literal("on"), Type.Literal("off")]),
+          url: Type.Optional(Type.String({ maxLength: 256 })),
+        }, { additionalProperties: false }),
+        execute: change("set-webdav", "webdav", "WebDAV upload"),
+      },
+    );
+  }
+
   const agent = new Agent({
     initialState: {
-      systemPrompt: serialSystemPrompt(executionMode),
+      systemPrompt: serialSystemPrompt(executionMode, { accessory: Boolean(accessory) }),
       model: {
         id: config.model, name: config.model, provider: "linkr-custom",
         api: "openai-completions", baseUrl: config.endpoint,
@@ -328,7 +412,7 @@ export function createSerialAgent({ config, device, onEvent, stream = streamSimp
       if (agent.state.isStreaming) throw new Error("Agent is already processing. Wait for the current run to stop.");
       executionMode = device.mode;
       checkSession();
-      agent.state.systemPrompt = serialSystemPrompt(executionMode);
+      agent.state.systemPrompt = serialSystemPrompt(executionMode, { accessory: Boolean(accessory) });
       agent.state.messages = compactAgentContext(settleAgentHistory(agent.state.messages));
       downloadStage = false;
       recovering = !!recovery; statusRound = null; logRound = null;

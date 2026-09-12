@@ -28,6 +28,9 @@ trap 'rm -rf "$work_dir"' EXIT
 # Deterministic flags: the same sources and esbuild version must produce a
 # byte-identical bundle so tools/verify.sh and the unit tests can detect a
 # stale committed artifact.
+# Run from the repository root so the metafile records repository-relative
+# paths: the source digests below must not depend on the caller's directory.
+cd "$repo_dir"
 "$esbuild" "$entry" \
     --bundle --format=esm --platform=browser --target=es2022 \
     --minify --legal-comments=eof \
@@ -46,6 +49,16 @@ const names = new Set();
 for (const input of Object.keys(meta.inputs)) {
   const match = input.match(/node_modules\/((?:@[^/]+\/)?[^/]+)\//);
   if (match) names.add(match[1]);
+}
+
+/* Sources outside node_modules are fingerprinted too, so an edit to the agent
+ * runtime fails the bundle test until this script runs again. */
+const sources = {};
+for (const input of Object.keys(meta.inputs)) {
+  if (input.includes("node_modules/")) continue;
+  const relative = path.relative(repoDir, path.resolve(input)).split(path.sep).join("/");
+  sources[relative] = require("crypto").createHash("sha256")
+    .update(fs.readFileSync(path.join(repoDir, relative))).digest("hex");
 }
 
 const packages = {};
@@ -69,12 +82,13 @@ const build = {
   entry: "mobile/src/agent-runtime.mjs",
   esbuild: require(path.join(repoDir, "mobile/node_modules/esbuild/package.json")).version,
   packages,
+  sources,
   sha256: require("crypto").createHash("sha256").update(fs.readFileSync(bundle)).digest("hex"),
 };
 
 fs.writeFileSync(path.join(outDir, "LICENSES.txt"), sections.join("\n\n") + "\n");
 fs.writeFileSync(path.join(outDir, "BUILD.json"), JSON.stringify(build, null, 2) + "\n");
-console.log(`bundled ${Object.keys(packages).length} packages from ${meta.inputs ? Object.keys(meta.inputs).length : 0} inputs`);
+console.log(`bundled ${Object.keys(packages).length} packages and ${Object.keys(sources).length} project sources from ${meta.inputs ? Object.keys(meta.inputs).length : 0} inputs`);
 EOF
 
 ls -l "$out_dir/agent-runtime.js" >&2

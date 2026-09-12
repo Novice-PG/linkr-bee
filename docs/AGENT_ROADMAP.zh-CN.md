@@ -55,7 +55,7 @@
 - 仍未覆盖：真实模型端点的 CORS 行为、云端厂商需要代理这一前提，只能由用户环境
   验证；`read_web_page` 的浏览器跨域限制同样如此。
 
-## 第二期：配件管理工具组
+## 第二期：配件管理工具组（已完成）
 
 复用已有的管理通道（面板向 Agent 注入的 `sendControl`，与目标绑定同一条路径），
 新增受审批约束的工具：
@@ -70,6 +70,24 @@
 
 验收：每个工具都要有单元测试（含被拒绝的路径），并证明工具结果可被模型引用为证据
 （不是"已设置"这类无证据回执）。
+
+实现说明（2026-09-12）：
+
+- 实际交付 5 个工具：`get_accessory_diagnostics`、`set_uart_config`、`wifi_scan`、
+  `set_wifi`（`action=connect|off`）、`set_webdav`（`action=on|off`）。协议、校验与
+  回复解析在 `web/accessory_control.js`；命令发送与回读在 `web/app.js`；审批卡片
+  在面板里，复用工具行。
+- **`reboot_accessory` 取消**：固件没有配件重启命令（面板里的 `reboot` 预设是发给
+  目标机 Shell 的）。要做需要先加 `@linkr reboot` 一类的命令。
+- 除诊断外每个动作在每个执行档位都需要一次人工批准；结果由"命令回复 + 随后回读"
+  组成，`applied=false` 表示配件没有报告目标值。
+- WiFi 密码只经蓝牙管理通道发送，不进入工具结果、任务记录或审批卡片（用户自己
+  输入的问题文本仍按原样保留）。
+- 测试：`mobile/test/accessory_control.test.mjs`（协议与校验）、
+  `mobile/test/accessory_tools.test.mjs`（工具注入与拒绝路径）、
+  `mobile/browser-test/accessory.spec.mjs`（审批、拒绝、密码不外泄）。
+- 仍未覆盖：真机上的 WiFi 连接与 WebDAV 上传（沿用固件侧的实机验收清单），以及
+  非 BLE 传输下的行为（局域网模式下工具会明确拒绝）。
 
 ## 第三期：记忆与成本可见
 

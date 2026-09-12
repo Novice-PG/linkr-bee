@@ -2599,6 +2599,9 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
 .agent-message { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; background: var(--panel-2); }
 .agent-message > b { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .agent-message-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
+/* Accessory approval card: the change is described in the message text, so the
+ * note only carries the "this changes the bridge, not the target" warning. */
+.accessory-approval-note { margin: 4px 0 6px; color: var(--muted); font-size: 12.5px; }
 .agent-message-text.agent-markdown { white-space: normal; min-width: 0; max-width: 100%; }
 .agent-markdown > :first-child { margin-top: 0; }
 .agent-markdown > :last-child { margin-bottom: 0; }

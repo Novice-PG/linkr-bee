@@ -6,6 +6,7 @@ import { isEndpointUnreachable } from "./agent_config.js";
 import { createDeviceExecutor } from "./device_executor.js";
 import { requestComputerDownload } from "./local_download.js";
 import { renderAssistantMarkdown } from "./agent_markdown.js";
+import { requestAccessoryApproval } from "./accessory_control.js";
 
 /* Smallest usable picker height. The list scrolls, so staying clear of the
  * composer matters more than showing every mode at once. */
@@ -84,11 +85,16 @@ const labels = {
   readRange: ["读取范围", "Read range"],
   get_device_status: ["读取设备状态", "Read device status"],
   send_serial_input: ["请求发送串口输入", "Request serial input"],
+  get_accessory_diagnostics: ["读取配件诊断", "Read accessory diagnostics"],
+  set_uart_config: ["修改桥接串口参数", "Change bridge UART settings"],
+  wifi_scan: ["扫描附近 WiFi", "Scan nearby WiFi"],
+  set_wifi: ["配置配件 WiFi", "Configure accessory WiFi"],
+  set_webdav: ["配置日志上传", "Configure log upload"],
   wait_for_serial_output: ["等待串口输出", "Wait for serial output"],
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -465,6 +471,23 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       const nextFingerprint = JSON.stringify(config);
       if (!runner || fingerprint !== nextFingerprint) {
         runner = await createSerialAgent({ config, device,
+          /* Accessory changes go through the same tool row: the card asks for
+           * one explicit approval and the executed command is then shown as
+           * evidence by the generic tool-result path. */
+          accessory: accessory && {
+            capability: () => accessory.capability(),
+            diagnostics: ({signal}) => accessory.diagnostics({signal}),
+            scan: ({signal}) => accessory.scan({signal}),
+            change: async ({id, action, args, signal}) => {
+              const capability = accessory.capability();
+              if (!capability.available) throw new Error(capability.reason);
+              const command = accessory.command(action, args);
+              const body = toolRows.get(id) || addMessage(`accessory_${action}`);
+              body.textContent = "";
+              await requestAccessoryApproval({ container: body, command, lang: getLang(), signal });
+              return accessory.execute({ action, args, command, signal });
+            },
+          },
           computerDownload: ({id,args,signal}) => {
             const body = toolRows.get(id) || addMessage("download_to_computer");
             body.textContent = ""; body.dataset.download = "computer";

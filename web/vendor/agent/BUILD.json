@@ -13,5 +13,17 @@
     "typebox": "1.3.7",
     "yaml": "2.9.0"
   },
-  "sha256": "5e0d2633fb3beb809aaa4cff4aab85bf2ca92ebe5205586251e528ec653fbe14"
+  "sources": {
+    "web/device_profile.js": "a6f0926ee5fd79c86a0020db91605b40ac07383f632c842d5c07e0cfb6236929",
+    "web/agent_config.js": "e0852a30bd456a8ef00e089a207ea1a5fd9f825c32c5ba86a152c17d44fe0a97",
+    "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
+    "web/agent_execution_policy.js": "13b732aa8dee6030db2e1b167290876e8d1fd917caf94cb6516b62096e8f29ed",
+    "mobile/src/agent-prompt.mjs": "9e58f535eee05ec6dbcad5cc42816554a8b394e6699ab732c17eb45889c858d4",
+    "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
+    "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
+    "mobile/src/agent-context.mjs": "67e2cda76ce337fc432392263c1b0c2bccbeb937ac07d7a6f15df031f258c70e",
+    "mobile/src/pi-agent.mjs": "34ae59fa5d558c2b8666d01993e79181d125577488becd0e7e30de94048cfdfa",
+    "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
+  },
+  "sha256": "c8448dc87bcfe6118ad53008f0f7496847e103d214380a5c1f1752f56c137117"
 }

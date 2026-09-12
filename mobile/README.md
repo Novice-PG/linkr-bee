@@ -192,6 +192,14 @@ The endpoint must allow requests from the app's WebView origin
 a trusted local development network. Subscription/OAuth login and native
 secure credential storage are not part of this integration.
 
+The assistant can also read Linkr Bee's own diagnostics and change its UART
+format, WiFi and WebDAV configuration over the encrypted management channel.
+`get_accessory_diagnostics` is read-only; every change waits for one explicit
+approval in the conversation, in every execution mode, and the result is the
+accessory's own reply plus a follow-up read. A WiFi password travels only
+through that tool: it never appears in the approval card, the task history or
+the assistant's answer.
+
 Android/iOS load the Pi runtime when first needed. HarmonyOS includes it in the
 inlined ArkWeb bundle so rawfile imports work. Vite dev/production web builds
 also include the assistant, and directly serving the unbuilt `web/` directory
