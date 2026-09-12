@@ -88,6 +88,10 @@ void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn);
 int linkr_wifi_scan(struct bt_conn *conn);
 void linkr_wifi_release_scan(void);
 
+/* Abort an in-flight scan and drop its connection reference. Called when the
+ * requesting BLE peer disconnects, so the scan cannot outlive it. */
+void linkr_wifi_scan_abort(void);
+
 #else /* WiFi compiled out: provide no-op stubs so main.c stays unchanged. */
 
 static inline int  linkr_wifi_init(void) { return 0; }
@@ -113,6 +117,7 @@ static inline int  linkr_upload_diagnostics(char *buf, size_t len) { return snpr
 static inline void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn) { (void)fn; }
 static inline int  linkr_wifi_scan(struct bt_conn *conn) { (void)conn; return -ENOTSUP; }
 static inline void linkr_wifi_release_scan(void) {}
+static inline void linkr_wifi_scan_abort(void) {}
 
 #endif
 

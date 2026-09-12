@@ -368,6 +368,12 @@ static void tx_message_send(struct linkr_mgmt_tx_message *message)
 		if (err) {
 			LOG_WRN("Management indication continuation failed: %d",
 				err);
+			/* The header already promised the peer payload_len bytes, so
+			 * stopping here leaves its reassembler waiting for fragments
+			 * that will never arrive. Fail the connection the way the
+			 * indication timeout above does, so the peer reconnects. */
+			(void)bt_conn_disconnect(message->conn,
+						 BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			return;
 		}
 		sent += chunk;

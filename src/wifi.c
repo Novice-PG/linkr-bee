@@ -82,16 +82,24 @@ static struct net_if *wifi_iface;
 /* Asynchronous scan state. linkr_wifi_scan() references conn for the lifetime
  * of the scan; results are streamed through scan_respond and released on
  * NET_EVENT_WIFI_SCAN_DONE. A watchdog releases the scan even if the driver
- * never reports completion, so a lost event cannot wedge the bridge. */
+ * never reports completion, so a lost event cannot wedge the bridge.
+ *
+ * scan_lock keeps that one reference single-owner: the completion event, the
+ * watchdog and linkr_wifi_scan_abort() (BLE disconnect) all race to release it,
+ * and only the context that clears a non-NULL scan_conn may unref it. It also
+ * pins scan_conn for the responders, which take their own reference while the
+ * lock is held so a concurrent release cannot free the connection first. */
 #define WIFI_SCAN_TIMEOUT_MS 15000
 static linkr_wifi_respond_fn scan_respond;
 static struct bt_conn *scan_conn;
 static atomic_t scan_in_progress;
 static struct k_work wifi_scan_work;
+static struct k_mutex scan_lock;
 static struct k_mutex scan_cache_lock;
 static struct k_work_delayable wifi_retry_work;
 static struct k_work_delayable wifi_scan_timeout_work;
 static struct k_work_delayable wifi_operation_timeout_work;
+static int wifi_scan_emit(const char *line);
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
 static atomic_t wifi_last_error;
@@ -292,7 +300,7 @@ static int wifi_scan_cache_emit(void)
                  WIFI_SSID_MAX_LEN, scan_cache[i].ssid,
                  wifi_security_name(scan_cache[i].security),
                  scan_cache[i].channel, scan_cache[i].rssi);
-        err = scan_respond(scan_conn, line);
+        err = wifi_scan_emit(line);
         if (err) {
             break;
         }
@@ -960,21 +968,54 @@ static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
 		if (ok && wifi_scan_cache_emit() != 0) {
 			ok = false;
 		}
-		if (scan_respond(scan_conn, ok ? "@scan done" : "@scan error") != 0) {
+		if (wifi_scan_emit(ok ? "@scan done" : "@scan error") != 0) {
 			LOG_WRN("WiFi scan completion event could not be queued");
 		}
         wifi_scan_release();
     }
 }
 
+/* Deliver one scan line to the requesting connection, or to the sink's NULL
+ * target when the scan was not bound to one. The extra reference keeps the
+ * connection alive across the callback: a completion, watchdog or abort
+ * release may drop the scan's own reference the moment the lock is dropped. */
+static int wifi_scan_emit(const char *line)
+{
+    struct bt_conn *conn;
+    int err;
+
+    if (!scan_respond) {
+        return 0;
+    }
+
+    k_mutex_lock(&scan_lock, K_FOREVER);
+    conn = scan_conn ? bt_conn_ref(scan_conn) : NULL;
+    k_mutex_unlock(&scan_lock);
+
+    err = scan_respond(conn, line);
+    if (conn) {
+        bt_conn_unref(conn);
+    }
+    return err;
+}
+
+/* Drop the scan's connection reference. Serialized so two concurrent callers
+ * cannot both observe a non-NULL scan_conn and unref it twice. */
 static void wifi_scan_release(void)
 {
+    struct bt_conn *conn;
+
     (void)k_work_cancel_delayable(&wifi_scan_timeout_work);
-    if (scan_conn) {
-        bt_conn_unref(scan_conn);
-        scan_conn = NULL;
-    }
+
+    k_mutex_lock(&scan_lock, K_FOREVER);
+    conn = scan_conn;
+    scan_conn = NULL;
     atomic_set(&scan_in_progress, 0);
+    k_mutex_unlock(&scan_lock);
+
+    if (conn) {
+        bt_conn_unref(conn);
+    }
 }
 
 /* Watchdog: a driver that never reports NET_EVENT_WIFI_SCAN_DONE (cancel or
@@ -988,9 +1029,7 @@ static void wifi_scan_timeout_handler(struct k_work *work)
         return;
     }
     LOG_WRN("WiFi scan timed out; releasing");
-    if (scan_respond) {
-        (void)scan_respond(scan_conn, "@scan error");
-    }
+    (void)wifi_scan_emit("@scan error");
     wifi_scan_release();
 }
 
@@ -1000,6 +1039,13 @@ static void wifi_scan_work_handler(struct k_work *work)
     int err;
 
     ARG_UNUSED(work);
+
+    /* linkr_wifi_scan_abort() may have released the scan after this work was
+     * queued; do not start a driver scan whose requester is already gone. */
+    if (!atomic_get(&scan_in_progress)) {
+        return;
+    }
+
     memset(&params, 0, sizeof(params));
     params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
     params.max_bss_cnt = 0;
@@ -1011,9 +1057,7 @@ static void wifi_scan_work_handler(struct k_work *work)
                    &params, sizeof(params));
     if (err) {
         LOG_WRN("WiFi scan request failed: %d", err);
-        if (scan_respond) {
-            (void)scan_respond(scan_conn, "@scan error");
-        }
+        (void)wifi_scan_emit("@scan error");
         wifi_scan_release();
         return;
     }
@@ -1030,19 +1074,24 @@ int linkr_wifi_scan(struct bt_conn *conn)
     if (!wifi_iface) {
         return -ENODEV;
     }
-    if (!atomic_cas(&scan_in_progress, 0, 1)) {
-        return -EBUSY;
-    }
     if (!scan_respond) {
         LOG_WRN("scan requested but no response sink registered");
-        atomic_clear(&scan_in_progress);
         return -ENOSYS;
     }
 
+    k_mutex_lock(&scan_lock, K_FOREVER);
+    if (atomic_get(&scan_in_progress)) {
+        k_mutex_unlock(&scan_lock);
+        return -EBUSY;
+    }
+    /* Store the reference before publishing scan_in_progress so a concurrent
+     * abort either sees this scan and releases it, or leaves it untouched. */
     scan_conn = conn ? bt_conn_ref(conn) : NULL;
-    wifi_scan_cache_clear();
+    atomic_set(&scan_in_progress, 1);
+    k_mutex_unlock(&scan_lock);
 
-	return 0;
+    wifi_scan_cache_clear();
+    return 0;
 }
 
 void linkr_wifi_release_scan(void)
@@ -1051,11 +1100,23 @@ void linkr_wifi_release_scan(void)
 
 	if (err < 0) {
 		LOG_WRN("WiFi scan work submit failed: %d", err);
-		if (scan_respond) {
-			(void)scan_respond(scan_conn, "@scan error");
-		}
+		(void)wifi_scan_emit("@scan error");
 		wifi_scan_release();
 	}
+}
+
+/* Abort an in-flight scan when its BLE peer goes away. Without this the scan
+ * keeps the connection reference, streams its results to a dead peer and makes
+ * a new @w scan from a reconnected client fail with -EBUSY until the 15 s
+ * watchdog fires. Each release step is the same as the watchdog's, minus the
+ * error event: there is no live connection left to notify. */
+void linkr_wifi_scan_abort(void)
+{
+    if (!atomic_get(&scan_in_progress)) {
+        return;
+    }
+    LOG_INF("WiFi scan aborted: BLE peer disconnected");
+    wifi_scan_release();
 }
 
 bool linkr_wifi_is_connected(void)
@@ -1777,6 +1838,7 @@ int linkr_wifi_init(void)
     k_mutex_init(&cfg_lock);
     k_mutex_init(&log_lock);
     k_mutex_init(&upload_lock);
+    k_mutex_init(&scan_lock);
     k_mutex_init(&scan_cache_lock);
     k_work_init_delayable(&wifi_retry_work, wifi_retry_work_handler);
 	k_work_init_delayable(&wifi_operation_timeout_work,

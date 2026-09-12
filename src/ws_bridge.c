@@ -45,8 +45,11 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
  * saw data ready, so this only covers a frame split across TCP segments. */
 #define WS_AUTH_RECV_TIMEOUT_MS 500
 
-BUILD_ASSERT((WS_TX_BUF_SIZE & (WS_TX_BUF_SIZE - 1)) == 0,
-	     "LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE must be a power of two");
+/* The per-client TX ring is a byte-oriented Zephyr ring buffer: ring_buf_*
+ * accept arbitrary sizes and nothing here masks the size (there is no
+ * "& (WS_TX_BUF_SIZE - 1)" arithmetic), so a power-of-two size is not an
+ * invariant this code needs. The assert that used to demand one rejected most
+ * of the Kconfig range for no functional reason and was dropped instead. */
 BUILD_ASSERT(sizeof(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN) <=
 		     WS_RX_BUF_SIZE,
 	     "WebSocket auth token must fit in one receive buffer");
@@ -259,29 +262,35 @@ static int ws_settings_save(bool enabled)
 	return settings_save_one("linkr/ws/en", &settings, sizeof(settings));
 }
 
-/* Mint a token when none is available. A build-time token always wins, so
- * provisioning can pin one without relying on first-boot randomness. */
+/* Adopt a usable token. A record persisted in settings wins over the build-time
+ * pin, because it is what "@s token" and "@s token off" write (an empty
+ * persisted token is a valid record meaning "LAN auth disabled"); letting the
+ * pin win here would silently revert an explicit revocation at the next boot.
+ * The pin is therefore only applied when no record exists yet. A malformed pin
+ * still blocks the listener outright, even when a record exists: this build
+ * cannot state a valid credential, and failing closed is the safe outcome. */
 static int ws_token_resolve(void)
 {
 	static const char configured[] =
 		CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN;
 	int err;
 
-	if (configured[0]) {
-		if (!ws_token_str_valid(configured)) {
-			LOG_ERR("CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN must be "
-				"exactly %d lowercase hex characters",
-				WS_TOKEN_HEX_LEN);
-			atomic_set(&ws_auth_blocked, 1);
-			return -EINVAL;
-		}
-		k_mutex_lock(&ws_token_lock, K_FOREVER);
-		memcpy(ws_token, configured, WS_TOKEN_HEX_LEN + 1);
-		k_mutex_unlock(&ws_token_lock);
-		return 0;
+	if (configured[0] && !ws_token_str_valid(configured)) {
+		LOG_ERR("CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN must be "
+			"exactly %d lowercase hex characters",
+			WS_TOKEN_HEX_LEN);
+		atomic_set(&ws_auth_blocked, 1);
+		return -EINVAL;
 	}
 
 	if (ws_token_loaded) {
+		return 0;
+	}
+
+	if (configured[0]) {
+		k_mutex_lock(&ws_token_lock, K_FOREVER);
+		memcpy(ws_token, configured, WS_TOKEN_HEX_LEN + 1);
+		k_mutex_unlock(&ws_token_lock);
 		return 0;
 	}
 
@@ -770,6 +779,11 @@ int linkr_ws_set_token(const char *token)
 		LOG_WRN("persisting WebSocket token failed: %d", err);
 	}
 
+	/* The token is the LAN credential, so a session that authenticated with the
+	 * previous value must not outlive the change; without this, "@s token" and
+	 * "@s token off" would not revoke an already-open client. */
+	ws_close_all_clients();
+
 	/* Mirror linkr_ws_rotate_token(): recovering from a blocked boot (or any
 	 * enabled-but-not-listening state) must actually start the bridge. */
 	if (atomic_get(&ws_enabled) && linkr_wifi_has_ip() &&
@@ -799,6 +813,10 @@ int linkr_ws_rotate_token(void)
 	if (err) {
 		LOG_WRN("persisting WebSocket token failed: %d", err);
 	}
+
+	/* Revoke sessions that authenticated with the replaced token; see
+	 * linkr_ws_set_token(). */
+	ws_close_all_clients();
 
 	/* Recover from a boot where entropy was unavailable: the bridge refused to
 	 * listen, so start it now that a token exists. */

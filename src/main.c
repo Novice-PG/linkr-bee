@@ -548,6 +548,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	atomic_clear(&nus_notify_enabled);
 	linkr_mgmt_disconnected(conn);
 	linkr_uart_reliable_disconnected(conn);
+	/* A scan owned by this connection must not survive it: otherwise it keeps
+	 * its reference, streams results to the dead peer and answers -EBUSY to
+	 * the next @w scan until the 15 s watchdog fires. */
+	linkr_wifi_scan_abort();
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.disconnected_count++;
 	ble_diag.notify_enabled = 0;

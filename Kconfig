@@ -291,11 +291,14 @@ config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
 config LINKR_BLE_BRIDGE_LOG_RING_SIZE
 	int "WebDAV log staging ring buffer size in bytes"
 	default 8192
-	range 512 32768
+	range 512 32767
 	depends on LINKR_BLE_BRIDGE_WEBDAV
 	help
 	  Bytes of UART RX data staged for periodic WebDAV upload. When the
-	  ring overflows, the oldest bytes are dropped and counted.
+	  ring overflows, the oldest bytes are dropped and counted. The upper
+	  bound is Zephyr's RING_BUFFER_MAX_SIZE: this value sizes a
+	  RING_BUF_DECLARE(), which asserts size <= RING_BUFFER_MAX_SIZE
+	  (32767) unless CONFIG_RING_BUFFER_LARGE raises the limit.
 
 config LINKR_BLE_BRIDGE_WIFI_SSID_MAX
 	int "Maximum WiFi SSID length"
@@ -348,13 +351,16 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 
 config LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE
-	int "Per-client TX ring buffer size in bytes (power of two)"
+	int "Per-client TX ring buffer size in bytes"
 	default 2048
 	range 512 16384
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 	help
 	  Bytes of UART RX buffered per WebSocket client. A client slower than
-	  the UART drops oldest data instead of blocking the bridge.
+	  the UART drops oldest data instead of blocking the bridge. Any value
+	  in this range builds: the buffer is a byte-oriented Zephyr ring
+	  buffer, which accepts arbitrary sizes and is never indexed with a
+	  power-of-two mask.
 
 config LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN
 	string "Optional build-time WebSocket auth token override"
@@ -369,7 +375,9 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN
 	  "@s token=<value>" sets one explicitly.
 
 	  Set this only to pin a provisioning-time token: it must be exactly 32
-	  lowercase hex characters and takes precedence over the generated token.
+	  lowercase hex characters. It is used when settings holds no token yet;
+	  a token written at runtime by "@s token" or "@s token off" is persisted
+	  and takes precedence from the next boot on.
 	  The token is LAN access control, not transport security: the socket is
 	  plain ws:// and its bytes are visible to the local network.
 

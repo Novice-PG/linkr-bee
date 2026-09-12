@@ -330,6 +330,14 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 
 		err = indicate_fragment(conn, data + sent, chunk);
 		if (err) {
+			/* The header already promised the peer len bytes, so giving up
+			 * here leaves its reassembler waiting forever. Fail the
+			 * connection the way the indication timeout above does, so the
+			 * peer reconnects instead of hanging. */
+			LOG_WRN("Reliable UART indication continuation failed: %d; "
+				"disconnecting peer", err);
+			(void)bt_conn_disconnect(conn,
+						 BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			return err;
 		}
 		sent += chunk;
