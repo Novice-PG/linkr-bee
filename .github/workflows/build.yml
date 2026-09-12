@@ -41,6 +41,7 @@ jobs:
           python3 -m compileall -q tools/linkr_ble_terminal.py
           sh -n tools/serve_web.sh
           sh -n tools/flash_firmware.sh
+          sh -n tools/build_terminal_binary.sh
           sh -n tools/verify.sh
 
   mobile:
@@ -91,6 +92,18 @@ jobs:
           - name: ESP32-C3 Super Mini
             board: esp32c3_supermini
             slug: esp32c3-supermini
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C3 DevKitM
+            board: esp32c3_devkitm
+            slug: esp32c3-devkitm
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C3 DevKitC
+            board: esp32c3_devkitc
+            slug: esp32c3-devkitc
             chip: esp32c3
             flash_address: "0x0"
             factory_reset: GPIO0 to GND for two seconds during boot
@@ -219,10 +232,10 @@ jobs:
           EOF
           cat > FLASHING.txt <<'EOF'
           macOS / Linux:
-            ./flash_firmware.sh
+            ./flash_firmware.sh --image linkr-bee-${{ matrix.slug }}.bin
 
           Select a port explicitly when more than one device is connected:
-            ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
+            ./flash_firmware.sh --image linkr-bee-${{ matrix.slug }}.bin --port /dev/cu.usbmodemXXXX
 
           The script preserves the settings partition.
           Factory reset: ${{ matrix.factory_reset }}.
