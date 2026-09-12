@@ -3,12 +3,21 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
+
+        <!-- allowBackup is off because the WebView localStorage holds the LAN
+             access token and the model API key; Android Auto Backup would copy
+             them off the device. Cleartext is on because LAN mode connects to
+             ws://<device-ip>/ws and the model endpoint may be a plain http://
+             service on the local network, and targetSdk 28+ blocks both by
+             default. The Capacitor `server.cleartext` flag does not reach this
+             manifest. -->
 
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
