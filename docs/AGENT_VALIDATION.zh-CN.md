@@ -53,7 +53,7 @@ AI 设置现在提供核实、绑定、解除和重新生成入口。通过 BLE 
 
 ### 提交前回归
 
-- 固件主机测试：`python3 -m unittest discover -s tests -p 'test_*.py'`，15 项通过。
+- 固件主机测试：`python3 -m unittest discover -s tests -p 'test_*.py'`，25 项通过。
 - 前端构建：`npm run build` 通过。
 - 完整浏览器回归（本机 Chrome）：112 项中 111 项通过，档位切换测试一次菜单操作超时；该项独立复测通过。测试期间曾更新页面源文件，未将超时认定为已确认的产品缺陷，也不声称完整套件一次全部通过。
 - 提交包含源码、测试、文档和带许可证的 Markdown 依赖；不包含固件镜像、Flash 备份、串口日志、浏览器配置或 API Key。

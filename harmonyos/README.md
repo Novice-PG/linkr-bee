@@ -7,8 +7,10 @@ BLE access and exposes it through the JSON-RPC contract in
 
 ## Current implementation
 
-- HarmonyOS API 26 Stage project with phone and tablet support;
-- runtime `ohos.permission.ACCESS_BLUETOOTH` handling and local-network access;
+- HarmonyOS Stage project for phone and tablet: minimum API 12
+  (`compatibleSdkVersion` `5.0.0(12)`), target API 26 (`targetSdkVersion` `26.0.0`);
+- declares `ohos.permission.INTERNET` and `ohos.permission.ACCESS_BLUETOOTH`, and
+  requests `ohos.permission.ACCESS_BLUETOOTH` at runtime;
 - Management Service-filtered scan and native device picker;
 - GATT connect, service discovery, MTU 247 request, serialized reads/writes, and
   indication subscriptions;
@@ -83,7 +85,8 @@ hosts do not need GPIO1. Automatic pairing dialogs and lost-bond recovery still
 require a physical HarmonyOS device; see [pairing and recovery](../docs/BLE_PAIRING.md).
 
 The shared terminal now includes the Pi serial assistant. Its setup and tool
-behavior are documented in [the mobile guide](../mobile/README.md#built-in-serial-assistant-pi).
+behavior are documented in the [Built-in serial assistant (Pi)](../mobile/README.md#built-in-serial-assistant-pi)
+section of the mobile guide.
 The Pi runtime is included in the single inlined ArkWeb entry; no Node.js process
 runs on the phone. Model endpoint/CORS behavior and agent cancellation across
 real-device lifecycle transitions still require hardware validation.

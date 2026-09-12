@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A terminal-first Bluetooth LE and LAN serial bridge for Linkr.
+  A wireless serial console for your board, over Bluetooth LE or your local network.
 </p>
 
 <p align="center">
@@ -12,218 +12,164 @@
   <a href="docs/DEVELOPMENT.md">Development guide</a>
 </p>
 
-Linkr Bee turns the UART console of an SBC or embedded target into a terminal
-that can be reached from a browser, desktop computer, mobile device, or Linkr.
-The accessory firmware runs on ESP32-C3 and ESP32-C5 with Zephyr and advertises
-as `Linkr BLE UART-*`.
+Linkr Bee is a small ESP32 accessory that puts a board's UART console on a browser,
+a phone, or a command line, over Bluetooth LE or your local network.
 
-## Why Linkr Bee
+UART is usually the last interface still working: board bring-up, bootloader work,
+a network that will not come up, recovery. Linkr Bee keeps that console reachable
+without a USB serial cable and a computer parked next to the target. It carries the
+target's own UART bytes and does not replace the target shell.
 
-UART is often the only dependable interface during board bring-up, bootloader
-work, network failures, and recovery. Linkr Bee keeps that console available
-without dedicating a USB serial cable and computer to the target.
+## What it does
 
-| Scenario | What Linkr Bee provides |
-| --- | --- |
-| New-board bring-up | Wireless access to boot logs and the first interactive shell |
-| Headless SBC operation | A local console when SSH or the network is unavailable |
-| Field diagnosis | Terminal access from a phone, tablet, browser, or Linkr |
-| Bench development | One UI for serial output, UART settings, diagnostics, and logs |
-| Multiple accessories | Prefix-based discovery for devices named `Linkr BLE UART-*` |
+- Terminal in the browser, in the phone apps, or on the command line, with ANSI and
+  256-color output.
+- Change baud rate, data bits, parity, stop bits, and flow control while connected.
+  Default is `115200,8,n,1,n`.
+- Send Enter as raw, CR, LF, or CRLF for bootloaders and different shells.
+- Save logs, upload them to WebDAV, and check firmware, UART buffer, WiFi, and
+  transfer counters from the diagnostics panel.
+- Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
+- Assistant in the phone apps: searches the serial log and can run commands on the
+  target once you approve them.
 
-Linkr Bee is a transport for the target UART. It does not replace the target
-shell or inject a command environment of its own: the terminal displays and
-sends the same byte stream that would normally pass through a wired adapter.
-
-## Interface Overview
-
-![Linkr Bee terminal-first desktop interface](assets/screenshots/linkr-bee-terminal-desktop.jpg)
-
-The terminal remains the primary workspace. Its height and width are kept
-stable while connection state and serial output change, so long boot logs and
-interactive programs remain readable.
-
-### Connection and settings
-
-![Linkr Bee desktop terminal with controls](assets/screenshots/linkr-bee-terminal-controls.jpg)
-
-Connection and device settings can be collapsed when they are not needed,
-leaving more room for serial output.
-
-- **Top bar:** connection state, quick connect, panel toggle, theme, and language.
-- **Terminal:** xterm.js rendering, ANSI color, selection and copy, auto-scroll,
-  font controls, fullscreen, and direct keyboard input.
-- **Control panel:** BLE or LAN transport, UART parameters, line endings,
-  diagnostics, WiFi, WebDAV, and log actions.
-- **Command strip and status bar:** common Linux commands, RX/TX counters,
-  baud rate, and live connection state.
-
-### Phone and tablet layout
-
-<p align="center">
-  <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee mobile terminal" width="360">
-</p>
-
-On phones and tablets, the terminal takes over the available workspace while
-secondary controls move into a drawer. The layout is designed to remain usable
-with the on-screen keyboard visible.
-
-## How It Works
+## What you need
 
 ```text
 Browser / desktop / mobile / Linkr
                  │
-          Bluetooth LE or LAN
+          Bluetooth LE or WiFi
                  │
-        Linkr Bee accessory
-          ESP32-C3 / ESP32-C5
+        Linkr Bee accessory (ESP32-C3 / ESP32-C5)
                  │
              3.3 V UART
                  │
         SBC or embedded target
 ```
 
-Terminal traffic and management traffic use separate GATT services. UART bytes
-remain transparent, while UART configuration, WiFi setup, diagnostics, and
-other accessory controls use a versioned request/response channel. This keeps
-control messages out of the target console.
+- A Linkr Bee accessory: ESP32-C3 Super Mini, ESP32-C3 DevKitM, ESP32-C3 DevKitC,
+  or ESP32-C5 DevKitC.
+- A target with a UART console, and three wires: target TX to accessory RX, target RX
+  to accessory TX, and a shared ground.
+- A host: Chrome or Chromium for the web terminal, one of the phone apps, or the
+  Python / C terminal on macOS and Linux.
 
-Reliable UART adds sequence tracking, confirmed indications, and reconnect
-state to the BLE serial path. A legacy Nordic UART Service remains available
-for clients that only need basic unframed forwarding.
+The UART side is 3.3 V logic, not RS-232. See the
+[hardware requirements](docs/HARDWARE.md) before wiring a custom board.
 
-## Connection Modes
+## Getting started
 
-| Mode | Best for | Requirements | Available controls |
-| --- | --- | --- | --- |
-| Bluetooth LE | Direct local access and first-time setup | BLE-capable host; Web Bluetooth requires Chrome/Chromium over HTTPS or localhost | Terminal, UART, WiFi, WebDAV, and diagnostics |
-| LAN WebSocket | Reconnecting through an existing local network | Linkr Bee must already be connected to 2.4 GHz WiFi; the LAN access token read with `@s?` over BLE | Terminal data path |
+1. Flash the accessory. Download the image for your board (names are listed in the
+   [development guide](docs/DEVELOPMENT.md#github-actions-build)) and flash it from
+   macOS or Linux:
 
-BLE is the primary provisioning and recovery path because it does not depend on
-the target or local network. LAN mode is an additional choice for established
-installations, not a replacement for BLE.
+   ```sh
+   python3 -m pip install esptool
+   ./flash_firmware.sh
+   ```
 
-## Capabilities
+   The script finds the image and the serial port, verifies `SHA256SUMS` when it is
+   present, and keeps the saved settings. Building from source is covered in the
+   [development guide](docs/DEVELOPMENT.md#build).
 
-- BLE-to-UART and UART-to-BLE forwarding with a loss-detecting Reliable UART service.
-- Configurable UART parameters for SBC boot consoles and interactive Linux shells.
-- Web Bluetooth terminal for Chrome and Chromium on HTTPS or localhost.
-- Native transport projects for Android, iOS, and HarmonyOS NEXT.
-- Optional WiFi station control and UART-over-WebSocket access on the local network.
-- Device diagnostics and optional WebDAV log upload.
-- Legacy Nordic UART Service compatibility for existing clients.
+2. Wire it to the target, crossing TX and RX and connecting ground. On an ESP32-C3
+   Super Mini the bridge uses GPIO20 (RX) and GPIO21 (TX); other boards are in the
+   [hardware requirements](docs/HARDWARE.md#3-引脚分配).
 
-### Terminal behavior
+3. Power both sides. The blue LED flashes while bytes cross the bridge.
 
-- Full ANSI/VT terminal rendering through xterm.js, including 256-color output.
-- Prompt-aware Linux terminal-size synchronization after login and viewport changes.
-- Raw, CR, LF, and CRLF Enter-key modes for different bootloaders and shells.
-- Configurable font stack, font size, local echo, transfer chunk size, and I/O debug view.
-- Selection copy, log export, auto-scroll control, fullscreen, and `Ctrl-C`.
-- Quick-send commands for common Linux inspection tasks.
+4. Authorize this host: hold **GPIO1 to GND**, connect, and accept the pairing
+   prompt. Release GPIO1 afterwards; the host is remembered.
 
-### Accessory management
+5. Open a client. For the web terminal:
 
-- Read and change baud rate, data bits, parity, stop bits, and flow control.
-- Scan and join nearby 2.4 GHz WiFi networks without sending credentials to the target UART.
-- Query firmware, UART buffer, WiFi, upload queue, and bridge diagnostics.
-- Upload captured logs to an explicitly configured WebDAV endpoint.
-- Preserve accessory settings across normal restarts and provide a hardware factory-reset path.
+   ```sh
+   tools/serve_web.sh        # then open http://127.0.0.1:8765/
+   ```
 
-## Supported Hardware
+6. Match the UART format to the target, then reset it and watch the console.
 
-| Target | Role | Notes |
-| --- | --- | --- |
-| ESP32-C3 Super Mini | Primary compact reference board | UART on GPIO20/GPIO21; onboard blue LED shows UART activity |
-| ESP32-C3 DevKitM / DevKitC | Development and integration boards | Supported by the Zephyr application and board overlays |
-| ESP32-C5 DevKitC | WiFi 6-capable development target | Build target included; validate final memory and radio behavior on hardware |
+## Using the terminal
 
-The UART side is 3.3 V logic. Always share ground with the target and cross TX
-to RX. Do not connect Linkr Bee directly to an RS-232 voltage-level interface.
-See the [hardware requirements](docs/HARDWARE.md) before designing a custom board.
+![Linkr Bee desktop terminal](assets/screenshots/linkr-bee-terminal-desktop.jpg)
 
-## Clients
+- Top bar: connection state, connect/reconnect, panel toggle, theme, language.
+- Terminal: click and type; font size, fullscreen, auto-scroll, copy, and clear are
+  in its toolbar.
+- Control panel: transport, UART settings, Enter mode, local echo, chunk size,
+  diagnostics, WiFi, WebDAV, and log actions.
 
-| Client | Intended use | Status |
-| --- | --- | --- |
-| Web terminal | Chrome/Chromium desktop access | Available |
-| Python terminal | macOS and Linux command-line access | Available |
-| C terminal | Minimal-dependency Linkr/Buildroot integration | Available |
-| Android and iOS | Native BLE transport with shared terminal UI | Projects included; real-device validation required |
-| HarmonyOS NEXT | ArkUI/ArkWeb host with shared terminal UI | Emulator UI validated; BLE requires a real device |
+UART settings apply immediately, so a target that boots at an unusual baud rate
+needs no reflash. The terminal also keeps the target's window size in sync after
+login and on layout changes, which full-screen programs need. If output arrives but
+typing does nothing, check that the target RX goes to the accessory TX, and turn
+hardware flow control off unless CTS and RTS are both wired.
 
-All graphical clients share the same terminal and management behavior. Platform
-projects supply the native BLE transport where Web Bluetooth is unavailable.
+<p align="center">
+  <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee terminal on a phone" width="360">
+</p>
 
-## Typical Workflow
+On phones the terminal takes the available space and secondary settings move into a
+drawer. The Android, iOS, and HarmonyOS builds also include the assistant panel; the
+plain web terminal served by `tools/serve_web.sh` does not. See the
+[serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for the model
+endpoint it needs.
 
-1. Power Linkr Bee and the target, then connect crossed UART TX/RX and ground.
-2. Open a client and select a device whose name begins with `Linkr BLE UART`.
-3. Confirm that the UART format matches the target; `115200,8,n,1,n` is the default.
-4. Reset or boot the target and observe its console output in the terminal.
-5. Type directly in the terminal when the target presents a bootloader, login, or shell prompt.
-6. Optionally configure WiFi and use LAN mode for later sessions.
+## LAN mode
 
-The activity LED flashes when bytes pass through the bridge. If output appears
-but input does not work, verify that target RX is connected to Linkr Bee TX and
-that hardware flow control is disabled unless both CTS and RTS are wired.
+After provisioning the accessory onto a 2.4 GHz network over Bluetooth LE, the same
+terminal can reach it through its WebSocket bridge. Bluetooth LE stays the
+configuration path: UART settings, WiFi, WebDAV, and diagnostics are managed over
+it, while LAN mode carries the terminal data.
 
-## Getting Started
+The bridge needs a 128-bit access token, generated on first boot and readable only
+over the encrypted Bluetooth LE link. The web terminal picks it up automatically
+while Bluetooth is connected; the Python and C terminals print it. The token gates
+access but does not encrypt anything, so `ws://` traffic is visible on the same
+network. Use LAN mode on a network you trust.
 
-1. Flash a supported ESP32-C3 or ESP32-C5 board with the Linkr Bee firmware.
-2. Connect the target UART TX, RX, and ground to the accessory.
-3. Open one of the terminal clients and select a device named `Linkr BLE UART-*`.
-4. Set the UART format to match the target, normally `115200,8,n,1,n`.
+## Pairing and security
 
-Build, flash, packaging, wiring, and client setup instructions are kept in the
-[development guide](docs/DEVELOPMENT.md).
+- The Bluetooth LE link is encrypted and bonded. Each new host is authorized once by
+  holding **GPIO1 to GND** during pairing.
+- Eight hosts are remembered across reboots and are not evicted automatically, so
+  remove an unused host or factory-reset before adding a ninth.
+- Pairing uses LE Secure Connections Just Works, which has no man-in-the-middle
+  protection. Authorize only where you can see the accessory.
+- Factory reset clears every bond and setting. Hold **GPIO0 to GND** on ESP32-C3, or
+  **GPIO28** on ESP32-C5, while the board boots, for at least two seconds. On an
+  ESP32-C3 Super Mini the BOOT pin is not GPIO0, so check the board wiring first.
+- Per-client steps and recovery: [Bluetooth pairing](docs/BLE_PAIRING.md) (Chinese).
 
-## Compatibility Notes
+## Troubleshooting
 
-- Device selection matches the `Linkr BLE UART` prefix, so numeric or deployment-specific suffixes are accepted.
-- The default terminal format is `115200,8,n,1,n`: 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control.
-- Web Bluetooth is intended for Chrome and Chromium. Safari and Firefox do not provide the required browser API.
-- iOS simulators cannot validate BLE; Android, iOS, and HarmonyOS BLE behavior must be accepted on physical devices.
-- WiFi provisioning is limited to 2.4 GHz networks in the current firmware.
-- WebDAV upload is optional and should only be enabled for a trusted endpoint on a trusted network.
+| Symptom | Check |
+| --- | --- |
+| No device in the client | Accessory powered and in range, and not already connected to another host; only one Bluetooth LE connection is served at a time |
+| Browser cannot connect | Chrome or Chromium, served over HTTPS or `localhost`. `tools/serve_web.sh` uses `localhost` |
+| No output | Target TX to accessory RX, target is printing, baud rate matches |
+| Output but no input | Target RX to accessory TX; hardware flow control off unless CTS and RTS are both wired |
+| Garbled output | UART format matches the target: baud rate, data bits, parity, stop bits |
+| No pairing prompt | GPIO1 grounded before connecting |
+| LAN mode fails | Accessory on 2.4 GHz, host on the same network, token matches the one reported over Bluetooth LE |
 
-## Project Status
+## Limits
 
-- ESP32-C3 and ESP32-C5 firmware targets build under Zephyr 4.4.1.
-- Desktop Web Bluetooth, Python, and C terminal paths are included.
-- The responsive shared UI covers desktop, phone, and tablet layouts.
-- Android and iOS projects are synchronized with the shared terminal UI but still require physical-device acceptance.
-- The HarmonyOS API 26 HAP, ArkWeb UI, and bridge have been exercised in the emulator; BLE remains a real-device test boundary.
-
-Build success, emulator startup, and host-side unit tests are not substitutes
-for end-to-end UART and BLE validation on the intended hardware.
+- Devices are matched by the Linkr management service, so any `Linkr BLE UART-*`
+  suffix works.
+- Web Bluetooth means Chrome or Chromium. Safari and Firefox do not implement it.
+- WiFi provisioning is 2.4 GHz only.
+- iOS simulators cannot do Bluetooth LE; use a real device.
 
 ## Documentation
 
-| Topic | Document |
-| --- | --- |
-| Documentation index | [docs/README.md](docs/README.md) |
-| Build, flash, integration, and configuration | [Development guide](docs/DEVELOPMENT.md) |
-| GATT and Reliable UART protocol | [BLE accessory API v1](docs/LINKR_BLE_API.zh-CN.md) |
-| Board wiring and electrical requirements | [Hardware requirements](docs/HARDWARE.md) |
-| Android and iOS client | [mobile/README.md](mobile/README.md) |
-| HarmonyOS NEXT client | [harmonyos/README.md](harmonyos/README.md) |
-
-## Security
-
-BLE UART and management require an encrypted, bonded connection. For a new
-host, hold **GPIO1 to GND** before connecting and accept the host's pairing
-prompt. Release GPIO1 after pairing; saved hosts reconnect without it. Up to
-eight bonds are retained across reboots. See [pairing and recovery](docs/BLE_PAIRING.md).
-
-The LAN WebSocket bridge requires a 128-bit access token that is generated on
-first boot and reported by `@s?` over the encrypted BLE channel. The browser
-captures it automatically while BLE is connected; `@s token` rotates it and
-`@s token off` restores unauthenticated access. The token gates access but does
-not encrypt the socket: `ws://` traffic is still visible on the local network.
-
-- [Agent task recovery, device profiles and hardware validation (Chinese)](docs/AGENT_VALIDATION.zh-CN.md)
+- [Development guide](docs/DEVELOPMENT.md): build, flash, packaging, Kconfig, protocol
+- [Hardware requirements](docs/HARDWARE.md): pinout, electrical, production notes
+- [Bluetooth pairing](docs/BLE_PAIRING.md): authorization and recovery (Chinese)
+- [BLE accessory API](docs/LINKR_BLE_API.zh-CN.md): services and framing for integrators (Chinese)
+- [Android / iOS](mobile/README.md) and [HarmonyOS](harmonyos/README.md) clients
+- [Documentation index](docs/README.md) · [中文 README](README.zh-CN.md)
 
 ## License
 
-Licensed under the terms in [LICENSE](LICENSE).
+[LICENSE](LICENSE)

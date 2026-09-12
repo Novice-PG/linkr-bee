@@ -35,6 +35,7 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
   - [Linux 或 Linkr Buildroot 的 C 终端](#linux-或-linkr-buildroot-的-c-终端)
 - [Web Bluetooth 终端](#web-bluetooth-终端)
 - [手机 App](#手机-app)
+- [验证状态](#验证状态)
 - [配置参考](#配置参考)
 
 ---
@@ -101,10 +102,10 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 
 ### GitHub Actions 构建与刷写
 
-`.github/workflows/build.yml` 使用矩阵构建 `esp32c3_supermini` 与
-`esp32c5_devkitc/esp32c5/hpcore` 的默认 WiFi + BLE 配置。它会在 `main`
-push、版本 tag、pull request 和手动触发时运行，使用 Zephyr v4.4.1 与
-Zephyr SDK 1.0.1。
+`.github/workflows/build.yml` 使用矩阵构建 `esp32c3_supermini`、
+`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore`
+的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、pull request 和手动触发时
+运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
 
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
@@ -338,12 +339,15 @@ WebDAV 控制。Python 客户端提供相同的 Management v1 自动化操作。
 
 所有测试选项默认关闭。
 
-可重复执行的本地回归检查会构建 C3 与 C5 的 WiFi + BLE 固件，并检查 Python
-与 shell 语法：
+运行可重复执行的本地回归检查：
 
 ```sh
 tools/verify.sh
 ```
+
+它会构建全部受支持的固件板型、检查 Python 与 shell 语法，并在存在 `dbus-1`
+开发文件时编译 C 参考终端；它不运行 Web/手机端测试套件，也不构建原生工程的
+Web 资源——这些由 CI（`.github/workflows/build.yml`）覆盖。
 
 启用 UART RX 回环：
 
@@ -672,6 +676,22 @@ Android/iOS 环境要求见 [`mobile/README.md`](../mobile/README.md)，HarmonyO
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md)，其中也包含调试
 签名和无设备测试说明。首版手机 App 仅支持前台运行。首次连接需要 GPIO1 物理授权并完成系统配对；
 浏览器设备选择授权与 BLE 绑定是两种独立状态。
+
+---
+
+## 验证状态
+
+各层次实际验证到什么程度。构建成功、主机测试通过或模拟器启动，都不等于目标硬件上
+的端到端验收。
+
+| 层次 | 本仓库已验证 | 仍需硬件验证 |
+| --- | --- | --- |
+| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | — |
+| 协议主机测试 | `tests/` 编译并驱动生产代码中的管理协议、安全配对门禁、目标绑定、WebDAV 与 HCI 顺序逻辑，含 C3/C5 构建约束 | 真实 SMP 配对、NVS 持久化、射频行为 |
+| BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
+| WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |
+| 助手（Agent 模式） | Node 与浏览器套件覆盖执行策略、证据处理与任务恢复 | 真实目标机上的命令执行与设备档案恢复，详见 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
+| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步 | Android、iOS、HarmonyOS 真机 Bluetooth LE |
 
 ---
 

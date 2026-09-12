@@ -28,7 +28,7 @@ repository owns the accessory firmware and reference clients.
 - [SBC UART Settings](#sbc-uart-settings)
 - [WiFi and WebDAV Log Upload](#wifi-and-webdav-log-upload)
   - [UART over WebSocket (LAN Bridge)](#uart-over-websocket-lan-bridge)
-  - [Open BLE Access, Persistence, and Factory Reset](#open-ble-access-persistence-and-factory-reset)
+  - [GPIO1 Pairing, Persistence, and Factory Reset](#gpio1-pairing-persistence-and-factory-reset)
 - [Control Commands Reference](#control-commands-reference)
 - [Test Options](#test-options)
 - [BLE Protocol](#ble-protocol)
@@ -36,6 +36,7 @@ repository owns the accessory firmware and reference clients.
   - [C Terminal for Linux or Linkr Buildroot](#c-terminal-for-linux-or-linkr-buildroot)
 - [Web Bluetooth Terminal](#web-bluetooth-terminal)
 - [Mobile Apps](#mobile-apps)
+- [Validation Status](#validation-status)
 - [Configuration Reference](#configuration-reference)
 
 ---
@@ -113,7 +114,7 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ### GitHub Actions build
 
 The workflow in `.github/workflows/build.yml` builds the default WiFi + BLE
-configuration for both `esp32c3_supermini` and
+configuration for `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and
 `esp32c5_devkitc/esp32c5/hpcore`. It runs on pushes to `main`, version tags,
 pull requests, and manual dispatches using Zephyr
 v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
@@ -124,6 +125,8 @@ run. The flashable images are:
 
 ```text
 linkr-bee-esp32c3-supermini.bin
+linkr-bee-esp32c3-devkitm.bin
+linkr-bee-esp32c3-devkitc.bin
 linkr-bee-esp32c5-devkitc.bin
 ```
 
@@ -430,12 +433,16 @@ exposes the same Management v1 operations for automation.
 
 All test options default to off.
 
-Run the repeatable local regression check (the single WiFi + BLE firmware,
-Python syntax, and shell syntax) with:
+Run the repeatable local regression check with:
 
 ```sh
 tools/verify.sh
 ```
+
+It builds every supported firmware board, checks the Python and shell helpers,
+and compiles the C reference terminal when `dbus-1` development files are
+available. It does not run the web/mobile test suites or the native-project
+asset builds: those are covered by CI (`.github/workflows/build.yml`).
 
 Enable UART RX echo loopback:
 
@@ -800,9 +807,27 @@ See [`mobile/README.md`](../mobile/README.md) for Android/iOS requirements and
 [`harmonyos/README.md`](../harmonyos/README.md) plus
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md) for the HarmonyOS
 host contract, debug signing, and host-side tests. The first mobile release is
-foreground-only. The firmware also
-currently permits open BLE access, so public distribution should wait for a
-defined ownership or authorization policy.
+foreground-only. The firmware requires an encrypted, bonded BLE link and gates
+new pairings on GPIO1, so each new host must be authorized physically before it
+can pair; see [pairing and recovery](BLE_PAIRING.md) for the authorization and
+recovery rules.
+
+---
+
+## Validation status
+
+What each layer has actually been exercised against. A successful build, a host
+test run, or a simulator launch is not end-to-end acceptance on the target
+hardware.
+
+| Layer | Verified in this repository | Still requires hardware |
+| --- | --- | --- |
+| Firmware builds | `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and `esp32c5_devkitc/esp32c5/hpcore` build in CI under Zephyr v4.4.1, with the per-generation controller security symbols asserted | — |
+| Host protocol tests | `tests/` compiles and drives the production management, security, target-binding, WebDAV, and HCI-order code paths, including the C3/C5 build guards | Real SMP pairing, NVS persistence, radio behaviour |
+| BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
+| WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
+| Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
+| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
 
 ---
 

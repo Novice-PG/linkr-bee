@@ -1,6 +1,6 @@
 # WiFi / BLE 共存问题排查记录
 
-> 最后更新: 2026-07-24
+> 最后更新: 2026-09-12
 
 ## 2026-07-24 WebSocket 闭环验证
 
@@ -178,11 +178,17 @@ OR 后层标识无法正确匹配。
 - 需要 `modules/lib/hostap/port/mbedtls/removed/ecdh.c`
 - 添加 `hostap` 到 west.yml 后 `west update` 成功
 - 但编译 mbedtls `extras/pkparse.c` 时报 `implicit declaration` 错误（`mbedtls_asn1_get_alg` 等）
-- Zephyr v4.4.1 的 mbedtls/tf-psa-crypto 版本与 hostap/esp32 driver 不兼容
+- 仅在启用 WPA3/SAE 的这个配置下，Zephyr v4.4.1 的 mbedtls/tf-psa-crypto 与
+  hostap/esp32 driver 不兼容
 
-**解决方案**
-- 升级到 Zephyr 4.4.2+ / 5.x（官方可能已修复 mbedtls 兼容性）
-- 或手动 patch mbedtls 兼容层
+**当前处理**
+- 默认构建未启用 `CONFIG_ESP32_WIFI_ENABLE_WPA3_SAE`，因此该问题不影响发布的固件。
+- 项目继续固定在 Zephyr v4.4.1（`west.yml`）。manifest 当前保留 `hostap`，是因为
+  ESP32-C5 控制器的 `CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS` 需要 hostap 附带的
+  旧版 mbedTLS 模块；`tools/verify.sh` 与 CI 都会构建该默认配置并断言相关控制器
+  安全符号（见 `docs/DEVELOPMENT.md` 的构建章节）。
+- 本版不支持 WPA3/SAE。若将来需要，应先在独立分支上验证升级后的 mbedtls 兼容层，
+  而不是直接把固定版本改成 4.4.2+/5.x。
 
 ---
 
@@ -202,6 +208,12 @@ OR 后层标识无法正确匹配。
 ---
 
 ## 已做的 Zephyr 驱动 Patch
+
+> **注意**：本节描述的改动只存在于当时的本地 Zephyr 工作区，**尚未以 patch 文件形式
+> 纳入本仓库**：仓库内没有 `patches/` 目录或 `*.patch` 文件，`west.yml` 也没有任何
+> patch 步骤。因此干净检出并按 `west.yml` 执行 `west update` 后得到的是未打补丁的
+> 上游驱动，不会复现这里描述的扫描/省电行为；这些改动需要先固化为可复现的补丁或
+> 上游提交。
 
 文件: `drivers/wifi/esp32/src/esp_wifi_drv.c`
 
