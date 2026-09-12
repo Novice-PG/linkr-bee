@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({
       response,
       body: await response.text() +
-        "\nwindow.__test = { state, setConnected, setTerminalFallbackFullscreen, sendControl, bleTransport, onDisconnected, enqueueBytes };",
+        "\nwindow.__test = { state, setConnected, setTerminalFallbackFullscreen, sendControl, bleTransport, onDisconnected, enqueueBytes, onTerminalData, inputPending: () => serialInputPending };",
     });
   });
   await page.goto("/");
@@ -144,29 +144,55 @@ test("uncertain management fragment blocks queued settings until reconnect", asy
   expect(result.writesAfterReconnect).toBe(3);
 });
 
-test("explicit ATT size rejection still falls back before a frame starts", async ({ page }) => {
-  const result = await page.evaluate(async () => {
-    const { state, setConnected, enqueueBytes, bleTransport } = window.__test;
-    state.mode = "ble";
-    state.device = { id: "device" };
-    state.nusReady = state.reliableReady = true;
-    state.reliableMaxPayload = 232;
-    state.reliableWriteSize = 244;
-    setConnected(true);
-    const attempts = [];
-    const accepted = [];
-    bleTransport.write = async (_id, _service, _characteristic, chunk) => {
-      attempts.push(chunk.length);
-      if (chunk.length > 20) throw new Error("GATT Invalid Attribute Length.");
-      accepted.push(...chunk);
-    };
-    await enqueueBytes(new Uint8Array(80).fill(65));
-    return { attempts, accepted, nextSequence: state.reliableTxSequence, writeError: state.uartWriteError };
+for (const [platform, rejection] of [
+  ["web", "GATT Invalid Attribute Length."],
+  // The native bridges surface the platform message, not a Web Bluetooth name.
+  ["android", "Writing characteristic failed with status code 13."],
+  ["ios", "The attribute value length is invalid."],
+]) {
+  test(`explicit ATT size rejection still falls back before a frame starts (${platform})`, async ({ page }) => {
+    const result = await page.evaluate(async (rejection) => {
+      const { state, setConnected, enqueueBytes, bleTransport } = window.__test;
+      state.mode = "ble";
+      state.device = { id: "device" };
+      state.nusReady = state.reliableReady = true;
+      state.reliableMaxPayload = 232;
+      state.reliableWriteSize = 244;
+      setConnected(true);
+      const attempts = [];
+      const accepted = [];
+      bleTransport.write = async (_id, _service, _characteristic, chunk) => {
+        attempts.push(chunk.length);
+        if (chunk.length > 20) throw new Error(rejection);
+        accepted.push(...chunk);
+      };
+      await enqueueBytes(new Uint8Array(80).fill(65));
+      return { attempts, accepted, nextSequence: state.reliableTxSequence, writeError: state.uartWriteError };
+    }, rejection);
+    expect(result.attempts).toEqual([92, 62, 20, 20, 20, 20, 12]);
+    expect(result.accepted.slice(12)).toEqual(new Array(80).fill(65));
+    expect(result.nextSequence).toBe(2);
+    expect(result.writeError).toBe("");
   });
-  expect(result.attempts).toEqual([92, 62, 20, 20, 20, 20, 12]);
-  expect(result.accepted.slice(12)).toEqual(new Array(80).fill(65));
-  expect(result.nextSequence).toBe(2);
-  expect(result.writeError).toBe("");
+}
+
+test("transport replies never leave the input line pending", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const { state, onTerminalData, inputPending } = window.__test;
+    // xterm answers DSR/focus queries; those replies are not keystrokes and must
+    // not block tracked commands, geometry sync or Auto mode approvals.
+    onTerminalData("\x1b[0n", { userInput: false });
+    onTerminalData("\x1b[I", { userInput: false });
+    await state.writeQueue;
+    const afterReplies = inputPending();
+    onTerminalData("l", { userInput: true });
+    await state.writeQueue;
+    const afterTyping = inputPending();
+    onTerminalData("\r", { userInput: true });
+    await state.writeQueue;
+    return { afterReplies, afterTyping, afterEnter: inputPending() };
+  });
+  expect(result).toEqual({ afterReplies: false, afterTyping: true, afterEnter: false });
 });
 
 test("IME Escape does not exit terminal fullscreen", async ({ page }) => {

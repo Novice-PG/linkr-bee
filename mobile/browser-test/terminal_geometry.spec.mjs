@@ -23,12 +23,20 @@ test.beforeEach(async ({ page }) => {
 
 async function receive(page, text) {
   await page.evaluate(text => window.__geometry.handleIncomingBytes(new TextEncoder().encode(text)), text);
-  // Cover both xterm's asynchronous parser and the 180 ms debounce.
-  await page.waitForTimeout(350);
+  // Cover xterm's asynchronous parser and the 180 ms debounce. The margin is
+  // generous because a loaded runner can delay both, and the negative
+  // assertions below rely on this wait being long enough to prove absence.
+  await page.waitForTimeout(600);
 }
 
 async function syncCommands(page) {
   return page.evaluate(() => window.sent.filter(text => text.startsWith("stty ")));
+}
+
+/* A sync that is expected to happen is polled: the debounce plus xterm's parser
+ * can take longer than the fixed wait above when the suite runs in parallel. */
+async function expectSyncCount(page, count) {
+  await expect.poll(() => syncCommands(page)).toHaveLength(count);
 }
 
 for (const viewport of [{ width: 1552, height: 1221 }, { width: 390, height: 844 }]) {
@@ -61,7 +69,7 @@ for (const viewport of [{ width: 1552, height: 1221 }, { width: 390, height: 844
 
 test("geometry synchronizes once at an empty prompt", async ({ page }) => {
   await receive(page, prompt);
-  expect(await syncCommands(page)).toHaveLength(1);
+  await expectSyncCount(page, 1);
   await receive(page, `stty\r\n${prompt}`);
   expect(await syncCommands(page)).toHaveLength(1);
 });
@@ -76,7 +84,7 @@ for (const locallyTyped of [true, false]) {
     // Cancelling the input and receiving a fresh prompt permits synchronization.
     await page.evaluate(() => window.__geometry.onTerminalData("\x03"));
     await receive(page, `^C\r\n${prompt}`);
-    expect(await syncCommands(page)).toHaveLength(1);
+    await expectSyncCount(page, 1);
   });
 }
 
@@ -92,7 +100,7 @@ test("hidden pending input and alternate-screen prompts never trigger geometry w
 for (const coalesced of [false, true]) {
   test(`same-size login resynchronizes without a BLE reconnect (coalesced: ${coalesced})`, async ({ page }) => {
     await receive(page, prompt);
-    expect(await syncCommands(page)).toHaveLength(1);
+    await expectSyncCount(page, 1);
     if (coalesced) {
       await receive(page, `\r\ntarget login: root\r\n${prompt}`);
     } else {
@@ -101,6 +109,6 @@ for (const coalesced of [false, true]) {
       expect(await syncCommands(page)).toHaveLength(1);
       await receive(page, `root\r\n${prompt}`);
     }
-    expect(await syncCommands(page)).toHaveLength(2);
+    await expectSyncCount(page, 2);
   });
 }

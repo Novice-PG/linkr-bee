@@ -518,6 +518,33 @@ for (const [width, height] of [[320, 740], [375, 812], [802, 867], [1194, 834]])
   });
 }
 
+for (const [width, height] of [[320, 740], [360, 640], [390, 844]]) {
+  test(`mode picker never covers the composer at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.locator("#agentModeButton").tap();
+    await expect(page.locator("#agentModePicker")).toBeVisible();
+    const geometry = await page.evaluate(() => {
+      const picker = document.querySelector("#agentModePicker").getBoundingClientRect();
+      const composer = document.querySelector("#agentQuestion").getBoundingClientRect();
+      const centre = document.elementFromPoint(
+        (composer.left + composer.right) / 2,
+        (composer.top + composer.bottom) / 2,
+      );
+      return {
+        pickerBottom: picker.bottom,
+        composerTop: composer.top,
+        covered: Boolean(centre?.closest("#agentModePicker")),
+      };
+    });
+    // A picker over the composer swallows the dismissing tap as a mode choice.
+    expect(geometry.covered).toBe(false);
+    expect(geometry.pickerBottom).toBeLessThanOrEqual(geometry.composerTop);
+    await page.locator("#agentQuestion").tap();
+    await expect(page.locator("#agentModePicker")).toBeHidden();
+    await expect(page.locator("#agentActiveMode")).toHaveText("Auto");
+  });
+}
+
 test("gear selector stays usable above a landscape soft keyboard", async ({ page }) => {
   await page.setViewportSize({ width: 844, height: 390 });
   await page.locator("#agentQuestion").focus();

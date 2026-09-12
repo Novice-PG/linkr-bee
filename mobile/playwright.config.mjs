@@ -4,6 +4,10 @@ export default defineConfig({
   testDir: "./browser-test",
   fullyParallel: true,
   workers: 2,
+  /* The Agent specs drive a real Pi agent loop and the geometry specs wait on
+   * xterm's asynchronous parser; the 5 s default is tight for a loaded CI
+   * runner, where a missed assertion looks like a product failure. */
+  expect: { timeout: 10_000 },
   use: {
     browserName: "chromium",
     baseURL: "http://127.0.0.1:8765",

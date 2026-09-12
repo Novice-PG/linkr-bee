@@ -89,8 +89,12 @@
 
 html.agent-mode .terminal-head, .agent-tight .agent-header { min-height: var(--window-header-height); padding: var(--window-header-padding); }
 html.agent-mode .terminal-card { box-shadow: var(--window-shadow); }
-.agent-mode-picker.window-surface { padding: 0; border-color: var(--line); box-shadow: var(--overlay-shadow); scroll-padding-top: var(--window-header-height); }
-.agent-mode-title.window-header { position: sticky; top: 0; z-index: 1; }
+.agent-mode-picker.window-surface { padding: 0; border-color: var(--line); box-shadow: var(--overlay-shadow); }
+/* Keep the title out of the scrolling options area. A sticky header inside the
+ * scroll container hides the row that scrolling just brought into view, which
+ * makes the lower modes untappable whenever the picker is short (soft keyboard
+ * open). scroll-padding-top cannot fix that for native scrollIntoView. */
+.agent-mode-title.window-header { flex: 0 0 auto; min-height: 44px; }
 .agent-mode-options { padding: 12px; }
 .agent-mode-options::before { top: 50px; bottom: 50px; left: 40px; }
 .agent-mode-option { border-radius: var(--control-radius); }

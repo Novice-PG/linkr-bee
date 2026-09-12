@@ -6,6 +6,10 @@ import { createDeviceExecutor } from "./device_executor.js";
 import { requestComputerDownload } from "./local_download.js";
 import { renderAssistantMarkdown } from "./agent_markdown.js";
 
+/* Smallest usable picker height. The list scrolls, so staying clear of the
+ * composer matters more than showing every mode at once. */
+const MODE_PICKER_MIN_HEIGHT = 96;
+
 const labels = {
   history: ["任务记录与设备", "Tasks and device"], refreshProfile: ["探测设备", "Probe device"],
   noProfile: ["尚未探测设备能力", "Device capabilities not probed"], staleProfile: ["档案已过期，请重新探测", "Profile stale; probe again"],
@@ -519,11 +523,30 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     const height = viewport?.height || window.innerHeight;
     const width = viewport?.width || window.innerWidth;
     const anchor = modeButton.getBoundingClientRect();
+    const gap = 8;
+    /* The picker must never cover the composer. It is dismissed by tapping
+     * outside, so a picker that overlaps the question input swallows that tap
+     * as a mode selection — including Full Auto, which sends serial input
+     * without confirmation. Stop the list above the composer instead. */
+    const composer = $("agentQuestion")?.getBoundingClientRect();
+    const floor = top + height - gap;
+    const ceiling = composer && composer.top > top + gap ? Math.min(floor, composer.top - gap) : floor;
+    const spaceBelow = ceiling - (anchor.bottom + 6);
+    const spaceAbove = anchor.top - 6 - (top + gap);
+    const placeAbove = spaceAbove > spaceBelow;
+    /* The box never crosses the ceiling above (the composer) nor the visual
+     * viewport top, whatever the two gaps are; it just scrolls when it is
+     * small. The floor only applies while that stays inside the budget. */
+    const budget = Math.max(0, ceiling - (top + gap));
+    const room = Math.max(0, placeAbove ? spaceAbove : spaceBelow);
+    const available = Math.min(Math.max(MODE_PICKER_MIN_HEIGHT, room), budget);
     modePicker.style.width = `${Math.min(328, width - 16)}px`;
-    modePicker.style.maxHeight = `${height - 16}px`;
+    modePicker.style.maxHeight = `${available}px`;
     const box = modePicker.getBoundingClientRect();
     modePicker.style.left = `${Math.max(left + 8, Math.min(anchor.left, left + width - box.width - 8))}px`;
-    modePicker.style.top = `${Math.max(top + 8, Math.min(anchor.bottom + 6, top + height - box.height - 8))}px`;
+    modePicker.style.top = placeAbove
+      ? `${Math.max(top + gap, anchor.top - 6 - box.height)}px`
+      : `${Math.min(anchor.bottom + 6, ceiling - box.height)}px`;
   }
   function showModePicker(show, restoreFocus = false) {
     modePicker.hidden = !show;

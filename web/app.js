@@ -84,6 +84,7 @@ const state = {
   reliableReady: false,
   reliableTxSequence: 1,
   reliableRxSequence: 1,
+  reliableRxDesync: false,
   reliableMaxPayload: 20,
   reliableWriteSize: BLE_MAX_ATT_VALUE,
   deviceId: "",
@@ -1672,6 +1673,14 @@ function feedManagementText(text) {
   }
 }
 
+/* The LAN access token grants full target access, so it must not reach the
+ * scrollback or an exported log: `@s?` returns it as "… token=<32 hex>" and its
+ * reply line is echoed to the terminal and can be saved to disk. Parsing uses
+ * the raw text; only display and export are redacted. */
+function redactSecrets(text) {
+  return String(text).replace(/(^|\s)token=[0-9a-fA-F]{32}(?=\s|$)/g, "$1token=<redacted>");
+}
+
 function handleSocketStatusLine(line) {
   const value = String(line).trim();
   if (!value.startsWith("OK ws=")) {
@@ -2013,8 +2022,23 @@ function assertWriteSession(generation, signal) {
 function isAttSizeRejection(error) {
   // Only explicit local/ATT size rejection proves this write was not applied.
   // Timeouts and generic network errors can arrive after the peripheral wrote it.
-  return error?.name === "InvalidModificationError" ||
-    /invalid attribute (?:value )?length/i.test(error?.message || "");
+  // Web Bluetooth names the failure, but the native bridges surface the platform
+  // message instead, so match those shapes as well:
+  //  - Android through the Capacitor BLE plugin:
+  //    "Writing characteristic failed with status code 13."
+  //    (13 = GATT_INVALID_ATTRIBUTE_LENGTH)
+  //  - iOS/CoreBluetooth: "The attribute value length is invalid."
+  const name = error?.name || "";
+  const message = error?.message || "";
+  if (name === "InvalidModificationError" || /invalid attribute (?:value )?length/i.test(message)) {
+    return true;
+  }
+  if (/\bstatus code 13\b/.test(message)) {
+    return true;
+  }
+  // Locale-independent fallback for platform wording that names the length as
+  // invalid without matching either fixed phrase above.
+  return /\blength\b[^.]*\binvalid\b/i.test(message) || /\binvalid\b[^.]*\blength\b/i.test(message);
 }
 
 async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal) {
@@ -2154,13 +2178,15 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
   throw lastError || new Error("Reliable UART write failed");
 }
 
-function enqueueBytes(bytes, sensitive = false, { generation = state.writeGeneration, signal, inputRevision } = {}) {
+function enqueueBytes(bytes, sensitive = false, { generation = state.writeGeneration, signal, inputRevision, trackPending = true } = {}) {
   try { assertWriteSession(generation, signal); } catch (error) { return Promise.reject(error); }
   if (inputRevision !== undefined && inputRevision !== serialInputRevision) {
     return Promise.reject(new Error("Terminal input changed; request a new command before sending."));
   }
-  const queuedRevision = ++serialInputRevision;
-  serialInputPending = inputLeavesPendingLine(bytes, serialInputPending);
+  const queuedRevision = trackPending ? ++serialInputRevision : serialInputRevision;
+  if (trackPending) {
+    serialInputPending = inputLeavesPendingLine(bytes, serialInputPending);
+  }
   const operation = state.writeQueue.then(async () => {
     try {
       assertWriteSession(generation, signal);
@@ -2170,7 +2196,8 @@ function enqueueBytes(bytes, sensitive = false, { generation = state.writeGenera
       await writeBytes(bytes, sensitive, generation, signal);
     } catch (error) {
       // A partially delivered line has unknown contents; Auto must ask next time.
-      if (generation === state.writeGeneration) {
+      // Transport replies are not terminal input and must not latch the line.
+      if (trackPending && generation === state.writeGeneration) {
         serialInputPending = true;
         serialInputRevision++;
       }
@@ -2181,8 +2208,8 @@ function enqueueBytes(bytes, sensitive = false, { generation = state.writeGenera
   return operation;
 }
 
-async function writeText(text) {
-  await enqueueBytes(encoder.encode(text));
+async function writeText(text, options) {
+  await enqueueBytes(encoder.encode(text), false, options);
 }
 
 function sendText(text) {
@@ -2225,7 +2252,10 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
   if (!userInput) {
     // Replies and focus reports are transport data, not keystrokes. Preserve
     // armed modifiers and send these bytes without local echo or CR mapping.
-    writeText(data).catch((error) => appendLine(`[error] ${error.message}`));
+    // They must not mark the terminal input line as pending: a program that
+    // queries the terminal (DSR/DA/focus) would otherwise block tracked
+    // commands and geometry sync until the user pressed Enter.
+    writeText(data, { trackPending: false }).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
   markTerminalBusy();
@@ -2333,7 +2363,7 @@ function dispatchManagementMessage(message) {
   feedManagementText(text);
   for (const line of text.split(/\r?\n/)) {
     if (line) {
-      appendLine(`[${kind} #${message.requestId}] ${line}`);
+      appendLine(`[${kind} #${message.requestId}] ${redactSecrets(line)}`);
     }
   }
   state.mgmtResponses.settle({ ...message, text });
@@ -2379,9 +2409,16 @@ function onReliableUartIndication(value) {
     return; // Duplicate of the frame we already delivered.
   }
   if (sequence !== state.reliableRxSequence) {
-    appendLine(
-      `[error] Reliable UART sequence gap: expected ${state.reliableRxSequence}, got ${sequence}`,
-    );
+    // A gap cannot be recovered by waiting: every later frame keeps failing the
+    // same check. Latch the desynchronized state, say so once, and stop logging
+    // per-frame errors that would otherwise flood the terminal forever.
+    if (!state.reliableRxDesync) {
+      state.reliableRxDesync = true;
+      appendLine(
+        `[error] Reliable UART sequence gap: expected ${state.reliableRxSequence}, got ${sequence}. `
+        + "Serial output is no longer delivered; disconnect and reconnect the device.",
+      );
+    }
     return;
   }
   state.reliableRxSequence = nextSequence(state.reliableRxSequence);
@@ -2715,6 +2752,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     state.reliableWriteSize = BLE_MAX_ATT_VALUE;
     state.reliableTxSequence = reliableTxSequence;
     state.reliableRxSequence = reliableRxSequence;
+    state.reliableRxDesync = false;
     await bleTransport.startNotifications(
       device.id,
       RELIABLE_UART_SERVICE,
@@ -2820,7 +2858,7 @@ function clearTerminalOutput(resetTerminal) {
 function saveLog() {
   const chunks = state.logBytes.length
     ? state.logBytes
-    : [encoder.encode(elements.terminalOutput.textContent)];
+    : [encoder.encode(redactSecrets(elements.terminalOutput.textContent))];
   const blob = new Blob(chunks, { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");

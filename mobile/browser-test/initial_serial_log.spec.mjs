@@ -182,14 +182,20 @@ test("WebSocket switches start fresh evidence and ignore retired socket events",
     document.querySelector("#wsHostInput").value = "old.test";
     const first = connectWs();
     const old = sockets[0];
-    old.onopen();
+    // The bridge confirms LAN access before any terminal data is accepted, so a
+    // socket that only fires onopen never lets connectWs() resolve.
+    const openAndAuthorize = (socket) => {
+      socket.onopen();
+      socket.onmessage({ data: "@ws auth=none" });
+    };
+    openAndAuthorize(old);
     await first;
     old.onmessage({ data: "old network log\r\n" });
     old.onclose();
     document.querySelector("#wsHostInput").value = "new.test";
     const second = connectWs();
     const current = sockets[1];
-    current.onopen();
+    openAndAuthorize(current);
     await second;
     current.onmessage({ data: "new network log\r\n" });
     old.onmessage({ data: "late old network log\r\n" });

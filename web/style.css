@@ -2277,7 +2277,6 @@ html.soft-keyboard-open .app-shell {
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   height: var(--terminal-viewport-height, 100vh);
-  height: var(--terminal-viewport-height, 100dvh);
   min-height: 0;
   padding:
     max(4px, env(safe-area-inset-top, 0px))
@@ -2316,7 +2315,6 @@ html.soft-keyboard-open .terminal-card {
  * shrink visualViewport without changing the fixed/fullscreen layout height. */
 html.soft-keyboard-open .terminal-card.terminal-fullscreen-fallback {
   height: var(--terminal-viewport-height, 100vh);
-  height: var(--terminal-viewport-height, 100dvh);
 }
 
 html.soft-keyboard-open .terminal-card:fullscreen {
@@ -2328,6 +2326,10 @@ html.soft-keyboard-open .terminal-card:fullscreen {
 /* A declaration containing var() can fail at computed-value time, after the
  * preceding fallback has been discarded. Gate the unsupported unit instead. */
 @supports (height: 100dvh) {
+  html.soft-keyboard-open .app-shell,
+  html.soft-keyboard-open .terminal-card.terminal-fullscreen-fallback {
+    height: var(--terminal-viewport-height, 100dvh);
+  }
   html.soft-keyboard-open .terminal-card:fullscreen {
     padding-bottom: max(0px, calc(100dvh - var(--terminal-viewport-height, 100dvh)));
   }
@@ -2485,11 +2487,15 @@ html.agent-mode.settings-drawer-layout .app-shell {
   left: 0;
   width: 100%;
   height: var(--terminal-viewport-height, 100vh);
-  height: var(--terminal-viewport-height, 100dvh);
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   padding: max(6px, env(safe-area-inset-top, 0px)) max(6px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px));
+}
+@supports (height: 100dvh) {
+  html.agent-mode.settings-drawer-layout .app-shell {
+    height: var(--terminal-viewport-height, 100dvh);
+  }
 }
 html.agent-mode.settings-drawer-layout .topbar,
 html.agent-mode.settings-drawer-layout .controls,
@@ -2538,13 +2544,21 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
   top: calc(var(--settings-viewport-top, 0px) + max(12px, env(safe-area-inset-top, 0px)));
   bottom: auto;
   height: calc(var(--terminal-viewport-height, 100vh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
-  height: calc(var(--terminal-viewport-height, 100dvh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
 }
 @media (max-width: 600px) {
   html.settings-drawer-layout .app-shell.sidebar-open .controls {
     top: var(--settings-viewport-top, 0px);
     height: var(--terminal-viewport-height, 100vh);
-    height: var(--terminal-viewport-height, 100dvh);
+  }
+}
+@supports (height: 100dvh) {
+  html.settings-drawer-layout .app-shell.sidebar-open .controls {
+    height: calc(var(--terminal-viewport-height, 100dvh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
+  }
+  @media (max-width: 600px) {
+    html.settings-drawer-layout .app-shell.sidebar-open .controls {
+      height: var(--terminal-viewport-height, 100dvh);
+    }
   }
 }
 .agent-gear { display: flex; align-items: center; gap: 8px; min-width: 112px; min-height: 44px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel-2); color: var(--text); font: inherit; cursor: pointer; text-align: left; touch-action: manipulation; }
@@ -2560,10 +2574,10 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
 .agent-gear-track i { width: 4px; height: 4px; border-radius: 50%; background: var(--muted); }
 .agent-gear-track b { position: absolute; top: -2px; left: 1px; width: 8px; height: 8px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 0 2px var(--panel-2); transform: translateY(calc(var(--gear-index, 1) * 11px)); transition: transform 180ms ease; }
 .agent-mode-picker[hidden] { display: none; }
-.agent-mode-picker { position: fixed; z-index: 80; box-sizing: border-box; margin: 0; padding: 10px; min-width: 0; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); overflow-y: auto; overscroll-behavior: contain; }
+.agent-mode-picker { position: fixed; z-index: 80; box-sizing: border-box; margin: 0; padding: 10px; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
 .agent-mode-legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .agent-mode-title { padding: 4px 4px 10px; color: var(--muted); font-size: 12px; }
-.agent-mode-options { display: flex; flex-direction: column; gap: 8px; position: relative; }
+.agent-mode-options { display: flex; flex-direction: column; gap: 8px; position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .agent-mode-options::before { content: ""; position: absolute; top: 36px; bottom: 36px; left: 28px; width: 2px; background: var(--line-strong); }
 .agent-mode-options label { position: relative; min-width: 0; cursor: pointer; }
 .agent-mode-options input { position: absolute; opacity: 0; width: 1px; height: 1px; }
