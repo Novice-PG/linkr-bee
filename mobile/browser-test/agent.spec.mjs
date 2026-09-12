@@ -12,7 +12,14 @@ test.beforeEach(async ({ page }) => {
     const { state, setConnected } = window.__test;
     window.sent = [];
     state.mode = "ws";
-    state.ws = { readyState: 1, send: (bytes) => window.sent.push(Array.from(bytes)) };
+    /* window.sent is the UART input this test observes. A recognized shell
+     * prompt schedules the app's own window-size sync ("stty rows … cols …"),
+     * which is not assistant input and would otherwise race every count
+     * assertion; geometry is covered by terminal_geometry.spec.mjs. */
+    state.ws = { readyState: 1, send: (bytes) => {
+      if (new TextDecoder().decode(bytes).startsWith("stty ")) return;
+      window.sent.push(Array.from(bytes));
+    } };
     setConnected(true);
   });
   await page.locator("#agentButton").click();
