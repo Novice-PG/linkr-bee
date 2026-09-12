@@ -1064,7 +1064,7 @@ test('agent locates late documentation and serial errors without UART writes', a
  expect(await page.evaluate(()=>window.sent)).toEqual([]);
 });
 
-for(const width of [390,1280]) test(`running input queues support steering and follow-up at width ${width}`,async({page})=>{
+for(const width of [390,1280]) test(`running input queues support steering and follow-up at width ${width}`,async({page},testInfo)=>{
  await page.setViewportSize({width,height:844});
  let release;const gate=new Promise(resolve=>release=resolve);
  await mockModel(page,async(body,count)=>{
@@ -1079,7 +1079,7 @@ for(const width of [390,1280]) test(`running input queues support steering and f
  await page.locator('#agentQuestion').fill('Summarize afterwards');await page.locator('#agentFollowUp').click();
  await page.locator('#agentQuestion').fill('Use read-only checks');await page.locator('#agentSteer').click();
  await expect(page.locator('#agentQueue')).toContainText('Summarize afterwards');
- await page.screenshot({path:`/private/tmp/linkr-queue-${width}.png`});
+ await page.screenshot({path:testInfo.outputPath(`agent-queue-${width}.png`)});
  release();
  await expect(page.locator('#agentMessages')).toContainText('Follow-up complete.');
  await expect(page.locator('#agentQueueControls')).toBeHidden();
