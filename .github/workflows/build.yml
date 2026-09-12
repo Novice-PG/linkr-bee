@@ -142,7 +142,20 @@ jobs:
           enable-ccache: false
 
       - name: Fetch Espressif firmware blobs
-        run: west blobs fetch hal_espressif
+        shell: bash
+        run: |
+          set -euo pipefail
+          # raw.githubusercontent.com intermittently answers 5xx; one miss used
+          # to fail the whole firmware job, so retry before giving up.
+          for attempt in 1 2 3; do
+            if west blobs fetch hal_espressif; then
+              exit 0
+            fi
+            echo "blob fetch attempt ${attempt} failed; retrying in 20s" >&2
+            sleep 20
+          done
+          echo "blob fetch failed after 3 attempts" >&2
+          exit 1
 
       - name: Build firmware
         shell: bash
