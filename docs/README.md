@@ -14,6 +14,7 @@ If you just want to use the accessory, start with the project README instead:
 | [Hardware requirements](HARDWARE.md) | Board and hardware engineers | SoC, pinout, electrical requirements, test points, and production notes |
 | [WiFi/BLE coexistence findings](WIFI_DEBUG_FINDINGS.md) | Firmware maintainers | Reproduction evidence, Zephyr patches, and regression checks |
 | [Agent validation](AGENT_VALIDATION.zh-CN.md) | Firmware and client developers | Task recovery, device profiles, and what still needs hardware acceptance |
+| [Agent capability and roadmap](AGENT_ROADMAP.zh-CN.md) | Product and client developers | Current tool surface, known gaps, and the planned phases |
 | [Android/iOS client](../mobile/README.md) | Mobile developers | Capacitor build and native platform requirements |
 | [HarmonyOS NEXT client](../harmonyos/README.md) | HarmonyOS developers | DevEco build, signing, emulator status, and hardware-test boundary |
 | [HarmonyOS bridge protocol](../harmonyos/BRIDGE_PROTOCOL.md) | Client implementers | ArkWeb-to-ArkTS JSON bridge contract |
