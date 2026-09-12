@@ -3,7 +3,7 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-boards=${BOARD:-"esp32c3_supermini esp32c5_devkitc/esp32c5/hpcore"}
+boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore"}
 
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
@@ -50,6 +50,7 @@ done
 python3 -m compileall -q "$repo_dir/tools/linkr_ble_terminal.py"
 sh -n "$repo_dir/tools/serve_web.sh"
 sh -n "$repo_dir/tools/flash_firmware.sh"
+sh -n "$repo_dir/tools/build_terminal_binary.sh"
 
 # The C reference client is a shipped artifact with no other build path.
 if pkg-config --exists dbus-1 2>/dev/null; then

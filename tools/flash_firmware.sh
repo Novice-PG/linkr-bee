@@ -55,18 +55,26 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$IMAGE" ]; then
+    # Discover the packaged image by name rather than enumerating board slugs,
+    # so a new board artifact needs no change here. The released bundle keeps
+    # the script next to the image, which makes "$SCRIPT_DIR" and
+    # "$SCRIPT_DIR/../dist" the same directory: visit each real path once so a
+    # single image is not reported as "multiple images".
     matches=""
-    for candidate in \
-        "$SCRIPT_DIR/linkr-bee-esp32c3-supermini.bin" \
-        "$SCRIPT_DIR/linkr-bee-esp32c5-devkitc.bin" \
-        "$SCRIPT_DIR/linkr-ble-esp32c3-supermini.bin" \
-        "$SCRIPT_DIR/../dist/linkr-bee-esp32c3-supermini.bin" \
-        "$SCRIPT_DIR/../dist/linkr-bee-esp32c5-devkitc.bin" \
-        "$SCRIPT_DIR/../dist/linkr-ble-esp32c3-supermini.bin"; do
-        if [ -f "$candidate" ]; then
-            matches="${matches}${matches:+
+    seen_dirs=""
+    for dir in "$SCRIPT_DIR" "$SCRIPT_DIR/../dist"; do
+        [ -d "$dir" ] || continue
+        real_dir=$(CDPATH='' cd -- "$dir" && pwd)
+        case " $seen_dirs " in
+            *" $real_dir "*) continue ;;
+        esac
+        seen_dirs="$seen_dirs $real_dir"
+        for candidate in "$real_dir"/linkr-bee-*.bin "$real_dir"/linkr-ble-*.bin; do
+            if [ -f "$candidate" ]; then
+                matches="${matches}${matches:+
 }$candidate"
-        fi
+            fi
+        done
     done
     count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
     if [ "$count" -eq 1 ]; then
