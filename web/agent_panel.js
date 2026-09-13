@@ -78,6 +78,7 @@ const labels = {
   verificationNeeded: ["命令已结束，目标结果仍需验证", "Command completed; verify the intended result"],
   sessionRestored: ["已恢复上次对话；历史内容未经核实，操作前请重新读取设备状态。", "Restored the previous conversation. The history is unverified: re-read the device state before acting."],
   fullAutoExpired: ["Full Auto 已到时并回退到 Auto，后续命令需要确认。", "Full Auto reached its time limit and reverted to Auto; later commands need approval."],
+  fullAutoReconnected: ["设备已重新连接，执行档位已从 Full Auto 回到 Auto。低风险查询仍会自动执行，其他命令按当前规则确认。", "Device reconnected; execution mode changed from Full Auto to Auto. Low-risk queries still run automatically; other commands follow the current approval rules."],
   policyTitle: ["本机命令策略", "Command policy for this device"],
   policyNote: ["只保存在本机，不进入模型请求，也不会出现在导出的报告里。「总是询问」在包括 Full Auto 在内的所有档位都要求确认；「已预先批准」只对完全相同的命令在 Auto 档免确认。", "Kept on this device only: never part of a model request and never written to an exported report. \"Always ask\" requires approval in every mode including Full Auto; \"pre-approved\" skips the click in Auto mode for an exactly identical command."],
   policyAsk: ["总是询问（每行一条）", "Always ask (one per line)"],
@@ -300,8 +301,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
    * device happens to be current when a debounced save fires. */
   function saveCurrentSession() {
     if (!sessionDeviceKey) return;
-    let snapshotMessages = [];
-    try { snapshotMessages = runner?.snapshot?.() || []; } catch { snapshotMessages = []; }
+    // Before the next question creates a runner, the restored history is still
+    // the model's history. A second pagehide must not overwrite it with [].
+    let snapshotMessages = restoredMessages || [];
+    try { snapshotMessages = runner?.snapshot?.() ?? snapshotMessages; } catch { /* Keep restored history. */ }
     saveSession(sessionStorage, sessionDeviceKey, { display: displayTranscript, messages: snapshotMessages });
   }
   function scheduleSessionSave() {
@@ -431,8 +434,18 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     $("agentAsk").setAttribute("aria-label", text("send"));
     $("agentAsk").setAttribute("aria-keyshortcuts", "Control+Enter Meta+Enter");
     button.title += ` (${focusKeys})`;
+    refreshMode();
+    modePicker.setAttribute("aria-label", text("mode"));
+    $("agentModeClose").title = text("closePicker");
+    $("agentModeClose").setAttribute("aria-label", text("closePicker"));
+    $("agentNew").title = text("clear");
+    $("agentNew").setAttribute("aria-label", text("clear"));
+    refreshConsole(); refreshHistory();
+  }
+  function refreshMode() {
     const modeLabel = executionMode === "auto" ? "Auto" : text(executionMode === "full-auto" ? "fullAuto" : executionMode);
     $("agentActiveMode").textContent = modeLabel;
+    for (const option of modeOptions) option.checked = option.value === executionMode;
     /* The deadline ticks in its own aria-hidden element: the mode text stays
      * exact for tests and assistive tech, and a per-second live region would
      * only be noise. */
@@ -441,12 +454,6 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     modeButton.title = `${text("shiftMode")} · ${text(`help-${executionMode}`)}`;
     modeButton.style.setProperty("--gear-index", modeOptions.findIndex((option) => option.value === executionMode));
     if (executionMode === "full-auto" && device.getStatus().executionModeExpiresAt) startCountdown();
-    modePicker.setAttribute("aria-label", text("mode"));
-    $("agentModeClose").title = text("closePicker");
-    $("agentModeClose").setAttribute("aria-label", text("closePicker"));
-    $("agentNew").title = text("clear");
-    $("agentNew").setAttribute("aria-label", text("clear"));
-    refreshConsole(); refreshHistory();
   }
   function addMessage(role, content = "") {
     messages.querySelector(".agent-empty")?.remove();
@@ -590,8 +597,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
      * back. The explicit new-conversation action clears the record instead. */
     currentTask = null; recovery = null;
     device.reset();
+    executionMode = device.mode;
     executionRows.clear();
     messages.replaceChildren();
+    refreshMode();
   }
   function onEvent(event, expectedVersion) {
     if (version !== expectedVersion) return;
@@ -1042,12 +1051,20 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),
     logsCleared() { stop("stopped", { preserveConversation: false }); clearConversation(); refreshConsole(); },
     connectionChanged(connected) {
+      const wasFullAuto = device.mode === "full-auto";
       bindingState = null; rememberedProfile = null;
       autoIdentitySession = null;
       stop("changed", { preserveConversation: false });
       if (connected) clearConversation();
       else device.observe();
       refreshConsole(); refreshHistory();
+      if (connected && wasFullAuto) {
+        const notice = document.createElement("p");
+        notice.className = "agent-note";
+        notice.dataset.ai = "fullAutoReconnected";
+        notice.textContent = text("fullAutoReconnected");
+        messages.append(notice);
+      }
       if (connected) logsChanged();
     },
   };

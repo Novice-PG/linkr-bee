@@ -172,7 +172,13 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     },
     cancel,
     forgetProfile() { profile = null; toolCapabilities = {}; },
-    reset() { cancel(); clearModeTimer(); records.length = 0; profile = null; toolCapabilities = {}; },
+    reset() {
+      cancel();
+      clearModeTimer();
+      // A new conversation/session ends the unattended execution window.
+      if (mode === "full-auto") mode = "auto";
+      records.length = 0; profile = null; toolCapabilities = {};
+    },
     getStatus() {
       const status = getStatus();
       if (profile) {
@@ -188,9 +194,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '');
         capability.cursor = recent.cursor ?? capability.cursor;
       }
-      const policy = getCommandPolicy() || { alwaysAsk: [], allow: [] };
       return { ...status, executionMode: mode, executionModeExpiresAt: mode === "full-auto" ? modeExpiresAt : 0,
-        commandPolicy: { allow: [...(policy.allow || [])], alwaysAskCount: (policy.alwaysAsk || []).length },
         console: consoleState(), profile, toolCapabilities:structuredClone(toolCapabilities) };
     },
     readLog(options) { return readLog(options); },

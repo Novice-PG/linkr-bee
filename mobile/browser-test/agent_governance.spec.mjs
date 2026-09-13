@@ -43,7 +43,7 @@ async function mockModel(page, respond) {
   await page.route("https://agent.test/v1/chat/completions", async (route) => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
     if (route.request().method() === "OPTIONS") { await route.fulfill({ status: 204, headers }); return; }
-    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(respond()) });
+    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(respond(route.request().postDataJSON())) });
   });
 }
 
@@ -87,6 +87,58 @@ test("Full Auto shows its remaining window and re-selecting it extends it", asyn
   await expect(mode).toHaveText("Auto");
   await expect(countdown).toHaveText("");
   expect(first).toBeGreaterThan(0);
+});
+
+for (const reset of ["new conversation", "reconnect"]) {
+  test(`${reset} exits Full Auto and asks before writing`, async ({ page }) => {
+    await configure(page);
+    await chooseMode(page, "full-auto");
+    if (reset === "new conversation") await page.locator("#agentNew").click();
+    else await page.evaluate(() => {
+      window.__test.setConnected(false);
+      window.__test.setConnected(true);
+      window.__test.handleIncomingBytes(new TextEncoder().encode("root@board:~# "));
+    });
+    await expect(page.locator("#agentActiveMode")).toHaveText("Auto");
+    await expect(page.locator("#agentModeCountdown")).toHaveText("");
+    await expect(page.locator('[name="agentMode"][value="auto"]')).toBeChecked();
+    if (reset === "reconnect") {
+      await expect(page.locator('[data-ai="fullAutoReconnected"]')).toContainText(/Full Auto.*Auto/);
+    }
+    await mockModel(page, () => ({ tool: { name: "send_serial_input", args: { text: "touch /tmp/example", appendEnter: true } } }));
+    await page.locator("#agentQuestion").fill("Create an empty example file");
+    await page.locator("#agentAsk").click();
+    await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
+    expect(await page.evaluate(() => window.sent)).toEqual([]);
+  });
+}
+
+test("reading status never sends local command rules to the model", async ({ page }) => {
+  await configure(page);
+  const alwaysAsk = "echo LOCAL_ASK_ONLY";
+  const allow = "echo LOCAL_ALLOW_ONLY";
+  await page.locator("#agentHistory > summary").click();
+  await page.locator("#agentPolicy > summary").click();
+  await page.locator("#agentPolicyAsk").fill(alwaysAsk);
+  await page.locator("#agentPolicyAllow").fill(allow);
+  await page.locator("#agentPolicySave").click();
+  await expect(page.locator("#agentPolicyStatus")).toContainText(/Saved on this device|已保存到本机/);
+  await page.locator("#agentHistory > summary").click();
+  const requests = [];
+  await mockModel(page, (body) => {
+    requests.push(body);
+    return requests.length === 1
+      ? { tool: { name: "get_device_status", args: {} } }
+      : { text: "Status inspected." };
+  });
+  await page.locator("#agentQuestion").fill("Read the device status");
+  await page.locator("#agentAsk").click();
+  await expect(page.locator("#agentMessages")).toContainText("Status inspected.");
+  expect(requests).toHaveLength(2);
+  expect(requests[1].messages.some(message => message.role === "tool")).toBe(true);
+  expect(JSON.stringify(requests)).not.toContain(alwaysAsk);
+  expect(JSON.stringify(requests)).not.toContain(allow);
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
 });
 
 test("an always-ask entry makes Full Auto request approval for that command", async ({ page }) => {

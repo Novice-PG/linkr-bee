@@ -49,37 +49,44 @@ async function mockModel(page, bodies) {
   });
 }
 
-async function ask(page, question) {
+async function ask(page, question, bodies) {
+  const requestCount = bodies.length;
   await page.locator("#agentQuestion").fill(question);
   await page.locator("#agentAsk").click();
+  await expect.poll(() => bodies.length).toBe(requestCount + 1);
+  await expect(page.locator("#agentAsk")).toBeEnabled();
   await expect(page.locator("#agentMessages")).toContainText("could not mount");
 }
 
-test("a reload restores the conversation and marks the history unverified", async ({ page }) => {
-  const bodies = [];
-  await mockModel(page, bodies);
-  await ask(page, "Why did boot fail?");
-  // The panel saves on a short debounce.
-  await page.waitForTimeout(700);
+for (const reloads of [1, 2]) {
+  test(`${reloads} reload(s) restore the conversation and mark the history unverified`, async ({ page }) => {
+    const bodies = [];
+    await mockModel(page, bodies);
+    await ask(page, "Why did boot fail?", bodies);
+    // The panel saves on a short debounce.
+    await page.waitForTimeout(700);
 
-  await page.reload();
-  await connect(page);
-  await page.locator("#agentButton").click();
-  const messages = page.locator("#agentMessages");
-  await expect(messages).toContainText("Why did boot fail?");
-  await expect(messages).toContainText("could not mount");
-  await expect(messages).toContainText(/unverified|未经核实/);
+    const messages = page.locator("#agentMessages");
+    for (let i = 0; i < reloads; i++) {
+      await page.reload();
+      await connect(page);
+      await page.locator("#agentButton").click();
+      await expect(messages).toContainText("Why did boot fail?");
+      await expect(messages).toContainText("could not mount");
+      await expect(messages).toContainText(/unverified|未经核实/);
+    }
 
-  // The model receives the earlier turns, not just the on-screen copy.
-  await ask(page, "And what should I check first?");
-  const resent = bodies.at(-1).messages;
-  expect(JSON.stringify(resent)).toContain("Why did boot fail?");
-});
+    // The model receives the earlier turns, not just the on-screen copy.
+    await ask(page, "And what should I check first?", bodies);
+    const resent = bodies.at(-1).messages;
+    expect(JSON.stringify(resent)).toContain("Why did boot fail?");
+  });
+}
 
 test("an identity learned during the conversation does not reload the transcript", async ({ page }) => {
   const bodies = [];
   await mockModel(page, bodies);
-  await ask(page, "Why did boot fail?");
+  await ask(page, "Why did boot fail?", bodies);
   await page.waitForTimeout(700);
   // The stored key is [transport, device id, UART], and the app fills those in
   // as it learns them: reading the UART format updates the settings field, which
@@ -109,7 +116,7 @@ test("an identity learned during the conversation does not reload the transcript
 test("a new conversation clears the stored history", async ({ page }) => {
   const bodies = [];
   await mockModel(page, bodies);
-  await ask(page, "Why did boot fail?");
+  await ask(page, "Why did boot fail?", bodies);
   await page.waitForTimeout(700);
   expect(await page.evaluate(() => JSON.stringify(localStorage.getItem("linkr-agent-session-v1") || ""))).toContain("Why did boot fail");
 

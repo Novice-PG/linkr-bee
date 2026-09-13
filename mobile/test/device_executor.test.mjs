@@ -369,13 +369,34 @@ test("expiry cancels a pending approval instead of leaving it armed", async () =
   assert.equal(manual.sent.length, 0);
 });
 
-test("the status carries the per-target command policy for the model", () => {
+test("reset ends Full Auto and requires approval for the next write", async () => {
+  const { device, sent, timeouts } = windowFixture();
+  device.setMode("full-auto");
+  device.reset();
+  assert.equal(device.mode, "auto");
+  assert.equal(device.getStatus().executionModeExpiresAt, 0);
+  await tick(70);
+  assert.equal(timeouts.length, 0);
+  const pending = device.execute({ text: "touch /tmp/example", appendEnter: true });
+  const record = device.getRecords()[0];
+  assert.equal(record.state, "awaiting-approval");
+  assert.deepEqual(sent, []);
+  device.reject(record.id);
+  await assert.rejects(pending, /rejected/);
+
+  device.setMode("manual");
+  device.reset();
+  assert.equal(device.mode, "manual");
+});
+
+test("the model-visible status does not expose the local command policy", () => {
   const policy = { alwaysAsk: ["reboot", "flash"], allow: ["systemctl status nginx"] };
   const { device } = windowFixture({ getCommandPolicy: () => policy });
-  assert.deepEqual(device.getStatus().commandPolicy, { allow: ["systemctl status nginx"], alwaysAskCount: 2 });
-  // Without a policy the status still has a stable shape.
-  const { device: plain } = windowFixture();
-  assert.deepEqual(plain.getStatus().commandPolicy, { allow: [], alwaysAskCount: 0 });
+  const status = device.getStatus();
+  assert.equal(Object.hasOwn(status, "commandPolicy"), false);
+  for (const command of [...policy.allow, ...policy.alwaysAsk]) {
+    assert.equal(JSON.stringify(status).includes(command), false);
+  }
 });
 
 test("an always-ask entry is honoured by the executor in Full Auto", async () => {

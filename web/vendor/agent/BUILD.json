@@ -26,14 +26,14 @@
     "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
     "web/command_policy.js": "940328bac02f22c29df6beb7d2d16bcc7654408ddac3bc5401c97b0539ebcad9",
     "web/agent_execution_policy.js": "b5109b721b5074101ca8a84de057747cd4ed524720322609059c1fb66541a6d2",
-    "mobile/src/agent-prompt.mjs": "12b32bf28ad758c43b413e150adc5fd4ffc335e02042e5b5b22308ca12e02598",
+    "mobile/src/agent-prompt.mjs": "65650dd0b377e6caadfbe26f60293f8e2e949a7359f47340249968d087243d2b",
     "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
     "web/target_files.js": "69b593fc088b112d593fa9ae8e78d8b6d7fddfbb69d0822d168c50383e0fa778",
     "web/serial_watch.js": "e24f5d6c50e1dd5596557f3d7a79166fb5f87f81afcb43b7d76361d9c43caafa",
     "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
     "mobile/src/agent-context.mjs": "67e2cda76ce337fc432392263c1b0c2bccbeb937ac07d7a6f15df031f258c70e",
-    "mobile/src/pi-agent.mjs": "45f19a5816e28b9db0c77c76044eed4a76f7dba8a1155cc7a6cebf4e73007c8a",
+    "mobile/src/pi-agent.mjs": "5c7c53912642c1614214c6f4b3560a27eb9f8649230e79e89f5cfcb467b4afec",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "86a42161095d0b97e681315c86bff5bfd92700a9c8b411e15d7c428121a79819"
+  "sha256": "7371d890452f09ce6e3b90788008fa9174bc27ac24558f9cba4729bea422995a"
 }
