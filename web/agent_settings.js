@@ -1,6 +1,8 @@
 import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
 import {
+  AGENT_PROVIDERS,
+  AGENT_REASONING_LEVELS,
   clearAgentConfig,
   endpointSecurity,
   formatAgentHeaders,
@@ -34,6 +36,18 @@ const labels = {
   keyHint: ["无需密钥的本地服务可留空。", "Leave blank for a local service that does not require a key."],
   headers: ["附加请求头", "Extra request headers"],
   headersHint: ["每行一个 `名称: 值`。部分端点需要特定请求头才接受浏览器请求，例如 Anthropic 需要 anthropic-dangerous-direct-browser-access: true。", "One `Name: value` per line. Some endpoints only accept a browser request with a specific header, for example Anthropic needs anthropic-dangerous-direct-browser-access: true."],
+  provider: ["接口协议", "API protocol"],
+  providerHint: ["必须与 API 地址匹配，协议不同请求格式也不同。", "Must match the API base URL; each protocol uses a different request format."],
+  reasoning: ["推理强度", "Reasoning effort"],
+  reasoningHint: ["仅部分模型支持；关闭可减少等待和 token 消耗。", "Only some models support this; off avoids the extra latency and tokens."],
+  reasoningOff: ["关闭", "Off"], reasoningLow: ["低", "Low"], reasoningMedium: ["中", "Medium"], reasoningHigh: ["高", "High"],
+  contextWindow: ["上下文窗口（token，可留空）", "Context window in tokens (optional)"],
+  maxTokens: ["最大输出（token，可留空）", "Max output tokens (optional)"],
+  limitsHint: ["留空或填 0 表示使用内置默认值。", "Leave blank or 0 to keep the built-in default."],
+  providerError: ["请选择接口协议。", "Choose an API protocol."],
+  reasoningError: ["请选择推理强度。", "Choose a reasoning effort."],
+  contextWindowError: ["上下文窗口必须是 0，或 1000 到 2000000 之间的整数。", "Context window must be 0, or an integer between 1000 and 2000000."],
+  maxTokensError: ["最大输出必须是 0，或 1 到 100000 之间的整数。", "Max output tokens must be 0, or an integer between 1 and 100000."],
   pricing: ["Token 单价（每 100 万，可选）", "Token prices per 1M (optional)"],
   pricingHint: ["填了就按它估算本轮费用，只用于显示，留空则只显示 token 数。", "When set, the conversation shows an estimated cost; leave blank to show token counts only."],
   pricingError: ["单价必须是 0 到 100000 之间的数字。", "Prices must be numbers between 0 and 100000."],
@@ -60,9 +74,18 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   section.hidden = tab.hidden = false;
   section.closest(".controls").classList.add("has-agent-settings");
   const $ = (id) => section.querySelector(`#${id}`);
-  const inputs = { endpoint: $("agentEndpoint"), model: $("agentModel"), apiKey: $("agentApiKey") };
+  const inputs = {
+    endpoint: $("agentEndpoint"), model: $("agentModel"), apiKey: $("agentApiKey"),
+    provider: $("agentProvider"), reasoning: $("agentReasoning"),
+    contextWindow: $("agentContextWindow"), maxTokens: $("agentMaxTokens"),
+  };
   const headersInput = $("agentHeaders");
   const priceInputs = { input: $("agentPriceInput"), output: $("agentPriceOutput") };
+  // Every validated field reports through its own message; a wrong apiKey type
+  // can only come from a stored record, never from this form, so it keeps the
+  // endpoint message like before.
+  const statusLabels = { model: "modelError", provider: "providerError", reasoning: "reasoningError", contextWindow: "contextWindowError", maxTokens: "maxTokensError" };
+  const reasoningLabels = { off: "reasoningOff", low: "reasoningLow", medium: "reasoningMedium", high: "reasoningHigh" };
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
   let config = null;
   let status = "";
@@ -80,8 +103,37 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     el.classList.toggle("field-error", (!busy && error) || exposed);
   }
   function showStatus(next, failed = false) { status = next; error = failed; renderStatus(); }
+  /* The provider and reasoning selects are driven by the shared option lists, so
+   * the form and the validator cannot drift apart. Their text is translated, so
+   * the lists are rebuilt on every language change; the ids never change, so a
+   * choice made by the user survives the rebuild. */
+  function fillOptions() {
+    const index = getLang().startsWith("zh") ? 0 : 1;
+    const options = {
+      agentProvider: AGENT_PROVIDERS.map(({ id, label, hint }) => ({ value: id, label, hint })),
+      agentReasoning: AGENT_REASONING_LEVELS.map((id) => ({ value: id, label: labels[reasoningLabels[id]] || [id, id] })),
+    };
+    for (const [id, entries] of Object.entries(options)) {
+      const select = $(id);
+      const chosen = select.value;
+      select.textContent = "";
+      for (const { value, label, hint } of entries) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label[index];
+        // Only a tooltip has room for the endpoints a provider targets.
+        if (hint) option.title = hint[index];
+        select.append(option);
+      }
+      select.value = chosen || entries[0].value;
+    }
+  }
   function fill() {
     for (const [name, input] of Object.entries(inputs)) input.value = config?.[name] || "";
+    // A select whose value matches no option shows nothing and would submit an
+    // empty string, so a missing record falls back to the schema default.
+    if (!inputs.provider.value) inputs.provider.value = AGENT_PROVIDERS[0].id;
+    if (!inputs.reasoning.value) inputs.reasoning.value = AGENT_REASONING_LEVELS[0];
     headersInput.value = formatAgentHeaders(config?.headers);
     const pricing = loadPricing(localStorage);
     for (const [name, input] of Object.entries(priceInputs)) input.value = pricing[name] ? String(pricing[name]) : "";
@@ -92,12 +144,18 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     for (const input of Object.values(priceInputs)) input.removeAttribute("aria-invalid");
   }
   try { config = loadAgentConfig(localStorage); } catch { showStatus("readError", true); }
+  fillOptions();
   fill();
   $("agentSettingsForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (busy) return;
     resetErrors();
     const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
+    // A cleared number input reports an empty string and an empty select reports
+    // no choice at all. Both mean "keep the schema default", not invalid input.
+    for (const name of ["contextWindow", "maxTokens"]) draft[name] = draft[name].trim() ? Number(draft[name]) : 0;
+    draft.provider ||= AGENT_PROVIDERS[0].id;
+    draft.reasoning ||= AGENT_REASONING_LEVELS[0];
     try { draft.headers = parseAgentHeaders(headersInput.value); } catch {
       headersInput.setAttribute("aria-invalid", "true");
       showStatus("headersError", true);
@@ -111,9 +169,9 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
         headersInput.focus();
         return;
       }
-      const name = error.message === "model" ? "model" : "endpoint";
+      const name = statusLabels[error.message] ? error.message : "endpoint";
       inputs[name].setAttribute("aria-invalid", "true");
-      showStatus(`${name}Error`, true);
+      showStatus(statusLabels[error.message] || "endpointError", true);
       inputs[name].focus();
       return;
     }
@@ -177,6 +235,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   $("targetRegenerateConfirm").addEventListener("change", () => { $("targetRegenerate").disabled = !$("targetRegenerateConfirm").checked; });
   function refreshLang() {
     for (const el of section.querySelectorAll("[data-ai-setting]")) el.textContent = text(el.dataset.aiSetting);
+    fillOptions();
     renderStatus();
   }
   refreshLang();

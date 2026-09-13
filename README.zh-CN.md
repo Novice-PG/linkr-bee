@@ -103,7 +103,8 @@ RX 接的是配件 TX，并且除非 CTS 和 RTS 都接了，否则关掉硬件�
 手机上终端优先占用空间，次要设置收进抽屉。浏览器和手机 App 都有助手面板。浏览器里的
 模型请求由页面直接发出，需要端点允许来自页面的请求——多数云端服务和本地模型服务都
 支持。Anthropic 需要额外加一个请求头，配置方法见
-[串口助手说明](mobile/README.md#built-in-serial-assistant-pi)。
+[串口助手说明](mobile/README.md#built-in-serial-assistant-pi)。协议可选 OpenAI 兼容、
+Anthropic 或 Gemini，对话按板子存在本机，刷新页面接着上次继续。
 
 ## 局域网模式
 

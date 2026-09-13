@@ -888,7 +888,7 @@ test('task summaries survive reconnect without replay and can be cleared', async
 
 for (const desktop of [false,true]) test.describe(desktop ? 'desktop task archive' : 'mobile task archive',()=>{
   test.use({isMobile:!desktop,hasTouch:!desktop,viewport:desktop?{width:1552,height:1000}:{width:390,height:844}});
-  test('refresh restores only summaries and keeps the panel within the viewport',async ({page},testInfo)=>{
+  test('refresh restores summaries and the transcript without replaying commands',async ({page},testInfo)=>{
     await page.evaluate(()=>{window.__test.state.wsHost='ws://archive-board';});
     await mockModel(page,()=>({text:'Saved observation only.'}));
     await ask(page,'Verify target storage');
@@ -899,7 +899,10 @@ for (const desktop of [false,true]) test.describe(desktop ? 'desktop task archiv
     await page.locator('#agentHistory > summary').click();
     await page.locator('#agentTasks summary').click();
     await expect(page.locator('#agentTasks')).toContainText('Saved observation only.');
-    await expect(page.locator('#agentMessages .agent-message')).toHaveCount(0);
+    /* The transcript comes back from local storage and is labelled unverified;
+     * the throw-on-send stub above proves the refresh itself stayed offline. */
+    await expect(page.locator('#agentMessages .agent-message')).not.toHaveCount(0);
+    await expect(page.locator('#agentMessages')).toContainText(/unverified|未经核实/);
     expect(await page.locator('#agentPanel').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
     await page.screenshot({path:testInfo.outputPath('task-archive.png')});
   });

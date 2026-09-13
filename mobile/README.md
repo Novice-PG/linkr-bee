@@ -46,6 +46,14 @@ send a model request. Endpoint, model and API key are restored after reloading
 or restarting the app. Re-saving unchanged settings retains the current diagnostic
 conversation; changing the endpoint, model or key resets its model context.
 **Clear configuration** removes all three from this device.
+The same panel selects the provider protocol — `openai-completions` (default,
+covers OpenAI-compatible services), `anthropic-messages` or
+`google-generative-ai` — and, optionally, a context window, an output token limit
+and a reasoning level (`off` by default). Leave the numeric fields empty to use
+the adapter defaults; an unsupported combination fails the request with the
+provider's own error rather than silently changing the setting. Extra request
+headers can be added one `Name: value` per line, which is how providers that need
+a browser-access opt-in or an API version are configured.
 Ask a question such as “Why did this board fail to
 boot?” The app runs the Pi agent loop locally; model inference uses the configured
 service. This is not an on-device/offline language model.
@@ -63,6 +71,16 @@ pinned to 0.85.1. It exposes these tools:
 
 - `read_serial_log`: first reads the recent tail, then continues from its cursor.
   Use `recent: true` to reread the tail or `after` for an explicit range.
+- `read_target_file`: pages through one target file (1 KiB per call by default)
+  instead of `cat`, which floods the console. Results are wrapped in whole-line
+  `LINKR_FILE:begin/end` markers so prompt echo cannot be mistaken for file
+  content, and missing, directory, relative-path, permission and non-regular-file
+  cases have distinct errors. It appears only after a probe shows the target has
+  `dd` or `base64`, so the model is never offered a tool the board cannot run.
+- `watch_serial_output`: watches the console for a bounded window and returns
+  matching crash and boot-loop lines with their offsets, rather than a full log
+  dump. It is still a foreground tool the model must call; there is no unattended
+  background monitor.
 - `get_device_status`: connection, transport, UART settings, execution mode and
   passive console-state hints, without WiFi credentials.
 - `send_serial_input`: submits exact serial input under the selected execution mode.
@@ -71,6 +89,11 @@ pinned to 0.85.1. It exposes these tools:
 - `inspect_serial_execution`: waits for output to settle and retrieves a send
   record. Default evidence is its latest tail; `after` / `limit` page through
   earlier output, with `observedCursor` / `hasMore` indicating the next page.
+
+Read-only tools run in parallel; every tool that changes the target or writes to
+the console runs sequentially, so two commands never interleave on the UART. A
+tool result longer than 16,000 characters is truncated and marked as truncated,
+so one oversized output cannot consume the conversation's context.
 
 The Agent header shows a compact gear selector with the current execution mode.
 Tap it to open the vertical **M → A → F** gear track, then tap a mode to engage
@@ -178,12 +201,18 @@ first-fragment ATT size rejection can trigger a smaller-size retry.
 
 Execution records stay in memory. New conversations, cleared logs and new device
 connections reset them. Restarting the app does not restore approvals or replay
-unfinished actions; durable task recovery is not implemented.
+unfinished actions; durable task recovery is not implemented. The conversation
+transcript is the one exception and is stored per device, as described below.
 
 Questions and requested serial logs are sent to the configured model endpoint.
 Endpoint, model ID and API key are saved in this app / browser origin's
 `localStorage`; this is not an encrypted OS credential vault. Clearing the
-configuration or app / site data removes them. Conversations stay in memory.
+configuration or app / site data removes them. A conversation is stored per
+device identity alongside the task summaries, so reloading the page brings the
+transcript back, labelled as unverified history, and continues the same model
+context. Restoring it sends nothing to the target: no command is replayed. **New
+conversation** clears it, and so does changing the model configuration. This is a
+local snapshot, not an encrypted or server-side session.
 Unsaved edits do not change the active configuration, and configuration is
 locked while the Agent is running. Execution mode remains session-only and
 starts in recommended Auto mode. No shared service key is included in the app.

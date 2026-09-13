@@ -346,6 +346,22 @@
                 <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
                 <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
               </label>
+              <label class="field"><span class="field-label" data-ai-setting="provider">API protocol</span>
+                <select id="agentProvider" aria-describedby="agentProviderHint agentSettingsStatus"></select>
+                <span id="agentProviderHint" class="field-hint" data-ai-setting="providerHint"></span>
+              </label>
+              <label class="field"><span class="field-label" data-ai-setting="reasoning">Reasoning effort</span>
+                <select id="agentReasoning" aria-describedby="agentReasoningHint agentSettingsStatus"></select>
+                <span id="agentReasoningHint" class="field-hint" data-ai-setting="reasoningHint"></span>
+              </label>
+              <label class="field"><span class="field-label" data-ai-setting="contextWindow">Context window in tokens (optional)</span>
+                <input id="agentContextWindow" type="number" min="0" max="2000000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentContextWindowHint agentSettingsStatus">
+                <span id="agentContextWindowHint" class="field-hint" data-ai-setting="limitsHint"></span>
+              </label>
+              <label class="field"><span class="field-label" data-ai-setting="maxTokens">Max output tokens (optional)</span>
+                <input id="agentMaxTokens" type="number" min="0" max="100000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentMaxTokensHint agentSettingsStatus">
+                <span id="agentMaxTokensHint" class="field-hint" data-ai-setting="limitsHint"></span>
+              </label>
               <label class="field"><span class="field-label" data-ai-setting="pricing">Token prices per 1M (optional)</span>
                 <span class="field-row pricing">
                   <input id="agentPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="input" aria-label="input price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">

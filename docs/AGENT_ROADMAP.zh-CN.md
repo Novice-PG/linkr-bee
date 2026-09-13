@@ -140,17 +140,46 @@
   `mobile/browser-test/agent_governance.spec.mjs`（倒计时与延长、总是询问在 Full Auto
   下仍要确认、预先批准在 Auto 下免确认）。
 
-## 候选池（未排期）
+## 第四期：候选池（已完成）
 
-- 多 provider 与协议（SDK 已内置 anthropic / google / bedrock / azure 等适配器与
-  自定义 headers），以及 `contextWindow` / `maxTokens` / 推理档位可配。
-- 只读工具并行执行、`afterToolCall` 结果改写、`addedToolNames` 动态工具。
-- 目标机文件读取（分页替代 `cat` 刷屏）与本机到目标机的文件传输（需要新传输通道）。
-- 应用侧验证：把 hash、字节数、服务状态等可机器判定的检查做成工具，减少模型自述。
-- 后台与触发式观察（例如启动循环检测），需要不依赖提问的运行模式。
-- 会话与审批的持久化：SDK 的 harness session 层（entry tree、fork、usage rows）
-  目前完全未使用。
-- 治理：移动端密钥存入系统凭据库（时间盒与按目标机策略已完成，见上）。
+- **多 provider 与采样参数**：AI 设置里可选 `openai-completions` / `anthropic-messages`
+  / `google-generative-ai`，并可直接填 `contextWindow`、`maxTokens`、推理档位
+  （`off`/`low`/`medium`/`high`）；档位由 SDK 适配器翻译成各家的请求字段（OpenAI 系
+  `reasoning_effort`、Anthropic 的 thinking 预算、Gemini 的 `thinking.level` 或
+  `budgetTokens`），`off` 完全不发该字段。适配器随打包一起进 bundle，代价是体积从
+  488 KB 涨到 979 KB（min，gzip 252 KB）；bundle 仍是按需加载，不影响终端首屏。
+  留空即为各 provider 的默认值，服务端不接受某个字段时把该字段留空即可。
+- **工具执行语义**：`toolExecution: "parallel"` 让只读工具并行发请求，17 个会改变设备
+  状态或占用控制台的工具都单独标了 `executionMode: "sequential"`——并行的收益不该换来
+  两条命令交错写进同一个串口。`afterToolCall` 把超过 16000 字符的文本结果截断并注明，
+  避免一次 `cat` 把上下文冲掉。
+- **动态工具**：`read_target_file` 在探测到目标机具备 `dd` 或 `base64` 之前不暴露给
+  模型（`unlockTools` + `prepareNextTurnWithContext`，同一轮内解锁即可用），省掉反复
+  调用不存在工具的死循环。
+- **目标机文件读取**（`web/target_files.js`）：按行分页读取，默认一次 1 KB、用
+  `LINKR_FILE:begin/end` 整行标记包裹，因此不会被 shell 提示符或回显污染；缺失、是目录、
+  非绝对路径、无权限、非普通文件分别给出不同的错误标记，让模型能区分"文件不存在"和
+  "命令没跑完"。上传方向的命令构造与进度解析已经写好（`uploadPlan` /
+  `uploadChunkCommand` / `parseUploadResult`），但面板还没有选择文件与按计划一次审批的
+  交互，因此**尚未接入工具**。
+- **串口观察**（`web/serial_watch.js`）：`watch_serial_output` 在等待窗口里按行匹配崩溃
+  与启动循环特征，返回带偏移的证据行而不是整段日志。它只在模型主动调用时运行，即
+  "这一轮里多看一会儿"，不是无人值守的后台监控。
+- **会话持久化**（`web/agent_session.js`）：按目标机保存最近 40 条消息与 60 条显示记录
+  （96 KB 上限），刷新后恢复并明确标注"历史未经核实"，恢复的内容会作为上下文重新发给
+  模型，但刷新本身不会向设备重放任何命令。注意这是本机的快照，不是 SDK 的 harness
+  session 层（entry tree、fork、usage rows 仍未使用）。
+- 测试：`agent_config` / `target_files` / `target_tools` / `serial_watch` /
+  `agent_session` 等单测，以及 `mobile/browser-test/agent_session.spec.mjs`
+  （恢复、标注、续聊、新对话清空）与 `agent_settings.spec.mjs`（provider 与参数存取）。
+
+仍未做：
+
+- 目标机文件**上传**（`upload_to_target`）的界面与审批流程：命令已经能构造，缺的是
+  "选文件 → 一次审批整份计划 → 分块发送"的交互。
+- 无人值守的后台/触发式观察：需要一种不依赖提问的常驻运行模式，目前刻意没有。
+- 应用侧可机器判定的验证工具（hash、字节数、服务状态）：现在仍依赖串口证据与退出码。
+- 移动端密钥存入系统凭据库：需要 Kotlin / Swift / ArkTS 侧实现，本机无法验证。
 
 ## 边界
 

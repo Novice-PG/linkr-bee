@@ -54,7 +54,7 @@ test("invalid edits and denied storage keep the saved settings and report the fa
   await page.locator("#agentSettingsSave").tap();
   await expect(page.locator("#agentEndpoint")).toHaveAttribute("aria-invalid", "true");
   await expect(page.locator("#agentSettingsStatus")).toContainText("without credentials");
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {} });
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {}, provider: "openai-completions", reasoning: "off", contextWindow: 0, maxTokens: 0 });
   await fillSettings(page, { ...config, model: "unsaved-model" });
   await page.evaluate(() => {
     Storage.prototype.setItem = () => { throw new DOMException("Storage blocked", "QuotaExceededError"); };
@@ -64,7 +64,7 @@ test("invalid edits and denied storage keep the saved settings and report the fa
   await expect(page.locator("#agentSettingsStatus")).toContainText("Save failed");
   await page.locator("#agentSettingsClear").tap();
   await expect(page.locator("#agentSettingsStatus")).toContainText("Clear failed");
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {} });
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-agent-model")))).toEqual({ ...config, headers: {}, provider: "openai-completions", reasoning: "off", contextWindow: 0, maxTokens: 0 });
 });
 
 test("Agent settings uses the same drawer and returns to the existing conversation draft", async ({ page }) => {

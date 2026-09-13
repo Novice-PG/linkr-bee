@@ -118,6 +118,9 @@ page calls the model endpoint directly, so the endpoint has to accept requests f
 the page — most hosted providers and local model servers do. Anthropic needs one
 extra header; see the
 [serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for setup.
+OpenAI-compatible, Anthropic and Gemini protocols are all selectable, and the
+conversation is kept per board on the device, so a reload continues where it
+stopped instead of starting over.
 
 ## LAN mode
 

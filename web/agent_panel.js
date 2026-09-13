@@ -9,6 +9,7 @@ import { renderAssistantMarkdown } from "./agent_markdown.js";
 import { requestAccessoryApproval } from "./accessory_control.js";
 import { createNoteStore } from "./agent_notes.js";
 import { createCommandPolicyStore, formatPolicyList, parsePolicyList } from "./command_policy.js";
+import { clearSession, loadSession, saveSession } from "./agent_session.js";
 import { addUsage, emptyUsage, estimateCost, formatCost, formatTokens, loadPricing } from "./agent_usage.js";
 import { buildTaskReport } from "./agent_report.js";
 
@@ -75,6 +76,7 @@ const labels = {
   "observation-prompt-returned": ["检测到 Shell 提示符返回，仍需核对输出。", "A shell prompt returned; the output still needs verification."],
   "observation-interrupted": ["连接或终端输入已变化，已停止关联后续输出。", "Connection or terminal input changed; subsequent output is no longer attributed to this action."],
   verificationNeeded: ["命令已结束，目标结果仍需验证", "Command completed; verify the intended result"],
+  sessionRestored: ["已恢复上次对话；历史内容未经核实，操作前请重新读取设备状态。", "Restored the previous conversation. The history is unverified: re-read the device state before acting."],
   fullAutoExpired: ["Full Auto 已到时并回退到 Auto，后续命令需要确认。", "Full Auto reached its time limit and reverted to Auto; later commands need approval."],
   policyTitle: ["本机命令策略", "Command policy for this device"],
   policyNote: ["只保存在本机，不进入模型请求，也不会出现在导出的报告里。「总是询问」在包括 Full Auto 在内的所有档位都要求确认；「已预先批准」只对完全相同的命令在 Auto 档免确认。", "Kept on this device only: never part of a model request and never written to an exported report. \"Always ask\" requires approval in every mode including Full Auto; \"pre-approved\" skips the click in Auto mode for an exactly identical command."],
@@ -228,6 +230,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   const deviceKeyOf = () => deviceIdentity(currentStatus());
   let conversationUsage = emptyUsage();
   let countdownTimer = null;
+  let displayTranscript = [];
+  let restoredMessages = null;
+  let sessionDeviceKey = null;
+  let sessionTimer = null;
   let currentTask = null, recovery = null;
   let taskTimer = null;
   let historySignature = "";
@@ -265,6 +271,42 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     }, 1000);
   }
 
+  const sessionStorage = { getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) };
+  /* The conversation survives a reload per device. Restored content is marked
+   * unverified on screen and compacted by the runtime, so the assistant still
+   * has to read the device before it acts. */
+  function saveCurrentSession() {
+    const key = deviceKeyOf();
+    if (!key) return;
+    let messages = [];
+    try { messages = runner?.snapshot?.() || []; } catch { messages = []; }
+    saveSession(sessionStorage, key, { display: displayTranscript, messages });
+  }
+  function scheduleSessionSave() {
+    if (sessionTimer !== null) return;
+    sessionTimer = setTimeout(() => { sessionTimer = null; saveCurrentSession(); }, 500);
+  }
+  function restoreSession() {
+    const key = sessionDeviceKey = deviceKeyOf();
+    const session = key ? loadSession(sessionStorage, key) : null;
+    displayTranscript = session?.display || [];
+    restoredMessages = session?.messages?.length ? session.messages : null;
+    messages.replaceChildren();
+    if (!session) {
+      const empty = document.createElement("p");
+      empty.className = "agent-empty";
+      empty.textContent = text("empty");
+      messages.append(empty);
+      return;
+    }
+    for (const entry of session.display) addMessage(entry.role, entry.text);
+    const note = document.createElement("p");
+    note.className = "agent-note";
+    note.textContent = text("sessionRestored");
+    messages.append(note);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
   function persistTask() {
     if (!currentTask) return;
     try { taskStore.save(currentTask); } catch { $("agentStorageError").textContent = text("storageError"); }
@@ -287,6 +329,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (signature === historySignature) return;
     historySignature = signature;
     if (!editingPolicy()) refreshPolicy();
+    if (deviceKeyOf() !== sessionDeviceKey) restoreSession();
     const notesList = $("agentNotes");
     notesList.replaceChildren();
     if (notes.length) {
@@ -332,7 +375,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     try { taskStore.clear(deviceIdentity(device.getStatus())); currentTask = null; recovery = null; refreshHistory(); }
     catch { $("agentStorageError").textContent = text("storageError"); }
   });
-  window.addEventListener("pagehide", persistTask);
+  window.addEventListener("pagehide", () => { persistTask(); saveCurrentSession(); });
   setInterval(() => { if (opened && busy && !document.hidden) device.observe(); }, 1000);
 
 
@@ -502,6 +545,11 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   function clearConversation() {
     conversationUsage = emptyUsage();
     renderUsage();
+    displayTranscript = [];
+    restoredMessages = null;
+    /* Leave sessionDeviceKey alone: it marks which device's stored session is
+     * loaded, and a reconnect is exactly when this device's history should come
+     * back. The explicit new-conversation action clears the record instead. */
     currentTask = null; recovery = null;
     device.reset();
     executionRows.clear();
@@ -518,9 +566,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       addMessage('user',event.item.text);
       if(currentTask){currentTask.goal=(currentTask.goal+'\n'+event.item.text).slice(0,4000);persistTask();}
     }
-    if (event.type === "message_end" && event.message.role === "assistant" && event.message.usage) {
-      conversationUsage = addUsage(conversationUsage, event.message.usage);
-      renderUsage();
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      if (event.message.usage) {
+        conversationUsage = addUsage(conversationUsage, event.message.usage);
+        renderUsage();
+      }
+      const said = (event.message.content || []).filter(part => part.type === "text").map(part => part.text).join("\n").trim();
+      if (said) { displayTranscript.push({ role: "assistant", text: said }); scheduleSessionSave(); }
     }
     if (event.type === "message_start" && event.message.role === "assistant") answer = null;
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -653,6 +705,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
               return accessory.execute({ action, args, command, signal });
             },
           },
+          restoredMessages,
           notes: {
             remember: async ({text: noteText, evidence, signal}) => {
               signal?.throwIfAborted();
@@ -672,6 +725,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (version !== runVersion) { runner?.abort(); runner = null; return; }
       eventVersion = runVersion;
       addMessage("user", question);
+      displayTranscript.push({ role: "user", text: question });
+      scheduleSessionSave();
       const outcome = await runner.prompt(question, {recovery:restored});
       if (currentTask?.status === "running") currentTask.status = outcome.limitReached || currentTask.plan?.some(s=>s.status!=='completed') ? "interrupted" : "answered";
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
@@ -796,6 +851,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   $("agentNew").addEventListener("click", () => {
     stop(undefined, { preserveConversation: false });
     clearConversation();
+    clearSession(sessionStorage, deviceKeyOf());
   });
   function closePanel() {
     if (!opened) return;
@@ -846,6 +902,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       button.setAttribute("aria-pressed", "true");
       refreshLang();
       syncLayout();
+      // Bring back this device's conversation, if any, before the user types.
+      if (deviceKeyOf() !== sessionDeviceKey) restoreSession();
       // Do not summon the keyboard on entry; both panes should be visible.
       $("agentClose").focus({ preventScroll: true });
     } catch (error) {
@@ -933,7 +991,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         return {...bindingState,status:"verified",targetPath};
       } finally { bindingController = null; clearTimeout(timer); setBusy(false); refreshHistory(); }
     },
-    settingsChanged() { stop(undefined, { preserveConversation: false }); },
+    /* A changed configuration means a different model and a fresh context. */
+    settingsChanged() {
+      stop(undefined, { preserveConversation: false });
+      clearSession(sessionStorage, deviceKeyOf());
+      displayTranscript = [];
+      restoredMessages = null;
+    },
     refreshLang,
     logsChanged,
     syncLayout,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { AGENT_CONFIG_KEY, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable, parseAgentHeaders, formatAgentHeaders } from "../../web/agent_config.js";
+import { AGENT_CONFIG_KEY, AGENT_PROVIDERS, AGENT_REASONING_LEVELS, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable, parseAgentHeaders, formatAgentHeaders, validateAgentConfig } from "../../web/agent_config.js";
 
 function storage() {
   const values = new Map();
@@ -8,11 +9,15 @@ function storage() {
     setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) };
 }
 const config = { endpoint: "https://model.test/v1/", model: " model ", apiKey: "device-key" };
+// The stored record: endpoint and model normalized, every optional field filled
+// with its default.
+const stored = { endpoint: "https://model.test/v1", model: "model", apiKey: "device-key", headers: {},
+  provider: "openai-completions", reasoning: "off", contextWindow: 0, maxTokens: 0 };
 
 test("model settings round-trip endpoint, model and key, and can be removed", () => {
   const store = storage();
   const saved = saveAgentConfig(store, config);
-  assert.deepEqual(saved, { endpoint: "https://model.test/v1", model: "model", apiKey: "device-key", headers: {} });
+  assert.deepEqual(saved, stored);
   assert.deepEqual(loadAgentConfig(store), saved);
   clearAgentConfig(store);
   assert.equal(loadAgentConfig(store), null);
@@ -115,4 +120,75 @@ test("saved configuration carries the custom headers", () => {
   // Records written before this field existed load with no headers.
   store.setItem(AGENT_CONFIG_KEY, JSON.stringify({ endpoint: "https://model.test/v1", model: "m", apiKey: "k" }));
   assert.deepEqual(loadAgentConfig(store).headers, {});
+});
+
+test("records written before the provider and limit fields load with their defaults", () => {
+  const store = storage();
+  store.setItem(AGENT_CONFIG_KEY, JSON.stringify({ endpoint: "https://model.test/v1", model: "m", apiKey: "k" }));
+  assert.deepEqual(loadAgentConfig(store), { endpoint: "https://model.test/v1", model: "m", apiKey: "k", headers: {},
+    provider: "openai-completions", reasoning: "off", contextWindow: 0, maxTokens: 0 });
+  // An unsupported stored value is not repaired into the default: like an
+  // invalid endpoint it makes the whole record unusable.
+  for (const patch of [{ provider: "openai" }, { reasoning: "max" }, { contextWindow: 5 }, { maxTokens: -1 }]) {
+    store.setItem(AGENT_CONFIG_KEY, JSON.stringify({ endpoint: "https://model.test/v1", model: "m", ...patch }));
+    assert.equal(loadAgentConfig(store), null, JSON.stringify(patch));
+  }
+});
+
+test("provider, reasoning and model limits round-trip, and unsupported edits keep the saved record", () => {
+  const store = storage();
+  for (const patch of [{ provider: "anthropic-messages" }, { provider: "google-generative-ai" },
+    { reasoning: "low" }, { reasoning: "medium" }, { reasoning: "high" },
+    // Both limits accept their documented bounds, and 0 means "built-in default".
+    { contextWindow: 1000 }, { contextWindow: 2000000 }, { maxTokens: 1 }, { maxTokens: 100000 }]) {
+    const saved = saveAgentConfig(store, { ...config, ...patch });
+    assert.deepEqual(saved, { ...stored, ...patch });
+    assert.deepEqual(loadAgentConfig(store), saved);
+  }
+  const kept = saveAgentConfig(store, { ...config, provider: "anthropic-messages", reasoning: "high", contextWindow: 65536, maxTokens: 8192 });
+  assert.throws(() => saveAgentConfig(store, { ...config, provider: "anthropic" }));
+  assert.deepEqual(loadAgentConfig(store), kept);
+});
+
+test("every unsupported provider, reasoning level and limit is rejected by field name", () => {
+  const rejects = (field, value) => assert.throws(
+    () => validateAgentConfig({ ...config, [field]: value }),
+    (error) => error.message === field,
+    `${field}: ${String(value)}`);
+  for (const provider of ["", "openai", "OpenAI-Completions", "anthropic", "openai-responses", 1, true, null, {}]) rejects("provider", provider);
+  for (const reasoning of ["", "none", "minimal", "xhigh", "max", "OFF", 0, true, null]) rejects("reasoning", reasoning);
+  for (const contextWindow of [1, 999, 2000001, -1, 1.5, "65536", NaN, Infinity, true, null]) rejects("contextWindow", contextWindow);
+  for (const maxTokens of [100001, -1, 0.5, "8192", NaN, Infinity, true, null]) rejects("maxTokens", maxTokens);
+});
+
+test("provider and reasoning options are ordered with the default first and translated", () => {
+  assert.deepEqual(AGENT_PROVIDERS.map(({ id }) => id), ["openai-completions", "anthropic-messages", "google-generative-ai"]);
+  assert.deepEqual(AGENT_REASONING_LEVELS, ["off", "low", "medium", "high"]);
+  // A record without the fields keeps the historical protocol and no reasoning.
+  assert.equal(validateAgentConfig(config).provider, AGENT_PROVIDERS[0].id);
+  assert.equal(validateAgentConfig(config).reasoning, AGENT_REASONING_LEVELS[0]);
+  for (const { id, label, hint } of AGENT_PROVIDERS) {
+    assert.equal(validateAgentConfig({ ...config, provider: id }).provider, id);
+    assert.equal(label.length, 2, id);
+    assert.equal(hint.length, 2, id);
+    for (const pair of [label, hint]) {
+      assert.ok(pair.every((value) => typeof value === "string" && value.trim()), id);
+      assert.match(pair[0], /[\u4e00-\u9fff]/, `${id} zh`);
+      assert.doesNotMatch(pair[1], /[\u4e00-\u9fff]/, `${id} en`);
+    }
+  }
+  for (const reasoning of AGENT_REASONING_LEVELS) {
+    assert.equal(validateAgentConfig({ ...config, reasoning }).reasoning, reasoning);
+  }
+  // The reasoning ids are language-neutral, so their two-language labels live in
+  // the settings UI, keyed off the id as reasoning<Level>. That mapping must
+  // cover every level this list offers, or the select shows a raw id.
+  const settings = readFileSync(new URL("../../web/agent_settings.js", import.meta.url), "utf8");
+  for (const id of AGENT_REASONING_LEVELS) {
+    const key = `reasoning${id[0].toUpperCase()}${id.slice(1)}`;
+    const entry = settings.match(new RegExp(`\\b${key}:\\s*\\[\\s*"([^"]*)"\\s*,\\s*"([^"]*)"\\s*\\]`));
+    assert.ok(entry, `${key} is missing from web/agent_settings.js`);
+    assert.match(entry[1], /[\u4e00-\u9fff]/, `${key} zh`);
+    assert.ok(entry[2].trim(), `${key} en`);
+  }
 });

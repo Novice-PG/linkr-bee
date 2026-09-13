@@ -51,7 +51,36 @@ export function formatAgentHeaders(headers) {
   return Object.entries(headers || {}).map(([name, value]) => `${name}: ${value}`).join("\n");
 }
 
-export function validateAgentConfig({ endpoint, model, apiKey = "", headers = {} } = {}) {
+/* One endpoint host can speak several incompatible HTTP APIs, so the provider
+ * selects the request and response shape pi-ai drives against it. The default
+ * stays first because a record without the field keeps the historical protocol. */
+export const AGENT_PROVIDERS = [
+  // OpenAI-compatible /chat/completions: OpenAI, DeepSeek, Ollama, vLLM and most gateways.
+  { id: "openai-completions", label: ["OpenAI 兼容接口", "OpenAI-compatible API"],
+    hint: ["适用于提供 /chat/completions 的服务，例如 OpenAI、DeepSeek、Ollama、vLLM", "For services exposing /chat/completions, such as OpenAI, DeepSeek, Ollama or vLLM"] },
+  // Anthropic Messages API at /v1/messages, e.g. https://api.anthropic.com/v1.
+  { id: "anthropic-messages", label: ["Anthropic Messages 接口", "Anthropic Messages API"],
+    hint: ["适用于提供 /v1/messages 的服务，例如 https://api.anthropic.com/v1", "For services exposing /v1/messages, such as https://api.anthropic.com/v1"] },
+  // Google Generative AI generateContent, e.g. https://generativelanguage.googleapis.com/v1beta.
+  { id: "google-generative-ai", label: ["Google Gemini 接口", "Google Generative AI"],
+    hint: ["适用于提供 generateContent 的服务，例如 https://generativelanguage.googleapis.com/v1beta", "For services exposing generateContent, such as https://generativelanguage.googleapis.com/v1beta"] },
+];
+
+// Ascending thinking budget. "off" leaves reasoning options out of the request.
+export const AGENT_REASONING_LEVELS = ["off", "low", "medium", "high"];
+
+// 0 keeps the built-in default, so the ranges only bound what a user may set.
+const CONTEXT_WINDOW_RANGE = [1000, 2000000];
+const MAX_TOKENS_RANGE = [1, 100000];
+
+function validateRange(value, field, [min, max]) {
+  if (!Number.isInteger(value) || (value !== 0 && (value < min || value > max))) throw new Error(field);
+  return value;
+}
+
+export function validateAgentConfig({ endpoint, model, apiKey = "", headers = {},
+  provider = AGENT_PROVIDERS[0].id, reasoning = AGENT_REASONING_LEVELS[0],
+  contextWindow = 0, maxTokens = 0 } = {}) {
   let url;
   try { url = new URL(endpoint); } catch { throw new Error("endpoint"); }
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
@@ -69,7 +98,14 @@ export function validateAgentConfig({ endpoint, model, apiKey = "", headers = {}
     }
     normalizedHeaders[name] = value;
   }
-  return { endpoint: url.href.replace(/\/$/, ""), model: model.trim(), apiKey, headers: normalizedHeaders };
+  if (!AGENT_PROVIDERS.some((entry) => entry.id === provider)) throw new Error("provider");
+  if (!AGENT_REASONING_LEVELS.includes(reasoning)) throw new Error("reasoning");
+  return {
+    endpoint: url.href.replace(/\/$/, ""), model: model.trim(), apiKey, headers: normalizedHeaders,
+    provider, reasoning,
+    contextWindow: validateRange(contextWindow, "contextWindow", CONTEXT_WINDOW_RANGE),
+    maxTokens: validateRange(maxTokens, "maxTokens", MAX_TOKENS_RANGE),
+  };
 }
 
 /* A request that never reached the model arrives as an opaque transport error:
