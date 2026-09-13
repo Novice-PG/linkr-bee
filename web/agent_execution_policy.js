@@ -1,3 +1,5 @@
+import { isAlwaysAsk, isPreApproved } from "./command_policy.js";
+
 // Exact, deliberately small shell-query allowlist. Never trust a model's risk label.
 const queries = new Set([
   "pwd", "whoami", "id", "uptime", "date",
@@ -10,14 +12,25 @@ const queries = new Set([
   "cat /proc/uptime", "cat /proc/cmdline", "cat /etc/os-release",
 ]);
 
-export function requiresInputApproval(mode, args, payload, inputPending = false) {
+/* `policy` is the per-target list from web/command_policy.js. It can only move
+ * a decision in one direction each way: alwaysAsk forces approval in every
+ * mode, allow grants approval in Auto mode under the same conditions the
+ * built-in query list requires. Neither can override a destructive guard. */
+export function requiresInputApproval(mode, args, payload, inputPending = false, policy = null) {
   // Destructive operations outrank the mode: no execution mode sends them
   // unattended.
   if (isGuardedCommand(args.text)) return true;
+  // The user's own "always ask" list outranks Full Auto too, and matches the
+  // wire text so a rewritten tracked command cannot slip past it.
+  if (policy && isAlwaysAsk(policy.alwaysAsk, args.text, payload)) return true;
   if (mode === "full-auto") return false;
   if (mode !== "auto" || inputPending || args.appendEnter !== true) return true;
   // Compare the exact wire text: no multiline, escapes, operators, substitution,
   // arbitrary flags/paths or partial input can inherit query permission.
+  if (policy && isPreApproved(policy.allow, args.text) &&
+      ["\r", "\n", "\r\n"].some((enter) => payload === args.text + enter)) {
+    return false;
+  }
   return !queries.has(args.text) || !["\r", "\n", "\r\n"].some((enter) => payload === args.text + enter);
 }
 

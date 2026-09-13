@@ -312,3 +312,78 @@ test('capability freshness expires with age or a target reboot', async () => {
   } finally { Date.now=now; }
  }
 });
+
+/* Full Auto is meant for one task; a window that outlives it is how an
+ * unattended command happens later. */
+function windowFixture(options = {}) {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const status = { connected: true, sessionId: 1, inputRevision: 0, inputPending: false };
+  const sent = [], timeouts = [];
+  const device = createDeviceExecutor({
+    getStatus: () => ({ ...status }), readLog: (logOptions) => journal.read(logOptions),
+    prepareInput: ({ text, appendEnter }) => text + (appendEnter ? "\r" : ""),
+    sendInput: async (payload) => { sent.push(payload); return { inputRevision: ++status.inputRevision }; },
+    onModeTimeout: () => timeouts.push(Date.now()),
+    fullAutoWindowMs: 40,
+    ...options,
+  });
+  return { device, status, sent, timeouts, journal };
+}
+const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("Full Auto reverts to Auto when its window expires", async () => {
+  const { device, timeouts } = windowFixture();
+  device.setMode("full-auto");
+  assert.equal(device.getStatus().executionMode, "full-auto");
+  assert.ok(device.getStatus().executionModeExpiresAt > Date.now());
+  await tick(70);
+  assert.equal(device.getStatus().executionMode, "auto");
+  assert.equal(device.getStatus().executionModeExpiresAt, 0);
+  assert.equal(timeouts.length, 1);
+  // The window is armed again when the mode is selected again.
+  device.setMode("full-auto");
+  assert.ok(device.getStatus().executionModeExpiresAt > Date.now());
+  device.setMode("auto");
+  assert.equal(device.getStatus().executionModeExpiresAt, 0);
+});
+
+test("expiry cancels a pending approval instead of leaving it armed", async () => {
+  const { device, sent, journal } = windowFixture();
+  journal.append(new TextEncoder().encode("Board login: "));
+  device.setMode("full-auto");
+  const pending = device.execute({ text: "reboot", appendEnter: true });
+  // Full Auto sends directly, so the pending promise resolves; the point is that
+  // an approval left over from Manual does not survive the reversion.
+  await pending;
+  assert.equal(sent.length, 1);
+
+  const manual = windowFixture({ fullAutoWindowMs: 5000 });
+  manual.journal.append(new TextEncoder().encode("root@board:~# "));
+  manual.device.setMode("manual");
+  const waiting = manual.device.execute({ text: "apt-get install vim", appendEnter: true });
+  assert.equal(manual.device.getRecords()[0].state, "awaiting-approval");
+  manual.device.setMode("full-auto");
+  manual.device.setMode("manual");
+  await assert.rejects(waiting, /cancelled/);
+  assert.equal(manual.sent.length, 0);
+});
+
+test("the status carries the per-target command policy for the model", () => {
+  const policy = { alwaysAsk: ["reboot", "flash"], allow: ["systemctl status nginx"] };
+  const { device } = windowFixture({ getCommandPolicy: () => policy });
+  assert.deepEqual(device.getStatus().commandPolicy, { allow: ["systemctl status nginx"], alwaysAskCount: 2 });
+  // Without a policy the status still has a stable shape.
+  const { device: plain } = windowFixture();
+  assert.deepEqual(plain.getStatus().commandPolicy, { allow: [], alwaysAskCount: 0 });
+});
+
+test("an always-ask entry is honoured by the executor in Full Auto", async () => {
+  const { device, sent } = windowFixture({ getCommandPolicy: () => ({ alwaysAsk: ["reboot"], allow: [] }) });
+  device.setMode("full-auto");
+  const pending = device.execute({ text: "reboot", appendEnter: true });
+  assert.equal(device.getRecords()[0].state, "awaiting-approval");
+  assert.equal(sent.length, 0);
+  device.reject(device.getRecords()[0].id);
+  await assert.rejects(pending, /rejected/);
+});

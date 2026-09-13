@@ -17,13 +17,14 @@
     "web/device_profile.js": "a6f0926ee5fd79c86a0020db91605b40ac07383f632c842d5c07e0cfb6236929",
     "web/agent_config.js": "7f525fd63b0706a8904943cc991c755a4ff62c09a504a5e2afd867a64c2f54fe",
     "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
-    "web/agent_execution_policy.js": "13b732aa8dee6030db2e1b167290876e8d1fd917caf94cb6516b62096e8f29ed",
-    "mobile/src/agent-prompt.mjs": "df871188b9764e0efdfcd3d7797f28da7a682b0d7a67e7904a0c712757f2c6b0",
+    "web/command_policy.js": "940328bac02f22c29df6beb7d2d16bcc7654408ddac3bc5401c97b0539ebcad9",
+    "web/agent_execution_policy.js": "b5109b721b5074101ca8a84de057747cd4ed524720322609059c1fb66541a6d2",
+    "mobile/src/agent-prompt.mjs": "482a64df76ff7cca92c4a7d6134054139b26e90f1464eaab605565d5dd6e73bb",
     "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
     "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
     "mobile/src/agent-context.mjs": "67e2cda76ce337fc432392263c1b0c2bccbeb937ac07d7a6f15df031f258c70e",
     "mobile/src/pi-agent.mjs": "d5a7450e47593b5ab933cca932c573da16b6ce51746379a4c85b5a101f881d64",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "548ae92d87912a2b8d4c0b559ee783ac9b2d8a212c958ef80746b345d9615028"
+  "sha256": "bde22d6d81681d4e37081e8821920d633c61440f5a554b5d19a22c5d0f0b4565"
 }

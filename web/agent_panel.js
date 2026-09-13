@@ -8,6 +8,7 @@ import { requestComputerDownload } from "./local_download.js";
 import { renderAssistantMarkdown } from "./agent_markdown.js";
 import { requestAccessoryApproval } from "./accessory_control.js";
 import { createNoteStore } from "./agent_notes.js";
+import { createCommandPolicyStore, formatPolicyList, parsePolicyList } from "./command_policy.js";
 import { addUsage, emptyUsage, estimateCost, formatCost, formatTokens, loadPricing } from "./agent_usage.js";
 import { buildTaskReport } from "./agent_report.js";
 
@@ -74,6 +75,13 @@ const labels = {
   "observation-prompt-returned": ["检测到 Shell 提示符返回，仍需核对输出。", "A shell prompt returned; the output still needs verification."],
   "observation-interrupted": ["连接或终端输入已变化，已停止关联后续输出。", "Connection or terminal input changed; subsequent output is no longer attributed to this action."],
   verificationNeeded: ["命令已结束，目标结果仍需验证", "Command completed; verify the intended result"],
+  fullAutoExpired: ["Full Auto 已到时并回退到 Auto，后续命令需要确认。", "Full Auto reached its time limit and reverted to Auto; later commands need approval."],
+  policyTitle: ["本机命令策略", "Command policy for this device"],
+  policyNote: ["只保存在本机，不进入模型请求，也不会出现在导出的报告里。「总是询问」在包括 Full Auto 在内的所有档位都要求确认；「已预先批准」只对完全相同的命令在 Auto 档免确认。", "Kept on this device only: never part of a model request and never written to an exported report. \"Always ask\" requires approval in every mode including Full Auto; \"pre-approved\" skips the click in Auto mode for an exactly identical command."],
+  policyAsk: ["总是询问（每行一条）", "Always ask (one per line)"],
+  policyAllow: ["已预先批准（每行一条完整命令）", "Pre-approved (one full command per line)"],
+  policySave: ["保存策略", "Save policy"],
+  policySaved: ["已保存到本机。", "Saved on this device."],
   usageTokens: ["本轮 token", "Tokens this conversation"],
   usageCost: ["估算费用", "Estimated cost"],
   usageNoPrice: ["未配置费率", "Prices not set"],
@@ -119,7 +127,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     <header class="agent-header window-header"><div class="agent-heading"><strong id="agentTitle" data-ai="title"></strong>
       <button type="button" class="agent-gear" id="agentModeButton" aria-controls="agentModePicker" aria-expanded="false">
         <span class="agent-gear-track" aria-hidden="true"><i></i><i></i><i></i><b></b></span>
-        <span class="agent-gear-label"><span class="agent-gear-caption" data-ai="modeCaption"></span><span id="agentActiveMode" aria-live="polite"></span></span>
+        <span class="agent-gear-label"><span class="agent-gear-caption" data-ai="modeCaption"></span><span id="agentActiveMode" aria-live="polite"></span><span id="agentModeCountdown" class="agent-mode-countdown" aria-hidden="true"></span></span>
         <svg class="agent-gear-chevron" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 6 4 4 4-4"/></svg>
       </button></div>
       <div class="agent-actions"><button type="button" class="btn" id="agentSettingsButton" data-ai="settingsButton" aria-controls="controlsPanel"></button>
@@ -138,6 +146,16 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     <details class="agent-history" id="agentHistory"><summary data-ai="history"></summary>
       <p data-ai="taskNote"></p><p id="agentProfile"></p>
       <div id="agentNotes"></div>
+      <details class="agent-policy" id="agentPolicy">
+        <summary data-ai="policyTitle"></summary>
+        <p data-ai="policyNote"></p>
+        <label class="field"><span class="field-label" data-ai="policyAsk"></span>
+          <textarea id="agentPolicyAsk" rows="2" spellcheck="false"></textarea></label>
+        <label class="field"><span class="field-label" data-ai="policyAllow"></span>
+          <textarea id="agentPolicyAllow" rows="2" spellcheck="false"></textarea></label>
+        <div class="agent-actions"><button class="btn btn-primary" type="button" id="agentPolicySave" data-ai="policySave"></button></div>
+        <p id="agentPolicyStatus" class="field-hint" role="status"></p>
+      </details>
       <div class="agent-actions"><button class="btn" type="button" id="agentProbe" data-ai="refreshProfile"></button><button class="btn" type="button" id="agentExport" data-ai="exportReport"></button><button class="btn" type="button" id="agentForget" data-ai="forgetTasks"></button></div>
       <div id="agentTasks"></div><p id="agentStorageError" role="status"></p></details>
     <div id="agentMessages" class="agent-messages" role="log" aria-live="polite"><p class="agent-empty" data-ai="empty"></p></div>
@@ -189,13 +207,27 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   /* Notes are part of the status the assistant sees, so get_device_status shows
    * them without a separate tool; the executor keeps them out of its own
    * decisions, they are context for the model. */
-  const agentStatus = () => { const status = {...getStatus(), targetBinding:bindingState, rememberedProfile};
+  const agentStatus = () => { const status = currentStatus();
     return {...status, notes: noteStore.list(deviceIdentity(status))}; };
-  const device = createDeviceExecutor({ getStatus: agentStatus, readLog, prepareInput, sendInput, onRecord: renderExecution });
+  const device = createDeviceExecutor({ getStatus: agentStatus, readLog, prepareInput, sendInput, onRecord: renderExecution,
+    getCommandPolicy: () => policyStore.get(deviceKeyOf()),
+    /* Full Auto ended by itself: say so, because the next command will need a
+     * click and the user should know why. */
+    onModeTimeout: () => {
+      executionMode = device.mode;
+      refreshLang();
+      $("agentStatus").textContent = text("fullAutoExpired");
+    } });
   let observeTimer = null;
   const taskStore = createTaskStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
   const noteStore = createNoteStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
+  const policyStore = createCommandPolicyStore({ getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value) });
+  /* The device identity must come from the raw app status: asking the executor
+   * would re-enter getCommandPolicy() and recurse. */
+  const currentStatus = () => ({ ...getStatus(), targetBinding: bindingState, rememberedProfile });
+  const deviceKeyOf = () => deviceIdentity(currentStatus());
   let conversationUsage = emptyUsage();
+  let countdownTimer = null;
   let currentTask = null, recovery = null;
   let taskTimer = null;
   let historySignature = "";
@@ -213,6 +245,26 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     ].join(" · ");
   }
 
+  /* Full Auto carries a visible deadline, so "why did it stop asking?" is
+   * answered on screen rather than in a manual. */
+  function countdownSuffix() {
+    const expiresAt = device.getStatus().executionModeExpiresAt;
+    if (!expiresAt) return "";
+    const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+    return ` · ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
+  }
+  function startCountdown() {
+    if (countdownTimer !== null) return;
+    countdownTimer = setInterval(() => {
+      if (!opened || !device.getStatus().executionModeExpiresAt) {
+        clearInterval(countdownTimer); countdownTimer = null;
+        if (opened) refreshLang();
+        return;
+      }
+      refreshLang();
+    }, 1000);
+  }
+
   function persistTask() {
     if (!currentTask) return;
     try { taskStore.save(currentTask); } catch { $("agentStorageError").textContent = text("storageError"); }
@@ -221,6 +273,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (taskTimer !== null) return;
     taskTimer = setTimeout(() => { taskTimer = null; persistTask(); }, 500);
   }
+  const editingPolicy = () => ["agentPolicyAsk", "agentPolicyAllow"].includes(document.activeElement?.id);
   function refreshHistory() {
     const status = device.getStatus(), profile = status.profile;
     $("agentProfile").textContent = profile ? [profile.stale && text("staleProfile"), profile.model || profile.system, profile.os, profile.storage, profile.tools.join(", ")].filter(Boolean).join("\n") : text("noProfile");
@@ -233,6 +286,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     const signature = JSON.stringify([key,busy,tasks,notes,getLang()]);
     if (signature === historySignature) return;
     historySignature = signature;
+    if (!editingPolicy()) refreshPolicy();
     const notesList = $("agentNotes");
     notesList.replaceChildren();
     if (notes.length) {
@@ -298,9 +352,14 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     button.title += ` (${focusKeys})`;
     const modeLabel = executionMode === "auto" ? "Auto" : text(executionMode === "full-auto" ? "fullAuto" : executionMode);
     $("agentActiveMode").textContent = modeLabel;
+    /* The deadline ticks in its own aria-hidden element: the mode text stays
+     * exact for tests and assistive tech, and a per-second live region would
+     * only be noise. */
+    $("agentModeCountdown").textContent = countdownSuffix();
     modeButton.setAttribute("aria-label", `${text("shiftMode")} · ${modeLabel}`);
     modeButton.title = `${text("shiftMode")} · ${text(`help-${executionMode}`)}`;
     modeButton.style.setProperty("--gear-index", modeOptions.findIndex((option) => option.value === executionMode));
+    if (executionMode === "full-auto" && device.getStatus().executionModeExpiresAt) startCountdown();
     modePicker.setAttribute("aria-label", text("mode"));
     $("agentModeClose").title = text("closePicker");
     $("agentModeClose").setAttribute("aria-label", text("closePicker"));
@@ -512,6 +571,35 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = null;
     }
   }
+  /* The notice belongs to the device it was produced for: refreshing the panel
+   * (which happens on every task event) must not wipe it, but switching to
+   * another device must not keep showing it either. */
+  let policyNotice = { key: null, text: "" };
+  function renderPolicyNotice() {
+    $("agentPolicyStatus").textContent = policyNotice.key === deviceKeyOf() ? policyNotice.text : "";
+  }
+  function refreshPolicy() {
+    const policy = policyStore.get(deviceKeyOf());
+    $("agentPolicyAsk").value = formatPolicyList(policy.alwaysAsk);
+    $("agentPolicyAllow").value = formatPolicyList(policy.allow);
+    renderPolicyNotice();
+  }
+  $("agentPolicySave").addEventListener("click", () => {
+    try {
+      policyStore.save(deviceKeyOf(), {
+        alwaysAsk: parsePolicyList($("agentPolicyAsk").value),
+        allow: parsePolicyList($("agentPolicyAllow").value),
+      });
+      policyNotice = { key: deviceKeyOf(), text: text("policySaved") };
+    } catch (error) {
+      policyNotice = { key: deviceKeyOf(), text: error.message };
+      renderPolicyNotice();
+      return;
+    }
+    historySignature = ""; refreshHistory();
+    renderPolicyNotice();
+  });
+
   $("agentExport").addEventListener("click", () => {
     const status = device.getStatus();
     const key = deviceIdentity(status);
@@ -674,11 +762,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   $("agentModeClose").addEventListener("click", () => showModePicker(false, true));
   for (const option of modeOptions) {
     option.addEventListener("click", () => {
-      if (option.value !== executionMode) {
-        stop("modeChanged", { preserveConversation: true });
+      if (option.value !== executionMode || option.value === "full-auto") {
+        if (option.value !== executionMode) stop("modeChanged", { preserveConversation: true });
         device.setMode(option.value);
         executionMode = device.mode;
         refreshLang();
+        if (executionMode === "full-auto") startCountdown();
       }
       showModePicker(false, true);
     });

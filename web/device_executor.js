@@ -5,8 +5,18 @@ import { inspectSerialConsole } from "./serial_console.js";
 const cancelled = () => new Error("Operation cancelled. Do not retry automatically.");
 
 // Owns device permissions and evidence. No DOM, model SDK, or automatic retries.
-export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInput, onRecord }) {
+/* Full Auto never outlives its window: it is meant for one task, and a mode
+ * that stays armed silently is how a prompt injection or a tired user turns
+ * into an unattended command. The deadline lives here rather than in the panel
+ * so no UI path can leave the mode armed. */
+export const FULL_AUTO_WINDOW_MS = 15 * 60 * 1000;
+
+export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInput, onRecord,
+  getCommandPolicy = () => ({ alwaysAsk: [], allow: [] }), onModeTimeout = null,
+  fullAutoWindowMs = FULL_AUTO_WINDOW_MS }) {
   let mode = "auto";
+  let modeExpiresAt = 0;
+  let modeTimer = null;
   let nextId = 0;
   let active = null;
   const records = [];
@@ -30,6 +40,29 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     if (status.inputRevision !== record.inputRevision) throw new Error("Terminal input changed; request a new command before sending.");
     if (consoleState().kind !== record.console.kind) throw new Error("Console state changed; review a new command before sending.");
   }
+  function clearModeTimer() {
+    if (modeTimer !== null) clearTimeout(modeTimer);
+    modeTimer = null;
+    modeExpiresAt = 0;
+  }
+  function armFullAuto() {
+    clearModeTimer();
+    modeExpiresAt = Date.now() + fullAutoWindowMs;
+    /* `unref` exists in Node only: the armed window must not hold a host process
+     * open (tests, and any future headless runner), while browsers are unaffected. */
+    modeTimer = setTimeout(() => {
+      modeTimer = null;
+      modeExpiresAt = 0;
+      if (mode !== "full-auto") return;
+      // A pending approval must not survive the reversion: in Auto it would
+      // have needed a click anyway, and the user stopped watching this run.
+      cancel();
+      mode = "auto";
+      onModeTimeout?.();
+    }, fullAutoWindowMs);
+    modeTimer.unref?.();
+  }
+
   function cancel() {
     if (!active) return;
     active.controller.abort();
@@ -129,11 +162,17 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     get mode() { return mode; },
     setMode(value) {
       if (!["auto", "manual", "full-auto"].includes(value)) throw new Error("Unknown execution mode.");
-      if (value !== mode) { cancel(); mode = value; }
+      // Selecting Full Auto again extends the window; other modes are a no-op
+      // when they are already active.
+      if (value === mode && value !== "full-auto") return;
+      if (value !== mode) cancel();
+      mode = value;
+      if (value === "full-auto") armFullAuto();
+      else clearModeTimer();
     },
     cancel,
     forgetProfile() { profile = null; toolCapabilities = {}; },
-    reset() { cancel(); records.length = 0; profile = null; toolCapabilities = {}; },
+    reset() { cancel(); clearModeTimer(); records.length = 0; profile = null; toolCapabilities = {}; },
     getStatus() {
       const status = getStatus();
       if (profile) {
@@ -149,8 +188,10 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '');
         capability.cursor = recent.cursor ?? capability.cursor;
       }
-      return { ...status, executionMode: mode, console: consoleState(), profile,
-        toolCapabilities:structuredClone(toolCapabilities) };
+      const policy = getCommandPolicy() || { alwaysAsk: [], allow: [] };
+      return { ...status, executionMode: mode, executionModeExpiresAt: mode === "full-auto" ? modeExpiresAt : 0,
+        commandPolicy: { allow: [...(policy.allow || [])], alwaysAskCount: (policy.alwaysAsk || []).length },
+        console: consoleState(), profile, toolCapabilities:structuredClone(toolCapabilities) };
     },
     readLog(options) { return readLog(options); },
     getRecords() { return records.filter((record) => record.sessionId === getStatus().sessionId).map(snapshot); },
@@ -205,7 +246,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       records.push(record);
       if (records.length > 50) records.shift();
       try {
-        if (!userApproved && (requiresInputApproval(mode, args, record.payload, status.inputPending) || (mode === "auto" && record.console.kind !== "shell"))) {
+        if (!userApproved && (requiresInputApproval(mode, args, record.payload, status.inputPending, getCommandPolicy()) || (mode === "auto" && record.console.kind !== "shell"))) {
           record.state = "awaiting-approval";
           await new Promise((resolve, reject) => {
             let settled = false;

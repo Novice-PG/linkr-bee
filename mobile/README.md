@@ -192,6 +192,13 @@ The endpoint must allow requests from the app's WebView origin
 a trusted local development network. Subscription/OAuth login and native
 secure credential storage are not part of this integration.
 
+Full Auto is time-boxed: it reverts to Auto after fifteen minutes with a visible
+countdown on the mode label, re-selecting it extends the window, and an
+unanswered approval is cancelled when it ends. Per device you can also keep a
+command policy — entries that must always be confirmed (Full Auto included) and
+exact commands that Auto mode may send unattended — from the history section;
+it stays on the device and never reaches the model or an exported report.
+
 Facts the assistant verified about a target — console quirks, the UART format
 that works, tools that are missing — can be stored as device notes
 (`remember_target_note`). They are kept per device identity, redacted like task

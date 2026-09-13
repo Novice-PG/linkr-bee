@@ -121,6 +121,25 @@
   `agent_report.test.mjs`，以及 `mobile/browser-test/agent_memory.spec.mjs`（笔记写入
   → 回到模型 → 列表 → 删除；用量与费用显示；单价校验与保存；导出文件内容）。
 
+## 治理（已完成）
+
+- **Full Auto 时间盒**：切换到 Full Auto 后 15 分钟自动回退到 Auto，倒计时显示在档位
+  标签上（`Full Auto · 12:34`），再次选择 Full Auto 即为延长；到时会取消尚未确认的
+  输入，并在状态行说明"后续命令需要确认"。时限判定放在 `web/device_executor.js`
+  而不是界面里，任何界面路径都无法让该档位一直挂着手动放行。
+- **按目标机的命令策略**（`web/command_policy.js`，面板历史区可编辑）：
+  - *总是询问*：命中即要求确认，**包括 Full Auto**；按线缆文本做不区分大小写的子串
+    匹配，因此被改写成 `sh -c '…'` 的追踪命令也逃不掉。
+  - *已预先批准*：只有与条目**完全相同**的命令、且 Auto 档、且输入行为空、且以单个
+    回车结尾时才免确认——与内置低风险查询列表同一套条件；无法绕过破坏性命令守卫。
+  - 策略只存在本机，不进入模型请求，也不会写进导出的报告；`get_device_status.commandPolicy`
+    只把"已预先批准列表 + 总是询问条数"给模型，便于它选择合适的命令形式并提前说明
+    需要确认。
+- 测试：`mobile/test/command_policy.test.mjs`（匹配与存储）、
+  `device_executor.test.mjs` 新增的时限用例（到时回退、取消待确认、重新选择延长）、
+  `mobile/browser-test/agent_governance.spec.mjs`（倒计时与延长、总是询问在 Full Auto
+  下仍要确认、预先批准在 Auto 下免确认）。
+
 ## 候选池（未排期）
 
 - 多 provider 与协议（SDK 已内置 anthropic / google / bedrock / azure 等适配器与
@@ -131,7 +150,7 @@
 - 后台与触发式观察（例如启动循环检测），需要不依赖提问的运行模式。
 - 会话与审批的持久化：SDK 的 harness session 层（entry tree、fork、usage rows）
   目前完全未使用。
-- 治理：Full Auto 时间盒自动回退、按目标机的命令白名单、移动端密钥存入系统凭据库。
+- 治理：移动端密钥存入系统凭据库（时间盒与按目标机策略已完成，见上）。
 
 ## 边界
 

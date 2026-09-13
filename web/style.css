@@ -2604,6 +2604,10 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
 .accessory-approval-note { margin: 4px 0 6px; color: var(--muted); font-size: 12.5px; }
 .field-row.pricing { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .agent-usage { margin: 2px 0 0; color: var(--muted); font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+.agent-mode-countdown { color: var(--muted); font: 12px/1.2 ui-monospace, "SF Mono", Menlo, monospace; }
+.agent-policy { margin-top: 8px; }
+.agent-policy > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.agent-policy textarea { width: 100%; min-height: 44px; font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
 .agent-note { display: flex; gap: 6px; align-items: baseline; margin: 4px 0; font-size: 13px; overflow-wrap: anywhere; }
 .agent-note .btn { flex: 0 0 auto; }
 .agent-message-text.agent-markdown { white-space: normal; min-width: 0; max-width: 100%; }
