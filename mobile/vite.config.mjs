@@ -9,7 +9,12 @@ const repoDir = path.resolve(mobileDir, "..");
 const webDir = path.join(repoDir, "web");
 const browserDependencies = ["@capacitor/core", "@capacitor-community/bluetooth-le",
   "@earendil-works/pi-agent-core", "@earendil-works/pi-ai",
-  "@earendil-works/pi-ai/api/openai-completions"];
+  // Every provider the runtime can stream from has to be listed: one missing
+  // adapter is discovered on the first chat that selects it, and Vite answers a
+  // late discovery by reloading the page underneath the running session.
+  "@earendil-works/pi-ai/api/openai-completions",
+  "@earendil-works/pi-ai/api/anthropic-messages",
+  "@earendil-works/pi-ai/api/google-generative-ai"];
 
 export default defineConfig({
   root: webDir,
