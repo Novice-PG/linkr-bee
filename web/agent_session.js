@@ -6,15 +6,17 @@
  * such and the runtime compacts it like an interrupted run, so the assistant
  * still has to re-read the device before acting.
  *
- * Storage is bounded twice: a cap on entries and a cap on the serialized size,
- * dropping the oldest first, because a diagnostic conversation can otherwise
- * grow without limit and localStorage is a shared, small quota.
+ * Storage is bounded three times: a cap on messages per device, a cap on the
+ * serialized size of one record, and a cap on how many devices are remembered.
+ * A diagnostic conversation can otherwise grow without limit, and localStorage
+ * is a shared, small quota.
  */
 export const SESSION_KEY = "linkr-agent-session-v1";
 export const SESSION_MESSAGES = 40;
 export const SESSION_DISPLAY = 60;
 export const SESSION_ENTRY_CHARS = 2000;
 export const SESSION_MAX_BYTES = 96000;
+export const SESSION_DEVICES = 8;
 
 function trimDisplay(display) {
   return (Array.isArray(display) ? display : [])
@@ -40,6 +42,15 @@ export function saveSession(storage, deviceKey, { display = [], messages = [] } 
   try { data = JSON.parse(storage.getItem(SESSION_KEY) || "{}") || {}; } catch { data = {}; }
   if (session) data[deviceKey] = session;
   else delete data[deviceKey];
+  // One record per board seen, oldest first: a bench that cycles through boards
+  // must not fill the origin's quota with conversations nobody will reopen.
+  const keys = Object.keys(data);
+  if (keys.length > SESSION_DEVICES) {
+    keys.map((key) => [key, Number(data[key]?.updatedAt) || 0])
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, keys.length - SESSION_DEVICES)
+      .forEach(([key]) => { delete data[key]; });
+  }
   try { storage.setItem(SESSION_KEY, JSON.stringify(data)); } catch { return null; }
   return session;
 }

@@ -76,6 +76,36 @@ test("a reload restores the conversation and marks the history unverified", asyn
   expect(JSON.stringify(resent)).toContain("Why did boot fail?");
 });
 
+test("an identity learned during the conversation does not reload the transcript", async ({ page }) => {
+  const bodies = [];
+  await mockModel(page, bodies);
+  await ask(page, "Why did boot fail?");
+  await page.waitForTimeout(700);
+  // The stored key is [transport, device id, UART], and the app fills those in
+  // as it learns them: reading the UART format updates the settings field, which
+  // is part of the identity. Console data refreshes the panel, so a refinement
+  // arriving mid-conversation is the case that must not look like another board.
+  await page.evaluate(() => {
+    document.getElementById("uartInput").value = "9600,8,n,1,none";
+    window.__test.handleIncomingBytes(new TextEncoder().encode("\r\nroot@board:~# "));
+  });
+  const messages = page.locator("#agentMessages");
+  await expect(messages).toContainText("could not mount");
+  await expect(messages.locator(".agent-empty")).toHaveCount(0);
+  // The transcript moved rather than being copied: the half-known identity does
+  // not keep a duplicate that a later connection could resurrect.
+  await expect.poll(() => page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem("linkr-agent-session-v1")))))
+    .toEqual([JSON.stringify(["ws", "test-board", "9600,8,n,1,none"])]);
+
+  // The conversation moved to the refined key, so a reload still finds it.
+  await page.waitForTimeout(700);
+  await page.reload();
+  await connect(page);
+  await page.evaluate(() => { document.getElementById("uartInput").value = "9600,8,n,1,none"; });
+  await page.locator("#agentButton").click();
+  await expect(page.locator("#agentMessages")).toContainText("could not mount");
+});
+
 test("a new conversation clears the stored history", async ({ page }) => {
   const bodies = [];
   await mockModel(page, bodies);

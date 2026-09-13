@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  SESSION_DEVICES,
   SESSION_DISPLAY,
   SESSION_ENTRY_CHARS,
   SESSION_KEY,
@@ -54,6 +55,26 @@ test("storage stays bounded in entries, in entry length and in total size", () =
   assert.ok(JSON.stringify(session.messages).length <= 96000, String(JSON.stringify(session.messages).length));
   // The newest turn survives the trimming.
   assert.match(JSON.stringify(session.messages.at(-1)), /39:/);
+});
+
+test("only the most recently used devices are remembered", () => {
+  const store = storage();
+  const realNow = Date.now;
+  try {
+    // The loop would otherwise finish inside one millisecond, leaving the order
+    // of "most recent" to chance.
+    for (let index = 0; index < SESSION_DEVICES + 3; index++) {
+      Date.now = () => 1000 + index;
+      saveSession(store, `target:${index}`, {
+        display: [{ role: "user", text: `board ${index}` }], messages: [message(index)],
+      });
+    }
+  } finally { Date.now = realNow; }
+  const kept = Object.keys(JSON.parse(store.getItem(SESSION_KEY)));
+  assert.equal(kept.length, SESSION_DEVICES);
+  assert.ok(!kept.includes("target:0"), kept.join(","));
+  // The board used last is the one that must survive.
+  assert.ok(loadSession(store, `target:${SESSION_DEVICES + 2}`));
 });
 
 test("an empty session removes the record instead of storing a stub", () => {

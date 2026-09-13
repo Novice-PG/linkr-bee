@@ -233,7 +233,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let displayTranscript = [];
   let restoredMessages = null;
   let sessionDeviceKey = null;
+  let sessionSession = null;
   let sessionTimer = null;
+  const offeredSessions = new Set();
   let currentTask = null, recovery = null;
   let taskTimer = null;
   let historySignature = "";
@@ -275,19 +277,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   /* The conversation survives a reload per device. Restored content is marked
    * unverified on screen and compacted by the runtime, so the assistant still
    * has to read the device before it acts. */
-  function saveCurrentSession() {
-    const key = deviceKeyOf();
-    if (!key) return;
-    let messages = [];
-    try { messages = runner?.snapshot?.() || []; } catch { messages = []; }
-    saveSession(sessionStorage, key, { display: displayTranscript, messages });
-  }
-  function scheduleSessionSave() {
-    if (sessionTimer !== null) return;
-    sessionTimer = setTimeout(() => { sessionTimer = null; saveCurrentSession(); }, 500);
-  }
-  function restoreSession() {
-    const key = sessionDeviceKey = deviceKeyOf();
+  function renderSession(key) {
     const session = key ? loadSession(sessionStorage, key) : null;
     displayTranscript = session?.display || [];
     restoredMessages = session?.messages?.length ? session.messages : null;
@@ -305,6 +295,54 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     note.textContent = text("sessionRestored");
     messages.append(note);
     messages.scrollTop = messages.scrollHeight;
+  }
+  /* Stored under the key the transcript on screen belongs to, not under whatever
+   * device happens to be current when a debounced save fires. */
+  function saveCurrentSession() {
+    if (!sessionDeviceKey) return;
+    let snapshotMessages = [];
+    try { snapshotMessages = runner?.snapshot?.() || []; } catch { snapshotMessages = []; }
+    saveSession(sessionStorage, sessionDeviceKey, { display: displayTranscript, messages: snapshotMessages });
+  }
+  function scheduleSessionSave() {
+    if (sessionTimer !== null) return;
+    sessionTimer = setTimeout(() => { sessionTimer = null; saveCurrentSession(); }, 500);
+  }
+  /* The device identity is a snapshot of what the app knows so far: the device
+   * id and the UART format arrive after the connection does, and a run can learn
+   * them mid-conversation. Three cases have to stay apart:
+   *
+   * - a refined identity inside one connection is the same board, so the live
+   *   conversation stays on screen and only moves to its new storage key;
+   * - a new connection means another board: the panel was cleared on purpose, so
+   *   nothing is put back, though a board seen for the first time on this page
+   *   does get its stored conversation offered;
+   * - a reload starts a fresh page, which is why the offer is per page: a
+   *   reconnect must not resurrect what the connection change just dropped. */
+  function syncSession() {
+    const status = device.getStatus(), key = deviceKeyOf();
+    const connection = status.sessionId ?? null, sameConnection = sessionSession === connection;
+    if (sameConnection && key === sessionDeviceKey) return;
+    const hadConversation = displayTranscript.length > 0 || Boolean(restoredMessages);
+    // The conversation moves to the better key; the earlier copy under the
+    // half-known identity would otherwise resurface as a stale duplicate.
+    if (sameConnection && hadConversation) {
+      const previous = sessionDeviceKey;
+      sessionDeviceKey = key;
+      if (previous) clearSession(sessionStorage, previous);
+      scheduleSessionSave();
+      return;
+    }
+    sessionDeviceKey = key;
+    sessionSession = connection;
+    if (hadConversation || !key || offeredSessions.has(key)) return;
+    offeredSessions.add(key);
+    renderSession(key);
+  }
+  function clearCurrentSession() {
+    clearSession(sessionStorage, sessionDeviceKey || deviceKeyOf());
+    displayTranscript = [];
+    restoredMessages = null;
   }
 
   function persistTask() {
@@ -329,7 +367,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (signature === historySignature) return;
     historySignature = signature;
     if (!editingPolicy()) refreshPolicy();
-    if (deviceKeyOf() !== sessionDeviceKey) restoreSession();
+    syncSession();
     const notesList = $("agentNotes");
     notesList.replaceChildren();
     if (notes.length) {
@@ -851,7 +889,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   $("agentNew").addEventListener("click", () => {
     stop(undefined, { preserveConversation: false });
     clearConversation();
-    clearSession(sessionStorage, deviceKeyOf());
+    clearCurrentSession();
   });
   function closePanel() {
     if (!opened) return;
@@ -903,7 +941,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       refreshLang();
       syncLayout();
       // Bring back this device's conversation, if any, before the user types.
-      if (deviceKeyOf() !== sessionDeviceKey) restoreSession();
+      syncSession();
       // Do not summon the keyboard on entry; both panes should be visible.
       $("agentClose").focus({ preventScroll: true });
     } catch (error) {
@@ -994,9 +1032,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     /* A changed configuration means a different model and a fresh context. */
     settingsChanged() {
       stop(undefined, { preserveConversation: false });
-      clearSession(sessionStorage, deviceKeyOf());
-      displayTranscript = [];
-      restoredMessages = null;
+      clearCurrentSession();
     },
     refreshLang,
     logsChanged,
