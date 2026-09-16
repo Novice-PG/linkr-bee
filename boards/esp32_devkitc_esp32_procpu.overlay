@@ -1,0 +1,82 @@
+/*
+ * Linkr Bee - ESP32-DevKitC (ESP32-WROOM-32, Xtensa dual-core)
+ *
+ * Pin assignments for ESP32-WROOM-32 with CH340 USB-UART:
+ *   Bridge UART:  UART2 — GPIO16 (RX), GPIO17 (TX) — via CH340
+ *   Console:      UART0 — GPIO1 (TX), GPIO3 (RX) — via Type-C CH340
+ *   LED:          GPIO2 (active-low on most DevKitC boards)
+ *   Pairing key:  GPIO4
+ *   Factory reset: GPIO0 (BOOT button)
+ */
+
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart2;
+	};
+
+	aliases {
+		led0 = &led0;
+		linkr-pairing = &linkr_pairing;
+		linkr-factory-reset = &linkr_factory_reset;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led0: led_0 {
+			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
+			label = "Activity LED";
+		};
+	};
+
+	linkr_pairing_keys {
+		compatible = "gpio-keys";
+		linkr_pairing: pairing {
+			label = "Linkr pairing authorization";
+			gpios = <&gpio0 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+
+	linkr_factory_reset_keys {
+		compatible = "gpio-keys";
+
+		/* Hold GPIO0 low during boot to clear settings and configuration. */
+		linkr_factory_reset: factory-reset {
+			label = "Linkr factory reset";
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&uart2 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart2_default>;
+	pinctrl-names = "default";
+};
+
+/* Keep test markers out of the default coredump sector. */
+&storage_partition {
+	reg = <0x3b0000 0x2f000>;
+};
+
+&flash0 {
+	partitions {
+		linkr_test_marker_partition: partition@3df000 {
+			label = "linkr-test-marker";
+			reg = <0x3df000 0x1000>;
+		};
+	};
+};
+
+/* Enable the onboard WiFi node used by the single Linkr firmware. */
+&wifi {
+	status = "okay";
+};

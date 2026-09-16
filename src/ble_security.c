@@ -39,11 +39,12 @@ static enum bt_security_err pairing_accept(
 	/* Applies to every new key exchange, including replacement of a bond.
 	 * Existing LTK encryption does not invoke this callback. A GPIO read
 	 * failure must fail closed, not be mistaken for an active-low input. */
-	if (gpio_pin_get_dt(&pairing_gpio) != 1) {
-		LOG_WRN("Pairing denied: hold GPIO1 low before requesting pairing");
+	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) &&
+	    gpio_pin_get_dt(&pairing_gpio) != 1) {
+		LOG_WRN("Pairing denied: hold GPIO4 low before requesting pairing");
 		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
 	}
-	LOG_INF("Pairing authorized by GPIO1");
+	LOG_INF("Pairing authorized");
 	return BT_SECURITY_ERR_SUCCESS;
 }
 
@@ -108,7 +109,11 @@ void linkr_ble_security_connected(struct bt_conn *conn)
 	if (!err && !bt_le_bond_exists(info.id, bt_conn_get_dst(conn))) {
 		/* The host initiates its first pairing explicitly or in response to
 		 * an encrypted GATT access. Avoid racing Android createBond(). */
-		LOG_INF("Unbonded host: waiting for GPIO1-authorized pairing");
+		if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)) {
+			LOG_INF("Unbonded host: waiting for GPIO-authorized pairing");
+		} else {
+			LOG_INF("Unbonded host: pairing allowed without GPIO check");
+		}
 		return;
 	}
 	/* Restore encryption using the saved LTK without forcing a new pairing. */
