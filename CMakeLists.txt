@@ -7,6 +7,11 @@ if(CONFIG_SOC_SERIES_ESP32C3)
   include(cmake/esp32c3_hci_order.cmake)
 endif()
 
+# ESP32 (Xtensa) uses the same HCI driver; apply the same ordering fix.
+if(CONFIG_SOC_SERIES_ESP32 AND NOT CONFIG_SOC_SERIES_ESP32C3)
+  include(cmake/esp32c3_hci_order.cmake)
+endif()
+
 target_sources(app PRIVATE
   src/target_binding.c
   src/ble_security.c
