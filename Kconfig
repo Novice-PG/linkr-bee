@@ -1,10 +1,10 @@
 menu "Linkr Bee bridge"
 
-# ESP32-C3 uses Espressif's controller, not Zephyr's BT_CTLR. The upstream
+# ESP32 uses Espressif's controller, not Zephyr's BT_CTLR. The upstream
 # controller encryption default follows BT_CTLR_LE_ENC, which is unset with
 # this external controller even when the host enables SMP.
 config ESP32_BT_CTLR_LE_SECURITY_ENABLE
-	default y if BT_SMP && SOC_SERIES_ESP32C3
+	default y if BT_SMP && (SOC_SERIES_ESP32C3 || SOC_SERIES_ESP32)
 
 # C2/C5/C6/H2 use the newer Espressif controller, whose menu in Zephyr
 # (drivers/bluetooth/hci/Kconfig.esp32) declares ESP32_BT_LE_* instead of the
@@ -139,6 +139,15 @@ config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 	  Treat BLE RX writes starting with "@linkr " as bridge control commands
 	  instead of forwarding them to UART. Supported commands include:
 	  "@linkr uart?" and "@linkr uart=<baud>,<data>,<parity>,<stop>,<flow>".
+
+config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
+	bool "Require GPIO button press for BLE pairing"
+	default y
+	help
+	  When enabled, the pairing GPIO (linkr-pairing alias) must be held
+	  active before the host can initiate BLE pairing. Set to n to allow
+	  pairing without physical button access, e.g. for boards without a
+	  dedicated pairing button or during development.
 
 config LINKR_BLE_BRIDGE_TEST_UART_ECHO
 	bool "Echo received UART bytes back to UART"

@@ -119,6 +119,58 @@ ESP32-C5 DevKitC 差异：
 - **esp32c3_supermini**（主目标，已验证）
 - esp32c3_devkitm / esp32c3_devkitc（overlay 已提供，引脚同上）
 - esp32c5_devkitc/esp32c5/hpcore（UART1 GPIO11/12，USB Serial/JTAG console，GPIO28 恢复出厂）
+- **esp32_devkitc/esp32/procpu**（ESP32-WROOM-32，Xtensa 双核，已验证）
+
+### ESP32-WROOM-32 (Xtensa) 差异
+
+| 项 | C3 Super Mini | WROOM-32 DevKitC |
+|----|--------------|------------------|
+| SoC | ESP32-C3 (RISC-V) | ESP32-D0WDQ6 (Xtensa 双核) |
+| BLE | BLE 5.0 | BLE 4.2 |
+| USB | 内置 USB Serial JTAG | 外置 CH340 USB-UART |
+| 桥接 UART | UART0 (GPIO20/21) | UART2 (GPIO16 RX / GPIO17 TX) |
+| Console | USB Serial JTAG | UART0 (GPIO1 TX / GPIO3 RX) via CH340 |
+| LED | GPIO8 | GPIO2 |
+| 配对按钮 | GPIO1 | GPIO4 |
+| 恢复出厂 | GPIO0 (BOOT) | GPIO0 (BOOT) |
+| DRAM | 单一 SRAM ~400KB | dram0 ~137KB + dram1 ~96KB |
+| WebDAV | 默认开启 | **关闭**（DRAM 不足） |
+
+**ESP32-WROOM-32 引脚分配：**
+
+| 功能 | GPIO | 方向 | 说明 |
+|------|------|------|------|
+| 桥接 UART2 RX | 16 | in | 接 SBC TX（通过 CH340 → ttyUSB0） |
+| 桥接 UART2 TX | 17 | out | 接 SBC RX（通过 CH340 → ttyUSB0） |
+| Console UART0 TX | 1 | out | USB Type-C CH340（ttyUSB1） |
+| Console UART0 RX | 3 | in | USB Type-C CH340（ttyUSB1） |
+| 活动 LED | 2 | out | 蓝色，收发活动闪烁（40ms 脉冲） |
+| 配对按钮 | 4 | in | 内部上拉，低有效 |
+| 恢复出厂 | 0 | in | BOOT 按钮，启动时接地保持 2 秒 |
+
+**DRAM 约束与优化：**
+
+ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
+
+- `CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n` — 关闭 WebDAV 节省 ~12KB noinit
+- `CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=4096` — UART RX 从 16KB 降至 4KB
+- BT ACL TX buffer 从 12 降至 4
+- 各线程栈缩减（main=2048, workqueue=4096, WiFi connect=2048）
+- HTTP server 单客户端，栈 2048
+
+**功能差异：**
+
+- WiFi station + BLE + WebSocket 桥接：完整支持
+- WebDAV 上传：不可用（DRAM 不足）
+- BLE 管理协议：完整支持
+- Quick WiFi GATT：完整支持
+- WebSocket 认证：完整支持
+
+**已知限制：**
+
+- BLE 4.2（非 5.0），MTU 协商最大 247
+- 双 CH340 USB：ttyUSB0 = 桥接 UART2，ttyUSB1 = console UART0（端口可能因 USB 插拔顺序交换）
+- WiFi/BLE 共存时功耗较高（power save 已禁用以降低延迟）
 
 ## 12. 固件对外接口（供硬件/集成联调）
 
@@ -157,6 +209,10 @@ west flash --esp-device /dev/cu.usbmodemXXXX
 
 west build -b esp32c5_devkitc/esp32c5/hpcore /path/to/linkr-bee
 tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c5
+
+# ESP32-WROOM-32 (Xtensa 双核)
+west build -b esp32_devkitc/esp32/procpu /path/to/linkr-bee
+west flash --runner esp32
 ```
 
 前置条件：west manifest 含 `modules/hal_espressif`（提供 WiFi blobs）。
@@ -166,3 +222,4 @@ tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c5
 | 日期 | 版本 | 说明 |
 |------|------|------|
 | 2026-07-07 | v1.0 | 初版，对应已验证固件（含 WiFi/WebDAV） |
+| 2026-09-16 | v1.1 | 新增 ESP32-WROOM-32 (Xtensa) 支持 |
