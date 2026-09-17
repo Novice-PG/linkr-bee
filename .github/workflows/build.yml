@@ -122,7 +122,7 @@ jobs:
             board: esp32_devkitc/esp32/procpu
             slug: esp32-wroom-32
             chip: esp32
-            toolchain: xtensa-lx106-elf
+            toolchain: xtensa-espressif_esp32_zephyr-elf
             flash_address: "0x1000"
             factory_reset: GPIO27 to GND via external jumper
 
@@ -182,7 +182,11 @@ jobs:
           config="${GITHUB_WORKSPACE}/app/build/zephyr/.config"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS=30000' "${config}"
-          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
+            grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "${config}"
+          else
+            grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+          fi
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
