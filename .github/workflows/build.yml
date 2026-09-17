@@ -94,26 +94,37 @@ jobs:
             board: esp32c3_supermini
             slug: esp32c3-supermini
             chip: esp32c3
+            toolchain: riscv64-zephyr-elf
             flash_address: "0x0"
             factory_reset: GPIO0 to GND for two seconds during boot
           - name: ESP32-C3 DevKitM
             board: esp32c3_devkitm
             slug: esp32c3-devkitm
             chip: esp32c3
+            toolchain: riscv64-zephyr-elf
             flash_address: "0x0"
             factory_reset: GPIO0 to GND for two seconds during boot
           - name: ESP32-C3 DevKitC
             board: esp32c3_devkitc
             slug: esp32c3-devkitc
             chip: esp32c3
+            toolchain: riscv64-zephyr-elf
             flash_address: "0x0"
             factory_reset: GPIO0 to GND for two seconds during boot
           - name: ESP32-C5 DevKitC
             board: esp32c5_devkitc/esp32c5/hpcore
             slug: esp32c5-devkitc
             chip: esp32c5
+            toolchain: riscv64-zephyr-elf
             flash_address: "0x2000"
             factory_reset: GPIO28 BOOT to GND for two seconds during boot
+          - name: ESP32-WROOM-32 DevKitC
+            board: esp32_devkitc/esp32/procpu
+            slug: esp32-wroom-32
+            chip: esp32
+            toolchain: xtensa-lx106-elf
+            flash_address: "0x1000"
+            factory_reset: GPIO27 to GND via external jumper
 
     steps:
       - name: Check out repository
@@ -138,7 +149,7 @@ jobs:
         with:
           app-path: app
           sdk-version: 1.0.1
-          toolchains: riscv64-zephyr-elf
+          toolchains: ${{ matrix.toolchain }}
           enable-ccache: false
 
       - name: Fetch Espressif firmware blobs
@@ -206,6 +217,9 @@ jobs:
             grep -qx '# CONFIG_ESP32_BT_LE_SM_LEGACY is not set' "${config}"
             grep -qx 'CONFIG_ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION=y' "${config}"
             grep -qx 'CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS=y' "${config}"
+          fi
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
+            grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "${config}"
           fi
 
       - name: Package firmware
