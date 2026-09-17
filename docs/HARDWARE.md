@@ -131,8 +131,8 @@ ESP32-C5 DevKitC 差异：
 | 桥接 UART | UART0 (GPIO20/21) | UART2 (GPIO16 RX / GPIO17 TX) |
 | Console | USB Serial JTAG | UART0 (GPIO1 TX / GPIO3 RX) via CH340 |
 | LED | GPIO8 | GPIO2 |
-| 配对按钮 | GPIO1 | GPIO4 |
-| 恢复出厂 | GPIO0 (BOOT) | GPIO0 (BOOT) |
+| 配对按钮 | GPIO1 | GPIO4（默认不启用授权检查） |
+| 恢复出厂 | GPIO0 | GPIO27（外接跳线接地） |
 | DRAM | 单一 SRAM ~400KB | dram0 ~137KB + dram1 ~96KB |
 | WebDAV | 默认开启 | **关闭**（DRAM 不足） |
 
@@ -145,8 +145,16 @@ ESP32-C5 DevKitC 差异：
 | Console UART0 TX | 1 | out | USB Type-C CH340（ttyUSB1） |
 | Console UART0 RX | 3 | in | USB Type-C CH340（ttyUSB1） |
 | 活动 LED | 2 | out | 蓝色，收发活动闪烁（40ms 脉冲） |
-| 配对按钮 | 4 | in | 内部上拉，低有效 |
-| 恢复出厂 | 0 | in | BOOT 按钮，启动时接地保持 2 秒 |
+| 配对按钮 | 4 | in | 内部上拉，低有效；默认不启用授权检查 |
+| 恢复出厂 | 27 | in | 外接跳线接地后上电或复位，保持至少 2 秒后释放 |
+
+**配对与恢复说明：**
+
+受当前硬件条件限制，WROOM-32 默认设置 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，附近主机无需按键即可申请配对。该选项只关闭物理授权检查；GATT 仍要求加密，绑定仍需保存，已有绑定重连仍恢复加密，未绑定完成或加密失败仍会断开。C3/C5 默认保留 GPIO 授权。
+
+如果为 WROOM-32 外接了 GPIO4 配对按钮，可将该选项设为 `y` 恢复物理授权。恢复出厂使用独立的 GPIO27 跳线，会清除保存的设置与绑定；本板 GPIO0/BOOT 在复位时拉低会进入 ROM 下载模式，不能按 C3 的 GPIO0 恢复步骤操作。
+
+本次修订的回调测试覆盖授权开关两种配置、加密失败及绑定重连；GPIO27 恢复出厂接线仍需在 WROOM-32 实机验收。
 
 **DRAM 约束与优化：**
 
