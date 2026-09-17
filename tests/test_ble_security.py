@@ -24,6 +24,25 @@ class BleSecurityTests(unittest.TestCase):
                         "-Werror", "-I", str(directory), str(ROOT / "tests/ble_security_harness.c"),
                         "-o", str(cls.binary)], check=True)
 
+    def test_open_pairing_keeps_encryption_and_bond_requirements(self):
+        binary = Path(self.tmp.name) / "security-test-open"
+        subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra",
+                        "-Werror", "-DCONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=0",
+                        "-I", self.tmp.name, str(ROOT / "tests/ble_security_harness.c"),
+                        "-o", str(binary)], check=True)
+        for scenario in ["open_pairing", "reconnect", "fail_closed"]:
+            with self.subTest(scenario=scenario):
+                subprocess.run([binary, scenario], check=True)
+
+    def test_esp32_build_requires_controller_encryption(self):
+        command = [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-fsyntax-only",
+                   "-DCONFIG_SOC_SERIES_ESP32=1", "-I", self.tmp.name,
+                   str(ROOT / "tests/ble_security_harness.c")]
+        disabled = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(disabled.returncode, 0)
+        self.assertIn("pairing requires controller link encryption support", disabled.stderr)
+        subprocess.run([*command, "-DCONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=1"], check=True)
+
     def test_gpio_gate_applies_to_new_and_replacement_keys(self):
         subprocess.run([self.binary, "gate"], check=True)
 

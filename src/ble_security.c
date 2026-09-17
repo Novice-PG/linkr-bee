@@ -14,9 +14,9 @@ LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
  * C2/C5/C6/H2 use the newer ESP32_BT_LE_* menu (see the matching overrides in
  * Kconfig). Both paths default off because BT_CTLR_LE_ENC is unset when the
  * Espressif controller is used instead of Zephyr's own BT_CTLR. */
-#if defined(CONFIG_SOC_SERIES_ESP32C3) && \
+#if (defined(CONFIG_SOC_SERIES_ESP32C3) || defined(CONFIG_SOC_SERIES_ESP32)) && \
 	!defined(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE)
-#error "ESP32-C3 pairing requires controller link encryption support"
+#error "ESP32/ESP32-C3 pairing requires controller link encryption support"
 #endif
 
 #if (defined(CONFIG_SOC_SERIES_ESP32C2) || defined(CONFIG_SOC_SERIES_ESP32C5) || \
@@ -41,7 +41,7 @@ static enum bt_security_err pairing_accept(
 	 * failure must fail closed, not be mistaken for an active-low input. */
 	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) &&
 	    gpio_pin_get_dt(&pairing_gpio) != 1) {
-		LOG_WRN("Pairing denied: hold GPIO4 low before requesting pairing");
+		LOG_WRN("Pairing denied: hold the pairing GPIO low before requesting pairing");
 		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
 	}
 	LOG_INF("Pairing authorized");
@@ -93,9 +93,11 @@ int linkr_ble_security_init(void)
 {
 	int err;
 
-	if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
-	err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
-	if (err) return err;
+	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)) {
+		if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
+		err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
+		if (err) return err;
+	}
 	err = bt_conn_auth_cb_register(&auth_callbacks);
 	if (err) return err;
 	return bt_conn_auth_info_cb_register(&auth_info_callbacks);

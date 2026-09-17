@@ -25,6 +25,11 @@ struct bt_conn_cb {
 };
 #define BT_SECURITY_L2 2
 #define BT_HCI_ERR_AUTH_FAIL 5
+/* Both configurations are compiled; the default mirrors Kconfig's gate=y. */
+#ifndef CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
+#define CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH 1
+#endif
+#define IS_ENABLED(option) (option)
 #define GPIO_INPUT 1
 #define GPIO_DT_SPEC_GET(...) { 0 }
 #define BT_CONN_CB_DEFINE(name) struct bt_conn_cb name
@@ -79,6 +84,18 @@ int main(int argc, char **argv)
         gpio_value = 1;
         assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
         assert(disconnects == 0);
+    } else if (!strcmp(argv[1], "open_pairing")) {
+        assert(!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH));
+        gpio_ready = false;
+        configured_error = -EIO;
+        assert(linkr_ble_security_init() == 0);
+        for (int value = -1; value <= 1; value++) {
+            gpio_value = value;
+            assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        }
+        assert(gpio_reads == 0);
+        pairing_complete(&conn, true);
+        assert(disconnects == 0);
     } else if (!strcmp(argv[1], "reconnect")) {
         gpio_value = 0;
         linkr_ble_security_connected(&conn);
@@ -100,10 +117,10 @@ int main(int argc, char **argv)
         pairing_failed(&conn, BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
         assert(disconnects == 4);
         gpio_ready = false;
-        assert(linkr_ble_security_init() == -ENODEV);
+        assert(linkr_ble_security_init() == (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) ? -ENODEV : 0));
         gpio_ready = true;
         configured_error = -EIO;
-        assert(linkr_ble_security_init() == -EIO);
+        assert(linkr_ble_security_init() == (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) ? -EIO : 0));
     } else return 1;
     return 0;
 }
