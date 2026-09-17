@@ -6,7 +6,7 @@
  *   Console:      UART0 — GPIO1 (TX), GPIO3 (RX) — via Type-C CH340
  *   LED:          GPIO2 (active-low on most DevKitC boards)
  *   Pairing key:  GPIO4
- *   Factory reset: GPIO0 (BOOT button)
+ *   Factory reset: GPIO27 (external jumper to GND)
  */
 
 / {
@@ -40,10 +40,10 @@
 	linkr_factory_reset_keys {
 		compatible = "gpio-keys";
 
-		/* Hold GPIO0 low during boot to clear settings and configuration. */
+		/* GPIO0 selects the ROM downloader at reset; use GPIO27 for recovery. */
 		linkr_factory_reset: factory-reset {
 			label = "Linkr factory reset";
-			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			gpios = <&gpio0 27 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 		};
 	};
 };
