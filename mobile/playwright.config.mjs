@@ -18,18 +18,16 @@ export default defineConfig({
       ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
       : {},
   },
+  /* Only the bundler path is served here. The plain hosting path documented for
+   * desktop users needs web/ served without a build step, and the spec that
+   * exercises it (`browser-test/static_agent.spec.mjs`) starts that server
+   * itself: Playwright's spawn of a second `webServer` entry did not become
+   * reachable on this machine, and the spec failed on connection refused while
+   * every other spec passed. */
   webServer: [
     {
       command: "npm run dev -- --host 127.0.0.1 --port 8765 --strictPort",
       url: "http://127.0.0.1:8765",
-      reuseExistingServer: !process.env.CI,
-      stdout: "pipe",
-    },
-    {
-      /* The plain hosting path documented for desktop users: no bundler, so the
-       * assistant comes from the vendored runtime in web/vendor/agent/. */
-      command: "node browser-test/static-server.mjs 8766 ../web",
-      url: "http://127.0.0.1:8766",
       reuseExistingServer: !process.env.CI,
       stdout: "pipe",
     },
