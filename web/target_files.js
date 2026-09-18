@@ -482,6 +482,9 @@ export function parseUploadResult(text, expected = {}) {
   let missing = false;
   let moved = false;
   let sizeMismatch = null;
+  // `actual=` is optional in the marker, so "no mismatch reported" and "a
+  // mismatch reported without a count" cannot both be `null`.
+  let sizeMismatchSeen = false;
   let hashMismatch = false;
   for (const line of markerLines(text)) {
     if (line === "LINKR_UPLOAD:missing") missing = true;
@@ -493,7 +496,7 @@ export function parseUploadResult(text, expected = {}) {
       match = /^LINKR_UPLOAD:sha256=([0-9a-f]{64})$/.exec(line);
       if (match) { sha256 = match[1]; continue; }
       match = /^LINKR_UPLOAD:error size-mismatch(?: actual=(\d+))?$/.exec(line);
-      if (match) { sizeMismatch = match[1] === undefined ? null : Number(match[1]); continue; }
+      if (match) { sizeMismatchSeen = true; sizeMismatch = match[1] === undefined ? null : Number(match[1]); continue; }
       match = /^LINKR_UPLOAD:error hash-mismatch(?: actual=(\S*))?$/.exec(line);
       if (match) { hashMismatch = true; if (/^[0-9a-f]{64}$/.test(match[1] ?? "")) sha256 = match[1]; }
     }
@@ -504,8 +507,15 @@ export function parseUploadResult(text, expected = {}) {
   // Most specific failure first: a visible digest mismatch is a mismatch even
   // when the command stopped before it could report a byte count.
   if (missing) return incomplete("The target has no part file for this upload; nothing was written.");
-  if (sizeMismatch !== null) {
-    return { ...mismatch(`The target reported ${sizeMismatch} bytes${expectSize === null ? "" : ` instead of ${expectSize}`}.`), bytes: sizeMismatch };
+  /* A reported size mismatch is definitive even when it arrives without the
+   * measured count: downgrading it to "not finished" would turn a real
+   * disagreement into an unresolved transfer and invite a resume over a file
+   * the target has already said is wrong. */
+  if (sizeMismatchSeen) {
+    return { ...mismatch(sizeMismatch === null
+        ? "The target reported a size mismatch without the measured byte count."
+        : `The target reported ${sizeMismatch} bytes${expectSize === null ? "" : ` instead of ${expectSize}`}.`),
+      bytes: sizeMismatch ?? 0 };
   }
   if (expectSize !== null && bytes !== null && bytes !== expectSize) return mismatch(`The target reported ${bytes} bytes instead of ${expectSize}.`);
   if (expectSha) {

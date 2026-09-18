@@ -1,4 +1,52 @@
-const MAX_CONTEXT_CHARS = 24000;
+/* How much history may be kept, and why it cannot be a constant.
+ *
+ * Every request pays for the system prompt and every tool description before a
+ * single history message is sent, and that fixed part is large: measured
+ * 2026-09-18 it is about 7,900 tokens (a 13.7 KB prompt plus 24 tool
+ * descriptions). The history budget therefore has to be what is LEFT of the
+ * configured window, not an absolute number.
+ *
+ * It used to be an absolute 24000 characters while the setting accepted a
+ * window as small as 1000 tokens. A user who set 8192 got the fixed part plus
+ * up to 24,000 characters of history -- far more than the window they asked
+ * for -- and the failure surfaced as a provider context-length error that says
+ * nothing about which setting caused it.
+ *
+ * `MAX_CONTEXT_CHARS` is kept as the ceiling so a large window behaves exactly
+ * as before: only a small window lowers the budget.
+ */
+export const MAX_CONTEXT_CHARS = 24000;
+
+/* Never trim history to nothing: a few messages of context are worth keeping
+ * even when the window is already too small to hold them, because the
+ * alternative is a request that carries no conversation at all. The settings
+ * layer warns about such a window instead (see isContextWindowTight). */
+export const MIN_CONTEXT_CHARS = 2000;
+
+/* No tokenizer ships with the app, so the conversion is deliberately
+ * pessimistic in both directions: the prompt and tool descriptions are English
+ * (about 3-4 characters per token), while a Chinese conversation runs closer to
+ * 1-1.5. Budgeting the fixed part at 3 and history at 2 stays on the safe side
+ * of both rather than guessing a single ratio. */
+const FIXED_CHARS_PER_TOKEN = 3;
+const HISTORY_CHARS_PER_TOKEN = 2;
+
+/* Message framing, role markers and the request envelope the provider adds. */
+const FRAMING_TOKENS = 256;
+
+/* The history budget in characters for one request.
+ *
+ * `contextWindow` of 0 or undefined means "use the built-in default", which the
+ * caller resolves before calling; it is treated here as unset and keeps the
+ * historical ceiling so a configuration without an explicit window is unchanged.
+ */
+export function contextBudgetChars({ contextWindow = 0, fixedChars = 0, outputTokens = 0 } = {}) {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return MAX_CONTEXT_CHARS;
+  const fixedTokens = Math.ceil(Math.max(0, fixedChars) / FIXED_CHARS_PER_TOKEN);
+  const available = contextWindow - fixedTokens - Math.max(0, outputTokens) - FRAMING_TOKENS;
+  if (!Number.isFinite(available)) return MIN_CONTEXT_CHARS;
+  return Math.max(MIN_CONTEXT_CHARS, Math.min(MAX_CONTEXT_CHARS, Math.floor(available * HISTORY_CHARS_PER_TOKEN)));
+}
 
 // A streamed response can stop before its tool calls are complete. Pi providers
 // discard such assistant messages, so keep them only as labelled text history.
@@ -115,6 +163,12 @@ export function compactAgentContext(messages, maxChars = MAX_CONTEXT_CHARS) {
   context = context.map((message) => message.role === "toolResult" ? toolExcerpt(message, 1200) : message);
 
   const template = context.findLast((message) => message.role === "assistant");
+  /* A history with no assistant reply has no message that can carry a summary,
+   * so it is returned as-is even when it is over budget. That is bounded in
+   * practice: such a history is only ever a handful of user messages, and they
+   * are small next to the fixed prompt. Reported rather than papered over,
+   * because inventing an assistant message would put words in the model's mouth
+   * and excerpting the user's own text would edit the question. */
   if (!template) return context;
   let memory = [];
   while (size() > maxChars) {

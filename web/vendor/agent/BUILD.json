@@ -22,18 +22,19 @@
   },
   "sources": {
     "web/device_profile.js": "a6f0926ee5fd79c86a0020db91605b40ac07383f632c842d5c07e0cfb6236929",
-    "web/agent_config.js": "c4aed3132d6d87c62c96b87ca76bc92ca6a400131eebff59a157501627d2ea0e",
+    "web/agent_config.js": "9c5ec7c2b0538d714f59ce98d0780710d17bd4f68737e0d7f6c1de9c069697a2",
     "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
     "web/command_policy.js": "940328bac02f22c29df6beb7d2d16bcc7654408ddac3bc5401c97b0539ebcad9",
     "web/agent_execution_policy.js": "b5109b721b5074101ca8a84de057747cd4ed524720322609059c1fb66541a6d2",
-    "mobile/src/agent-prompt.mjs": "65650dd0b377e6caadfbe26f60293f8e2e949a7359f47340249968d087243d2b",
+    "mobile/src/agent-prompt.mjs": "a2d7f2327462477bcfc4f93a0a17b530167596b0425180e780a624b44a322fb6",
     "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
-    "web/target_files.js": "69b593fc088b112d593fa9ae8e78d8b6d7fddfbb69d0822d168c50383e0fa778",
+    "web/target_files.js": "cc6085e526f699e91672a9bf5036ef74a3fac27f8289e3cf234b9012bcfbde16",
+    "web/target_verify.js": "8293c4f3f6fac047b77ddeee98730d5837b88884a730512b6326d6ba3dd5b540",
     "web/serial_watch.js": "e24f5d6c50e1dd5596557f3d7a79166fb5f87f81afcb43b7d76361d9c43caafa",
     "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
-    "mobile/src/agent-context.mjs": "67e2cda76ce337fc432392263c1b0c2bccbeb937ac07d7a6f15df031f258c70e",
-    "mobile/src/pi-agent.mjs": "5c7c53912642c1614214c6f4b3560a27eb9f8649230e79e89f5cfcb467b4afec",
+    "mobile/src/agent-context.mjs": "f8bff8cf0e56dd9b83bc76fb5a38592185ef2a65125b7fef8691d1e9c0dbedcd",
+    "mobile/src/pi-agent.mjs": "76ca2a14195e1eed9558cda57fdf173dde371dd06f2ab4b277f2274b5a7cd59b",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "7371d890452f09ce6e3b90788008fa9174bc27ac24558f9cba4729bea422995a"
+  "sha256": "065b6e36268eabc6a1151ae9e78458d7a4bfdc52645457676b7c12580e805c0c"
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createSerialAgent, validateAgentConfig } from "../src/pi-agent.mjs";
+import { AGENT_FIXED_CONTEXT_TOKENS } from "../../web/agent_config.js";
 import { SerialJournal } from "../../web/serial_journal.js";
 import { createDeviceExecutor } from "../../web/device_executor.js";
 
@@ -462,4 +463,53 @@ test("configured extra headers reach the provider request", async () => {
     } });
   await agent.prompt("hello");
   assert.deepEqual(seen, { "anthropic-dangerous-direct-browser-access": "true" });
+});
+
+/* The history budget has to be what is LEFT of the configured window, because
+ * the prompt and every tool description are paid first. It used to be a constant
+ * that ignored the setting, so a small window sent a request far larger than it
+ * and the failure appeared at the provider with nothing pointing at the field. */
+test("a small configured context window shrinks the history that is sent", async () => {
+  /* A restored conversation looks like this: alternating turns from both roles,
+   * because compaction builds its summary from an assistant message. */
+  const restoredMessages = Array.from({ length: 12 }, (_, index) => ([
+    { role: "user", content: [{ type: "text", text: `question-${index}:` + "x".repeat(3000) }], timestamp: 1 },
+    { role: "assistant", api: "openai-completions", provider: "test", model: "test", stopReason: "stop",
+      content: [{ type: "text", text: `answer-${index}:` + "y".repeat(3000) }], timestamp: 1 },
+  ])).flat();
+  const sent = [];
+  const openAgent = (contextWindow) => makeAgent({
+    config: { ...config, contextWindow }, getStatus: () => status,
+    readLog: () => ({ text: "", cursor: 0 }),
+    sendInput: () => assert.fail("read-only turn must not write"),
+    restoredMessages,
+    stream: fakeStream((context) => {
+      sent.push(JSON.stringify(context.messages).length);
+      return [{ type: "text", text: "ok" }];
+    }),
+  });
+
+  await openAgent(32768).prompt("Continue");
+  await openAgent(8192).prompt("Continue");
+  assert.ok(sent[0] > sent[1], `the smaller window must carry less history (${sent[0]} vs ${sent[1]} characters)`);
+});
+
+/* AGENT_FIXED_CONTEXT_TOKENS tells a user how much of their window the assistant
+ * spends before any conversation, and the settings form warns from it. That
+ * number is only honest while it still describes the real prompt and tools, so
+ * this re-measures them at the same pessimistic ratio the runtime budgets with
+ * and fails when a new tool description pushes the truth past the constant. */
+test("the fixed-context estimate still covers the real prompt and tool descriptions", async () => {
+  let fixedChars = 0;
+  const agent = makeAgent({ config, getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
+    sendInput: () => assert.fail("read-only turn must not write"),
+    stream: fakeStream((context) => {
+      fixedChars = context.systemPrompt.length + context.tools
+        .reduce((total, tool) => total + tool.name.length + tool.description.length, 0);
+      return [{ type: "text", text: "ok" }];
+    }) });
+  await agent.prompt("hello");
+  const measured = Math.ceil(fixedChars / 3);
+  assert.ok(measured <= AGENT_FIXED_CONTEXT_TOKENS,
+    `the assistant now costs about ${measured} tokens before any history, past AGENT_FIXED_CONTEXT_TOKENS=${AGENT_FIXED_CONTEXT_TOKENS}; raise the constant and re-check the settings warning`);
 });

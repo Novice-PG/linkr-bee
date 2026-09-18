@@ -92,6 +92,16 @@ const labels = {
   noteDelete: ["删除", "Delete"],
   exportReport: ["导出报告", "Export report"],
   remember_target_note: ["记录设备事实", "Remember a target fact"],
+  verify_target_file: ["校验目标机文件", "Verify a target file"],
+  verify_target_service: ["校验目标机服务", "Verify a target service"],
+  /* The verdict is the application's, so the panel names it in the app's own
+   * words rather than leaving the model's phrasing to stand in for it. */
+  "verify-match": ["一致", "Match"],
+  "verify-mismatch": ["不一致", "Mismatch"],
+  "verify-indeterminate": ["无法判定", "Indeterminate"],
+  "verify-observed": ["仅测量，未校验", "Measured only, not verified"],
+  verifyObservedNote: ["没有提供预期值，这只是测量结果，不构成校验。", "No expectation was supplied: this is a measurement, not a verification."],
+  verifyIndeterminateNote: ["目标机没能给出答案，不能据此认定成功或失败。", "The target could not answer; this establishes neither outcome."],
   evidence: ["后续串口输出：", "Subsequent serial output:"], truncated: ["输出已截断。", "Output truncated."],
   connected: ["已连接", "Connected"], disconnected: ["未连接", "Disconnected"],
   probe_download_tools: ["探测目标机下载工具", "Probe download tools"],
@@ -662,6 +672,26 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
             text(`observation-${value.observation}`), value.waitStatus && text(`wait-${value.waitStatus}`), value.evidence?.slice(-1600),
             (value.evidenceTruncated || value.evidence?.length > 1600) && text("truncated"),
           ].filter(Boolean).join("\n");
+          /* A verification result leads with the verdict, because that is the
+           * one thing on this row the model did not decide. The rest of the line
+           * is what the verdict rests on, so an operator can check it without
+           * opening the console. */
+          if (["verify_target_file", "verify_target_service"].includes(event.toolName)) {
+            const checked = value.checks || {};
+            preview = [
+              `${text(`verify-${value.status}`)} · ${value.subject ?? value.path ?? ""}`,
+              value.reason,
+              value.status === "observed" && text("verifyObservedNote"),
+              value.status === "indeterminate" && text("verifyIndeterminateNote"),
+              value.expectedBytes !== undefined && value.expectedBytes !== null
+                ? `bytes: ${value.bytes ?? "?"} / ${value.expectedBytes} (${checked.bytes || "not checked"})` : null,
+              value.expectedSha256 ? `sha256: ${checked.sha256 === "match" ? "match" : checked.sha256 || "not checked"}` : null,
+              value.observed?.active ? `ActiveState=${value.observed.active}${value.observed.sub ? ` (${value.observed.sub})` : ""}` : null,
+              value.observed?.count !== undefined ? `matched processes: ${value.observed.count}` : null,
+              value.observed?.listening !== undefined ? `listening: ${value.observed.listening}` : null,
+              value.evidence?.length ? value.evidence.slice(-5).join("\n") : null,
+            ].filter(Boolean).join("\n");
+          }
         } catch { /* Tool errors can be plain text. */ }
       }
       const body = toolRows.get(event.toolCallId) || addMessage(event.toolName);

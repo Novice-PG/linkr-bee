@@ -1,12 +1,15 @@
 import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
 import {
+  AGENT_FIXED_CONTEXT_TOKENS,
   AGENT_PROVIDERS,
   AGENT_REASONING_LEVELS,
   clearAgentConfig,
   endpointSecurity,
   formatAgentHeaders,
+  isContextWindowTight,
   loadAgentConfig,
+  minimumUsefulContextWindow,
   parseAgentHeaders,
   saveAgentConfig,
   validateAgentConfig,
@@ -44,6 +47,11 @@ const labels = {
   contextWindow: ["上下文窗口（token，可留空）", "Context window in tokens (optional)"],
   maxTokens: ["最大输出（token，可留空）", "Max output tokens (optional)"],
   limitsHint: ["留空或填 0 表示使用内置默认值。", "Leave blank or 0 to keep the built-in default."],
+  /* The window is not only the conversation: the system prompt and every tool
+   * description are paid first, on every request. Saying so here is the
+   * difference between "the model refused" and "this field is too small". */
+  contextWindowHint: ["留空或填 0 表示使用内置默认值。助手自身的系统提示词与工具说明每次请求都要占用一部分窗口，其余才是对话历史。", "Leave blank or 0 to keep the built-in default. The assistant's own system prompt and tool descriptions consume part of the window on every request; the rest is conversation history."],
+  contextWindowTight: ["窗口太小：助手自身的提示词与工具说明约占 {fixed} token，加上最大输出后至少需要 {min}。按当前设置，每次请求都会超出窗口并报错。", "Window too small: the assistant's own prompt and tool descriptions already cost about {fixed} tokens, and with the max output it needs at least {min}. At the current value every request overflows and fails."],
   providerError: ["请选择接口协议。", "Choose an API protocol."],
   reasoningError: ["请选择推理强度。", "Choose a reasoning effort."],
   contextWindowError: ["上下文窗口必须是 0，或 1000 到 2000000 之间的整数。", "Context window must be 0, or an integer between 1000 and 2000000."],
@@ -93,14 +101,23 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   let busy = false;
   function renderStatus() {
     // The plaintext warning describes the saved configuration, so it stays
-    // visible next to whatever status the last action produced.
+    // visible next to whatever status the last action produced. The context
+    // window does too: it is a property of the saved record, and a window below
+    // what the assistant costs by itself fails on every question, so it must not
+    // be reported only while the form happens to be dirty.
     const exposed = endpointSecurity(config?.endpoint).exposesKey;
+    const tight = isContextWindowTight(config?.contextWindow, config?.maxTokens)
+      ? text("contextWindowTight")
+        .replace("{fixed}", String(AGENT_FIXED_CONTEXT_TOKENS))
+        .replace("{min}", String(minimumUsefulContextWindow(config?.maxTokens)))
+      : "";
     const el = $("agentSettingsStatus");
     el.textContent = [
       busy ? text("busy") : status ? text(status) : "",
+      tight,
       exposed ? text("plaintextKeyWarning") : "",
     ].filter(Boolean).join(" ");
-    el.classList.toggle("field-error", (!busy && error) || exposed);
+    el.classList.toggle("field-error", (!busy && error) || exposed || Boolean(tight));
   }
   function showStatus(next, failed = false) { status = next; error = failed; renderStatus(); }
   /* The provider and reasoning selects are driven by the shared option lists, so

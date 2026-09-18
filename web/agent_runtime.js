@@ -11,8 +11,13 @@ export async function createSerialAgent(options) {
     try {
       runtime = await import("./vendor/agent/agent-runtime.js");
     } catch (error) {
+      /* The cause has to travel with the message: an import here can fail for
+       * reasons that have nothing to do with the bundle being stale -- a syntactically
+       * valid but unloadable module, a server answering with the wrong type, a
+       * denied fetch -- and "rebuild the bundle" sends the reader down the wrong
+       * path for all of them. */
       throw new Error(
-        "The bundled assistant runtime is missing or unreadable. Rebuild it with tools/build_agent_bundle.sh.",
+        `The bundled assistant runtime is missing or unreadable (${error?.message || error}). Rebuild it with tools/build_agent_bundle.sh.`,
         { cause: error },
       );
     }

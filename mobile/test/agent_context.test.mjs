@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
-import { compactAgentContext, settleAgentHistory } from "../src/agent-context.mjs";
+import { MAX_CONTEXT_CHARS, MIN_CONTEXT_CHARS, compactAgentContext, contextBudgetChars, settleAgentHistory } from "../src/agent-context.mjs";
 
 const user = (text) => ({ role: "user", content: [{ type: "text", text }], timestamp: 1 });
 const assistant = (content) => ({ role: "assistant", content, api: "openai-completions", provider: "test", model: "test", timestamp: 1, stopReason: "toolUse" });
@@ -85,3 +85,43 @@ test("repeated compaction retains the latest question and marks earlier excerpts
   assert(messages.some((message) => message.role === "user" && message.content[0].text === "Question 49"));
   assert(JSON.stringify(messages).includes("never replay"));
 });
+
+/* The budget is derived from the configured window, so these are the numbers the
+ * runtime actually uses: measured 2026-09-18 the prompt and 24 tool descriptions
+ * come to about 23,700 characters. */
+const FIXED_CHARS = 23700;
+
+test("a history budget follows the configured window instead of a constant", () => {
+  const budget = (contextWindow, outputTokens = 4096) => contextBudgetChars({ contextWindow, fixedChars: FIXED_CHARS, outputTokens });
+
+  // A window that leaves room keeps the historical ceiling: nothing about a
+  // normal configuration changes.
+  assert.equal(budget(32768), MAX_CONTEXT_CHARS);
+  assert.equal(contextBudgetChars({ contextWindow: 32768, fixedChars: 0, outputTokens: 0 }), MAX_CONTEXT_CHARS);
+
+  // Leaving the field blank means "built-in default", which the caller resolves;
+  // an unresolved 0 must not be read as "no window".
+  assert.equal(contextBudgetChars({ contextWindow: 0, fixedChars: FIXED_CHARS, outputTokens: 4096 }), MAX_CONTEXT_CHARS);
+  assert.equal(contextBudgetChars({ fixedChars: FIXED_CHARS }), MAX_CONTEXT_CHARS);
+
+  // A window smaller than the fixed part cannot hold anything; the budget floors
+  // rather than going negative, and the settings form is what reports the cause.
+  assert.equal(budget(8192), MIN_CONTEXT_CHARS);
+  assert.equal(budget(1000), MIN_CONTEXT_CHARS);
+  assert.ok(budget(16000) > MIN_CONTEXT_CHARS && budget(16000) < MAX_CONTEXT_CHARS, "a middling window lands in between");
+  assert.equal(budget(16000), Math.floor((16000 - Math.ceil(FIXED_CHARS / 3) - 4096 - 256) * 2));
+
+  // Output is reserved out of the same window, so asking for more of it leaves
+  // less for history; more tools and a bigger prompt do the same.
+  assert.ok(budget(16000, 8192) < budget(16000, 1024));
+  assert.ok(contextBudgetChars({ contextWindow: 16000, fixedChars: FIXED_CHARS, outputTokens: 0 }) <
+    contextBudgetChars({ contextWindow: 16000, fixedChars: 0, outputTokens: 0 }));
+});
+
+test("a budget below the floor is never returned as a negative or tiny number", () => {
+  for (const contextWindow of [1000, 2000, 4000, 8192]) {
+    const value = contextBudgetChars({ contextWindow, fixedChars: FIXED_CHARS, outputTokens: 100000 });
+    assert.equal(value, MIN_CONTEXT_CHARS);
+  }
+});
+

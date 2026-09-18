@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { AGENT_CONFIG_KEY, AGENT_PROVIDERS, AGENT_REASONING_LEVELS, loadAgentConfig, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable, parseAgentHeaders, formatAgentHeaders, validateAgentConfig } from "../../web/agent_config.js";
+import { AGENT_CONFIG_KEY, AGENT_DEFAULT_MAX_TOKENS, AGENT_FIXED_CONTEXT_TOKENS, AGENT_PROVIDERS, AGENT_REASONING_LEVELS, isContextWindowTight, loadAgentConfig, minimumUsefulContextWindow, saveAgentConfig, clearAgentConfig, endpointSecurity, isEndpointUnreachable, parseAgentHeaders, formatAgentHeaders, validateAgentConfig } from "../../web/agent_config.js";
 
 function storage() {
   const values = new Map();
@@ -191,4 +191,45 @@ test("provider and reasoning options are ordered with the default first and tran
     assert.match(entry[1], /[\u4e00-\u9fff]/, `${key} zh`);
     assert.ok(entry[2].trim(), `${key} en`);
   }
+});
+
+/* A window smaller than what the assistant costs by itself cannot carry a
+ * request, and the setting accepts one as small as 1000 tokens. The form is the
+ * only place that can say so before the provider answers with an opaque
+ * context-length error. */
+test("a context window too small for the assistant's own prompt is reported as tight", () => {
+  assert.equal(isContextWindowTight(0), false, "blank means the built-in default, which is large enough");
+  assert.equal(isContextWindowTight(undefined), false);
+  assert.equal(isContextWindowTight(minimumUsefulContextWindow()), false, "the floor is a floor, not a target");
+  assert.equal(isContextWindowTight(minimumUsefulContextWindow() + 1), false);
+  assert.equal(isContextWindowTight(minimumUsefulContextWindow() - 1), true);
+  assert.equal(isContextWindowTight(1000), true, "the smallest accepted value cannot work");
+  assert.equal(isContextWindowTight(8192), true);
+  // Saving more room for output lowers the floor, so a deliberate small output
+  // can make a small window work rather than being warned about forever.
+  assert.equal(minimumUsefulContextWindow(512) < minimumUsefulContextWindow(), true);
+  assert.equal(isContextWindowTight(10000, 512), false);
+  assert.equal(isContextWindowTight(10000, 0), true);
+  assert.ok(minimumUsefulContextWindow() > AGENT_FIXED_CONTEXT_TOKENS, "the floor covers the fixed part plus output");
+});
+
+/* The tight-window notice interpolates two measured numbers. A label without the
+ * placeholders would still render -- just without the reason -- so the message
+ * shape is asserted rather than trusted, along with the HTML key that selects it
+ * (a missing key renders the raw key name to the user). */
+test("the settings form keeps the context-window hint, its placeholders and its HTML key", () => {
+  const settings = readFileSync(new URL("../../web/agent_settings.js", import.meta.url), "utf8");
+  for (const key of ["contextWindowHint", "contextWindowTight"]) {
+    const entry = settings.match(new RegExp(`\\b${key}:\\s*\\[\\s*"([^"]*)"\\s*,\\s*"([^"]*)"\\s*\\]`));
+    assert.ok(entry, `${key} is missing from web/agent_settings.js`);
+    assert.match(entry[1], /[\u4e00-\u9fff]/, `${key} zh`);
+    assert.ok(entry[2].trim(), `${key} en`);
+  }
+  const tight = settings.match(/contextWindowTight:\s*\[\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\]/);
+  for (const [lang, label] of [["zh", tight[1]], ["en", tight[2]]]) {
+    for (const placeholder of ["{fixed}", "{min}"]) assert.ok(label.includes(placeholder), `${lang} keeps ${placeholder}`);
+  }
+  const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="agentContextWindowHint"[^>]*data-ai-setting="contextWindowHint"/,
+    "the context-window hint must select its own label instead of the shared limits hint");
 });

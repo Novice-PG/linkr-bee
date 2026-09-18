@@ -69,6 +69,41 @@ export const AGENT_PROVIDERS = [
 // Ascending thinking budget. "off" leaves reasoning options out of the request.
 export const AGENT_REASONING_LEVELS = ["off", "low", "medium", "high"];
 
+/* Shared with the runtime so the settings form and the request it produces
+ * cannot disagree about what "left blank" means. */
+export const AGENT_DEFAULT_CONTEXT_WINDOW = 32768;
+export const AGENT_DEFAULT_MAX_TOKENS = 4096;
+
+/* What the assistant costs before any conversation is sent.
+ *
+ * Measured 2026-09-18 by summing the system prompt and every tool description
+ * the agent is created with: 13.7 KB + 9.4 KB. The prompt is English, so it is
+ * converted at a pessimistic 3 characters per token. `mobile/test/agent_config.test.mjs`
+ * re-measures the real value and fails if it grows past this number, so adding
+ * a large tool description cannot silently make the warning below wrong.
+ *
+ * This matters because the setting accepts a window as small as 1000 tokens: a
+ * window below the fixed part cannot hold a request at all, and the failure
+ * arrives as an opaque provider error. Naming the floor is the difference
+ * between "the model refused" and "this field is too small".
+ */
+export const AGENT_FIXED_CONTEXT_TOKENS = 8000;
+
+/* A window this small cannot carry the fixed part plus the requested output.
+ * The reserve is framing and a little history; a user who lowers maxTokens
+ * deliberately lowers this floor with it. */
+export function minimumUsefulContextWindow(maxTokens = 0) {
+  const output = Number.isInteger(maxTokens) && maxTokens > 0 ? maxTokens : AGENT_DEFAULT_MAX_TOKENS;
+  return AGENT_FIXED_CONTEXT_TOKENS + output + 512;
+}
+
+/* 0 means "use the built-in default", which is large enough, so it is never
+ * tight. Only an explicit window is judged. */
+export function isContextWindowTight(contextWindow, maxTokens = 0) {
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) return false;
+  return contextWindow < minimumUsefulContextWindow(maxTokens);
+}
+
 // 0 keeps the built-in default, so the ranges only bound what a user may set.
 const CONTEXT_WINDOW_RANGE = [1000, 2000000];
 const MAX_TOKENS_RANGE = [1, 100000];

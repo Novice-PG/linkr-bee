@@ -400,6 +400,13 @@ test('upload results are only ok when the count and digest agree', () => {
   assert.equal(short.bytes, 1200);
   assert.match(short.reason, /1200 bytes instead of 1800/);
 
+  // The marker's `actual=` is optional, so the parser has to treat "no mismatch"
+  // and "a mismatch without a count" as different things. Downgrading the second
+  // to incomplete would read as an unresolved transfer and invite a resume.
+  const shortUncounted = parseUploadResult('LINKR_UPLOAD:error size-mismatch\n', plan);
+  assert.equal(shortUncounted.status, 'mismatch');
+  assert.match(shortUncounted.reason, /without the measured byte count/);
+
   const counted = parseUploadResult('LINKR_UPLOAD:bytes=1799\n', plan);
   assert.equal(counted.status, 'mismatch');
   assert.match(counted.reason, /1799 bytes instead of 1800/);
