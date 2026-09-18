@@ -13,7 +13,7 @@ usage() {
 Usage: $(basename "$0") [--port DEVICE] [--image FILE] [--chip CHIP]
        [--address OFFSET] [--baud RATE]
 
-Flash a Linkr Bee ESP32-C3 or ESP32-C5 image without erasing settings.
+Flash a Linkr Bee ESP32-WROOM-32, ESP32-C3 or ESP32-C5 image without erasing settings.
 CHIP and OFFSET are inferred for standard artifact filenames.
 Environment overrides: LINKR_IMAGE, LINKR_CHIP, LINKR_FLASH_ADDRESS,
 LINKR_PORT, LINKR_BAUD.
@@ -95,6 +95,7 @@ if [ -z "$CHIP" ]; then
     case "$(basename "$IMAGE")" in
         *esp32c3*) CHIP=esp32c3 ;;
         *esp32c5*) CHIP=esp32c5 ;;
+        *esp32-wroom-32*) CHIP=esp32 ;;
         *)
             echo "Cannot infer chip from image name; pass --chip." >&2
             exit 1
@@ -102,6 +103,9 @@ if [ -z "$CHIP" ]; then
     esac
 fi
 case "$CHIP" in
+    esp32)
+        : "${FLASH_ADDRESS:=0x1000}"
+        ;;
     esp32c3)
         : "${FLASH_ADDRESS:=0x0}"
         ;;
@@ -109,7 +113,7 @@ case "$CHIP" in
         : "${FLASH_ADDRESS:=0x2000}"
         ;;
     *)
-        echo "Unsupported chip: $CHIP (expected esp32c3 or esp32c5)" >&2
+        echo "Unsupported chip: $CHIP (expected esp32, esp32c3 or esp32c5)" >&2
         exit 2
         ;;
 esac
