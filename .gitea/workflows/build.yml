@@ -1,0 +1,132 @@
+name: Build (Gitea / self-hosted container)
+
+# 跑在 232 上的 Gitea Actions 版本。
+# 与 .github/workflows/build.yml 的关系:
+#   - 沿用同一套 board 矩阵与 Kconfig 特性断言
+#   - 区别在运行环境:这里用自建的 Ubuntu 容器镜像
+#     (localhost/zephyr-build:4.4.1-ubuntu)
+#   - 该镜像已预置 zephyr v4.4.1 + allowlist 模块 + SDK 1.0.1
+#     + espressif blobs + esptool,故不再需要:
+#       apt-get install / actions/setup-python / action-zephyr-setup
+#   - 若日后想让 workflow 自己装环境(走原版逻辑),
+#     把 runs-on 换成 host-build 并加回上述步骤即可。
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-gitea-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: ${{ matrix.name }}
+    runs-on: build
+    timeout-minutes: 60
+    container:
+      image: localhost/zephyr-build:4.4.1-ubuntu
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ESP32-C3 Super Mini
+            board: esp32c3_supermini
+            slug: esp32c3-supermini
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C3 DevKitM
+            board: esp32c3_devkitm
+            slug: esp32c3-devkitm
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C3 DevKitC
+            board: esp32c3_devkitc
+            slug: esp32c3-devkitc
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C5 DevKitC
+            board: esp32c5_devkitc/esp32c5/hpcore
+            slug: esp32c5-devkitc
+            chip: esp32c5
+            flash_address: "0x2000"
+            factory_reset: GPIO28 BOOT to GND for two seconds during boot
+          - name: ESP32-WROOM-32 DevKitC
+            board: esp32_devkitc/esp32/procpu
+            slug: esp32-wroom-32
+            chip: esp32
+            flash_address: "0x1000"
+            factory_reset: GPIO27 to GND via external jumper
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          west build -p always -b "${{ matrix.board }}" \
+            -d "${GITHUB_WORKSPACE}/app/build" "${GITHUB_WORKSPACE}/app"
+
+      - name: Verify default feature set
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="${GITHUB_WORKSPACE}/app/build/zephyr/.config"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS=30000' "${config}"
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
+            grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "${config}"
+          else
+            grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+          fi
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
+          grep -qx 'CONFIG_WIFI=y' "${config}"
+          grep -qx 'CONFIG_NETWORKING=y' "${config}"
+          grep -qx 'CONFIG_NET_TCP=y' "${config}"
+          grep -qx '# CONFIG_NET_IPV6 is not set' "${config}"
+          grep -qx 'CONFIG_HTTP_SERVER=y' "${config}"
+          grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "${config}"
+          grep -qx 'CONFIG_BT=y' "${config}"
+          grep -qx 'CONFIG_BT_SMP=y' "${config}"
+          grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "${config}"
+          grep -qx 'CONFIG_BT_MAX_PAIRED=8' "${config}"
+          grep -qx 'CONFIG_BUILD_OUTPUT_BIN=y' "${config}"
+
+      - name: Package firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${GITHUB_WORKSPACE}/app/dist"
+          zephyr="${GITHUB_WORKSPACE}/app/build/zephyr"
+          rm -rf "${output}"
+          mkdir -p "${output}"
+
+          cp "${zephyr}/zephyr.bin" "${output}/linkr-bee-${{ matrix.slug }}.bin"
+          cp "${zephyr}/zephyr.elf" "${output}/linkr-bee-${{ matrix.slug }}.elf"
+          cp "${zephyr}/zephyr.map" "${output}/linkr-bee-${{ matrix.slug }}.map"
+          cp "${zephyr}/.config" "${output}/firmware.config"
+
+          cd "${output}"
+          sha256sum "linkr-bee-${{ matrix.slug }}.bin" > SHA256SUMS
+          ls -lh
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-bee-${{ matrix.slug }}
+          path: app/dist/
+          if-no-files-found: error
+          retention-days: 30
