@@ -33,8 +33,8 @@
     "web/serial_watch.js": "e24f5d6c50e1dd5596557f3d7a79166fb5f87f81afcb43b7d76361d9c43caafa",
     "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
     "mobile/src/agent-context.mjs": "15174a79939ccef79d55ff92c14ff9e285339d7af755be4af2af393cd5244992",
-    "mobile/src/pi-agent.mjs": "ff631ddd05c415c1374ffc96049c1f7d5805a1d2e87bf60fb7c3b2e1a041a7d9",
+    "mobile/src/pi-agent.mjs": "5d8a18c3361917a6e4dbc9ea0f5e3821839998bbee8b4c4826ce3fb35d7abfd9",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "3337892474db9c514b7007a91cde4140b5cb6f1ca3d4f157823b9f0519e66f49"
+  "sha256": "60dbdfa5683af92fc2d77234068bb1e8d3876b25cce166ef876aca96c2c94771"
 }

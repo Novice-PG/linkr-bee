@@ -498,6 +498,55 @@ test("a small configured context window shrinks the history that is sent", async
   assert.ok(sent[0] > sent[1], `the smaller window must carry less history (${sent[0]} vs ${sent[1]} characters)`);
 });
 
+/* pi-agent-core 0.87 replays system messages: every message's text merges into
+ * the prompt and the tool declarations replay in order. A restored snapshot
+ * carries its own baseline system message, so without deduplication each
+ * request would send the prompt twice — including a stale copy that never
+ * refreshes (two conflicting "Execution mode" lines at once). Legacy snapshots
+ * saved before the upgrade hold no system message at all and must still gain
+ * exactly one baseline with the tool declarations. */
+test("a restored conversation carries exactly one baseline system prompt", async () => {
+  const device = (mode) => ({ mode, getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
+    execute: () => assert.fail("read-only turn must not write"), inspectExecution: () => ({ executionStatus: "unknown" }) });
+  let snapshot;
+  let expectedTools = 0;
+  {
+    const agent = createSerialAgent({ config, device: device("auto"),
+      stream: fakeStream((context) => {
+        expectedTools = getCurrentTools(context.messages).length;
+        return [{ type: "text", text: "ok" }];
+      }) });
+    await agent.prompt("q1");
+    snapshot = agent.snapshot();
+    assert.ok(snapshot.some((message) => message.role === "system"), "a new-format snapshot carries its baseline");
+  }
+  for (const [label, restoredMessages] of [
+    ["new-format", snapshot],
+    ["legacy", snapshot.filter((message) => message.role !== "system")],
+  ]) {
+    const seen = [];
+    const agent = createSerialAgent({ config, device: device("manual"), restoredMessages,
+      stream: fakeStream((context) => {
+        seen.push(context.messages);
+        return [{ type: "text", text: "ok" }];
+      }) });
+    await agent.prompt("q2");
+    await agent.prompt("q3");
+    for (const messages of seen) {
+      const system = messages.filter((message) => message.role === "system");
+      const baselines = system.filter((message) => message.content);
+      assert.equal(baselines.length, 1, `${label} restore must carry exactly one prompt per request`);
+      const prompt = system.map((message) => String(message.content)).join("\n");
+      assert.equal((prompt.match(/Execution mode: /g) || []).length, 1,
+        `${label} restore must not leak a stale prompt copy`);
+      assert.match(prompt, /Execution mode: Manual/);
+      assert.ok(!prompt.includes("Execution mode: Auto"), `${label} restore kept the stale snapshot prompt`);
+      assert.equal(getCurrentTools(messages).length, expectedTools,
+        `${label} restore must replay the runner's tool baseline`);
+    }
+  }
+});
+
 /* AGENT_FIXED_CONTEXT_TOKENS tells a user how much of their window the assistant
  * spends before any conversation, and the settings form warns from it. That
  * number is only honest while it still describes the real prompt and tools, so
