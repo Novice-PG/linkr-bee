@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
 import { createSerialAgent } from "../src/pi-agent.mjs";
 import { SerialJournal } from "../../web/serial_journal.js";
 
@@ -79,7 +79,7 @@ test("target file and watch tools stay hidden until a probe observes what they n
   const seen = [];
   let turns = 0;
   const { agent } = makeAgent({ journal, stream: fakeStream((context) => {
-    seen.push(context.tools.map((tool) => tool.name));
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
     if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
     return [{ type: "text", text: "Probed." }];
   }) });

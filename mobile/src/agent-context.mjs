@@ -132,8 +132,14 @@ function toolExcerpt(message, limit) {
 function summarize(messages) {
   return messages.flatMap((message) => {
     if (message.diagnosticMemory) return message.diagnosticMemory;
-    const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-    const calls = message.content.filter((part) => part.type === "toolCall").map((part) => ({ tool: part.name, input: part.arguments }));
+    /* System messages carry the prompt (string content since pi-ai 0.87), not
+     * conversation history; they never belong in a task summary. */
+    if (message.role === "system") return [];
+    const parts = typeof message.content === "string"
+      ? [{ type: "text", text: message.content }]
+      : message.content;
+    const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    const calls = parts.filter((part) => part.type === "toolCall").map((part) => ({ tool: part.name, input: part.arguments }));
     return [{ source: message.role, tool: message.toolName, error: message.isError || undefined,
       excerpt: evidenceExcerpt(text || JSON.stringify(calls), message.role === "user" ? 1000 : 1800) }];
   });
@@ -151,7 +157,10 @@ function memoryMessage(template, entries) {
 
 export function compactAgentContext(messages, maxChars = MAX_CONTEXT_CHARS) {
   let context = messages.slice();
-  const size = () => JSON.stringify(context).length;
+  /* The leading system message is fixed cost (prompt plus tool baseline since
+   * pi-agent-core 0.87 keeps it in the transcript): the history budget already
+   * subtracts it, so it is neither measured here nor evicted below. */
+  const size = () => JSON.stringify(context.filter((message) => message.role !== "system")).length;
   if (size() <= maxChars) return context;
 
   // Shrink older evidence first, retaining the latest result in full if possible.
@@ -174,7 +183,10 @@ export function compactAgentContext(messages, maxChars = MAX_CONTEXT_CHARS) {
   while (size() > maxChars) {
     const currentQuestion = context.findLastIndex((message) => message.role === "user");
     // Remove whole assistant/tool-result exchanges, never orphan a tool result.
-    const start = context.findIndex((message, index) => index !== currentQuestion && !message.diagnosticMemory);
+    // The leading system message carries the prompt and tool baseline in
+    // pi-agent-core 0.87; dropping it would silently strip the prompt.
+    const start = context.findIndex((message, index) => index !== currentQuestion
+      && message.role !== "system" && !message.diagnosticMemory);
     if (start < 0) break;
     let end = start + 1;
     if (context[start].role === "assistant") {

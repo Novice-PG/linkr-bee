@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import { createSerialAgent, validateAgentConfig } from "../src/pi-agent.mjs";
 import { AGENT_FIXED_CONTEXT_TOKENS } from "../../web/agent_config.js";
 import { SerialJournal } from "../../web/serial_journal.js";
@@ -169,7 +169,11 @@ test("real Pi loop processes two large incremental log reads without context ove
   const agent = makeAgent({ config, getStatus: () => status, readLog: (options) => journal.read(options),
     sendInput: () => assert.fail("read-only"),
     stream: fakeStream((context) => {
-      assert(JSON.stringify(context.messages).length <= 24000);
+      /* pi-agent-core 0.87 folds the tool declarations (with parameter schemas)
+       * into the transcript's leading system message, so the whole-request JSON
+       * includes the fixed cost on top of the history the budget governs. */
+      const history = context.messages.filter((message) => message.role !== "system");
+      assert(JSON.stringify(history).length <= 24000);
       if (++turns === 1) return [call("read_serial_log", { after: 0, limit: 12000 })];
       if (turns === 2) return [call("read_serial_log", { limit: 12000 })];
       const value = JSON.parse(context.messages.at(-1).content[0].text);
@@ -289,9 +293,9 @@ test("changing mode retains prior dialogue and closes interrupted tool batches w
   agent = createSerialAgent({ config, device, stream: fakeStream((context) => {
     if (++turns === 1) return [{ type: "text", text: "Remember: this board has a mount failure." }];
     if (turns === 2) return [call("send_serial_input", { text: "reboot", appendEnter: true }), call("send_serial_input", { text: "pwd", appendEnter: true })];
-    assert(context.systemPrompt.includes("Execution mode: Full Auto"));
+    assert(getCurrentSystemPrompt(context.messages).includes("Execution mode: Full Auto"));
     assert(JSON.stringify(context.messages).includes("mount failure"));
-    const requests = context.messages.flatMap((m) => m.content.filter((c) => c.type === "toolCall").map((c) => c.id));
+    const requests = context.messages.flatMap((m) => Array.isArray(m.content) ? m.content.filter((c) => c.type === "toolCall").map((c) => c.id) : []);
     const results = context.messages.filter((m) => m.role === "toolResult").map((m) => m.toolCallId);
     assert.deepEqual(new Set(requests), new Set(results));
     assert(JSON.stringify(context.messages).includes("interrupted"));
@@ -504,7 +508,7 @@ test("the fixed-context estimate still covers the real prompt and tool descripti
   const agent = makeAgent({ config, getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
     sendInput: () => assert.fail("read-only turn must not write"),
     stream: fakeStream((context) => {
-      fixedChars = context.systemPrompt.length + context.tools
+      fixedChars = getCurrentSystemPrompt(context.messages).length + getCurrentTools(context.messages)
         .reduce((total, tool) => total + tool.name.length + tool.description.length, 0);
       return [{ type: "text", text: "ok" }];
     }) });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
 import { createSerialAgent } from "../src/pi-agent.mjs";
 
 /* Accessory tools are injected by the panel only when the app can reach the
@@ -40,7 +40,7 @@ function makeAgent({ accessory, stream, getStatus = () => status, sendInput = ()
 test("accessory tools exist only when the app injects the capability", async () => {
   const seen = [];
   const stream = fakeStream((context) => {
-    seen.push(context.tools.map((tool) => tool.name));
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
     return [{ type: "text", text: "done" }];
   });
   await makeAgent({ accessory: null, stream }).prompt("hello");
@@ -50,7 +50,7 @@ test("accessory tools exist only when the app injects the capability", async () 
 
   const withAccessory = [];
   const accessoryStream = fakeStream((context) => {
-    withAccessory.push(context.tools.map((tool) => tool.name));
+    withAccessory.push(getCurrentTools(context.messages).map((tool) => tool.name));
     return [{ type: "text", text: "done" }];
   });
   await makeAgent({ accessory: { capability: () => ({ available: true }) }, stream: accessoryStream }).prompt("hello");
