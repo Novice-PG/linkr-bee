@@ -7,7 +7,13 @@ export class SerialJournal {
 
   reset() {
     this.decoder = new TextDecoder();
-    this.text = "";
+    /* The retained window is kept as the chunks that produced it: rebuilding one
+     * string per append copies the whole 128KB ring on every log burst. `start`
+     * skips the evicted head, `length` counts retained chars in raw UTF-16 units
+     * so cursors stay directly comparable, exactly like the slices did. */
+    this.parts = [];
+    this.start = 0;
+    this.length = 0;
     this.end = 0;
     this.updatedAt = null;
     this.control = "text";
@@ -55,22 +61,77 @@ export class SerialJournal {
       }
       visible += keep ? char : "\0";
     }
-    let retained = (this.text + visible).slice(-this.capacity);
+    if (visible) {
+      this.parts.push(visible);
+      this.length += visible.length;
+      this.evict();
+    }
+    this.updatedAt = new Date().toISOString();
+  }
+
+  /* Drop from the head until the window fits: whole chunks first, then the head of
+   * the chunk that straddles the limit, so at most `capacity` chars are retained. */
+  evict() {
+    while (this.length > this.capacity) {
+      if (this.start >= this.parts.length) {
+        this.length = 0;
+        break;
+      }
+      const head = this.parts[this.start];
+      if (!head) {
+        this.start += 1;
+        continue;
+      }
+      const excess = this.length - this.capacity;
+      if (head.length <= excess) {
+        this.length -= head.length;
+        this.parts[this.start] = "";
+        this.start += 1;
+      } else {
+        this.parts[this.start] = head.slice(excess);
+        this.length -= excess;
+      }
+      if (this.start > 256) {
+        this.parts = this.parts.slice(this.start);
+        this.start = 0;
+      }
+    }
     // Never begin the retained window on a low surrogate: the split pair would
     // surface as a replacement character in the journal and to the agent.
-    const first = retained.charCodeAt(0);
-    if (first >= 0xdc00 && first <= 0xdfff) retained = retained.slice(1);
-    this.text = retained;
-    this.updatedAt = new Date().toISOString();
+    const head = this.parts[this.start];
+    const first = head ? head.charCodeAt(0) : NaN;
+    if (first >= 0xdc00 && first <= 0xdfff) {
+      this.parts[this.start] = head.slice(1);
+      this.length -= 1;
+    }
+  }
+
+  /* A page is collected from the tail of the ring, so a read costs the page and not
+   * the whole window. `from` is an offset into the retained text; `need` counts
+   * back to it, so the head chunk contributes only its tail and the first char of
+   * `text` sits exactly at `from` — anything past `count` is trimmed after. */
+  page(from, count) {
+    if (count <= 0) return "";
+    let need = this.length - from;
+    if (need <= 0) return "";
+    let text = "";
+    for (let i = this.parts.length - 1; i >= this.start && need > 0; i--) {
+      const part = this.parts[i];
+      if (!part) continue;
+      const take = part.length > need ? part.slice(part.length - need) : part;
+      text = take + text;
+      need -= take.length;
+    }
+    return text.length > count ? text.slice(0, count) : text;
   }
 
   read({ after, limit = 12000 } = {}) {
     limit = Math.max(1, Math.min(16000, Math.trunc(limit) || 12000));
-    const oldest = this.end - this.text.length;
+    const oldest = this.end - this.length;
     const requested = Number.isFinite(after) ? Math.trunc(after) : Math.max(0, this.end - limit);
     const start = Math.min(this.end, Math.max(oldest, requested));
     const end = Math.min(this.end, start + limit);
-    const text = this.text.slice(start - oldest, end - oldest).replace(/\0/g, "");
+    const text = this.page(start - oldest, end - start).replace(/\0/g, "");
     return { text, start, cursor: end, latestCursor: this.end,
       truncated: requested < oldest, updatedAt: this.updatedAt };
   }

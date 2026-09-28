@@ -214,6 +214,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   const toolRows = new Map();
   const executionRows = new Map();
   let bindingController = null;
+  let bindingAutomatic = false;
   let bindingState = null;
   let rememberedProfile = null;
   let autoIdentitySession = null;
@@ -575,12 +576,18 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (bindingState?.verified && status.profile && !status.profile.stale) {
       try { localStorage.setItem(`linkr-target-profile:${bindingState.targetId}`, JSON.stringify(status.profile)); } catch { /* optional history cache */ }
     }
-    $("agentConsole").textContent = `${text("consoleHint")} · ${text(`console-${device.getStatus().console.kind}`)}`;
+    $("agentConsole").textContent = `${text("consoleHint")} · ${text(`console-${status.console.kind}`)}`;
   }
   function maybeVerifyIdentity() {
+    /* Runs on every log burst, so the cheap app status screens first: the executor's
+     * getStatus() pages the journal and re-inspects the console tail, and that must
+     * not happen ten times a second while the terminal is merely streaming logs.
+     * The session guard means the expensive scan runs at most once per session. */
+    const quick = currentStatus();
+    if (busy || bindingState?.verified || !quick.connected || quick.transport !== "ble" ||
+        quick.inputPending || autoIdentitySession === quick.sessionId) return;
     const status = device.getStatus();
-    if (busy || bindingState?.verified || !status.connected || status.transport !== "ble" ||
-        status.inputPending || status.console.kind !== "shell" || autoIdentitySession === status.sessionId) return;
+    if (status.console.kind !== "shell" || status.sessionId !== quick.sessionId) return;
     autoIdentitySession = status.sessionId;
     api.targetBinding("verify", { automatic: true }).catch(() => {
       // Missing IDs, mismatch, interrupted commands and login prompts never
@@ -589,11 +596,19 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function logsChanged() {
     if (observeTimer !== null) return;
+    /* The log stream drives two things: unfinished executions have to be
+     * re-inspected, and a shell prompt may start automatic identity verification.
+     * Neither needs the console hint or the history rows, and while the panel is
+     * closed those two are what make a tick expensive, so they are skipped. The
+     * cadence stays at 100ms because verification must start as soon as a prompt
+     * appears — a slower tick lets a run begin before the target is verified. */
     observeTimer = setTimeout(() => {
       observeTimer = null;
-      device.observe();
-      refreshConsole();
-      refreshHistory();
+      if (device.needsObservation()) device.observe();
+      if (opened) {
+        refreshConsole();
+        refreshHistory();
+      }
       maybeVerifyIdentity();
     }, 100);
   }
@@ -932,7 +947,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   });
   function closePanel() {
     if (!opened) return;
+    /* stop() aborts an automatic identity check; re-arm it, or a panel closed
+     * mid-verify would lose the check for the rest of the connection. Manual
+     * binding actions are not re-armed: the user runs those deliberately. */
+    const autoVerifyAborted = bindingController !== null && bindingAutomatic;
     stop("stopped");
+    if (autoVerifyAborted) autoIdentitySession = null;
     showModePicker(false);
     opened = false;
     dialog.hidden = true;
@@ -979,6 +999,11 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       button.setAttribute("aria-pressed", "true");
       refreshLang();
       syncLayout();
+      /* Bytes may have arrived while the panel was closed and only the slow tick
+       * was running: catch up once on entry so nothing is shown stale. */
+      device.observe();
+      refreshConsole();
+      refreshHistory();
       // Bring back this device's conversation, if any, before the user types.
       syncSession();
       // Do not summon the keyboard on entry; both panes should be visible.
@@ -1026,6 +1051,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       stop(undefined, {preserveConversation:false});
       currentTask = null; device.forgetProfile();
       const controller = bindingController = new AbortController();
+      bindingAutomatic = automatic;
       const timer = setTimeout(() => controller.abort(), 35000);
       setBusy(true);
       try {
@@ -1066,7 +1092,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
           rememberedProfile = profile ? {profile,historical:true} : null;
         } catch { rememberedProfile = null; }
         return {...bindingState,status:"verified",targetPath};
-      } finally { bindingController = null; clearTimeout(timer); setBusy(false); refreshHistory(); }
+      } finally { bindingController = null; bindingAutomatic = false; clearTimeout(timer); setBusy(false); refreshHistory(); }
     },
     /* A changed configuration means a different model and a fresh context. */
     settingsChanged() {

@@ -1042,6 +1042,15 @@ body.terminal-fullscreen-fallback {
   display: none;
 }
 
+/* The panel holds the primary connect action; when it is collapsed, this top bar
+ * entry is the only way to reach it — on wide fine-pointer layouts too, not just
+ * touch or narrow windows. */
+.app-shell.controls-hidden .top-actions .mobile-connect {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 104px;
+}
+
 @media (max-width: 900px) {
   .mobile-connect {
     display: inline-flex;

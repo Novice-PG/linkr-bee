@@ -1197,7 +1197,8 @@ function initTerminal() {
     fontSize: state.fontSize,
     lineHeight: 1,
     scrollback: 10000,
-    smoothScrollDuration: 100,
+    // A burst of log lines must not queue an animation frame per scroll step.
+    smoothScrollDuration: 0,
     tabStopWidth: 8,
     theme: theme === "dark" ? XTERM_DARK : XTERM_LIGHT,
   });
@@ -1218,29 +1219,51 @@ function initTerminal() {
   return true;
 }
 
+/* A hidden page never runs rAF, so the queue needs a timer next to the frame:
+ * without both, one fast burst stays pending until the user returns and the
+ * backlog grows without limit. The cap drops the oldest half of the pending
+ * display only — the agent's evidence is the journal, which is untouched. */
+const WRITE_BACKLOG_LIMIT = 512 * 1024;
+const WRITE_FALLBACK_MS = 50;
+
 let writeRaf = 0;
+let writeFallbackTimer = 0;
 let pendingWrites = [];
+let pendingWriteBytes = 0;
+let droppedWriteBytes = 0;
 
 function flushTerminalWrites() {
   writeRaf = 0;
+  if (writeFallbackTimer) {
+    clearTimeout(writeFallbackTimer);
+    writeFallbackTimer = 0;
+  }
   const chunks = pendingWrites;
   pendingWrites = [];
+  pendingWriteBytes = 0;
   if (!state.term || !chunks.length) {
     return;
+  }
+  if (droppedWriteBytes) {
+    // The notice belongs after the surviving output, where the gap actually is.
+    chunks.push(
+      encoder.encode(
+        `\x1b[93m[warn] ${droppedWriteBytes} bytes of output dropped (terminal backlog)\x1b[0m\r\n`,
+      ),
+    );
+    droppedWriteBytes = 0;
   }
   if (chunks.length === 1) {
     state.term.write(chunks[0], onTerminalWriteParsed);
     return;
   }
   let total = 0;
-  const encoded = chunks.map((chunk) => {
-    const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk;
+  for (const bytes of chunks) {
     total += bytes.length;
-    return bytes;
-  });
+  }
   const merged = new Uint8Array(total);
   let offset = 0;
-  for (const bytes of encoded) {
+  for (const bytes of chunks) {
     merged.set(bytes, offset);
     offset += bytes.length;
   }
@@ -1257,9 +1280,28 @@ function appendOutput(data) {
     elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
     return;
   }
-  pendingWrites.push(data);
+  // Encoding here keeps the byte accounting honest and encodes each chunk once.
+  const bytes = typeof data === "string" ? encoder.encode(data) : data;
+  pendingWrites.push(bytes);
+  pendingWriteBytes += bytes.length;
+  if (pendingWriteBytes > WRITE_BACKLOG_LIMIT && pendingWrites.length > 1) {
+    // Drop the oldest half in one step: a user watching a running command needs
+    // the live tail, and repeated shift() would be quadratic.
+    const keep = Math.max(1, pendingWrites.length >> 1);
+    for (const chunk of pendingWrites.slice(0, pendingWrites.length - keep)) {
+      droppedWriteBytes += chunk.length;
+    }
+    pendingWrites = pendingWrites.slice(-keep);
+    pendingWriteBytes = pendingWrites.reduce(
+      (total, chunk) => total + chunk.length,
+      0,
+    );
+  }
   if (!writeRaf) {
     writeRaf = requestAnimationFrame(flushTerminalWrites);
+  }
+  if (!writeFallbackTimer) {
+    writeFallbackTimer = setTimeout(flushTerminalWrites, WRITE_FALLBACK_MS);
   }
 }
 
@@ -1873,8 +1915,16 @@ function setAutoScroll(value, scroll) {
   }
 }
 
+let terminalViewport = null;
+
 function onViewportScroll() {
-  const vp = elements.terminalOutput.querySelector(".xterm-viewport");
+  // Scroll fires every frame while the log streams; re-querying the viewport (and
+  // re-resolving it after xterm re-opens) is cheaper than the three layout reads
+  // below, which must stay.
+  if (!terminalViewport || !terminalViewport.isConnected) {
+    terminalViewport = elements.terminalOutput.querySelector(".xterm-viewport");
+  }
+  const vp = terminalViewport;
   if (!vp) {
     return;
   }
@@ -1883,13 +1933,19 @@ function onViewportScroll() {
 }
 
 let connectionInFlight = false;
+let disconnectInFlight = false;
 
 function setConnecting(connecting) {
   connecting = connecting || connectionInFlight;
+  // Same source as setConnected(): a failure path must not re-enable a Connect
+  // button whose prerequisites (term, BLE availability) are still missing.
+  const canConnect =
+    Boolean(state.term) &&
+    (state.mode === "ws" || Boolean(bleTransport?.isAvailable()));
   elements.switchDeviceButton.disabled = connecting || state.connected;
   const btn = elements.connectButton;
   btn.classList.toggle("loading", connecting);
-  btn.disabled = connecting || state.connected;
+  btn.disabled = connecting || state.connected || !canConnect;
   elements.bleModeBtn.disabled = connecting || state.connected;
   elements.lanModeBtn.disabled = connecting || state.connected;
   const label = btn.querySelector(".btn-label");
@@ -1903,9 +1959,6 @@ function setConnecting(connecting) {
   const mobileBtn = elements.mobileConnectBtn;
   if (mobileBtn) {
     mobileBtn.classList.toggle("loading", connecting);
-    const canConnect =
-      Boolean(state.term) &&
-      (state.mode === "ws" || Boolean(bleTransport?.isAvailable()));
     mobileBtn.disabled = connecting || (!state.connected && !canConnect);
     mobileBtn.classList.toggle("btn-primary", !state.connected);
     const mobileLabel = mobileBtn.querySelector(".btn-label");
@@ -2037,6 +2090,12 @@ async function restoreAuthorizedDevice() {
       candidates[0];
 
     if (!device) {
+      return;
+    }
+    /* getDevices() can settle long after the user started connecting: a background
+     * restore must not overwrite the device in use or tear down a live session. */
+    if (state.connected || connectionInFlight || state.deviceId || state.ws) {
+      debugLine("[restore] skipped: a session is already in use");
       return;
     }
     rememberDevice(device, true);
@@ -2561,8 +2620,6 @@ function connectWs() {
     }
     clearWsErrors();
     saveSetting(WS_HOST_KEY, host);
-    lanTokens.edit(token);
-    lanTokens.save();
     const url = /^wss?:\/\//.test(host) ? host : `ws://${host}/ws`;
     const ws = new WebSocket(url);
     let opened = false;
@@ -2608,6 +2665,10 @@ function connectWs() {
       clearTimers();
       opened = true;
       clearWsErrors();
+      /* Persist the token only after the access handshake accepted it: a rejected
+       * or unreachable attempt must not overwrite a token that still works. */
+      lanTokens.edit(token);
+      lanTokens.save();
       setConnected(true);
       appendLine("[ready]");
       resolve();
@@ -2876,36 +2937,43 @@ async function disconnect() {
     return;
   }
 
-  if (state.mgmtReady && state.device) {
-    try {
-      await bleTransport.stopNotifications(
-        state.device.id,
-        MGMT_SERVICE,
-        MGMT_RESPONSE,
-      );
-    } catch (_error) {
-      // Ignore disconnect races.
+  /* Double taps fire two teardowns whose notification/race handling interleaves. */
+  if (disconnectInFlight) return;
+  disconnectInFlight = true;
+  try {
+    if (state.mgmtReady && state.device) {
+      try {
+        await bleTransport.stopNotifications(
+          state.device.id,
+          MGMT_SERVICE,
+          MGMT_RESPONSE,
+        );
+      } catch (_error) {
+        // Ignore disconnect races.
+      }
     }
-  }
-  if (state.reliableReady && state.device) {
-    try {
-      await bleTransport.stopNotifications(
-        state.device.id,
-        RELIABLE_UART_SERVICE,
-        RELIABLE_UART_TX,
-      );
-    } catch (_error) {
-      // Ignore disconnect races.
+    if (state.reliableReady && state.device) {
+      try {
+        await bleTransport.stopNotifications(
+          state.device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_TX,
+        );
+      } catch (_error) {
+        // Ignore disconnect races.
+      }
     }
-  }
 
-  if (state.device && (await bleTransport.isConnected())) {
-    await bleTransport.disconnect(state.device.id);
-    if (state.connected) {
+    if (state.device && (await bleTransport.isConnected())) {
+      await bleTransport.disconnect(state.device.id);
+      if (state.connected) {
+        onDisconnected();
+      }
+    } else if (state.connected) {
       onDisconnected();
     }
-  } else if (state.connected) {
-    onDisconnected();
+  } finally {
+    disconnectInFlight = false;
   }
 }
 
@@ -3044,8 +3112,18 @@ function syncSoftKeyboardLayout() {
 
   // iOS/Android WebViews may resize only the visual viewport, leaving dvh
   // unchanged. Size the workspace to the area actually above the keyboard.
-  document.documentElement.style.setProperty("--terminal-viewport-height", `${height}px`);
-  document.documentElement.style.setProperty("--settings-viewport-top", `${window.visualViewport?.offsetTop || 0}px`);
+  // visualViewport also fires for plain scrolls: skip identical writes so the
+  // stylesheet is not dirtied every frame.
+  const viewportHeight = `${height}px`;
+  const settingsTop = `${window.visualViewport?.offsetTop || 0}px`;
+  if (softKeyboardLayout.appliedHeight !== viewportHeight) {
+    softKeyboardLayout.appliedHeight = viewportHeight;
+    document.documentElement.style.setProperty("--terminal-viewport-height", viewportHeight);
+  }
+  if (softKeyboardLayout.appliedTop !== settingsTop) {
+    softKeyboardLayout.appliedTop = settingsTop;
+    document.documentElement.style.setProperty("--settings-viewport-top", settingsTop);
+  }
   agentPanel?.syncLayout({ keyboardOpen: active });
 
   if (active === softKeyboardLayout.active) {
@@ -3698,7 +3776,12 @@ function init() {
       // Entering Agent changes only the workspace on desktop. Keep the docked
       // settings panel and its saved visibility; touch layouts close the sheet.
       if (usesSettingsDrawer()) setMobileSidebarOpen(false, { restoreFocus: false });
-      if (document.fullscreenElement === elements.terminalCard) await document.exitFullscreen();
+      /* Leaving fullscreen is best effort: some WebViews reject the request (or the
+       * call is no longer tied to a user gesture) and a refused exit must not stop
+       * the assistant from opening. */
+      if (document.fullscreenElement === elements.terminalCard) {
+        await document.exitFullscreen().catch(() => {});
+      }
       elements.terminalCard.classList.remove("terminal-fullscreen-fallback");
       document.body.classList.remove("terminal-fullscreen-fallback");
       updateFullscreenButton();

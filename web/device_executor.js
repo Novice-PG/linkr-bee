@@ -101,9 +101,11 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     } else {
       record.observedEnd = readLog({ limit: 1 }).latestCursor;
       Object.assign(record, executionPage(record));
+      // One scan per inspection: the classifier walks the whole evidence page and
+      // this runs on every log tick while a command is open.
+      const hint = inspectSerialConsole({ text: record.evidence, latestCursor: record.observedEnd });
       record.observation = !record.evidence ? "no-output"
-        : inspectSerialConsole({ text: record.evidence, latestCursor: record.observedEnd }).kind === "shell" ? "prompt-returned" : "output-observed";
-      const hint = inspectSerialConsole({text:record.evidence,latestCursor:record.observedEnd});
+        : hint.kind === "shell" ? "prompt-returned" : "output-observed";
       record.waitingFor = ["login", "password", "sudo-password", "confirmation", "pager", "bootloader"].includes(hint.kind) ? hint.kind : null;
       if (record.download) {
         const partial = record.evidence.match(/^LINKR_PART:(.+)\r?$/m);
@@ -146,6 +148,11 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     }
     publish(record);
     return snapshot(paged ? { ...record, ...executionPage(record, options) } : record);
+  }
+  /* Cheap predicate for the panel's log-driven tick: an idle page must not scan
+   * the console ten times a second just because bytes arrived. */
+  function needsObservation() {
+    return records.some((record) => record.delivery === "sent" && !record.observationClosed);
   }
   function observe() {
     for (const record of records) {
@@ -200,6 +207,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     readLog(options) { return readLog(options); },
     getRecords() { return records.filter((record) => record.sessionId === getStatus().sessionId).map(snapshot); },
     inspectExecution,
+    needsObservation,
     observe,
     approve(id) {
       if (active?.record.id !== id || active.record.state !== "awaiting-approval") return false;
