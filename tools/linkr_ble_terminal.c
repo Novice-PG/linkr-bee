@@ -49,6 +49,19 @@
 /* ATT MTU 247 leaves up to 244 bytes for a GATT value. */
 #define BLE_MAX_NUS_PAYLOAD 244
 
+/* Keep in sync with __version__ in linkr_ble_terminal.py: both clients speak to
+ * the same device and are released together. tests/test_terminal_cli_c.py
+ * asserts the two strings match. */
+#define CLI_VERSION     "1.0.0"
+
+/* Exit codes mirror the Python client so scripts can treat them alike. */
+enum {
+    EXIT_OK = 0,
+    EXIT_ERROR = 1,
+    EXIT_USAGE = 2,
+    EXIT_DEVICE_DISCONNECTED = 3,
+};
+
 struct options {
     const char *name;
     const char *address;
@@ -104,6 +117,10 @@ struct app_state {
 
 static struct app_state g_state;
 
+/* Set by --quiet. Progress chatter goes through msg() and is dropped; errors
+ * (fatal/usage_fatal) and protocol traces always print. */
+static bool g_quiet;
+
 /* ------------------------------------------------------------------------ */
 /* Helpers                                                                  */
 /* ------------------------------------------------------------------------ */
@@ -112,6 +129,9 @@ static void msg(const char *fmt, ...)
 {
     va_list ap;
 
+    if (g_quiet) {
+        return;
+    }
     va_start(ap, fmt);
     fprintf(stderr, "linkr-ble-c: ");
     vfprintf(stderr, fmt, ap);
@@ -119,16 +139,47 @@ static void msg(const char *fmt, ...)
     va_end(ap);
 }
 
+/* Every failure goes out through here so the prefix stays uniform. */
+static void emit_error(const char *fmt, va_list ap)
+{
+    fputs("linkr-ble-c: error: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+}
+
+/* A failure that is reported but does not end the process by itself. */
+static void err_msg(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    emit_error(fmt, ap);
+    va_end(ap);
+}
+
+/* Runtime failure: the adapter, the D-Bus connection or the peer device. */
 static void fatal(const char *fmt, ...)
 {
     va_list ap;
 
     va_start(ap, fmt);
-    fprintf(stderr, "linkr-ble-c: fatal: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    emit_error(fmt, ap);
     va_end(ap);
-    exit(1);
+    exit(EXIT_ERROR);
+}
+
+/* Bad command line: same shape as the Python client's argparse failures.
+ * The parse helpers used to report these as fatal() and exit 1, which made an
+ * unparsable argument indistinguishable from a device that failed to connect. */
+static void usage_fatal(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    emit_error(fmt, ap);
+    va_end(ap);
+    fputs("linkr-ble-c: try '--help' for the accepted options\n", stderr);
+    exit(EXIT_USAGE);
 }
 
 static void hex_uuid_to_dbus(const char *uuid128, char *out, size_t out_len)
@@ -220,6 +271,26 @@ static void normalize_enter(const uint8_t *in, size_t in_len,
         }
     }
     *out_len = o;
+}
+
+/* Human name for the configured escape byte, so the terminal hint follows
+ * --escape instead of always claiming Ctrl-]. Mirrors describe_escape() in
+ * linkr_ble_terminal.py. */
+static void describe_escape(const char *escape, char *out, size_t out_len)
+{
+    unsigned char byte = (unsigned char)escape[0];
+
+    if (byte == 0x1b) {
+        snprintf(out, out_len, "Esc");
+    } else if (byte >= 1 && byte <= 26) {
+        snprintf(out, out_len, "Ctrl-%c", 'A' + byte - 1);
+    } else if (byte >= 0x1c && byte <= 0x1f) {
+        snprintf(out, out_len, "Ctrl-%c", "\\]^_"[byte - 0x1c]);
+    } else if (byte >= 0x20 && byte < 0x7f) {
+        snprintf(out, out_len, "'%c'", byte);
+    } else {
+        snprintf(out, out_len, "0x%02x", byte);
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -340,8 +411,9 @@ static bool find_adapter(DBusConnection *conn, char *path_out, size_t path_out_l
             dbus_message_iter_recurse(&ifaces, &iface_entry);
             iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
             if (strcmp(iface, ADAPTER_IFACE) == 0) {
-                strncpy(path_out, path, path_out_len - 1);
-                path_out[path_out_len - 1] = '\0';
+                /* snprintf over strncpy: always NUL-terminated, and gcc's
+                 * -Wstringop-truncation stays quiet. */
+                snprintf(path_out, path_out_len, "%s", path);
                 dbus_message_unref(reply);
                 return true;
             }
@@ -361,7 +433,17 @@ struct device_match {
     char found_name[MAX_NAME_LEN];
     bool found;
     bool found_has_nus;
+    /* Best rank seen so far; -1 means "nothing matched yet". */
+    int best_rank;
 };
+
+/* Pick between candidate devices: an exact name beats a prefix match, and
+ * either beats a device that does not advertise the NUS service, which the
+ * legacy NUS client cannot use. */
+static int device_rank(bool exact_name, bool has_nus)
+{
+    return (exact_name ? 2 : 0) + (has_nus ? 1 : 0);
+}
 
 static void strip_dashes(const char *in, char *out, size_t out_len)
 {
@@ -547,25 +629,33 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 }
 
                 has_nus = uuid_matches(&props, NUS_SERVICE);
-                name_match = name && strncmp(name, match->name_prefix,
-                                             strlen(match->name_prefix)) == 0;
-
                 if (match->address && strcasecmp(match->address, addr) == 0) {
-                    strncpy(match->path, path, sizeof(match->path) - 1);
-                    strncpy(match->found_name, name ? name : "",
-                            sizeof(match->found_name) - 1);
+                    /* snprintf, not strncpy: a shorter name after a longer one
+                     * would otherwise keep the previous tail. */
+                    snprintf(match->path, sizeof(match->path), "%s", path);
+                    snprintf(match->found_name, sizeof(match->found_name), "%s",
+                             name ? name : "");
                     match->found = true;
                     match->found_has_nus = has_nus;
                     dbus_message_unref(reply);
                     return;
                 }
 
-                if (name_match &&
-                    (!match->found || (has_nus && !match->found_has_nus))) {
-                    strncpy(match->path, path, sizeof(match->path) - 1);
-                    strncpy(match->found_name, name, sizeof(match->found_name) - 1);
-                    match->found = true;
-                    match->found_has_nus = has_nus;
+                name_match = name && name[0] &&
+                             strncmp(name, match->name_prefix,
+                                     strlen(match->name_prefix)) == 0;
+                if (name_match) {
+                    int rank = device_rank(strcmp(name, match->name_prefix) == 0,
+                                           has_nus);
+
+                    if (rank > match->best_rank) {
+                        match->best_rank = rank;
+                        snprintf(match->path, sizeof(match->path), "%s", path);
+                        snprintf(match->found_name, sizeof(match->found_name),
+                                 "%s", name);
+                        match->found = true;
+                        match->found_has_nus = has_nus;
+                    }
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -588,10 +678,15 @@ static bool find_device(DBusConnection *conn, struct options *opt,
     match->address = opt->address;
     match->found = false;
     match->found_has_nus = false;
+    match->best_rank = -1;
     match->path[0] = '\0';
     match->found_name[0] = '\0';
 
-    msg("Scanning for BLE device matching %s* ...", match->name_prefix);
+    if (opt->address) {
+        msg("Looking for BLE device at %s ...", opt->address);
+    } else {
+        msg("Scanning for BLE device matching %s* ...", match->name_prefix);
+    }
 
     /* Start discovery. */
     {
@@ -630,7 +725,13 @@ static bool find_device(DBusConnection *conn, struct options *opt,
     }
 
     if (!match->found) {
-        msg("device not found matching: %s*", match->name_prefix);
+        /* Name the criterion that actually failed: an address search reported
+         * as "matching Linkr BLE UART*" sent people looking for the wrong fix. */
+        if (opt->address) {
+            err_msg("no BLE device found at address %s", opt->address);
+        } else {
+            err_msg("device not found matching: %s*", match->name_prefix);
+        }
         return false;
     }
 
@@ -689,8 +790,11 @@ static void list_devices(DBusConnection *conn)
                     }
                     dbus_message_iter_next(&prop_entry);
                 }
-                if (name && addr) {
-                    printf("%s\t%s\n", addr, name);
+                if (addr) {
+                    /* Unnamed peripherals used to be dropped here, which made an
+                     * empty list look like "nothing is nearby". They are exactly
+                     * the devices a user cannot identify by looking at names. */
+                    printf("%s\t%s\n", addr, (name && name[0]) ? name : "(unknown)");
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -749,7 +853,8 @@ static bool connect_device(DBusConnection *conn, const char *device_path)
     }
     dbus_message_unref(reply);
     g_state.connected = true;
-    strncpy(g_state.device_path, device_path, sizeof(g_state.device_path) - 1);
+    snprintf(g_state.device_path, sizeof(g_state.device_path), "%s",
+             device_path);
     msg("Connected: %s", device_path);
     return true;
 }
@@ -862,9 +967,13 @@ static bool discover_characteristics(DBusConnection *conn)
 
                             if (uuid) {
                                 if (strcasecmp(uuid, rx_dbus_uuid) == 0) {
-                                    strncpy(g_state.rx_path, path, sizeof(g_state.rx_path) - 1);
+                                    snprintf(g_state.rx_path,
+                                             sizeof(g_state.rx_path), "%s",
+                                             path);
                                 } else if (strcasecmp(uuid, tx_dbus_uuid) == 0) {
-                                    strncpy(g_state.tx_path, path, sizeof(g_state.tx_path) - 1);
+                                    snprintf(g_state.tx_path,
+                                             sizeof(g_state.tx_path), "%s",
+                                             path);
                                 }
                             }
                         }
@@ -1480,18 +1589,21 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
 /* Main event loop                                                          */
 /* ------------------------------------------------------------------------ */
 
-static void run_terminal(DBusConnection *conn, struct options *opt)
+static int run_terminal(DBusConnection *conn, struct options *opt)
 {
     pthread_t tid;
     int err;
     bool lost = false;
+    bool write_failed = false;
+    char escape_name[32];
 
-    msg("Terminal open. Press Ctrl-] to exit.");
+    describe_escape(opt->escape, escape_name, sizeof(escape_name));
+    msg("Terminal open. Press %s to exit.", escape_name);
 
     err = pthread_create(&tid, NULL, stdin_thread, opt);
     if (err) {
-        msg("could not start stdin thread: %s", strerror(err));
-        return;
+        err_msg("could not start stdin thread: %s", strerror(err));
+        return EXIT_ERROR;
     }
 
     for (;;) {
@@ -1510,6 +1622,7 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
 
         if (n > 0) {
             if (!write_with_mtu(conn, buf, n, opt)) {
+                write_failed = true;
                 break;
             }
         }
@@ -1520,17 +1633,24 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
         }
     }
 
-    if (lost) {
-        msg("\nBLE disconnected.");
+    if (lost || write_failed) {
+        /* Raw mode leaves the cursor mid-line, so start on a fresh one. */
+        fputs("\n", stderr);
         /* The reader thread is blocked in read()/fgets() and only returns on the
          * next keystroke, so joining it here would hang the client. Let process
          * exit reclaim it after the terminal is restored. */
         atomic_store(&g_state.tx_done, true);
-        return;
+        if (lost) {
+            err_msg("BLE disconnected during the terminal session");
+            return EXIT_DEVICE_DISCONNECTED;
+        }
+        err_msg("BLE write failed; closing the terminal");
+        return EXIT_ERROR;
     }
 
     pthread_join(tid, NULL);
     msg("Terminal closed.");
+    return EXIT_OK;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1541,6 +1661,11 @@ static const char *parse_escape(const char *s)
 {
     static char out[8];
 
+    if (s[0] == '^' && s[1] == '\0') {
+        /* A lone caret starts the ^X form; it is not the literal byte '^'.
+         * This used to be accepted silently. */
+        usage_fatal("escape must be one byte, like ^] or 0x1d");
+    }
     if (strlen(s) == 2 && s[0] == '^') {
         out[0] = (char)(toupper((unsigned char)s[1]) & 0x1f);
         out[1] = '\0';
@@ -1552,20 +1677,20 @@ static const char *parse_escape(const char *s)
 
         errno = 0;
         v = strtoul(s + 2, &end, 16);
-        if (errno == 0 && end != s + 2 && *end == '\0' &&
-            v > 0 && v <= 0xff) {
+        /* 0x00 is allowed here to match the Python client's validator. */
+        if (errno == 0 && end != s + 2 && *end == '\0' && v <= 0xff) {
             out[0] = (char)v;
             out[1] = '\0';
             return out;
         }
-        fatal("hex escape must be between 0x01 and 0xff");
+        usage_fatal("hex escape must be between 0x00 and 0xff");
     }
     if (strlen(s) == 1) {
         out[0] = s[0];
         out[1] = '\0';
         return out;
     }
-    fatal("escape must be one byte, like ^] or 0x1d");
+    usage_fatal("escape must be one byte, like ^] or 0x1d");
     return NULL;
 }
 
@@ -1578,7 +1703,7 @@ static double parse_positive_double(const char *option, const char *value)
     parsed = strtod(value, &end);
     if (errno != 0 || end == value || *end != '\0' ||
         !isfinite(parsed) || parsed <= 0.0) {
-        fatal("%s must be a number greater than zero", option);
+        usage_fatal("%s must be a number greater than zero", option);
     }
     return parsed;
 }
@@ -1592,21 +1717,22 @@ static int parse_ble_write_size(const char *value)
     parsed = strtol(value, &end, 10);
     if (errno != 0 || end == value || *end != '\0' ||
         parsed < 0 || parsed > BLE_MAX_NUS_PAYLOAD) {
-        fatal("--ble-write-size must be between 0 and %d",
-              BLE_MAX_NUS_PAYLOAD);
+        usage_fatal("--ble-write-size must be between 0 and %d",
+                    BLE_MAX_NUS_PAYLOAD);
     }
     return (int)parsed;
 }
 
-static void usage(const char *prog)
+static void usage(FILE *out, const char *prog)
 {
-    fprintf(stderr,
+    fprintf(out,
             "Usage: %s [options]\n"
             "\n"
             "Options:\n"
             "  --name NAME           BLE device name or prefix (default: '%s')\n"
             "  --address ADDR        BLE address; skip name scan\n"
-            "  --scan                list nearby BLE devices and exit\n"
+            "  --scan                list nearby BLE devices; exits unless another\n"
+            "                        action or --address is also given\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
             "  --pair                request OS bonding; hold Bee GPIO1 low\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
@@ -1620,8 +1746,37 @@ static void usage(const char *prog)
             "  --debug-io            print BLE TX/RX traces\n"
             "  --log-file PATH       append raw BLE RX bytes to file\n"
             "  --escape BYTE         terminal escape byte (default: ^])\n"
-            "  -h, --help            show this help\n",
+            "  --quiet               suppress progress messages on stderr\n"
+            "  --version             print the client version and exit\n"
+            "  -h, --help            show this help\n"
+            "\n"
+            "Long options also accept the --option=value form.\n"
+            "Exit codes: 0 ok, 1 error, 2 bad arguments, 3 device disconnected.\n"
+            "\n"
+            "This is the Linux/BlueZ reference client and it speaks legacy NUS\n"
+            "only. Use linkr_ble_terminal.py for Management v1, Reliable UART,\n"
+            "WiFi and WebDAV control.\n",
             prog, DEFAULT_NAME);
+}
+
+/* --flag value and --flag=value are both accepted, like the Python client. */
+static const char *flag_takes_value(int argc, char **argv, int *index,
+                                    const char *flag, const char *inline_value)
+{
+    if (inline_value) {
+        return inline_value;
+    }
+    if (*index + 1 >= argc) {
+        usage_fatal("%s requires a value", flag);
+    }
+    return argv[++(*index)];
+}
+
+static void flag_takes_none(const char *flag, const char *inline_value)
+{
+    if (inline_value) {
+        usage_fatal("%s does not take a value", flag);
+    }
 }
 
 static void parse_args(int argc, char **argv, struct options *opt)
@@ -1636,50 +1791,86 @@ static void parse_args(int argc, char **argv, struct options *opt)
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
+        const char *inline_value = NULL;
+        const char *eq;
+        char flag[64];
 
-        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
-            usage(argv[0]);
-            exit(0);
-        } else if (strcmp(a, "--name") == 0 && i + 1 < argc) {
-            opt->name = argv[++i];
-        } else if (strcmp(a, "--address") == 0 && i + 1 < argc) {
-            opt->address = argv[++i];
-        } else if (strcmp(a, "--scan") == 0) {
-            opt->scan = true;
-        } else if (strcmp(a, "--timeout") == 0 && i + 1 < argc) {
-            opt->timeout = parse_positive_double(a, argv[++i]);
-        } else if (strcmp(a, "--pair") == 0) {
-            opt->pair = true;
-        } else if (strcmp(a, "--loopback-test") == 0 && i + 1 < argc) {
-            opt->loopback_test = argv[++i];
-        } else if (strcmp(a, "--loopback-timeout") == 0 && i + 1 < argc) {
-            opt->loopback_timeout = parse_positive_double(a, argv[++i]);
-        } else if (strcmp(a, "--no-terminal") == 0) {
-            opt->no_terminal = true;
-        } else if (strcmp(a, "--ble-write-size") == 0 && i + 1 < argc) {
-            opt->ble_write_size = parse_ble_write_size(argv[++i]);
-        } else if (strcmp(a, "--write-response") == 0) {
-            opt->write_response = true;
-        } else if (strcmp(a, "--enter") == 0 && i + 1 < argc) {
-            opt->enter = argv[++i];
-        } else if (strcmp(a, "--local-echo") == 0) {
-            opt->local_echo = true;
-        } else if (strcmp(a, "--line-mode") == 0) {
-            opt->line_mode = true;
-        } else if (strcmp(a, "--debug-io") == 0) {
-            opt->debug_io = true;
-        } else if (strcmp(a, "--log-file") == 0 && i + 1 < argc) {
-            opt->log_file = argv[++i];
-        } else if (strcmp(a, "--escape") == 0 && i + 1 < argc) {
-            opt->escape = argv[++i];
+        eq = (a[0] == '-' && a[1] == '-') ? strchr(a, '=') : NULL;
+        if (eq) {
+            size_t n = (size_t)(eq - a);
+
+            if (n >= sizeof(flag)) {
+                n = sizeof(flag) - 1;
+            }
+            memcpy(flag, a, n);
+            flag[n] = '\0';
+            inline_value = eq + 1;
         } else {
-            fatal("unknown option: %s", a);
+            snprintf(flag, sizeof(flag), "%s", a);
+        }
+
+        if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) {
+            flag_takes_none(flag, inline_value);
+            usage(stdout, argv[0]);
+            exit(EXIT_OK);
+        } else if (strcmp(flag, "--version") == 0) {
+            flag_takes_none(flag, inline_value);
+            printf("linkr_ble_terminal_c %s\n", CLI_VERSION);
+            exit(EXIT_OK);
+        } else if (strcmp(flag, "--quiet") == 0) {
+            flag_takes_none(flag, inline_value);
+            g_quiet = true;
+        } else if (strcmp(flag, "--name") == 0) {
+            opt->name = flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else if (strcmp(flag, "--address") == 0) {
+            opt->address = flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else if (strcmp(flag, "--scan") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->scan = true;
+        } else if (strcmp(flag, "--timeout") == 0) {
+            opt->timeout = parse_positive_double(
+                flag, flag_takes_value(argc, argv, &i, flag, inline_value));
+        } else if (strcmp(flag, "--pair") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->pair = true;
+        } else if (strcmp(flag, "--loopback-test") == 0) {
+            opt->loopback_test =
+                flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else if (strcmp(flag, "--loopback-timeout") == 0) {
+            opt->loopback_timeout = parse_positive_double(
+                flag, flag_takes_value(argc, argv, &i, flag, inline_value));
+        } else if (strcmp(flag, "--no-terminal") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->no_terminal = true;
+        } else if (strcmp(flag, "--ble-write-size") == 0) {
+            opt->ble_write_size = parse_ble_write_size(
+                flag_takes_value(argc, argv, &i, flag, inline_value));
+        } else if (strcmp(flag, "--write-response") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->write_response = true;
+        } else if (strcmp(flag, "--enter") == 0) {
+            opt->enter = flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else if (strcmp(flag, "--local-echo") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->local_echo = true;
+        } else if (strcmp(flag, "--line-mode") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->line_mode = true;
+        } else if (strcmp(flag, "--debug-io") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->debug_io = true;
+        } else if (strcmp(flag, "--log-file") == 0) {
+            opt->log_file = flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else if (strcmp(flag, "--escape") == 0) {
+            opt->escape = flag_takes_value(argc, argv, &i, flag, inline_value);
+        } else {
+            usage_fatal("unknown option: %s", a);
         }
     }
 
     if (strcmp(opt->enter, "raw") != 0 && strcmp(opt->enter, "cr") != 0 &&
         strcmp(opt->enter, "lf") != 0 && strcmp(opt->enter, "crlf") != 0) {
-        fatal("--enter must be raw, cr, lf, or crlf");
+        usage_fatal("--enter must be raw, cr, lf, or crlf");
     }
     opt->escape = parse_escape(opt->escape);
 }
@@ -1693,6 +1884,7 @@ int main(int argc, char **argv)
     struct options opt;
     DBusError err;
     struct device_match match;
+    int status;
 
     memset(&g_state, 0, sizeof(g_state));
     /* Ensure the terminal is restored even on fatal()/early exit paths. */
@@ -1704,6 +1896,15 @@ int main(int argc, char **argv)
     pthread_mutex_init(&g_state.stdout_lock, NULL);
 
     parse_args(argc, argv, &opt);
+
+    /* Open the log before touching Bluetooth: a bad path should not cost a
+     * pairing round trip, and a silently missing log is worse than a failure. */
+    if (opt.log_file) {
+        g_state.log_file = fopen(opt.log_file, "ab");
+        if (!g_state.log_file) {
+            fatal("cannot open log file %s: %s", opt.log_file, strerror(errno));
+        }
+    }
 
     dbus_error_init(&err);
     g_state.conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
@@ -1719,59 +1920,61 @@ int main(int argc, char **argv)
 
     if (opt.scan) {
         scan_and_list_devices(g_state.conn, opt.timeout);
-        if (!opt.loopback_test && !opt.pair) {
-            return 0;
+        /* Listing is the whole job unless another action was requested. The
+         * Python client follows the same rule. */
+        if (!opt.loopback_test && !opt.pair && !opt.address) {
+            return EXIT_OK;
         }
     }
 
     if (!find_device(g_state.conn, &opt, &match)) {
-        return 1;
+        return EXIT_ERROR;
     }
 
     msg("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.");
     if (!connect_device(g_state.conn, match.path)) {
-        return 1;
+        return EXIT_ERROR;
     }
 
     if (opt.pair && !pair_device(g_state.conn, match.path)) {
         disconnect_device(g_state.conn);
-        return 1;
+        return EXIT_ERROR;
     }
 
     if (!discover_characteristics(g_state.conn)) {
         disconnect_device(g_state.conn);
-        return 1;
+        return EXIT_ERROR;
     }
 
     if (!start_notifications(g_state.conn)) {
         disconnect_device(g_state.conn);
-        return 1;
+        return EXIT_ERROR;
     }
 
     configure_write_chunk();
 
-    if (opt.log_file) {
-        g_state.log_file = fopen(opt.log_file, "ab");
-        if (!g_state.log_file) {
-            msg("cannot open log file %s: %s", opt.log_file, strerror(errno));
-        }
-    }
-
     if (opt.loopback_test) {
         bool ok = do_loopback_test(g_state.conn, &opt);
+
         stop_notifications(g_state.conn);
         disconnect_device(g_state.conn);
         restore_terminal();
-        return ok ? 0 : 1;
+        if (g_state.log_file) {
+            fclose(g_state.log_file);
+        }
+        return ok ? EXIT_OK : EXIT_ERROR;
     }
 
     if (opt.no_terminal) {
         stop_notifications(g_state.conn);
         disconnect_device(g_state.conn);
-        return 0;
+        if (g_state.log_file) {
+            fclose(g_state.log_file);
+        }
+        return EXIT_OK;
     }
 
-    run_terminal(g_state.conn, &opt);
+    status = run_terminal(g_state.conn, &opt);
 
     stop_notifications(g_state.conn);
     disconnect_device(g_state.conn);
@@ -1781,5 +1984,5 @@ int main(int argc, char **argv)
         fclose(g_state.log_file);
     }
 
-    return 0;
+    return status;
 }
