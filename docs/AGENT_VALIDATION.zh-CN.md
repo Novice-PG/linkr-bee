@@ -142,3 +142,28 @@ AI 设置现在提供核实、绑定、解除和重新生成入口。通过 BLE 
 - 工具描述压缩：9,402 → 8,983 字符（约 −120 token）。**收益很小，如实记录**；保留的价值是上面那项防漂移测试。
 
 未覆盖：历史里没有 assistant 消息时无法构造摘要，压缩会原样返回（超预算也不收缩）。这种历史实际只有零星几条用户消息，远小于固定开销，边界很窄。另外字符/token 换算用的是保守常数而非真实分词器——应用里没有可用的分词器，所以宁可低估预算。
+
+## 2026-09-29 Pages 变体的 LAN 构建开关
+
+需求：部署到 GitHub Pages 后，LAN（局域网 WebSocket 桥）在 https 页面上必然连不上（混合内容被拦截），要求用一个构建开关把它关掉并隐藏。
+
+实现：`web/build_flags.js`（提交版默认 `lanBridge: true`，供本地服务与移动端使用）+ `tools/build_pages.sh`（拷贝 `web/` → `build-pages/`，只覆写这一个文件，另加 `.nojekyll`）+ Pages 工作流改为发布 `build-pages/`。除 `build_flags.js` 外**逐字节拷贝**，有单测锁住；脚本自身还会校验开关与 `app.js` 的引用一致，不一致就让构建失败。
+
+隐藏 UI 需要三处，其中两处**只有浏览器测试能发现**：
+
+1. `syncTransportControls()` 原先只在切换传输模式时被调用，**启动时不跑** → 按钮可见性一直来自 HTML 默认值，开关形同无效。已在启动时补调一次。
+2. **作者样式的 `display` 压过 UA 的 `[hidden] { display: none }`**：按钮 `hidden = true` 之后仍然可见。补了 `.ts-btn[hidden] { display: none }`（仓库里 `.ws-host-field[hidden]`、`.wifi-actions .btn[hidden]` 正是同一原因存在的）。
+
+线上验证：`https://radxa.github.io/linkr-bee/build_flags.js` 为 `lanBridge: false`；`/`、`app.js`、`style.css`、`vendor/agent/agent-runtime.js` 均返回 200。
+
+### 一处我判错两次的结论，与真正的根因
+
+`static_agent.spec.mjs` 的最后一个用例偶发 `ERR_CONNECTION_REFUSED at http://127.0.0.1:8766/`。我先后把它归因为"本机环境问题"和"本地 flake"，**两次都错**：CI 上同样复现（`an unreachable endpoint explains the browser-side conditions`），这才排除环境。
+
+真正原因是 harness 设计错误——**Playwright 的 `beforeAll`/`afterAll` 只在同一个 worker 内生效**：文件被拆到两个 worker 时，worker A 结束时执行 `afterAll` 杀掉它启动的 8766 服务器，而 worker B 复用了该服务器、并不持有它 → 连接拒绝。修法是给该文件加 `test.describe.configure({ mode: "serial" })`：服务器是**文件级** fixture，不该被拆开。
+
+教训写在这里而不只写在提交信息里：**"偶发"不等于"环境"**，先问"这个失败能不能用我自己的代码解释"；而且**重试会把这类 bug 藏起来**——当时给动态 import 加重试，差点就掩盖了它。
+
+另一处独立修复：1 MB 的 bundle 动态 import 偶发取回失败，会让终端在没有助手的状态下卡住。现在重试一次，并让错误带上真实原因——正是这条原因把上面那个 bug 暴露了出来。
+
+Validation: 284 node tests, 165 browser tests, both web builds, CI 7/7 jobs（含 4 块板）。真机行为未测。
