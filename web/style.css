@@ -137,6 +137,46 @@
   background: var(--terminal) !important;
 }
 
+/* The mouse pointer belongs to the operating system, and the light theme is
+ * nearly all white surfaces -- the terminal body is #f8fafc, the header is a
+ * white gradient. A white pointer (the Windows default, and every white cursor
+ * scheme) all but disappears there; the dark theme has no such problem, and it
+ * keeps the system pointer. Windows is also where this shows up first, because
+ * the theme follows the system preference and Windows defaults to light.
+ *
+ * So the light theme supplies its own pointers, taken from the deepin macaron
+ * cursor theme (CC-BY-4.0, UnionTech Software Technology Co., Ltd; see
+ * vendor/macaron-cursors/README.md, which the licence requires to stay). They
+ * are teal with a dark outline and a pale halo, which is what makes them
+ * readable on white regardless of the system cursor scheme.
+ *
+ * The hotspots come from the theme and are recorded in
+ * vendor/macaron-cursors/cursors.json; a test keeps the two in step, because a
+ * wrong hotspot points the click a few pixels off the arrow's tip and nothing
+ * else would notice.
+ *
+ * One size, 32px, plain url() -- no image-set. Chromium parses the unprefixed
+ * function inside `cursor` but does not use it for the pointer, and then falls
+ * back to the keyword at the end of the declaration, which looks exactly like
+ * these rules not applying at all. 32px is also the size MDN recommends:
+ * Chromium and Firefox cap cursors at 128x128, but anything above 32x32 tends to
+ * be refused or downscaled on a high-DPI screen. */
+[data-theme="light"],
+[data-theme="light"] .terminal-output .xterm-viewport {
+  cursor: url("./vendor/macaron-cursors/left_ptr-32.png") 3 2, default;
+}
+
+/* Over the terminal, where xterm already asks for cursor: text. */
+[data-theme="light"] .terminal-output .xterm {
+  cursor: url("./vendor/macaron-cursors/xterm-32.png") 15 15, text;
+}
+
+/* And the hand, on the controls that ask for it. */
+[data-theme="light"] :is(button, summary, a[href], select,
+  input[type="checkbox"], input[type="radio"], [role="button"]):not(:disabled) {
+  cursor: url("./vendor/macaron-cursors/hand2-32.png") 12 2, pointer;
+}
+
 * {
   box-sizing: border-box;
 }
