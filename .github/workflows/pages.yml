@@ -1,16 +1,20 @@
 name: Deploy the web terminal to GitHub Pages
 
 # The plain web terminal (web/) is a self-contained static site: no backend, no
-# bundler, all asset references relative. Publishing it is therefore a copy plus
-# one generated switch: tools/build_pages.sh copies web/ and turns the LAN
-# bridge off, because an https page may not open ws:// and the device serves no
-# TLS. The vendored assistant bundle committed under web/vendor/agent is not
-# rebuilt here -- what is published is what the regression suite ran against,
-# with that single switch flipped.
+# build step, all asset references relative. Publishing it is therefore a copy,
+# and the vendored assistant bundle committed under web/vendor/agent is the
+# artifact -- it is not rebuilt here, so what is published is exactly what the
+# regression suite ran against.
 #
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
-# WebSocket bridge is hidden entirely in this variant; LAN connections keep
-# using a locally served copy (tools/serve_web.sh).
+# WebSocket bridge works from here too, but with a warning: an https page that
+# opens ws:// is mixed content, and Chromium allows it while marking it
+# deprecated ("Insecure access to this endpoint is deprecated"). Measured on
+# 2026-09-29 against a ws:// endpoint on a 192.168 address from this exact
+# origin: the connection opened, only the warning was printed. The bridge is
+# therefore left available; a locally served copy (tools/serve_web.sh) remains
+# the way to run it without the warning, and to reach a device when a browser
+# does enforce the deprecation.
 #
 # Requires Settings -> Pages -> Source: "GitHub Actions" once.
 
@@ -20,7 +24,6 @@ on:
       - main
     paths:
       - "web/**"
-      - "tools/build_pages.sh"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -47,13 +50,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Assemble the Pages variant
-        run: sh tools/build_pages.sh build-pages
+      # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
+      # future switch to branch-based publishing from silently dropping paths.
+      - name: Mark the site as plain static files
+        run: touch web/.nojekyll
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: build-pages
+          path: web
 
       - name: Deploy to GitHub Pages
         id: deployment

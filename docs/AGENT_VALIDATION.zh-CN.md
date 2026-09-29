@@ -143,18 +143,28 @@ AI 设置现在提供核实、绑定、解除和重新生成入口。通过 BLE 
 
 未覆盖：历史里没有 assistant 消息时无法构造摘要，压缩会原样返回（超预算也不收缩）。这种历史实际只有零星几条用户消息，远小于固定开销，边界很窄。另外字符/token 换算用的是保守常数而非真实分词器——应用里没有可用的分词器，所以宁可低估预算。
 
-## 2026-09-29 Pages 变体的 LAN 构建开关
+## 2026-09-29 Pages 上的 LAN 桥：一个被实测推翻的结论
 
-需求：部署到 GitHub Pages 后，LAN（局域网 WebSocket 桥）在 https 页面上必然连不上（混合内容被拦截），要求用一个构建开关把它关掉并隐藏。
+我一度判断"部署到 GitHub Pages 后 LAN（局域网 WebSocket 桥）必然连不上，因为 https 页面不允许 `ws://`"，并据此做了一套构建开关把 LAN 入口隐藏掉。**这个判断是错的，相关改动已回退。**
 
-实现：`web/build_flags.js`（提交版默认 `lanBridge: true`，供本地服务与移动端使用）+ `tools/build_pages.sh`（拷贝 `web/` → `build-pages/`，只覆写这一个文件，另加 `.nojekyll`）+ Pages 工作流改为发布 `build-pages/`。除 `build_flags.js` 外**逐字节拷贝**，有单测锁住；脚本自身还会校验开关与 `app.js` 的引用一致，不一致就让构建失败。
+实测（2026-09-29，从 `https://radxa.github.io/linkr-bee/` 页面本身发起，Chrome）：
 
-隐藏 UI 需要三处，其中两处**只有浏览器测试能发现**：
+| 目标 | 结果 |
+| --- | --- |
+| `ws://127.0.0.1:8799/ws` | 连接成功 |
+| `ws://localhost:8799/ws` | 连接成功 |
+| `ws://192.168.2.151:8799/ws`（局域网地址）| 连接成功 |
+| `ws://192.168.8.216:8799/ws`（局域网地址）| 连接成功 |
 
-1. `syncTransportControls()` 原先只在切换传输模式时被调用，**启动时不跑** → 按钮可见性一直来自 HTML 默认值，开关形同无效。已在启动时补调一次。
-2. **作者样式的 `display` 压过 UA 的 `[hidden] { display: none }`**：按钮 `hidden = true` 之后仍然可见。补了 `.ts-btn[hidden] { display: none }`（仓库里 `.ws-host-field[hidden]`、`.wifi-actions .btn[hidden]` 正是同一原因存在的）。
+浏览器确实打印 mixed-content 提示，但那是 **warning 而不是拦截**，原文：`Mixed Content: ... attempted to connect to the insecure WebSocket endpoint 'ws://192.168.2.151:8799/ws'. This endpoint should be available via WSS. Insecure access to this endpoint is deprecated.`，并附 `Connecting to a non-secure WebSocket server from a secure origin is deprecated.`
 
-线上验证：`https://radxa.github.io/linkr-bee/build_flags.js` 为 `lanBridge: false`；`/`、`app.js`、`style.css`、`vendor/agent/agent-runtime.js` 均返回 200。
+所以准确的说法是：**Chromium 目前允许 https 页面连接 `ws://`（含局域网地址），只是标注为已弃用。** 而用户提的直觉是对的——设备联网设置（WiFi 卡片）走的是 `@w=` 命令经串口（BLE 模式），本来就不受影响，与 `ws://` 无关。
+
+补充一条推论：这个终端依赖 Web Bluetooth，只有 Chromium 系浏览器支持（Safari / Firefox 都不支持），而 Chromium 正是目前放行 `ws://` 的浏览器——**能跑这个应用的用户，今天两种传输方式都能用**。
+
+回退做法：`git revert` 掉该提交（移除 `web/build_flags.js`、`tools/build_pages.sh`、`build.yml` 里对它的语法检查、Pages 变体用例，以及 `app.js` / `style.css` 中为隐藏而加的改动），Pages 恢复直接发布 `web/`。**同一批里的两个真实修复保留**：1 MB bundle 动态 import 的重试与真实报错，以及测试服务器的 worker 归属修复（`test.describe.configure({ mode: "serial" })`）。
+
+教训：**"浏览器会拦 `ws://`"这类断言必须实测**，尤其是在我准备据此**去掉一个能用的功能**时。查规范、凭记忆都不如跑一次测量。
 
 ### 一处我判错两次的结论，与真正的根因
 

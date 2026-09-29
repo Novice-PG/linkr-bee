@@ -420,14 +420,6 @@ h1 {
   color: var(--accent-strong);
 }
 
-/* The UA rule for the hidden attribute loses to any author display setting, so
- * a button is only really hidden by a rule that says so -- same shape as
- * .ws-host-field[hidden] and .wifi-actions .btn[hidden]. Without this, the LAN
- * mode button stays clickable in the Pages build that switches it off. */
-.ts-btn[hidden] {
-  display: none;
-}
-
 .ts-btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;

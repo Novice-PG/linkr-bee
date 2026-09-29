@@ -1,7 +1,6 @@
 "use strict";
 
 import { createLanTokenStore } from "./lan_token_store.js";
-import { buildFlags } from "./build_flags.js";
 import {
   DIAGNOSTICS_COMMAND,
   UART_QUERY_COMMAND,
@@ -810,10 +809,6 @@ function clearWsErrors() {
 
 function syncTransportControls() {
   const isWs = state.mode === "ws";
-  /* The LAN bridge is a build switch, not a runtime setting: a variant that
-   * cannot reach ws:// hides the whole entry rather than offering a button that
-   * can only fail. */
-  elements.lanModeBtn.hidden = !buildFlags.lanBridge;
   elements.bleModeBtn.classList.toggle("active", !isWs);
   elements.lanModeBtn.classList.toggle("active", isWs);
   elements.bleModeBtn.setAttribute("aria-pressed", String(!isWs));
@@ -831,9 +826,6 @@ function syncTransportControls() {
 
 function setTransportMode(mode) {
   if (state.connected || !["ble", "ws"].includes(mode)) {
-    return;
-  }
-  if (mode === "ws" && !buildFlags.lanBridge) {
     return;
   }
   state.mode = mode;
@@ -3755,11 +3747,7 @@ function init() {
   applyTheme();
   applyLang();
   applySidebar();
-  /* Sync once at boot: the HTML encodes the BLE defaults, and the LAN entry is
-   * hidden by a build switch (which only this function applies), so the button
-   * would otherwise stay visible in a variant that cannot reach ws://. */
-  syncTransportControls();
-  if (buildFlags.lanBridge && localStorage.getItem(TRANSPORT_KEY) === "ws") {
+  if (localStorage.getItem(TRANSPORT_KEY) === "ws") {
     setTransportMode("ws");
   }
   setConnected(false);
