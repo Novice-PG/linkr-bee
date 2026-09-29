@@ -59,6 +59,15 @@ async function ensureServer(base, port, root) {
 
 let servers = [];
 
+/* This file owns its servers for the whole file, so its tests must run in one
+ * worker. Playwright brackets a file's beforeAll/afterAll within a single
+ * worker, so a second worker that finds the port already answered reuses the
+ * first worker's server and does not own it -- and then the first worker
+ * finishes and kills it under the second one. That is how the last test in this
+ * file kept failing with connection refused, in CI as well as locally, and it
+ * is why the fix is to stop splitting the file rather than to add a retry. */
+test.describe.configure({ mode: "serial" });
+
 test.beforeAll(async () => {
   const build = spawnSync("/bin/sh", [join(repoDir, "tools", "build_pages.sh"), pagesDir], { encoding: "utf8" });
   assert.equal(build.status, 0, `tools/build_pages.sh failed: ${build.stderr}`);
