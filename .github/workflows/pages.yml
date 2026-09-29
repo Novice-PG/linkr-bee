@@ -1,15 +1,16 @@
 name: Deploy the web terminal to GitHub Pages
 
 # The plain web terminal (web/) is a self-contained static site: no backend, no
-# build step, all asset references relative. Publishing it is therefore a copy,
-# and the vendored assistant bundle committed under web/vendor/agent is the
-# artifact -- it is not rebuilt here, so what is published is exactly what the
-# regression suite ran against.
+# bundler, all asset references relative. Publishing it is therefore a copy plus
+# one generated switch: tools/build_pages.sh copies web/ and turns the LAN
+# bridge off, because an https page may not open ws:// and the device serves no
+# TLS. The vendored assistant bundle committed under web/vendor/agent is not
+# rebuilt here -- what is published is what the regression suite ran against,
+# with that single switch flipped.
 #
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
-# WebSocket bridge does not work from here: an https page may not open ws://,
-# and the device serves no TLS, so LAN connections keep using a locally served
-# copy (tools/serve_web.sh).
+# WebSocket bridge is hidden entirely in this variant; LAN connections keep
+# using a locally served copy (tools/serve_web.sh).
 #
 # Requires Settings -> Pages -> Source: "GitHub Actions" once.
 
@@ -19,6 +20,7 @@ on:
       - main
     paths:
       - "web/**"
+      - "tools/build_pages.sh"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -45,15 +47,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
-      # future switch to branch-based publishing from silently dropping paths.
-      - name: Mark the site as plain static files
-        run: touch web/.nojekyll
+      - name: Assemble the Pages variant
+        run: sh tools/build_pages.sh build-pages
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: build-pages
 
       - name: Deploy to GitHub Pages
         id: deployment
