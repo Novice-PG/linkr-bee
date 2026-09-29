@@ -6,17 +6,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import getpass
+import json
 import math
 import os
+import re
+import signal
 import struct
 import sys
-import termios
 import threading
-import tty
 from dataclasses import dataclass
+from pathlib import Path
 
-from bleak import BleakClient, BleakScanner
+try:  # POSIX only. Without these the CLI still scans and runs control actions.
+    import termios
+    import tty
+except ModuleNotFoundError:  # pragma: no cover - Windows hosts
+    termios = None
+    tty = None
 
+__version__ = "1.0.0"
 DEFAULT_NAME = "Linkr BLE UART"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
@@ -40,6 +49,33 @@ MGMT_FLAG_ERROR = 1 << 1
 WIFI_OPERATION_TIMEOUT = 35.0
 WIFI_SCAN_TIMEOUT = 35.0
 
+# The device rejects anything outside these ranges (src/main.c parse_uart_line),
+# so the CLI validates the spec locally and fails before touching the link.
+UART_BAUD_MIN = 300
+UART_BAUD_MAX = 3_000_000
+UART_DATA_BITS = ("5", "6", "7", "8")
+UART_STOP_BITS = ("1", "2")
+UART_PARITY = {"n": "n", "none": "n", "o": "o", "odd": "o", "e": "e", "even": "e"}
+UART_FLOW_CONTROL = {
+    "n": "n", "none": "n", "off": "n", "rtscts": "rtscts", "hw": "rtscts",
+}
+# Same clamp the web terminal applies in web/terminal_geometry.js.
+MIN_TERMINAL_COLUMNS = 2
+MIN_TERMINAL_ROWS = 2
+MAX_TERMINAL_DIMENSION = 1000
+WIFI_PASSWORD_ENV = "LINKR_WIFI_PASSWORD"
+# Exit codes: 0 clean, 1 error, 2 usage/validation, 3 device vanished mid-session.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_DEVICE_DISCONNECTED = 3
+
+# Imports on demand so --help/--version work on a host without bleak installed.
+BleakClient = None
+BleakScanner = None
+
+_QUIET = False
+
 
 @dataclass
 class TerminalConfig:
@@ -54,11 +90,25 @@ class TerminalConfig:
 
 
 class RawTerminal:
+    """Put the local tty in raw mode for the terminal session.
+
+    POSIX only. The caller checks `available()` and falls back to line mode on
+    hosts without termios instead of failing at import time.
+    """
+
     def __init__(self, fd: int) -> None:
         self.fd = fd
         self.saved = None
 
+    @staticmethod
+    def available() -> bool:
+        return termios is not None and tty is not None
+
     def __enter__(self) -> None:
+        if not self.available():
+            raise RuntimeError(
+                "raw terminal mode needs POSIX termios; use --line-mode instead"
+            )
         if os.isatty(self.fd):
             self.saved = termios.tcgetattr(self.fd)
             tty.setraw(self.fd)
@@ -72,7 +122,42 @@ def stderr(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def info(message: str) -> None:
+    """Progress chatter; silenced by --quiet. Errors and results still print."""
+    if not _QUIET:
+        stderr(f"linkr: {message}")
+
+
+def warn(message: str) -> None:
+    stderr(f"linkr: warning: {message}")
+
+
+def error(message: str) -> None:
+    stderr(f"linkr: error: {message}")
+
+
+def import_bleak() -> None:
+    """Load bleak on demand so --help/--version need no dependencies."""
+    global BleakClient, BleakScanner
+    if BleakClient is not None:
+        return
+    try:
+        from bleak import BleakClient as client_class
+        from bleak import BleakScanner as scanner_class
+    except ImportError as exc:
+        # ImportError, not just ModuleNotFoundError: a bleak that is present but
+        # fails to import its own backend should read the same way.
+        raise RuntimeError(
+            "the 'bleak' package is required to talk to the device; "
+            "install it with 'python3 -m pip install bleak'"
+        ) from exc
+    BleakClient, BleakScanner = client_class, scanner_class
+
+
 def parse_escape(value: str) -> bytes:
+    if value == "^":
+        # A lone caret is the start of the ^X form, never a literal byte.
+        raise argparse.ArgumentTypeError("escape must be one byte, like ^] or 0x1d")
     if len(value) == 2 and value[0] == "^":
         return bytes([ord(value[1].upper()) & 0x1F])
     if value.startswith("0x"):
@@ -113,16 +198,45 @@ def ble_write_size(value: str) -> int:
 
 
 def normalize_uart_spec(spec: str) -> str:
+    """Validate and canonicalize a UART spec before it reaches the device.
+
+    The firmware answers only "ERR format: @u=115200,8,n,1,n" for any bad field,
+    so the CLI rejects the spec here and names the offending one.
+    """
     fields = [part.strip() for part in spec.split(",")]
     if len(fields) != 5:
-        raise argparse.ArgumentTypeError("UART spec must be baud,data,parity,stop,flow")
+        raise argparse.ArgumentTypeError(
+            "UART spec must be baud,data,parity,stop,flow, like 115200,8,n,1,n"
+        )
 
     baud, data_bits, parity, stop_bits, flow = fields
-    parity = {"none": "n", "n": "n", "odd": "o", "o": "o",
-              "even": "e", "e": "e"}.get(parity.lower(), parity.lower())
-    flow = {"none": "n", "off": "n", "n": "n", "rtscts": "rtscts",
-            "hw": "rtscts"}.get(flow.lower(), flow.lower())
-    return f"{baud},{data_bits},{parity},{stop_bits},{flow}"
+    try:
+        baud_rate = int(baud, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid UART baud rate: {baud!r}") from exc
+    if not UART_BAUD_MIN <= baud_rate <= UART_BAUD_MAX:
+        raise argparse.ArgumentTypeError(
+            f"UART baud rate must be between {UART_BAUD_MIN} and {UART_BAUD_MAX}"
+        )
+    if data_bits not in UART_DATA_BITS:
+        raise argparse.ArgumentTypeError(
+            "UART data bits must be one of " + ", ".join(UART_DATA_BITS)
+        )
+    if stop_bits not in UART_STOP_BITS:
+        raise argparse.ArgumentTypeError("UART stop bits must be 1 or 2")
+    if parity.lower() not in UART_PARITY:
+        raise argparse.ArgumentTypeError(
+            "UART parity must be none, odd or even (n/o/e)"
+        )
+    if flow.lower() not in UART_FLOW_CONTROL:
+        raise argparse.ArgumentTypeError(
+            "UART flow control must be none or rtscts"
+        )
+
+    return (
+        f"{baud_rate},{data_bits},{UART_PARITY[parity.lower()]},"
+        f"{stop_bits},{UART_FLOW_CONTROL[flow.lower()]}"
+    )
 
 
 def translate_enter(data: bytes, mode: str) -> bytes:
@@ -138,13 +252,174 @@ def translate_enter(data: bytes, mode: str) -> bytes:
     return data.replace(b"\n", replacement)
 
 
+def terminal_geometry(cols, rows) -> dict:
+    """Clamp a terminal size the way web/terminal_geometry.js does."""
+    def clamp(value, minimum: int) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return minimum
+        if not math.isfinite(number):
+            return minimum
+        return max(minimum, min(MAX_TERMINAL_DIMENSION, int(number)))
+
+    normalized_cols = clamp(cols, MIN_TERMINAL_COLUMNS)
+    normalized_rows = clamp(rows, MIN_TERMINAL_ROWS)
+    return {
+        "cols": normalized_cols,
+        "rows": normalized_rows,
+        "key": f"{normalized_cols}x{normalized_rows}",
+    }
+
+
+def terminal_geometry_command(cols, rows) -> str:
+    """The stty line the web client sends; keep the two byte-identical."""
+    geometry = terminal_geometry(cols, rows)
+    return (
+        f"stty rows {geometry['rows']} cols {geometry['cols']} "
+        ">/dev/null 2>&1\r"
+    )
+
+
+def looks_like_shell_prompt(text: str) -> bool:
+    """Port of looksLikeShellPrompt() from web/terminal_geometry.js."""
+    if not isinstance(text, str) or not re.search(r"[$#] $", text):
+        return False
+
+    prefix = text[:-2].strip()
+    if not prefix:
+        return True
+
+    return bool(
+        re.search(r"@\S+(?::\S*)?$", prefix)
+        or re.match(r"^(?:ba|da|a|z)?sh(?:-[\d.]+)?$", prefix)
+        or re.match(r"^(?:~|/\S*)$", prefix)
+        or re.match(r"^\[[^\]]+\]$", prefix)
+    )
+
+
+class TerminalGeometrySync:
+    """Tell the target its terminal size, but only at an idle shell prompt.
+
+    The UART carries a live console, so an stty line sent while a command owns
+    the line would be typed into that command. The web client gates on the same
+    condition; this mirrors it for the CLI.
+    """
+
+    def __init__(self, cols, rows) -> None:
+        self.geometry = terminal_geometry(cols, rows)
+        self.synced = ""
+        self.in_flight = ""
+        self.prompt_visible = False
+        self._line = ""
+
+    def set_size(self, cols, rows) -> None:
+        self.geometry = terminal_geometry(cols, rows)
+
+    def mark_busy(self) -> None:
+        """Local input invalidates the idle prompt until the target returns one."""
+        self.prompt_visible = False
+        self._line = ""
+
+    def observe(self, text: str) -> None:
+        """Track target output to know whether an idle prompt is on screen."""
+        for char in text:
+            if char in "\r\n":
+                self._line = ""
+                continue
+            self._line = (self._line + char)[-1024:]
+        self.prompt_visible = looks_like_shell_prompt(self._line)
+
+    def take_pending_command(self) -> str | None:
+        """Return the stty line to send now, or None when nothing is due."""
+        key = self.geometry["key"]
+        if not self.prompt_visible or key in (self.synced, self.in_flight):
+            return None
+        self.in_flight = key
+        self.prompt_visible = False
+        return terminal_geometry_command(self.geometry["cols"], self.geometry["rows"])
+
+    def confirm_sent(self) -> None:
+        self.synced = self.in_flight
+        self.in_flight = ""
+
+    def abort_sent(self) -> None:
+        self.in_flight = ""
+
+
+def describe_escape(escape: bytes) -> str:
+    """Human name for the escape byte, so the hint follows --escape."""
+    value = escape[0]
+    if value == 0x1B:
+        return "Esc"
+    if 1 <= value <= 26:
+        return f"Ctrl-{chr(ord('A') + value - 1)}"
+    if 0x1C <= value <= 0x1F:
+        return "Ctrl-" + "\\]^_"[value - 0x1C]
+    if 0x20 <= value < 0x7F:
+        return repr(chr(value))
+    return f"0x{value:02x}"
+
+
+def resolve_wifi_credentials(spec: str, key_file: str | None = None,
+                             environ: dict | None = None,
+                             prompt=None) -> tuple[str, str]:
+    """Resolve (ssid, password) without forcing the password into argv.
+
+    ``--wifi ssid,pass`` still works, but argv is world-readable through `ps`,
+    so ``--wifi ssid`` with --wifi-key-file / $LINKR_WIFI_PASSWORD / a prompt is
+    the documented form.
+    """
+    ssid, separator, inline = spec.partition(",")
+    ssid = ssid.strip()
+    if not ssid:
+        raise ValueError("WiFi SSID must not be empty")
+    if separator:
+        return ssid, inline
+
+    if key_file:
+        try:
+            text = Path(key_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read --wifi-key-file: {exc}") from exc
+        lines = text.splitlines()
+        if not lines:
+            raise ValueError(f"--wifi-key-file {key_file} is empty")
+        return ssid, lines[0]
+
+    source = (environ if environ is not None else os.environ).get(WIFI_PASSWORD_ENV)
+    if source:
+        return ssid, source
+
+    if prompt is not None:
+        password = prompt(f"WiFi password for {ssid}: ")
+        if not password:
+            raise ValueError("WiFi password must not be empty")
+        return ssid, password
+
+    raise ValueError(
+        "no WiFi password available: pass --wifi ssid,pass, or set "
+        f"--wifi-key-file, or export {WIFI_PASSWORD_ENV}"
+    )
+
+
 async def scan_devices(timeout: float) -> list:
+    """List every nearby BLE device, named or not.
+
+    Unnamed peripherals are exactly the ones a user cannot identify by name, so
+    silently dropping them made an empty --scan output misleading.
+    """
+    import_bleak()
     devices = await BleakScanner.discover(timeout=timeout)
-    for dev in devices:
-        name = dev.name or ""
-        if name:
-            print(f"{dev.address}\t{name}")
+    for dev in sorted(devices, key=device_sort_key):
+        rssi = getattr(dev, "rssi", None)
+        signal = f"{rssi} dBm" if isinstance(rssi, int) else "-"
+        print(f"{dev.address}\t{dev.name or '(unknown)'}\t{signal}")
     return devices
+
+
+def device_sort_key(device) -> tuple[str, str]:
+    return ((device.name or "\uffff").lower(), device.address or "")
 
 
 def normalize_name_prefix(name: str) -> str:
@@ -154,34 +429,46 @@ def normalize_name_prefix(name: str) -> str:
     return name
 
 
-async def find_device(name: str, address: str | None, timeout: float):
-    if address:
-        return address
+def match_device(devices, name: str) -> str | None:
+    """Return the best match's address, or None. Split out for testing."""
+    for dev in devices:
+        if dev.name == name:
+            return dev.address
 
     prefix = normalize_name_prefix(name)
-    stderr(f"Scanning for BLE device matching {prefix + '*'}...")
-    devices = await BleakScanner.discover(timeout=timeout)
-    exact = [dev for dev in devices if dev.name == name]
-    if exact:
-        return exact[0]
-
     prefixed = [
         dev for dev in devices
         if dev.name and dev.name.startswith(prefix)
     ]
-    if prefixed:
-        if len(prefixed) > 1:
-            matches = ", ".join(
-                f"{dev.name} ({dev.address})" for dev in prefixed[:4]
-            )
-            stderr(
-                "warning: multiple Linkr BLE devices match; "
-                f"using {prefixed[0].name} ({prefixed[0].address}); "
-                f"matches: {matches}"
-            )
-        return prefixed[0]
+    if not prefixed:
+        return None
+    if len(prefixed) > 1:
+        matches = ", ".join(
+            f"{dev.name} ({dev.address})" for dev in prefixed[:4]
+        )
+        warn(
+            f"multiple devices match {prefix + '*'}; using "
+            f"{prefixed[0].name} ({prefixed[0].address}); matches: {matches}"
+        )
+    return prefixed[0].address
 
-    raise RuntimeError(f"device not found matching: {prefix + '*'}")
+
+async def find_device(name: str, address: str | None, timeout: float,
+                      devices=None) -> str:
+    """Return the BLE address to connect to, reusing a completed scan."""
+    if address:
+        return address
+
+    import_bleak()
+    prefix = normalize_name_prefix(name)
+    if devices is None:
+        info(f"scanning for BLE device matching {prefix + '*'}")
+        devices = await BleakScanner.discover(timeout=timeout)
+
+    match = match_device(devices, name)
+    if match is None:
+        raise RuntimeError(f"device not found matching: {prefix + '*'}")
+    return match
 
 
 async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig,
@@ -207,27 +494,31 @@ class ManagementChannel:
     """Linkr Management Service v1 request/response channel."""
 
     def __init__(self, client: BleakClient, cfg: TerminalConfig,
-                 max_payload: int) -> None:
+                 max_payload: int, json_output: bool = False) -> None:
         self.client = client
         self.cfg = cfg
         self.max_payload = max_payload
+        self.json_output = json_output
         self.next_request_id = 1
         self.current: dict | None = None
         self.pending: dict[int, asyncio.Future[bytes]] = {}
         self.pending_final: dict[int, asyncio.Future[bytes]] = {}
+        # Command text per in-flight request, so a JSON record can say what it
+        # answers. Sensitive commands are stored already redacted.
+        self.commands: dict[int, str] = {}
 
     def on_indication(self, _char, data: bytearray) -> None:
         fragment = bytes(data)
         if self.current is None:
             if len(fragment) < MGMT_HEADER.size or fragment[:2] != b"LK":
-                stderr("management <- orphaned response fragment")
+                warn("management <- orphaned response fragment")
                 return
             magic, version, message_type, request_id, expected, flags = \
                 MGMT_HEADER.unpack_from(fragment)
             if magic != b"LK" or version != MGMT_API_MAJOR or \
                     message_type not in (2, 3) or expected == 0 or \
                     expected > self.max_payload:
-                stderr("management <- invalid response header")
+                warn("management <- invalid response header")
                 self.current = None
                 return
             self.current = {
@@ -242,7 +533,7 @@ class ManagementChannel:
         message = self.current
         payload = message["payload"]
         if len(payload) + len(fragment) > message["expected"]:
-            stderr("management <- oversized response")
+            warn("management <- oversized response")
             self.current = None
             return
         payload.extend(fragment)
@@ -253,12 +544,27 @@ class ManagementChannel:
         body = bytes(payload)
         kind = "event" if message["type"] == 3 else "response"
         text = body.decode(errors="replace").rstrip("\r\n")
-        for line in text.splitlines() or [""]:
-            stderr(f"{kind} #{message['request_id']} <- {line}")
+        lines = text.splitlines() or [""]
+        failed = bool(message["flags"] & MGMT_FLAG_ERROR)
+        command = self.commands.pop(message["request_id"], None)
+        if self.json_output:
+            record = {
+                "type": kind,
+                "requestId": message["request_id"],
+                "ok": not failed,
+                "lines": lines,
+            }
+            if command is not None:
+                record["command"] = command
+            print(json.dumps(record, ensure_ascii=False), flush=True)
+        else:
+            for line in lines:
+                stderr(f"{kind} #{message['request_id']} <- {line}")
+
         if message["type"] == 2:
             future = self.pending.pop(message["request_id"], None)
             if future and not future.done():
-                if message["flags"] & MGMT_FLAG_ERROR:
+                if failed:
                     future.set_exception(
                         RuntimeError(text or "management request failed")
                     )
@@ -267,7 +573,7 @@ class ManagementChannel:
         elif message["flags"] & MGMT_FLAG_FINAL:
             future = self.pending_final.pop(message["request_id"], None)
             if future and not future.done():
-                if message["flags"] & MGMT_FLAG_ERROR:
+                if failed:
                     future.set_exception(
                         RuntimeError(text or "management operation failed")
                     )
@@ -279,13 +585,13 @@ class ManagementChannel:
         if not command or len(command) > self.max_payload:
             raise ValueError("management command is outside the advertised limit")
         sensitive = command.startswith((b"@w=", b"@d="))
-        if sensitive:
-            stderr(f"control -> {command[:2].decode()}=<redacted>")
-        else:
-            stderr(f"control -> {command.decode(errors='replace')}")
+        display = (f"{command[:2].decode()}=<redacted>" if sensitive
+                   else command.decode(errors="replace"))
+        info(f"control -> {display}")
 
         request_id = self.next_request_id
         self.next_request_id = 1 if request_id == 0xFFFFFFFF else request_id + 1
+        self.commands[request_id] = display
         frame = MGMT_HEADER.pack(
             b"LK", MGMT_API_MAJOR, 1, request_id, len(command), 0
         ) + command
@@ -317,6 +623,7 @@ class ManagementChannel:
         finally:
             self.pending.pop(request_id, None)
             self.pending_final.pop(request_id, None)
+            self.commands.pop(request_id, None)
 
 
 class ReliableUartChannel:
@@ -341,13 +648,13 @@ class ReliableUartChannel:
         fragment = bytes(data)
         if self.current is None:
             if len(fragment) < RELIABLE_UART_HEADER.size or fragment[:2] != b"LR":
-                stderr("reliable UART <- orphaned fragment")
+                info("reliable UART <- orphaned fragment")
                 return
             magic, version, _flags, sequence, expected, _reserved = \
                 RELIABLE_UART_HEADER.unpack_from(fragment)
             if magic != b"LR" or version != 1 or sequence == 0 or \
                     expected == 0 or expected > self.max_payload:
-                stderr("reliable UART <- invalid frame header")
+                warn("reliable UART <- invalid frame header")
                 self.current = None
                 return
             self.current = {
@@ -360,7 +667,7 @@ class ReliableUartChannel:
         message = self.current
         payload = message["payload"]
         if len(payload) + len(fragment) > message["expected"]:
-            stderr("reliable UART <- oversized frame")
+            warn("reliable UART <- oversized frame")
             self.current = None
             return
         payload.extend(fragment)
@@ -372,7 +679,7 @@ class ReliableUartChannel:
         if message["sequence"] == previous:
             return
         if message["sequence"] != self.rx_sequence:
-            stderr(
+            warn(
                 "reliable UART sequence gap: "
                 f"expected {self.rx_sequence}, got {message['sequence']}"
             )
@@ -406,19 +713,25 @@ def configure_ble_write_size(client: BleakClient, cfg: TerminalConfig,
                              requested_size: int) -> None:
     if requested_size > 0:
         cfg.write_size = min(requested_size, 244)
-        stderr(f"BLE write chunk size: {cfg.write_size} bytes (manual)")
+        info(f"BLE write chunk size: {cfg.write_size} bytes (manual)")
         return
 
+    # Prefer what the characteristic itself advertises; fall back to the
+    # negotiated MTU minus the 3-byte ATT header when a platform (macOS) does
+    # not report it. Never exceed a single ATT write.
     try:
         characteristic = client.services.get_characteristic(NUS_RX_UUID)
-        reported = characteristic.max_write_without_response_size
-        mtu_size = getattr(client, "mtu_size", 23)
-        size = max(int(reported or 20), int(mtu_size or 23) - 3)
+        reported = int(characteristic.max_write_without_response_size or 0)
     except Exception:
-        size = 20
+        reported = 0
+    try:
+        mtu_size = int(getattr(client, "mtu_size", 0) or 0)
+    except (TypeError, ValueError):
+        mtu_size = 0
 
-    cfg.write_size = max(20, min(int(size or 20), 244))
-    stderr(f"BLE write chunk size: {cfg.write_size} bytes")
+    size = reported or (mtu_size - 3 if mtu_size > 3 else 0)
+    cfg.write_size = max(20, min(size or 20, 244))
+    info(f"BLE write chunk size: {cfg.write_size} bytes")
 
 
 async def loopback_test(client: BleakClient, payload: bytes, cfg: TerminalConfig,
@@ -428,7 +741,7 @@ async def loopback_test(client: BleakClient, payload: bytes, cfg: TerminalConfig
     while not notify_queue.empty():
         notify_queue.get_nowait()
 
-    stderr(f"loopback -> {payload!r}")
+    info(f"loopback -> {payload!r}")
     await ble_write(client, payload, cfg, reliable=reliable)
 
     received = bytearray()
@@ -449,7 +762,8 @@ async def loopback_test(client: BleakClient, payload: bytes, cfg: TerminalConfig
 
 
 async def terminal_loop(client: BleakClient, cfg: TerminalConfig,
-                        reliable: ReliableUartChannel | None = None) -> None:
+                        reliable: ReliableUartChannel | None = None,
+                        geometry: TerminalGeometrySync | None = None) -> None:
     loop = asyncio.get_running_loop()
     done = asyncio.Event()
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -493,35 +807,85 @@ async def terminal_loop(client: BleakClient, cfg: TerminalConfig,
         if cfg.local_echo:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
+        if geometry is not None:
+            # Typed input invalidates the idle prompt we resize from.
+            geometry.mark_busy()
         await ble_write(client, data, cfg, reliable=reliable)
 
-    stderr("Terminal open. Press Ctrl-] to exit.")
-    terminal_context = contextlib.nullcontext() if cfg.line_mode else RawTerminal(fd)
-    with terminal_context:
-        threading.Thread(target=stdin_reader, daemon=True).start()
-        task = asyncio.create_task(sender())
-        try:
-            await done.wait()
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-    stderr("\nTerminal closed.")
-
-
-async def run(args: argparse.Namespace) -> None:
-    if args.scan:
-        await scan_devices(args.timeout)
-        has_control_action = any((
-            args.query_info, args.query_uart, args.uart, args.wifi,
-            args.wifi_scan, args.wifi_off,
-            args.query_wifi, args.webdav, args.webdav_off,
-            args.query_webdav, args.loopback_test is not None, args.pair,
-        ))
-        if args.no_terminal and not has_control_action:
+    def on_resize(*_args: object) -> None:
+        if geometry is None:
             return
+        try:
+            size = os.get_terminal_size(fd)
+        except OSError:
+            return
+        geometry.set_size(size.columns, size.lines)
 
-    target = await find_device(args.name, args.address, args.timeout)
+    signal_installed = False
+    if geometry is not None and tty is not None and hasattr(signal, "SIGWINCH"):
+        with contextlib.suppress(NotImplementedError, ValueError, OSError):
+            loop.add_signal_handler(signal.SIGWINCH, on_resize)
+            signal_installed = True
+        on_resize()
+
+    info(f"terminal open. press {describe_escape(cfg.escape)} to exit.")
+    terminal_context = contextlib.nullcontext() if cfg.line_mode else RawTerminal(fd)
+    try:
+        with terminal_context:
+            threading.Thread(target=stdin_reader, daemon=True).start()
+            task = asyncio.create_task(sender())
+            try:
+                await done.wait()
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+    finally:
+        if signal_installed:
+            loop.remove_signal_handler(signal.SIGWINCH)
+    info("terminal closed.")
+
+
+def has_control_action(args: argparse.Namespace) -> bool:
+    """True when the invocation asks for more than opening a terminal.
+
+    --scan uses this to decide whether listing devices is the whole job. Both
+    clients follow the same rule: --scan exits unless another action, or an
+    explicit --address, was requested.
+    """
+    return any((
+        args.query_info, args.query_uart, args.uart, args.wifi,
+        args.wifi_scan, args.wifi_off, args.query_wifi, args.webdav,
+        args.webdav_off, args.query_webdav,
+        args.loopback_test is not None, args.pair,
+    ))
+
+
+async def run(args: argparse.Namespace) -> int:
+    # Resolve WiFi credentials before anything radio related: a bad spec or a
+    # missing password should fail fast, and the prompt must not fight the
+    # terminal for the tty. Keeping the password out of argv is the point here.
+    wifi_command: bytes | None = None
+    if args.wifi:
+        prompt = getpass.getpass if sys.stdin.isatty() else None
+        try:
+            ssid, password = resolve_wifi_credentials(
+                args.wifi, args.wifi_key_file, prompt=prompt)
+        except ValueError as exc:
+            error(str(exc))
+            return EXIT_USAGE
+        wifi_command = f"@w={ssid},{password}".encode()
+
+    import_bleak()
+
+    scanned = None
+    if args.scan:
+        scanned = await scan_devices(args.timeout)
+        if not args.address and not has_control_action(args):
+            return EXIT_OK
+
+    target = await find_device(args.name, args.address, args.timeout,
+                               devices=scanned)
     cfg = TerminalConfig(
         escape=args.escape,
         enter=args.enter,
@@ -536,22 +900,62 @@ async def run(args: argparse.Namespace) -> None:
     disconnected = asyncio.Event()
     notify_queue: asyncio.Queue[bytes] | None = None
     loop = asyncio.get_running_loop()
+    reliable: ReliableUartChannel | None = None
+    geometry: TerminalGeometrySync | None = None
+    geometry_tasks: set[asyncio.Task] = set()
+    try:
+        fd: int | None = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        # Scripted use may run with no usable stdin at all.
+        fd = None
+
+    if not args.no_terminal and fd is not None and os.isatty(fd):
+        try:
+            size = os.get_terminal_size(fd)
+        except OSError:
+            size = None
+        if size is not None:
+            geometry = TerminalGeometrySync(size.columns, size.lines)
 
     def on_disconnect(_client: BleakClient) -> None:
         loop.call_soon_threadsafe(disconnected.set)
 
-    stderr("Connecting...")
-    stderr("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.")
+    async def send_geometry(command: str) -> None:
+        try:
+            await ble_write(client, command.encode(), cfg, reliable=reliable)
+        except Exception as exc:
+            assert geometry is not None
+            geometry.abort_sent()
+            warn(f"terminal size sync failed: {exc}")
+        else:
+            assert geometry is not None
+            geometry.confirm_sent()
+
+    def handle_geometry(payload: bytes) -> None:
+        """Runs on the event loop: geometry state stays single-threaded."""
+        if geometry is None:
+            return
+        geometry.observe(payload.decode("utf-8", "replace"))
+        command = geometry.take_pending_command()
+        if command is not None:
+            task = asyncio.ensure_future(send_geometry(command))
+            geometry_tasks.add(task)
+            task.add_done_callback(geometry_tasks.discard)
+
+    info("connecting...")
+    info("new host: hold Bee GPIO1 to GND before pairing. "
+         "Bonded hosts reconnect without GPIO1.")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
 
     try:
         async with BleakClient(target, disconnected_callback=on_disconnect,
                                timeout=args.timeout) as client:
-            stderr(f"Connected: {client.address}")
+            info(f"connected: {client.address}")
 
             if args.pair:
                 if sys.platform == "darwin":
-                    stderr("macOS requests pairing when the encrypted service is read; accept the system dialog.")
+                    info("macOS requests pairing when the encrypted service is "
+                         "read; accept the system dialog.")
                 else:
                     await client.pair()
 
@@ -563,6 +967,8 @@ async def run(args: argparse.Namespace) -> None:
                     stderr(f"RX {payload!r}")
                 if log_file:
                     log_file.write(payload)
+                if geometry is not None:
+                    loop.call_soon_threadsafe(handle_geometry, payload)
                 sys.stdout.buffer.write(payload)
                 sys.stdout.buffer.flush()
 
@@ -594,11 +1000,13 @@ async def run(args: argparse.Namespace) -> None:
             device_id = bytes(await client.read_gatt_char(MGMT_DEVICE_ID_UUID))
             if len(device_id) != 16:
                 raise RuntimeError("invalid Linkr Device ID length")
-            stderr(
-                f"Management API v{protocol[0]}.{protocol[1]}, "
+            info(
+                f"management API v{protocol[0]}.{protocol[1]}, "
                 f"device ID {device_id.hex()}"
             )
-            management = ManagementChannel(client, cfg, management_max_payload)
+            management = ManagementChannel(
+                client, cfg, management_max_payload, json_output=args.json
+            )
             await client.start_notify(
                 MGMT_RESPONSE_UUID, management.on_indication
             )
@@ -629,15 +1037,14 @@ async def run(args: argparse.Namespace) -> None:
                 await management.send(b"@i?")
 
             if args.uart:
-                spec = normalize_uart_spec(args.uart)
-                await management.send(f"@u={spec}".encode())
+                await management.send(f"@u={args.uart}".encode())
 
             if args.query_uart:
                 await management.send(b"@u?")
 
-            if args.wifi:
+            if wifi_command is not None:
                 await management.send(
-                    f"@w={args.wifi}".encode(),
+                    wifi_command,
                     wait_final_timeout=WIFI_OPERATION_TIMEOUT,
                 )
 
@@ -676,13 +1083,12 @@ async def run(args: argparse.Namespace) -> None:
                     raise RuntimeError("loopback test failed")
 
             if args.no_terminal:
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(MGMT_RESPONSE_UUID)
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(RELIABLE_UART_TX_UUID)
-                return
+                await stop_channels(client)
+                return EXIT_OK
 
-            terminal = asyncio.create_task(terminal_loop(client, cfg, reliable))
+            terminal = asyncio.create_task(
+                terminal_loop(client, cfg, reliable, geometry)
+            )
             disconnect = asyncio.create_task(disconnected.wait())
             done, pending = await asyncio.wait(
                 {terminal, disconnect}, return_when=asyncio.FIRST_COMPLETED
@@ -692,34 +1098,58 @@ async def run(args: argparse.Namespace) -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             if disconnect in done:
-                stderr("\nBLE disconnected.")
-            with contextlib.suppress(Exception):
-                await client.stop_notify(MGMT_RESPONSE_UUID)
-            with contextlib.suppress(Exception):
-                await client.stop_notify(RELIABLE_UART_TX_UUID)
+                # Raw mode leaves the cursor mid-line, so start a fresh one.
+                stderr("")
+                error("BLE disconnected during the terminal session")
+                return EXIT_DEVICE_DISCONNECTED
+            terminal.result()
+            await stop_channels(client)
+            return EXIT_OK
     finally:
+        for task in list(geometry_tasks):
+            task.cancel()
+        # Settle the cancellations so the loop does not close over live tasks.
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*geometry_tasks, return_exceptions=True)
         if log_file:
             log_file.close()
+
+
+async def stop_channels(client: BleakClient) -> None:
+    with contextlib.suppress(Exception):
+        await client.stop_notify(MGMT_RESPONSE_UUID)
+    with contextlib.suppress(Exception):
+        await client.stop_notify(RELIABLE_UART_TX_UUID)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Terminal over BLE Nordic UART Service for Linkr Bee bridge"
     )
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--name",
         default=DEFAULT_NAME,
         help="BLE device name or prefix; default matches Linkr BLE UART*",
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
-    parser.add_argument("--scan", action="store_true", help="list nearby BLE devices")
+    parser.add_argument("--scan", action="store_true",
+                        help="list nearby BLE devices (all of them, named or not)")
     parser.add_argument("--timeout", type=positive_float, default=8.0,
                         help="scan timeout seconds")
     parser.add_argument("--query-info", action="store_true",
                         help="send @i? device diagnostics before terminal")
     parser.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
-    parser.add_argument("--uart", help="set UART as baud,data,parity,stop,flow")
-    parser.add_argument("--wifi", help="connect ESP32 to WiFi as ssid,pass")
+    parser.add_argument("--uart", type=normalize_uart_spec,
+                        help="set UART as baud,data,parity,stop,flow "
+                             "(baud 300-3000000, data 5-8, parity n/o/e, "
+                             "stop 1/2, flow n/rtscts)")
+    parser.add_argument("--wifi", metavar="SSID[,PASSWORD]",
+                        help="connect ESP32 to WiFi; prefer ssid alone with "
+                             "--wifi-key-file so the password stays out of argv")
+    parser.add_argument("--wifi-key-file", metavar="PATH",
+                        help="read the WiFi password from the first line of PATH")
     parser.add_argument("--wifi-off", action="store_true", help="forget saved WiFi")
     parser.add_argument("--query-wifi", action="store_true", help="send @w? before terminal")
     parser.add_argument("--wifi-scan", action="store_true",
@@ -734,6 +1164,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,
                         help="seconds to wait for --loopback-test echo")
     parser.add_argument("--no-terminal", action="store_true", help="connect, run commands, exit")
+    parser.add_argument("--json", action="store_true",
+                        help="write management responses/events to stdout as JSON "
+                             "lines (sensitive command text stays redacted)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="suppress progress messages; errors and results still print")
     parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
                         help="max bytes per BLE RX write; default auto")
     parser.add_argument("--write-response", action="store_true",
@@ -754,16 +1189,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global _QUIET
     parser = build_parser()
     args = parser.parse_args()
+    _QUIET = args.quiet
     try:
-        asyncio.run(run(args))
+        return asyncio.run(run(args))
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        stderr(f"error: {exc}")
-        return 1
-    return 0
+        error(str(exc))
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

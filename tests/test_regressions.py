@@ -221,7 +221,10 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("injected loopback failure")
             return True
 
-        async def fake_terminal(client, cfg, reliable):
+        async def fake_terminal(client, cfg, reliable=None, geometry=None):
+            # Signature tracks terminal_loop(); geometry stays None here because
+            # these tests do not run on a tty.
+            self.assertIsNone(geometry)
             for _ in range(1000):
                 client.notify(b"output")
 
