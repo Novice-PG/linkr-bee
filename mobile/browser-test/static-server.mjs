@@ -25,6 +25,12 @@ const types = {
 };
 
 createServer((request, response) => {
+  /* A page that closes mid-download (a test ending while the 1 MB assistant
+   * bundle is still streaming) surfaces as socket errors. Left unhandled they
+   * take this process down, and every remaining test in the file then fails
+   * with connection refused -- one flaky teardown turning into four failures. */
+  response.on("error", () => {});
+  request.on("error", () => {});
   const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
   const requested = resolve(join(root, normalize(pathname)));
   if (requested !== root && !requested.startsWith(root + "/")) {
