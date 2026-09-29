@@ -26,15 +26,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m unittest discover -s tests -v
-      # The C reference client is a shipped artifact. Nothing else compiles it,
-      # so without this step it can rot unnoticed.
-      - name: Build the C reference terminal
+      # The C reference client is a shipped artifact and nothing else compiles
+      # it, so it can rot unnoticed. Install its dependency before the tests:
+      # tests/test_terminal_cli_c.py builds that client and drives its argument
+      # surface, and skips itself when dbus-1 is missing.
+      - name: Install the C reference terminal's build dependency
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y libdbus-1-dev pkg-config
-          make -C tools clean all
+      - run: python3 -m unittest discover -s tests -v
+      - name: Build the C reference terminal
+        run: make -C tools clean all
       - name: Check the helper scripts
         run: |
           set -euo pipefail
