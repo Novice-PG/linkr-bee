@@ -1,0 +1,60 @@
+name: Deploy the web terminal to GitHub Pages
+
+# The plain web terminal (web/) is a self-contained static site: no backend, no
+# build step, all asset references relative. Publishing it is therefore a copy,
+# and the vendored assistant bundle committed under web/vendor/agent is the
+# artifact -- it is not rebuilt here, so what is published is exactly what the
+# regression suite ran against.
+#
+# BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
+# WebSocket bridge does not work from here: an https page may not open ws://,
+# and the device serves no TLS, so LAN connections keep using a locally served
+# copy (tools/serve_web.sh).
+#
+# Requires Settings -> Pages -> Source: "GitHub Actions" once.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages deployments are not worth racing: a cancelled deploy can leave the site
+# half-updated, and the site changes at most a few times a day.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish the plain web terminal
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
+      # future switch to branch-based publishing from silently dropping paths.
+      - name: Mark the site as plain static files
+        run: touch web/.nojekyll
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
