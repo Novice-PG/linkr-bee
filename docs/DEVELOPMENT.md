@@ -413,6 +413,24 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
+Scripting and safety notes:
+
+- `--json` writes management responses and events to stdout as one JSON object
+  per line, e.g.
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.2.0"],"command":"@i?"}`.
+  `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
+- `--quiet` suppresses progress messages (`linkr: …`); errors and
+  `loopback PASS/FAIL` still print.
+- `--help` and `--version` do not need bleak installed; it is imported only
+  when the device is actually accessed.
+- Keep the WiFi password out of argv: use `--wifi SSID --wifi-key-file PATH`,
+  or `$LINKR_WIFI_PASSWORD`, or the interactive prompt on a terminal.
+  `--wifi SSID,PASSWORD` still works but is visible in `ps`.
+- `--uart` is validated locally (baud 300–3000000, data 5–8, parity n/o/e,
+  stop 1/2, flow n/rtscts) and fails before anything is sent to the device.
+- Exit codes: `0` ok, `1` error, `2` bad arguments, `3` device disconnected
+  during the terminal session.
+
 Configuration commands use Management Service v1 binary frames with an API
 version, request ID, logical payload length, response ID, and confirmed
 indication fragmentation. NUS is now raw UART only. See the
@@ -543,11 +561,23 @@ The host terminal prints the detected write chunk size when it connects.
 to a `Linkr BLE UART*` device, verifies Management API v1 and Device ID, uses
 Reliable UART for terminal bytes, and keeps management responses separate.
 
-Install the host dependency if needed:
+Install the host dependency if needed (`--help`/`--version` do not need it):
 
 ```sh
 python3 -m pip install bleak
 ```
+
+- `--scan` lists **all** nearby devices (unnamed ones show `(unknown)`) with
+  their RSSI, and exits unless another action or an explicit `--address` was
+  given. When it continues, that scan result is reused instead of rescanning.
+- In terminal mode the CLI sends `stty rows/cols` to the target when it sees an
+  **idle shell prompt** (same rule and same command string as
+  `web/terminal_geometry.js`), and re-sends it after a window resize
+  (SIGWINCH). It stays quiet while the prompt is busy so the line cannot be fed
+  to a running command.
+- A device that disappears mid-session exits with code `3`; leaving the
+  terminal with the escape key (default `Ctrl-]`, and the hint follows
+  `--escape`) exits with `0`.
 
 ### C terminal for Linux or Linkr Buildroot
 
@@ -576,6 +606,31 @@ cd tools && make
 ./linkr_ble_terminal_c --help
 ./linkr_ble_terminal_c
 ```
+
+Its command line now matches the Python client, so scripts can treat both alike:
+
+- Exit codes `0` ok, `1` error, `2` bad arguments, `3` device disconnected
+  mid-session. Argument errors used to exit `1`, indistinguishable from a
+  device that would not connect.
+- `--version`; `--quiet` suppresses progress only, errors always print.
+- Long options also accept `--option=value`; a missing value reports
+  `--opt requires a value` instead of the misleading `unknown option`.
+- `--help` writes to stdout (errors and the usage hint go to stderr), and
+  argument errors point at `--help`.
+- An incomplete escape such as `--escape '^'` is rejected (it used to be
+  accepted as the literal byte `^`), and the exit hint follows `--escape`
+  instead of always claiming `Ctrl-]`.
+- `--scan` lists **all** nearby devices (unnamed ones show `(unknown)`) and
+  exits unless another action or an explicit `--address` was given.
+- A `--log-file` that cannot be opened fails before any Bluetooth work
+  (it used to warn and continue, silently losing the log).
+- Device matching prefers an exact name over a prefix, and NUS-advertising
+  devices over others within each kind.
+
+The tests live in `tests/test_terminal_cli_c.py`: the pure helpers (argument
+validation, name prefixing, escape naming, Enter translation) are compiled
+straight out of the C source into a host harness with no Bluetooth or D-Bus,
+and the argument surface is driven against a real binary built with `-Werror`.
 
 For Linkr Buildroot, do not expect to compile this binary on the target rootfs.
 The current Linkr image is uClibc based and does not include `gcc`, `make`,

@@ -325,6 +325,20 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
+脚本化与安全注意事项：
+
+- `--json` 把管理响应与事件按行输出为 JSON，例如
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.2.0"],"command":"@i?"}`；
+  `@w=`/`@d=` 这类命令在 JSON 里的 `command` 字段始终是 `<redacted>`。
+- `--quiet` 只抑制进度信息（`linkr: …`），错误与 `loopback PASS/FAIL` 仍然输出。
+- `--help` 与 `--version` 不需要安装 bleak，只有真正访问设备时才导入它。
+- 密码不进 argv：用 `--wifi SSID --wifi-key-file PATH`，或环境变量
+  `LINKR_WIFI_PASSWORD`，或在终端上前提下交互输入。`--wifi SSID,PASSWORD` 仍然可用，
+  但会出现在 `ps` 输出里。
+- `--uart` 在本地校验（baud 300–3000000、data 5–8、parity n/o/e、stop 1/2、
+  flow n/rtscts），不合法就直接报错退出，不发往设备。
+- 退出码：`0` 正常、`1` 错误、`2` 参数问题、`3` 终端会话期间设备断开。
+
 配置命令使用 Management Service v1 二进制帧，包含 API 版本、request ID、
 逻辑长度、response ID 和 confirmed indication 分片。NUS 现在只转发原始 UART。
 完整格式、WiFi 异步完成事件、Device ID 与 Reliable UART 序号见
@@ -444,11 +458,19 @@ coredump 扇区。
 `Linkr BLE UART*` 设备，核对 Management API v1 和 Device ID，使用 Reliable
 UART 传输终端字节，并将管理响应与串口输出分开。
 
-按需安装主机依赖：
+按需安装主机依赖（`--help` / `--version` 不需要）：
 
 ```sh
 python3 -m pip install bleak
 ```
+
+- `--scan` 列出**全部**附近设备（无名设备显示 `(unknown)`）并带上 RSSI；列完就退出，
+  除非同时给了其它动作或 `--address`（这时会复用这份扫描结果去连接，不会重扫）。
+- 终端模式下，CLI 在检测到**空闲 shell 提示符**时向目标机发送 `stty rows/cols`
+  （判定规则与命令串和 Web 端 `web/terminal_geometry.js` 一致），并在窗口变化
+  （SIGWINCH）后重发；提示符不空闲就不发，避免把这条命令喂给正在运行的程序。
+- 终端会话中设备中途断开以退出码 `3` 结束；用户按退出键（默认 `Ctrl-]`，
+  提示语跟随 `--escape`）是 `0`。
 
 ### Linux 或 Linkr Buildroot 的 C 终端
 
@@ -472,6 +494,25 @@ cd tools && make
 ./linkr_ble_terminal_c --help
 ./linkr_ble_terminal_c
 ```
+
+参数面与 Python 客户端对齐，脚本可以同等对待两者：
+
+- 退出码 `0` 正常、`1` 错误、`2` 参数问题、`3` 终端会话中设备断开；
+  之前的参数错误也是 `1`，与"连不上设备"没法区分。
+- `--version`；`--quiet` 只压进度信息，错误始终输出。
+- 长短选项都接受 `--opt=value` 写法；缺值时报 `--opt requires a value`，
+  不再是误导性的 `unknown option`。
+- `--help` 走 stdout（错误与用法提示走 stderr）；参数错误会提示 `--help`。
+- `--escape '^'` 这种不完整的转义被拒绝（以前被当成字面量 `^` 接受）；
+  退出提示会跟着 `--escape` 变，不再永远写 `Ctrl-]`。
+- `--scan` 列出**全部**附近设备（无名设备显示 `(unknown)`），列完就退出，
+  除非同时给了其它动作或 `--address`。
+- `--log-file` 打不开时在连蓝牙之前就失败（以前只是警告然后继续，日志静默丢失）。
+- 名字匹配规则：精确名优先，其次前缀；同类里优先广播了 NUS 服务的设备。
+
+对应的测试在 `tests/test_terminal_cli_c.py`：纯函数（参数校验、名字前缀、
+转义命名、Enter 转换）由宿主 harness 直接编译源文件里的真实实现来断言，不需要
+蓝牙或 D-Bus；参数面则用 `-Werror` 编译出真二进制再跑。
 
 对 Linkr Buildroot，不要指望在目标 rootfs 上编译此二进制。当前 Linkr 镜像基于 uClibc，不含 `gcc`、`make`、`pkg-config` 或 `dbus/dbus.h`。用生成 Linkr rootfs 的同一 Buildroot SDK/工具链构建，并链接该 sysroot 的 `libdbus-1`。
 
