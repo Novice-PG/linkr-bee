@@ -70,11 +70,25 @@ function sse(text) {
 test("the static terminal loads the vendored assistant runtime", async ({ page }) => {
   await page.goto(`${staticBase}/`);
   await expect(page.locator("#agentButton")).toBeVisible();
+  // A page that booted says nothing about failing to boot.
+  await expect(page.locator("#bootNotice")).toBeHidden();
   const runtime = await page.evaluate(async () => {
     const module = await import("/vendor/agent/agent-runtime.js");
     return { available: module.available, exportKind: typeof module.createSerialAgent };
   });
   expect(runtime).toEqual({ available: true, exportKind: "function" });
+});
+
+/* The terminal boots from static ES modules, so a single failed request used to
+ * leave an empty page with nothing on it to say why -- which is how a local
+ * server dropping one connection in ten read as "the cursors are not applied".
+ * Blocking a module is the same failure without the flakiness. */
+test("a module that never loads is reported instead of a blank page", async ({ page }) => {
+  await page.route("**/agent_markdown.js", (route) => route.abort());
+  await page.goto(`${staticBase}/`);
+  await expect(page.locator("#bootNotice")).toBeVisible();
+  await expect(page.locator("#bootNoticeText")).toContainText(/did not start|未能启动/);
+  await expect(page.locator("#bootNoticeReload")).toBeVisible();
 });
 
 test("the static terminal answers a question end to end", async ({ page }) => {

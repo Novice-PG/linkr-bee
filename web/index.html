@@ -427,7 +427,11 @@
             aria-label="Interactive serial terminal"
             data-i18n-aria="terminalAria"
             aria-describedby="terminalInputHint"
-          ></div>
+          >          </div>
+          <p id="bootNotice" class="boot-notice" role="status" hidden>
+            <span id="bootNoticeText"></span>
+            <button id="bootNoticeReload" class="btn" type="button"></button>
+          </p>
           <div class="terminal-input-bar">
             <span id="terminalInputHint" class="terminal-input-hint" data-i18n="terminalInputDisconnected">
               Connect a device to enable terminal input
@@ -510,5 +514,53 @@
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
     <script type="module" src="./app.js?v=20260910-agent-task-plan"></script>
+    <script>
+      /* The terminal boots from static ES modules, so one failed request -- a
+       * dropped connection, a proxy, a stale cache -- leaves this page blank
+       * with nothing on it to say why. A local server with a listen backlog of
+       * five against a burst of thirty requests did exactly that about one load
+       * in ten until it was fixed.
+       *
+       * This is an inline, dependency-free classic script on purpose: whatever
+       * else failed to load, it still runs. The strings are picked from
+       * navigator.language rather than from data-i18n, because the code that
+       * applies those is app.js, which may be the thing that never arrived. */
+      (function () {
+        var zh = (navigator.language || "").toLowerCase().indexOf("zh") === 0;
+        var graceMs = 6000;
+        var notice = document.getElementById("bootNotice");
+        var text = document.getElementById("bootNoticeText");
+        var reload = document.getElementById("bootNoticeReload");
+        var shown = false;
+
+        function terminalReady() {
+          return Boolean(document.querySelector(".terminal-output .xterm"));
+        }
+        function show() {
+          if (shown || terminalReady()) return;
+          shown = true;
+          text.textContent = zh
+            ? "终端没有启动：页面加载时有文件没能取到。刷新一次通常就好；如果反复出现，检查网络或代理。"
+            : "The terminal did not start: something failed to load with the page. Reloading usually fixes it; if it keeps happening, check the network or a proxy.";
+          reload.textContent = zh ? "重新加载" : "Reload";
+          notice.hidden = false;
+        }
+
+        reload.addEventListener("click", function () { location.reload(); });
+        // A failed module in the graph raises this on the entry script element.
+        addEventListener("error", function (event) {
+          if (event.target && event.target.tagName === "SCRIPT") show();
+        }, true);
+
+        // Anything that does not raise an event, and a late success that should
+        // take the notice back down.
+        var deadline = Date.now() + graceMs;
+        (function poll() {
+          if (terminalReady()) { notice.hidden = true; shown = false; }
+          else if (Date.now() > deadline) show();
+          setTimeout(poll, Date.now() > deadline ? 1000 : 200);
+        })();
+      })();
+    </script>
   </body>
 </html>

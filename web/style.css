@@ -893,6 +893,31 @@ button:focus-visible {
   box-shadow: 0 0 0 3px rgba(122, 168, 248, 0.22);
 }
 
+/* Shown only when the terminal never came up; set up by the inline script at the
+ * end of index.html. It stands in the terminal's place so a failed boot says
+ * something instead of leaving the page blank -- and it has to work when the
+ * stylesheet did load while a module did not, which is the usual case. */
+.boot-notice {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* An author display setting beats the user agent's rule for [hidden]. */
+.boot-notice[hidden] {
+  display: none;
+}
+
 .terminal-output:focus-within {
   box-shadow: inset 0 0 0 2px var(--focus);
 }
