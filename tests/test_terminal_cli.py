@@ -14,8 +14,12 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -118,6 +122,228 @@ class ParserTests(unittest.TestCase):
         parser = terminal.build_parser()
         args = parser.parse_args(["--uart", "115200, 8, none, 1, hw"])
         self.assertEqual(args.uart, "115200,8,n,1,rtscts")
+
+
+class CompletionTests(unittest.TestCase):
+    """--print-completion must stay in step with the parser it describes."""
+
+    def script(self, shell):
+        return terminal.completion_script(shell, terminal.build_parser())
+
+    def parser_options(self):
+        return {
+            option
+            for action in terminal.build_parser()._actions
+            for option in action.option_strings
+        }
+
+    def bash_complete(self, *words):
+        """Drive the generated function in a real bash, as completion would."""
+        with tempfile.TemporaryDirectory(prefix="linkr-completion-") as directory:
+            path = Path(directory) / "completion.bash"
+            path.write_text(self.script("bash"))
+            program = "\n".join([
+                f"source {shlex.quote(str(path))}",
+                "COMP_WORDS=(" + " ".join(shlex.quote(word) for word in words) + ")",
+                "COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))",
+                "COMPREPLY=()",
+                "_linkr_ble_terminal",
+                'printf "%s\\n" "${COMPREPLY[@]}"',
+            ])
+            result = subprocess.run(["bash", "-c", program],
+                                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_bash_script_is_syntactically_valid(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-completion-") as directory:
+            path = Path(directory) / "completion.bash"
+            path.write_text(self.script("bash"))
+            result = subprocess.run(["bash", "-n", str(path)],
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh is required")
+    def test_zsh_script_is_syntactically_valid(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-completion-") as directory:
+            path = Path(directory) / "_linkr_ble_terminal"
+            path.write_text(self.script("zsh"))
+            result = subprocess.run(["zsh", "-n", str(path)],
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("fish"), "fish is required")
+    def test_fish_script_is_syntactically_valid(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-completion-") as directory:
+            path = Path(directory) / "linkr_ble_terminal.py.fish"
+            path.write_text(self.script("fish"))
+            result = subprocess.run(["fish", "--no-execute", str(path)],
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fish_registers_every_option_for_every_command_name(self):
+        lines = [line for line in self.script("fish").splitlines()
+                 if line.startswith("complete ")]
+        commands = terminal.COMPLETION_COMMANDS
+        self.assertEqual(len(lines), len(self.parser_options()) * len(commands))
+
+        for option in sorted(self.parser_options()):
+            # fish spells the option without its dashes: --enter is -l enter.
+            if option.startswith("--"):
+                expected = f"-l {option[2:]}"
+            else:
+                expected = f"-s {option[1:]}"
+            for command in commands:
+                with self.subTest(option=option, command=command):
+                    self.assertTrue(
+                        any(line.startswith(f"complete -c {command} ") and
+                            expected in line for line in lines),
+                        f"{command} does not register {option}")
+
+    def test_fish_marks_choices_files_and_plain_values(self):
+        script = self.script("fish")
+        # -x is fish's "requires a value, complete no files".
+        self.assertIn("-l enter -x -a 'raw cr lf crlf'", script)
+        self.assertIn("-l print-completion -x -a 'bash fish zsh'", script)
+        self.assertIn("-l log-file -r -F", script)
+        self.assertIn("-l wifi-key-file -r -F", script)
+        self.assertIn("-l name -r -f", script)
+
+    def test_fish_script_keeps_descriptions_quoted(self):
+        for line in self.script("fish").splitlines():
+            if not line.startswith("complete "):
+                continue
+            with self.subTest(line=line):
+                # Exactly the opening and closing quote, once the choice list
+                # and any escaped apostrophe (argparse's own --version text has
+                # one) are set aside. A stray quote would end the string early.
+                unescaped = re.sub(r"-a '[^']*'", "", line.replace("\\'", ""))
+                self.assertEqual(unescaped.count("'"), 2)
+
+    @unittest.skipUnless(shutil.which("fish"), "fish is required")
+    def test_fish_completion_answers_the_way_a_shell_needs(self):
+        """Drive fish's own completion engine, hermetically.
+
+        fish only autoloads a completion file for a command it can find, so the
+        probe puts a stub on PATH; XDG_CONFIG_HOME keeps it out of the real
+        ~/.config/fish.
+        """
+        with tempfile.TemporaryDirectory(prefix="linkr-fish-") as directory:
+            config = Path(directory) / "config"
+            commands = config / "fish" / "completions"
+            commands.mkdir(parents=True)
+            script = self.script("fish")
+            for name in terminal.COMPLETION_COMMANDS:
+                (commands / f"{name}.fish").write_text(script)
+
+            stub_dir = Path(directory) / "bin"
+            stub_dir.mkdir()
+            for name in terminal.COMPLETION_COMMANDS:
+                stub = stub_dir / name
+                stub.write_text("#!/bin/sh\nexit 0\n")
+                stub.chmod(0o755)
+
+            env = dict(os.environ,
+                       XDG_CONFIG_HOME=str(config),
+                       PATH=f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+            def complete(line):
+                result = subprocess.run(["fish", "-c", f'complete -C"{line}"'],
+                                        capture_output=True, text=True,
+                                        env=env, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return sorted(entry.split("\t")[0]
+                              for entry in result.stdout.splitlines())
+
+            for command in terminal.COMPLETION_COMMANDS:
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        complete(f"{command} --enter "),
+                        ["cr", "crlf", "lf", "raw"])
+                    self.assertEqual(
+                        complete(f"{command} --print-completion "),
+                        ["bash", "fish", "zsh"])
+                    # A free-form value is neither completed with files nor
+                    # with anything else.
+                    self.assertEqual(complete(f"{command} --name "), [])
+
+    def test_every_parser_option_reaches_both_scripts(self):
+        options = self.parser_options()
+        self.assertTrue(options)
+        for shell in terminal.COMPLETION_SHELLS:
+            script = self.script(shell)
+            for option in sorted(options):
+                with self.subTest(shell=shell, option=option):
+                    if shell == "fish":
+                        # fish spells an option without its dashes.
+                        expected = (f"-l {option[2:]}" if option.startswith("--")
+                                    else f"-s {option[1:]}")
+                    else:
+                        expected = option
+                    self.assertIn(expected, script)
+
+    def test_option_choices_are_completed(self):
+        for shell in terminal.COMPLETION_SHELLS:
+            with self.subTest(shell=shell):
+                script = self.script(shell)
+                self.assertIn("raw cr lf crlf", script)
+        # zsh needs the action list, bash the compgen word list.
+        self.assertIn("(raw cr lf crlf)", self.script("zsh"))
+        self.assertIn('--enter) COMPREPLY=( $(compgen -W "raw cr lf crlf"',
+                      self.script("bash"))
+
+    def test_path_options_complete_files(self):
+        script = self.script("bash")
+        self.assertIn("--wifi-key-file|--log-file) COMPREPLY=( $(compgen -f",
+                      script)
+        self.assertIn("--log-file=[append raw BLE RX bytes to a file]:file:_files",
+                      self.script("zsh"))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_bash_completion_answers_the_way_a_shell_needs(self):
+        self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--e"),
+                         ["--enter", "--escape"])
+        self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--enter", "c"),
+                         ["cr", "crlf"])
+        self.assertEqual(
+            self.bash_complete("linkr_ble_terminal.py", "--print-completion", "z"),
+            ["zsh"])
+        # A prefix that several options share returns all of them.
+        self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--json", "--q"),
+                         ["--query-info", "--query-uart", "--query-wifi",
+                          "--query-webdav", "--quiet"])
+        self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--quiet", "--j"),
+                         ["--json"])
+        # --flag=value is accepted by the parser, so the value completes too.
+        self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--enter=c"),
+                         ["--enter=cr", "--enter=crlf"])
+        self.assertEqual(
+            self.bash_complete("linkr_ble_terminal.py", "--print-completion=f"),
+            ["--print-completion=fish"])
+
+    def test_unsupported_shell_is_a_usage_error(self):
+        with self.assertRaises(ValueError):
+            self.script("ksh")
+
+    def test_completion_prints_without_bleak_and_leaves_the_radio_alone(self):
+        # This interpreter has no bleak installed: printing a script must not
+        # need it, and must not be confused with a device operation.
+        result = subprocess.run(
+            [sys.executable, str(TERMINAL_PATH), "--print-completion", "bash"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("complete -F _linkr_ble_terminal", result.stdout)
+
+    def test_a_bad_shell_exits_two_from_the_command_line(self):
+        result = subprocess.run(
+            [sys.executable, str(TERMINAL_PATH), "--print-completion", "ksh"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2)
+        # argparse changed the wording of this message across versions.
+        self.assertIn("invalid choice", result.stderr)
+        for shell in terminal.COMPLETION_SHELLS:
+            self.assertIn(shell, result.stderr)
 
 
 class ScanRuleTests(unittest.TestCase):
