@@ -34,6 +34,7 @@ repository owns the accessory firmware and reference clients.
 - [BLE Protocol](#ble-protocol)
 - [BLE Terminal](#ble-terminal)
   - [C Terminal for Linux or Linkr Buildroot](#c-terminal-for-linux-or-linkr-buildroot)
+  - [Shell completion](#shell-completion)
 - [Web Bluetooth Terminal](#web-bluetooth-terminal)
 - [Mobile Apps](#mobile-apps)
 - [Validation Status](#validation-status)
@@ -757,6 +758,48 @@ Useful options:
 - `--debug-io`: show BLE TX/RX byte traces
 - `--log-file <path>`: append raw BLE RX bytes to a file
 - `--ble-write-size <n>`: override the auto-detected BLE write chunk size
+- `--wifi SSID --wifi-key-file <path>`: connect without the password in argv
+  (`$LINKR_WIFI_PASSWORD` and a prompt work too)
+- `--json`: write management responses and events as JSON lines, for scripts
+- `--quiet`: print errors and results only
+- `--print-completion <shell>`: print a bash / fish / zsh completion script,
+  see below
+
+### Shell completion
+
+Both clients generate bash, fish and zsh completions. The scripts are produced
+from each client's own option definitions, so a new option cannot be missed:
+
+```sh
+# bash, current session only
+source <(tools/linkr_ble_terminal.py --print-completion bash)
+
+# bash, installed once (needs bash-completion)
+tools/linkr_ble_terminal.py --print-completion bash > \
+  ~/.local/share/bash-completion/completions/linkr_ble_terminal.py
+
+# zsh: any directory in $fpath, and the file name must be _linkr_ble_terminal
+tools/linkr_ble_terminal.py --print-completion zsh > "${fpath[1]}/_linkr_ble_terminal"
+
+# fish: the file is named after the command
+tools/linkr_ble_terminal.py --print-completion fish > \
+  ~/.config/fish/completions/linkr_ble_terminal.py.fish
+
+# the C client works the same way
+source <(./linkr_ble_terminal_c --print-completion zsh)
+```
+
+They complete option names, the values of `--enter` and `--print-completion`,
+and paths for `--log-file` and `--wifi-key-file`. `--print-completion` does not
+load bleak and does not need a device.
+
+**Completion only applies when the client is invoked under that name, so the
+command has to be findable** (on `PATH`). Installing a completion script is not
+installing a program: `python3 tools/linkr_ble_terminal.py <TAB>` completes
+nothing, because that is `python3`'s to complete. Install the client as a
+command instead -- the PyInstaller build `linkr-ble-terminal`, a wrapper, or the
+script on `PATH`. fish is the strictest of the three: it does not read the
+completion file at all while the command is missing from `PATH`.
 
 ## Web Bluetooth terminal
 

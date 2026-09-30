@@ -33,6 +33,7 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 - [BLE 协议](#ble-协议)
 - [BLE 终端](#ble-终端)
   - [Linux 或 Linkr Buildroot 的 C 终端](#linux-或-linkr-buildroot-的-c-终端)
+  - [Shell 补全](#shell-补全)
 - [Web Bluetooth 终端](#web-bluetooth-终端)
 - [手机 App](#手机-app)
 - [验证状态](#验证状态)
@@ -631,6 +632,42 @@ GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 - `--debug-io`：显示 BLE TX/RX 字节跟踪
 - `--log-file <path>`：将原始 BLE RX 字节追加到文件
 - `--ble-write-size <n>`：覆盖自动检测的 BLE 写入块大小
+- `--wifi SSID --wifi-key-file <path>`：连 WiFi 而密码不进 argv（也接受
+  `$LINKR_WIFI_PASSWORD` 或终端上交互输入）
+- `--json`：把管理响应与事件输出成 JSON 行，给脚本用
+- `--quiet`：只输出错误与结果
+- `--print-completion <shell>`：打印 bash / fish / zsh 补全脚本，见下
+
+### Shell 补全
+
+两个客户端都能生成 bash / fish / zsh 补全脚本，脚本由各自的选项定义生成，所以新加的选项不会漏掉：
+
+```sh
+# bash：只在当前会话生效
+source <(tools/linkr_ble_terminal.py --print-completion bash)
+
+# bash：装一次（需要 bash-completion）
+tools/linkr_ble_terminal.py --print-completion bash > \
+  ~/.local/share/bash-completion/completions/linkr_ble_terminal.py
+
+# zsh：放进 $fpath 里的任意目录，文件名必须是 _linkr_ble_terminal
+tools/linkr_ble_terminal.py --print-completion zsh > "${fpath[1]}/_linkr_ble_terminal"
+
+# fish：文件名按命令名命名
+tools/linkr_ble_terminal.py --print-completion fish > \
+  ~/.config/fish/completions/linkr_ble_terminal.py.fish
+
+# C 客户端同理，把命令名换成 linkr_ble_terminal_c
+source <(./linkr_ble_terminal_c --print-completion zsh)
+```
+
+补全选项名、`--enter` 与 `--print-completion` 的取值，以及 `--log-file`、`--wifi-key-file` 的路径。
+`--print-completion` 不加载 bleak，也不需要设备在场。
+
+**补全只在以该名字调用时生效，所以命令本身要能被找到**（在 `PATH` 上）。装补全脚本不等于装
+可执行文件：`python3 tools/linkr_ble_terminal.py <TAB>` 不会补全，那属于 `python3` 的范围。
+要用补全就把客户端装成命令——PyInstaller 产物 `linkr-ble-terminal`、自己包一层 wrapper，
+或把脚本放到 `PATH`。fish 尤其严格：命令不在 `PATH` 上时它根本不加载对应的补全文件。
 
 ## Web Bluetooth 终端
 
