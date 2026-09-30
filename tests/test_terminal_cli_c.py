@@ -384,6 +384,108 @@ class CBinaryArgumentTests(unittest.TestCase):
         self.assertNotIn("D-Bus", result.stderr)
         self.assertNotIn("BlueZ", result.stderr)
 
+    def completion(self, shell):
+        result = self.run_cli("--print-completion", shell)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip(), "empty completion script")
+        return result.stdout
+
+    @staticmethod
+    def bash_option_words(script):
+        """The option list the generated bash function completes with."""
+        lines = script.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.strip().startswith('if [[ "$cur" == -* ]]'))
+        return re.findall(r"-{1,2}[a-z][a-z-]*", lines[index + 1])
+
+    @classmethod
+    def parsed_flags(cls):
+        """Every flag parse_args() matches on, read from the source."""
+        return set(re.findall(r'strcmp\(flag, "(-{1,2}[a-z][a-z-]*)"\)',
+                              SOURCE_PATH.read_text()))
+
+    def test_completion_lists_exactly_the_options_the_parser_accepts(self):
+        self.assertEqual(set(self.bash_option_words(self.completion("bash"))),
+                         self.parsed_flags())
+
+    def test_completion_scripts_parse_as_their_shell(self):
+        for shell in ("bash", "fish", "zsh"):
+            with self.subTest(shell=shell):
+                if not shutil.which(shell):
+                    self.skipTest(f"{shell} is not installed")
+                script = self.completion(shell)
+                with tempfile.TemporaryDirectory(prefix="linkr-c-completion-") as d:
+                    path = Path(d) / f"completion.{shell}"
+                    path.write_text(script)
+                    # fish spells the syntax check differently.
+                    command = (["fish", "--no-execute", str(path)]
+                               if shell == "fish" else [shell, "-n", str(path)])
+                    check = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_completion_fish_registers_every_option(self):
+        lines = [line for line in self.completion("fish").splitlines()
+                 if line.startswith("complete ")]
+        flags = self.parsed_flags()
+        self.assertEqual(len(lines), len(flags))
+        for flag in sorted(flags):
+            expected = f"-l {flag[2:]}" if flag.startswith("--") else f"-s {flag[1:]}"
+            with self.subTest(flag=flag):
+                self.assertTrue(any(expected in line for line in lines),
+                                f"fish script does not register {flag}")
+
+    def test_completion_fish_marks_choices_and_files(self):
+        fish = self.completion("fish")
+        self.assertIn("-l enter -x -a 'raw cr lf crlf'", fish)
+        self.assertIn("-l print-completion -x -a 'bash fish zsh'", fish)
+        self.assertIn("-l log-file -r -F", fish)
+        self.assertIn("-l name -r -f", fish)
+
+    def test_completion_marks_value_options(self):
+        bash = self.completion("bash")
+        self.assertIn('--enter) COMPREPLY=( $(compgen -W "raw cr lf crlf"', bash)
+        self.assertIn("--log-file) COMPREPLY=( $(compgen -f", bash)
+        zsh = self.completion("zsh")
+        self.assertIn("--log-file=[append raw BLE RX bytes to file]:file:_files",
+                      zsh)
+        self.assertIn(":enter:(raw cr lf crlf)", zsh)
+
+    def test_completion_registers_the_command_name(self):
+        self.assertIn("complete -F _linkr_ble_terminal_c linkr_ble_terminal_c",
+                      self.completion("bash"))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_bash_completion_answers_the_way_a_shell_needs(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-c-completion-") as d:
+            path = Path(d) / "completion.bash"
+            path.write_text(self.completion("bash"))
+            probes = [("--e", ["--enter", "--escape"]),
+                      ("--enter", "l", ["lf"]),
+                      ("--enter=l", ["--enter=lf"]),
+                      ("--print-completion", "z", ["zsh"]),
+                      ("--print-completion=z", ["--print-completion=zsh"])]
+            for probe in probes:
+                with self.subTest(probe=probe[:-1]):
+                    words = " ".join(shlex.quote(word) for word in probe[:-1])
+                    program = "\n".join([
+                        f"source {shlex.quote(str(path))}",
+                        f"COMP_WORDS=(linkr_ble_terminal_c {words})",
+                        "COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))",
+                        "COMPREPLY=()",
+                        "_linkr_ble_terminal_c",
+                        'printf "%s\\n" "${COMPREPLY[@]}"',
+                    ])
+                    result = subprocess.run(["bash", "-c", program],
+                                            capture_output=True, text=True,
+                                            timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.split(), probe[-1])
+
+    def test_unsupported_shell_is_a_usage_error(self):
+        result = self.run_cli("--print-completion", "ksh")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be bash, fish or zsh", result.stderr)
+
 
 class CParityTests(unittest.TestCase):
     """Cheap guards that the two host clients keep the same contract."""
@@ -434,6 +536,28 @@ class CParityTests(unittest.TestCase):
             "Listing is the whole job unless another action was requested",
             self.c_source)
         self.assertIn("def has_control_action(", self.py_source)
+
+    def test_completion_table_covers_every_flag_parse_args_matches(self):
+        """The C completions come from a hand-kept table; this ties it to the
+        parser so a new option cannot be added to one and not the other."""
+        table = set(re.findall(r'\{\s*"(-{1,2}[a-z][a-z-]*)",\s*(?:true|false)',
+                               self.c_source))
+        parsed = set(re.findall(r'strcmp\(flag, "(-{1,2}[a-z][a-z-]*)"\)',
+                                self.c_source))
+        self.assertTrue(parsed)
+        self.assertEqual(table, parsed)
+
+    def test_completion_shells_match(self):
+        py_shells = set(re.findall(r'"([a-z]+)"', re.search(
+            r"COMPLETION_SHELLS = \(([^)]*)\)", self.py_source).group(1)))
+        c_choices = re.search(
+            r'"--print-completion",\s*true,\s*false,\s*"([^"]*)"',
+            self.c_source).group(1)
+        self.assertEqual(py_shells, set(c_choices.split()))
+
+    def test_both_clients_expose_print_completion(self):
+        for source in (self.c_source, self.py_source):
+            self.assertIn("--print-completion", source)
 
 
 if __name__ == "__main__":
