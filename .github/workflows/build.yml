@@ -47,7 +47,9 @@ jobs:
           sh -n tools/build_agent_bundle.sh
           sh -n tools/flash_firmware.sh
           sh -n tools/build_terminal_binary.sh
+          sh -n tools/build_terminal.sh
           sh -n tools/verify.sh
+          python3 -m compileall -q tools/build_terminal_bundle.py
           node --check tools/extract_macaron_cursors.mjs
 
   mobile:
@@ -86,6 +88,145 @@ jobs:
 
       - name: Build HarmonyOS web assets
         run: npm run build:harmony
+
+  terminal:
+    name: Terminal (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux and Windows and macOS, on both architectures: the terminal is
+          # a single Rust crate, so every runner builds the same source. Native
+          # triples are spelled out so the packaging step never has to guess
+          # where cargo put the binary; macOS x86_64 is cross-built from the
+          # Apple silicon runner, which the Apple toolchain supports out of the
+          # box.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # btleplug talks to BlueZ over libdbus, so the Linux runners need the
+      # development package before anything can link.
+      - name: Install the Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-cli
+
+      - name: Run the test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tools/linkr-cli
+          cargo test
+
+      - name: Lint the crate
+        if: matrix.name == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tools/linkr-cli
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Build the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tools/linkr-cli
+          cargo build --release --target "${{ matrix.target }}"
+
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="tools/linkr-cli/target/${{ matrix.target }}/release/linkr.exe"
+          else
+            bin="tools/linkr-cli/target/${{ matrix.target }}/release/linkr"
+          fi
+          test -n "$("${bin}" --version)"
+          "${bin}" --help >/dev/null
+          "${bin}" completion bash | bash -n
+          "${bin}" --print-completion zsh >/dev/null
+
+      - name: Package the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/linkr-terminal-${{ matrix.name }}"
+          mkdir -p "${out}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="tools/linkr-cli/target/${{ matrix.target }}/release/linkr.exe"
+          else
+            bin="tools/linkr-cli/target/${{ matrix.target }}/release/linkr"
+          fi
+          cp "${bin}" "${out}/"
+          name="$(basename "${bin}")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "${out}" && sha256sum "${name}" > SHA256SUMS)
+          else
+            (cd "${out}" && shasum -a 256 "${name}" > SHA256SUMS)
+          fi
+          cat "${out}/SHA256SUMS"
+
+      - name: Generate the self-extracting Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="dist/linkr-terminal-${{ matrix.name }}/linkr.exe"
+          version="$("${exe}" --version | awk '{print $2}')"
+          python tools/build_terminal_bundle.py \
+            --exe "${exe}" \
+            --output dist/linkr-bee-terminal.ps1 \
+            --version "${version}"
+
+      - name: Upload the terminal
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-bee-terminal-${{ matrix.name }}
+          path: dist/linkr-terminal-${{ matrix.name }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the self-extracting Windows bundle
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-bee-terminal-bundle
+          path: dist/linkr-bee-terminal.ps1
+          if-no-files-found: error
+          retention-days: 30
 
   firmware:
     name: ${{ matrix.name }}
