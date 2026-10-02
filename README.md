@@ -30,11 +30,11 @@ target's own UART bytes and does not replace the target shell.
 - Save logs, upload them to WebDAV, and check firmware, UART buffer, WiFi, and
   transfer counters from the diagnostics panel.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
-- Assistant in the browser and the phone apps: searches the serial log, runs
-  commands on the target once you approve them, and changes the bridge's own
-  UART, WiFi and log-upload settings under the same approval. It remembers facts
-  about each target between sessions, counts the tokens it used, and can export
-  the whole diagnosis as a Markdown report.
+- Assistant in the browser, the phone apps, and the `linkr` terminal: searches
+  the serial log, runs commands on the target once you approve them, and
+  changes the bridge's own UART, WiFi and log-upload settings under the same
+  approval. It remembers facts about each target between sessions, counts the
+  tokens it used, and can export the whole diagnosis as a Markdown report.
 
 ## What you need
 
@@ -54,7 +54,8 @@ Browser / desktop / mobile / Linkr
   or ESP32-C5 DevKitC.
 - A target with a UART console, and three wires: target TX to accessory RX, target RX
   to accessory TX, and a shared ground.
-- A host: Chrome or Chromium for the web terminal, one of the phone apps, or the
+- A host: Chrome or Chromium for the web terminal, one of the phone apps, the
+  `linkr` terminal (TUI plus assistant) on Linux, Windows and macOS, or the
   Python / C terminal on macOS and Linux.
 
 The UART side is 3.3 V logic, not RS-232. See the
