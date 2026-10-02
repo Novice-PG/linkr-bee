@@ -1,0 +1,365 @@
+//! Shared parsers for management reply lines (WEB_UX_SPEC section 5.3).
+//!
+//! Every TUI surface that shows a reply uses these — never a private copy —
+//! so `OK uart=…`, `OK wifi=…`, `OK webdav=…`, `@scan` lines and the
+//! `replyStatus` rule behave exactly like the web client.
+
+/// Result of the `replyStatus(text)` helper: the first `^ERR` line wins,
+/// otherwise `ok` when any `^OK` line exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyStatus {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+pub fn reply_status(text: &str) -> ReplyStatus {
+    let mut saw_ok = false;
+    let mut error = None;
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.starts_with("ERR") {
+            if error.is_none() {
+                error = Some(line.to_string());
+            }
+        } else if line.starts_with("OK") {
+            saw_ok = true;
+        }
+    }
+    ReplyStatus {
+        ok: error.is_none() && saw_ok,
+        error,
+    }
+}
+
+/// `OK uart=115200,8,N,1,none` — the web `parseUartSettings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UartSettings {
+    pub baud: u64,
+    pub data_bits: u8,
+    /// Lowercase parity letter: `n` | `e` | `o`.
+    pub parity: String,
+    pub stop_bits: u8,
+    /// Lowercase flow: `none` | `rtscts`.
+    pub flow: String,
+}
+
+impl std::fmt::Display for UartSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{},{},{},{},{}",
+            self.baud, self.data_bits, self.parity, self.stop_bits, self.flow
+        )
+    }
+}
+
+pub fn parse_uart_reply(text: &str) -> Option<UartSettings> {
+    for line in text.lines() {
+        // Echoed commands and prompts sit next to the reply: only the `OK`
+        // line is parsed, the rest of the page is skipped (like the wifi reply).
+        let Some(rest) = line.trim().strip_prefix("OK uart=") else {
+            continue;
+        };
+        let mut parts = rest.split(',');
+        let baud = parts.next()?.trim().parse().ok()?;
+        let data_bits = parts.next()?.trim().parse().ok()?;
+        let parity = parts.next()?.trim().to_lowercase();
+        let stop_bits = parts.next()?.trim().parse().ok()?;
+        let flow = parts.next()?.trim().to_lowercase();
+        if !matches!(parity.as_str(), "n" | "e" | "o") {
+            return None;
+        }
+        let flow = match flow.as_str() {
+            "none" | "n" => "none".to_string(),
+            "rtscts" | "r" => "rtscts".to_string(),
+            other => other.to_string(),
+        };
+        return Some(UartSettings {
+            baud,
+            data_bits,
+            parity,
+            stop_bits,
+            flow,
+        });
+    }
+    None
+}
+
+/// `OK wifi=connected,ssid=MyNet,ip=192.168.1.5` / `OK wifi off`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiStatus {
+    /// `connected` | `connecting` | `off` | …
+    pub state: String,
+    pub ssid: String,
+    pub ip: String,
+}
+
+pub fn parse_wifi_reply(text: &str) -> Option<WifiStatus> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "OK wifi off" {
+            return Some(WifiStatus {
+                state: "off".to_string(),
+                ssid: String::new(),
+                ip: String::new(),
+            });
+        }
+        let rest = match line.strip_prefix("OK wifi=") {
+            Some(rest) => rest,
+            None => continue,
+        };
+        let mut state = String::new();
+        let mut ssid = String::new();
+        let mut ip = String::new();
+        for field in rest.split(',') {
+            let mut it = field.splitn(2, '=');
+            let key = it.next().unwrap_or("");
+            let value = it.next().unwrap_or("");
+            match key {
+                "" => {}
+                "ssid" => {
+                    ssid = if value == "-" {
+                        String::new()
+                    } else {
+                        value.to_string()
+                    }
+                }
+                // The IP is taken from the last `,ip=` field.
+                "ip" => ip = value.to_string(),
+                _ => {
+                    if state.is_empty() && !field.contains('=') {
+                        state = field.to_string();
+                    } else if !key.is_empty() && state.is_empty() {
+                        state = key.to_string();
+                    }
+                }
+            }
+        }
+        // First field is the bare state (`connected,ssid=…`).
+        if state.is_empty() {
+            state = rest
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        if state.is_empty() {
+            state = "unknown".to_string();
+        }
+        return Some(WifiStatus { state, ssid, ip });
+    }
+    None
+}
+
+/// `OK webdav=on,url=http://host/dav/` / `OK webdav off`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebdavStatus {
+    pub state: String,
+    pub url: String,
+}
+
+pub fn parse_webdav_reply(text: &str) -> Option<WebdavStatus> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "OK webdav off" {
+            return Some(WebdavStatus {
+                state: "off".to_string(),
+                url: String::new(),
+            });
+        }
+        let Some(rest) = line.strip_prefix("OK webdav=") else {
+            continue;
+        };
+        let mut state = String::new();
+        let mut url = String::new();
+        for field in rest.split(',') {
+            if let Some(value) = field.strip_prefix("url=") {
+                url = value.to_string();
+            } else if !field.contains('=') && state.is_empty() {
+                state = field.to_string();
+            } else if let Some(key) = field.split('=').next() {
+                if state.is_empty() {
+                    state = key.to_string();
+                }
+            }
+        }
+        return Some(WebdavStatus { state, url });
+    }
+    None
+}
+
+/// One `@scan result <ssid> [-N dBm] [ch=N] [security]` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanResult {
+    pub ssid: String,
+    pub rssi: Option<i32>,
+    pub channel: Option<u32>,
+    pub security: Option<String>,
+}
+
+pub fn parse_scan_line(line: &str) -> Option<ScanResult> {
+    let line = line.trim();
+    let rest = line.strip_prefix("@scan result ")?;
+    let mut fields = rest.split_whitespace();
+    let ssid = fields.next()?.to_string();
+    let mut result = ScanResult {
+        ssid,
+        rssi: None,
+        channel: None,
+        security: None,
+    };
+    for field in fields {
+        if let Ok(v) = field.parse::<i32>() {
+            result.rssi = Some(v);
+        } else if let Some(ch) = field.strip_prefix("ch=") {
+            result.channel = ch.parse().ok();
+        } else {
+            result.security = Some(field.to_string());
+        }
+    }
+    Some(result)
+}
+
+/// Redact secrets for display (`redactCommand`/`redactSecrets` in the web
+/// client): `@w=`/`@d=` payloads and 32-hex tokens never reach the screen.
+pub fn redact_command(cmd: &str) -> String {
+    if cmd.starts_with("@w=") {
+        return "@w=<redacted>".to_string();
+    }
+    if cmd.starts_with("@d=") {
+        return "@d=<redacted>".to_string();
+    }
+    cmd.to_string()
+}
+
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&redact_line(line));
+    }
+    out
+}
+
+fn redact_line(line: &str) -> String {
+    let mut result = line.to_string();
+    // `token=<32 hex>` → `token=<redacted>`
+    if let Some(pos) = result.find("token=") {
+        let after = &result[pos + "token=".len()..];
+        let hex_len = after.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+        if hex_len == 32 {
+            result.replace_range(
+                pos + "token=".len()..pos + "token=".len() + hex_len,
+                "<redacted>",
+            );
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_status_prefers_err_then_ok() {
+        let status = reply_status("OK uart=115200,8,N,1,none");
+        assert!(status.ok);
+        assert_eq!(status.error, None);
+        let status = reply_status("ERR format: @u=115200,8,n,1,n");
+        assert!(!status.ok);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("ERR format: @u=115200,8,n,1,n")
+        );
+        let status = reply_status("ERR first\nERR second\nOK anyway");
+        assert!(!status.ok);
+        assert_eq!(status.error.as_deref(), Some("ERR first"));
+        let status = reply_status("nothing useful");
+        assert!(!status.ok);
+        assert_eq!(status.error, None);
+    }
+
+    #[test]
+    fn uart_reply_parses_the_documented_sample() {
+        let parsed = parse_uart_reply("OK uart=115200,8,N,1,none").unwrap();
+        assert_eq!(
+            parsed,
+            UartSettings {
+                baud: 115200,
+                data_bits: 8,
+                parity: "n".to_string(),
+                stop_bits: 1,
+                flow: "none".to_string(),
+            }
+        );
+        assert_eq!(parsed.to_string(), "115200,8,n,1,none");
+        let parsed = parse_uart_reply("OK uart=1500000,7,E,2,rtscts").unwrap();
+        assert_eq!(parsed.baud, 1_500_000);
+        assert_eq!(parsed.parity, "e");
+        assert_eq!(parsed.flow, "rtscts");
+        assert!(parse_uart_reply("ERR nope").is_none());
+    }
+
+    #[test]
+    fn wifi_reply_parses_connected_and_off() {
+        let status = parse_wifi_reply("OK wifi=connected,ssid=MyNet,ip=192.168.1.5").unwrap();
+        assert_eq!(status.state, "connected");
+        assert_eq!(status.ssid, "MyNet");
+        assert_eq!(status.ip, "192.168.1.5");
+        let status = parse_wifi_reply("OK wifi off").unwrap();
+        assert_eq!(status.state, "off");
+        assert_eq!(status.ssid, "");
+        // SSID `-` becomes empty; the last `,ip=` wins.
+        let status = parse_wifi_reply("OK wifi=connected,ssid=-,ip=old,ip=10.0.0.9").unwrap();
+        assert_eq!(status.ssid, "");
+        assert_eq!(status.ip, "10.0.0.9");
+        assert!(parse_wifi_reply("ERR bad").is_none());
+    }
+
+    #[test]
+    fn webdav_reply_parses_on_and_off() {
+        let status = parse_webdav_reply("OK webdav=on,url=http://host/dav/").unwrap();
+        assert_eq!(status.state, "on");
+        assert_eq!(status.url, "http://host/dav/");
+        let status = parse_webdav_reply("OK webdav off").unwrap();
+        assert_eq!(status.state, "off");
+        assert!(parse_webdav_reply("ERR nope").is_none());
+    }
+
+    #[test]
+    fn scan_lines_parse_all_documented_shapes() {
+        let r = parse_scan_line("@scan result MyNet -54 ch=6 wpa2").unwrap();
+        assert_eq!(r.ssid, "MyNet");
+        assert_eq!(r.rssi, Some(-54));
+        assert_eq!(r.channel, Some(6));
+        assert_eq!(r.security.as_deref(), Some("wpa2"));
+        let r = parse_scan_line("@scan result OpenNet open").unwrap();
+        assert_eq!(r.ssid, "OpenNet");
+        assert_eq!(r.rssi, None);
+        assert_eq!(r.channel, None);
+        assert_eq!(r.security.as_deref(), Some("open"));
+        assert!(parse_scan_line("@scan done").is_none());
+        assert!(parse_scan_line("@scan error").is_none());
+    }
+
+    #[test]
+    fn redaction_matches_the_web_client() {
+        assert_eq!(redact_command("@w=ssid,secret"), "@w=<redacted>");
+        assert_eq!(
+            redact_command("@d=http://user:pass@host/d"),
+            "@d=<redacted>"
+        );
+        assert_eq!(redact_command("@u?"), "@u?");
+        let token = "0123456789abcdef0123456789abcdef";
+        let redacted = redact_secrets(&format!("OK ws=up token={token}"));
+        assert_eq!(redacted, "OK ws=up token=<redacted>");
+        assert_eq!(redact_secrets("token=short"), "token=short");
+        assert_eq!(redact_secrets("a\nb"), "a\nb");
+    }
+}
