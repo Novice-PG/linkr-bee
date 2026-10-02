@@ -47,3 +47,6 @@ harmonyos/**/*.p7b
 
 # Local design tooling state
 .impeccable/
+
+# linkr-cli build artifacts
+tools/linkr-cli/target/

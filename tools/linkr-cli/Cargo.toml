@@ -1,0 +1,45 @@
+[package]
+name = "linkr-cli"
+version = "1.0.0"
+edition = "2021"
+description = "Cross-platform host CLI and TUI for the Linkr Bee wireless serial bridge"
+license = "Apache-2.0"
+repository = "https://github.com/linkr/linkr-bee"
+authors = ["Linkr Bee contributors"]
+readme = "README.md"
+
+[[bin]]
+name = "linkr"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "io-util", "net"] }
+futures = "0.3"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "cargo", "wrap_help"] }
+clap_complete = "4"
+btleplug = "0.13.3"
+tokio-tungstenite = "0.30.0"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+vte = "0.15.0"
+unicode-width = "0.2.2"
+regex = "1.13.1"
+base64 = "0.23.1"
+sha2 = "0.11.0"
+uuid = { version = "1.26.1", features = ["v4"] }
+chrono = "0.4.45"
+dirs = "7.0.0"
+tokio-stream = "0.1.19"
+async-trait = "0.1.92"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
