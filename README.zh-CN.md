@@ -26,9 +26,9 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 回车可按 raw、CR、LF、CRLF 发送，适配 Bootloader 和不同 Shell。
 - 日志导出、WebDAV 上传，诊断面板可查固件、UART 缓冲、WiFi 和收发计数。
 - 接入 2.4 GHz 网络后走局域网，不再需要蓝牙。
-- 浏览器和手机 App 内置助手：检索串口日志、在你批准后向目标机执行命令，并以同样的
-  方式修改桥接器自身的 UART、WiFi 和日志上传设置。它会记住每台目标设备的事实、统计
-  本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
+- 浏览器、手机 App 和 `linkr` 终端内置助手：检索串口日志、在你批准后向目标机执行
+  命令，并以同样的方式修改桥接器自身的 UART、WiFi 和日志上传设置。它会记住每台目标
+  设备的事实、统计本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
 
 ## 需要什么
 
@@ -47,8 +47,8 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 一台 Linkr Bee 配件：ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC
   或 ESP32-C5 DevKitC。
 - 一台带 UART 控制台的目标设备，三根线：目标 TX 接配件 RX、目标 RX 接配件 TX、共地。
-- 一台主机：桌面 Chrome/Chromium 用 Web 终端，或手机 App，或 macOS、Linux 上的
-  Python / C 终端。
+- 一台主机：桌面 Chrome/Chromium 用 Web 终端，或手机 App，或 Linux、Windows、
+  macOS 上的 `linkr` 终端（TUI + 助手），或 macOS、Linux 上的 Python / C 终端。
 
 UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 [硬件需求](docs/HARDWARE.md)。

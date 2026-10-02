@@ -32,6 +32,7 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 - [测试选项](#测试选项)
 - [BLE 协议](#ble-协议)
 - [BLE 终端](#ble-终端)
+  - [linkr 终端](#linkr-终端)
   - [Linux 或 Linkr Buildroot 的 C 终端](#linux-或-linkr-buildroot-的-c-终端)
   - [Shell 补全](#shell-补全)
 - [Web Bluetooth 终端](#web-bluetooth-终端)
@@ -473,6 +474,37 @@ python3 -m pip install bleak
 - 终端会话中设备中途断开以退出码 `3` 结束；用户按退出键（默认 `Ctrl-]`，
   提示语跟随 `--escape`）是 `0`。
 
+### linkr 终端
+
+`tools/linkr-cli` 是跨平台的 `linkr` 可执行文件：会话、协议、选项与退出码和
+Python 客户端一致，另外提供全屏 TUI 与助手。支持 Linux、Windows、macOS，
+x86_64 与 arm64 都能构建，只需要 Rust 工具链：
+
+```sh
+tools/build_terminal.sh                       # fmt + clippy + 测试 + release 构建
+dist/linkr-terminal-linux-aarch64/linkr --tui
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_terminal.ps1 -Bundle
+.\dist\linkr-bee-terminal.ps1 --tui
+```
+
+第二条命令同时生成 `dist\linkr-bee-terminal.ps1`：自解压的 Windows 交付脚本，
+把 `linkr.exe` 以 base64 内嵌，先校验内嵌 SHA-256 再解包到
+`%LOCALAPPDATA%\LinkrBee\bin`（只解一次），并透传参数、控制台与退出码；删除该
+目录即可强制重新解包。`python3 tools/build_terminal_bundle.py --exe linkr.exe`
+可从任意可执行文件重新生成，`tests/test_terminal_bundle.py` 覆盖这个生成器。
+
+TUI 把 Web 端的四个界面放在 `F2`–`F5`（终端、诊断、网络、助手），`F1` 是帮助、
+`Ctrl+P` 是命令面板、`Ctrl+L` 清屏、`Ctrl+Q` 退出，`Ctrl+Shift+R` / `+C` /
+`+A` 用于锁定 Shift / Ctrl / Alt，替代 Web 端的按键条。`--tui`（或 `linkr tui`）
+连上后直接进入 TUI，`--yes` 让助手自行批准命令。
+
+`.github/workflows/build.yml` 的 `terminal` job 构建全部五个目标（Linux x86_64 与
+arm64、Windows x86_64、macOS arm64 与 x86_64），跑测试与 lint，并把二进制和打包
+脚本作为构建产物上传。完整参考见 `tools/linkr-cli/README.md`。
+
 ### Linux 或 Linkr Buildroot 的 C 终端
 
 `tools/linkr_ble_terminal.c` 提供仅 Linux 的 C 参考实现。它通过系统 D-Bus 直接用 `libdbus-1` 与 BlueZ 通信，不依赖 GLib。这使用户态依赖很小，但仍需要底层可用的 Linux BLE 中心栈。该程序目前是 legacy NUS 终端；Management v1 与 Reliable UART 对接请使用 Python 或 Web 参考客户端。
@@ -640,7 +672,7 @@ GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 
 ### Shell 补全
 
-两个客户端都能生成 bash / fish / zsh 补全脚本，脚本由各自的选项定义生成，所以新加的选项不会漏掉：
+Python 与 C 两个客户端都能生成 bash / fish / zsh 补全脚本，脚本由各自的选项定义生成，所以新加的选项不会漏掉：
 
 ```sh
 # bash：只在当前会话生效
@@ -659,6 +691,15 @@ tools/linkr_ble_terminal.py --print-completion fish > \
 
 # C 客户端同理，把命令名换成 linkr_ble_terminal_c
 source <(./linkr_ble_terminal_c --print-completion zsh)
+```
+
+Rust 终端的脚本由它自己的 clap 定义生成，支持 bash / fish / zsh / powershell，
+`linkr completion <shell>` 与 `linkr --print-completion <shell>` 打印同一份脚本：
+
+```sh
+source <(linkr completion bash)
+linkr completion zsh > "${fpath[1]}/_linkr"
+linkr completion fish > ~/.config/fish/completions/linkr.fish
 ```
 
 补全选项名、`--enter` 与 `--print-completion` 的取值，以及 `--log-file`、`--wifi-key-file` 的路径。

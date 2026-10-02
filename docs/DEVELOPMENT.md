@@ -33,6 +33,7 @@ repository owns the accessory firmware and reference clients.
 - [Test Options](#test-options)
 - [BLE Protocol](#ble-protocol)
 - [BLE Terminal](#ble-terminal)
+  - [Rust terminal (linkr)](#rust-terminal-linkr)
   - [C Terminal for Linux or Linkr Buildroot](#c-terminal-for-linux-or-linkr-buildroot)
   - [Shell completion](#shell-completion)
 - [Web Bluetooth Terminal](#web-bluetooth-terminal)
@@ -580,6 +581,43 @@ python3 -m pip install bleak
   terminal with the escape key (default `Ctrl-]`, and the hint follows
   `--escape`) exits with `0`.
 
+### Rust terminal (linkr)
+
+`tools/linkr-cli` is the cross-platform `linkr` binary: the same session,
+protocol, flags and exit codes as the Python client, plus a full-screen TUI
+and the assistant. It builds on Linux, Windows and macOS, on x86_64 and arm64,
+and needs nothing but a Rust toolchain:
+
+```sh
+tools/build_terminal.sh                       # fmt + clippy + tests + release build
+dist/linkr-terminal-linux-aarch64/linkr --tui
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_terminal.ps1 -Bundle
+.\dist\linkr-bee-terminal.ps1 --tui
+```
+
+The second command also produces `dist\linkr-bee-terminal.ps1`, the
+self-extracting Windows bundle: a single script that carries `linkr.exe` as
+base64, unpacks it once into `%LOCALAPPDATA%\LinkrBee\bin` after checking the
+embedded SHA-256, and forwards the arguments, the console and the exit code.
+Delete that folder to force a fresh unpack. `python3
+tools/build_terminal_bundle.py --exe linkr.exe` regenerates it from any
+executable, and `tests/test_terminal_bundle.py` covers the generator.
+
+The TUI keeps the four web surfaces behind `F2`–`F5` (terminal, diagnostics,
+network, assistant), with `F1` for help, `Ctrl+P` for the command palette,
+`Ctrl+L` to clear the terminal, `Ctrl+Q` to quit, and
+`Ctrl+Shift+R` / `+C` / `+A` to latch Shift / Ctrl / Alt in place of the web
+key bar. `--tui` (or `linkr tui`) hands a fresh session to it, `--yes` lets the
+assistant approve its own commands.
+
+CI job `terminal` in `.github/workflows/build.yml` builds the five targets
+(linux x86_64 and arm64, windows x86_64, macOS arm64 and x86_64), runs the test
+suite and the lints, and uploads the binaries and the bundle as artifacts.
+The full reference is `tools/linkr-cli/README.md`.
+
 ### C terminal for Linux or Linkr Buildroot
 
 A Linux-only reference implementation written in C is provided in
@@ -767,8 +805,9 @@ Useful options:
 
 ### Shell completion
 
-Both clients generate bash, fish and zsh completions. The scripts are produced
-from each client's own option definitions, so a new option cannot be missed:
+The Python and C clients generate bash, fish and zsh completions. The scripts
+are produced from each client's own option definitions, so a new option cannot
+be missed:
 
 ```sh
 # bash, current session only
@@ -787,6 +826,16 @@ tools/linkr_ble_terminal.py --print-completion fish > \
 
 # the C client works the same way
 source <(./linkr_ble_terminal_c --print-completion zsh)
+```
+
+The Rust terminal produces its scripts from its own clap definitions, for
+bash, fish, zsh and powershell; `linkr completion <shell>` and
+`linkr --print-completion <shell>` print the same script:
+
+```sh
+source <(linkr completion bash)
+linkr completion zsh > "${fpath[1]}/_linkr"
+linkr completion fish > ~/.config/fish/completions/linkr.fish
 ```
 
 They complete option names, the values of `--enter` and `--print-completion`,
