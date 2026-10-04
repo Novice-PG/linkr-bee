@@ -426,3 +426,90 @@ jobs:
           path: app/dist/
           if-no-files-found: error
           retention-days: 30
+
+  # E3-A: a `v*` tag publishes everything this run just built as a GitHub
+  # Release. Artifacts alone never worked as a download link: they live on the
+  # run, expire after 30 days, and never appear on the Releases page — so the
+  # tutorial had nowhere stable to point at.
+  #
+  # Every terminal archive unpacks to `linkr-terminal-<slug>/`, the same folder
+  # `tools/build_terminal.sh` produces locally, so the check is identical
+  # whichever way the file was obtained:
+  #
+  #     tar xzf linkr-terminal-linux-aarch64.tar.gz
+  #     cd linkr-terminal-linux-aarch64 && sha256sum -c SHA256SUMS
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host, terminal, firmware]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # the only job that creates the Release
+    steps:
+      - name: Download every artifact of this run
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: linkr-bee-*
+          merge-multiple: false
+
+      - name: Stage the release files
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          # One archive per terminal platform. Windows gets a .zip: Explorer
+          # opens it natively (a tar.gz would need 7-Zip), and the zip is the
+          # path that does not trip antivirus — the self-extracting ps1 is read
+          # as a dropper (BACKLOG I1), so it ships as a secondary download.
+          for dir in artifacts/linkr-bee-terminal-*/; do
+            [ -d "${dir}" ] || continue
+            base="$(basename "${dir}")"
+            [ "${base}" = "linkr-bee-terminal-bundle" ] && continue
+            slug="${base#linkr-bee-terminal-}"
+            mkdir -p "release/linkr-terminal-${slug}"
+            cp -a "${dir}." "release/linkr-terminal-${slug}/"
+            case "${slug}" in
+              *windows*)
+                python3 -c "import sys,zipfile,pathlib; s=sys.argv[1]; r=pathlib.Path('release')/f'linkr-terminal-{s}'; z=zipfile.ZipFile(pathlib.Path('release')/f'linkr-terminal-{s}.zip','w',zipfile.ZIP_DEFLATED,compresslevel=9); [z.write(p,f'linkr-terminal-{s}/'+str(p.relative_to(r))) for p in sorted(r.rglob('*')) if p.is_file()]; z.close()" "${slug}"
+                ;;
+              *)
+                tar -C release -czf "release/linkr-terminal-${slug}.tar.gz" "linkr-terminal-${slug}"
+                ;;
+            esac
+            rm -rf "release/linkr-terminal-${slug}"
+          done
+
+          # The self-extracting Windows bundle verifies its own payload, so it
+          # ships as the single file it is.
+          if [ -f artifacts/linkr-bee-terminal-bundle/linkr-bee-terminal.ps1 ]; then
+            cp artifacts/linkr-bee-terminal-bundle/linkr-bee-terminal.ps1 release/
+          fi
+
+          # Firmware: one archive per board, flashing notes and script inside.
+          for dir in artifacts/linkr-bee-*/; do
+            [ -d "${dir}" ] || continue
+            base="$(basename "${dir}")"
+            case "${base}" in linkr-bee-terminal-*) continue ;; esac
+            tar -C artifacts -czf "release/${base}.tar.gz" "${base}"
+          done
+
+          # One checksum file covering the whole release, including the
+          # per-archive SHA256SUMS each directory already carries.
+          (cd release && find . -type f ! -path './SHA256SUMS' -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          cat release/SHA256SUMS
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Linkr Bee ${GITHUB_REF_NAME}" \
+            --generate-notes
+          find release -type f -print0 \
+            | xargs -0 -n 20 gh release upload "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" --clobber

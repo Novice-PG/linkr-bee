@@ -88,6 +88,11 @@ binary="$target_dir/$profile/linkr"
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*) binary="$target_dir/$profile/linkr.exe" ;;
 esac
+# A windows-* target always emits linkr.exe, also when it is cross-built from
+# Unix, where the case above kept looking for the ELF name.
+if [ ! -f "$binary" ] && [ -f "$binary.exe" ]; then
+    binary="$binary.exe"
+fi
 [ -f "$binary" ] || {
     echo "build_terminal.sh: build finished without $binary" >&2
     exit 1
