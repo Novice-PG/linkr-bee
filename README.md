@@ -171,6 +171,8 @@ network. Use LAN mode on a network you trust.
 
 ## Documentation
 
+- [Terminal tutorial](docs/TUTORIAL.md) · [终端教程](docs/TUTORIAL.zh-CN.md):
+  install, first session, keys, palette, views, assistant, troubleshooting
 - [Development guide](docs/DEVELOPMENT.md): build, flash, packaging, Kconfig, protocol
 - [Hardware requirements](docs/HARDWARE.md): pinout, electrical, production notes
 - [Bluetooth pairing](docs/BLE_PAIRING.md): authorization and recovery (Chinese)
