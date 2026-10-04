@@ -7,6 +7,7 @@ If you just want to use the accessory, start with the project README instead:
 | Document | Audience | Contents |
 | --- | --- | --- |
 | [Project README](../README.md) · [中文](../README.zh-CN.md) | Users | What Linkr Bee is for, what it does, setup, everyday use, and troubleshooting |
+| [Terminal tutorial](TUTORIAL.md) · [终端教程](TUTORIAL.zh-CN.md) | Users of the `linkr` terminal | Install, first session, every key, the palette, the four views, the assistant, settings on disk, and troubleshooting |
 | [Development guide](DEVELOPMENT.md) | Firmware and client developers | Build, flash, UART integration, test modes, terminal tools, validation status, and Kconfig |
 | [开发指南](DEVELOPMENT.zh-CN.md) | 固件与客户端开发者 | 构建、刷写、UART 集成、测试模式、终端工具、验证状态与 Kconfig |
 | [Rust terminal (linkr)](../tools/linkr-cli/README.md) | Terminal developers | Build and packaging (Windows bundle), TUI keys, exit codes, tests, and module layout |

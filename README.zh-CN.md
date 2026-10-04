@@ -148,6 +148,8 @@ Anthropic 或 Gemini，对话按板子存在本机，刷新页面接着上次继
 
 ## 文档
 
+- [终端教程](docs/TUTORIAL.zh-CN.md) · [English](docs/TUTORIAL.md)：
+  安装、首次会话、键位、命令面板、四个视图、助手与故障排查
 - [开发指南](docs/DEVELOPMENT.zh-CN.md)：构建、刷写、打包、Kconfig、协议
 - [硬件需求](docs/HARDWARE.md)：引脚、电气要求、量产注意事项
 - [蓝牙配对与恢复](docs/BLE_PAIRING.md)：授权、绑定与恢复
