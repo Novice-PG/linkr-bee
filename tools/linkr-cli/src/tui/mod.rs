@@ -14,6 +14,8 @@ pub mod assistant_view;
 pub mod connect;
 pub mod diagnostics_view;
 pub mod dialogs;
+pub mod drawsync;
+pub mod i18n;
 pub mod keys;
 pub mod layout;
 pub mod network_view;
@@ -36,10 +38,12 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use crate::event::{ConnectionState, CoreEvent, NoticeLevel};
+use crate::lan_token_store;
 use crate::session::{CoreBus, SessionHandle};
 use crate::watch::{SerialWatch, WatchOptions};
 
 use self::dialogs::Dialog;
+use self::i18n::{strings, t, tr};
 use self::keys::{encode_key, translate_enter, StickyMods};
 use self::palette::PaletteState;
 use self::sidebar::SidebarState;
@@ -54,12 +58,87 @@ pub const DEFAULT_BLE_NAME: &str = "Linkr BLE UART";
 /// spin, so the status clock and the toasts stay live without burning CPU.
 const TICK: Duration = Duration::from_millis(16);
 
-type Ui = Terminal<CrosstermBackend<std::io::Stdout>>;
+/// Consecutive terminal I/O failures the frame loop rides out before it gives
+/// up on the console. One bad read used to tear the whole session down — which
+/// is how dragging the window to its minimum size killed the Windows TUI (K2):
+/// conhost errors while it reflows, and the next poll usually succeeds again.
+const IO_FAILURE_LIMIT: u32 = 5;
+
+/// Counts consecutive console failures so a burst is reported once and retried
+/// instead of fatal. `failed` answers with the failure's position in the burst
+/// (`Some(1)` = report me) or `None` once the limit is passed.
+#[derive(Debug, Default)]
+struct IoBudget {
+    consecutive: u32,
+}
+
+impl IoBudget {
+    fn failed(&mut self) -> Option<u32> {
+        self.consecutive += 1;
+        (self.consecutive <= IO_FAILURE_LIMIT).then_some(self.consecutive)
+    }
+
+    fn ok(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
+/// Record a console failure. Returns `true` when the session must stop.
+///
+/// The first failure of a burst surfaces as an error notice (so a genuinely
+/// broken console is still visible), the rest are absorbed, and the loop only
+/// gives up when the console keeps failing — plus a short pause so a wedged
+/// console cannot turn the frame loop into a busy spin.
+fn io_failure(app: &mut App, budget: &mut IoBudget, text: String) -> bool {
+    let keep_going = match budget.failed() {
+        None => return true,
+        Some(1) => {
+            app.notices.push(NoticeLevel::Error, text);
+            false
+        }
+        Some(_) => false,
+    };
+    std::thread::sleep(Duration::from_millis(40));
+    keep_going
+}
+
+// Notices the event loop raises. The `linkr: …` lines further down are *not*
+// here: they are plain stderr, written before the alternate screen is
+// entered or after it is left, and the CLI half of the binary stays English.
+strings! {
+    MOD_CONNECTED_SHORT => "connected", "已连接";
+    MOD_NOT_CONNECTED => "not connected", "未连接";
+    MOD_DROPPED => "{} session events dropped.", "丢失了 {} 条会话事件。";
+    MOD_INPUT_FAILED => "Terminal input failed: {}", "终端输入失败：{}";
+    MOD_DRAW_FAILED => "Draw failed: {}", "画面绘制失败：{}";
+    MOD_DISCONNECTED => "Disconnected: {}", "连接已断开：{}";
+    MOD_CONN_FAILED => "Connection failed: {}", "连接失败：{}";
+    MOD_CLEARED => "Terminal cleared.", "终端已清屏。";
+    MOD_NEED_BLE_DIAG => "Connect over BLE to read diagnostics.", "请通过 BLE 连接后再读取诊断。";
+    MOD_CJK_WIDE => "CJK probe: glyphs take two columns here.",
+        "CJK 探测：本终端把宽字形按 2 列绘制。";
+    MOD_CJK_NARROW => "CJK probe: this console counts CJK as one column — backing up the cells it skips.",
+        "CJK 探测：本控制台把中文按 1 列计宽，已补写被跳过的格子。";
+    MOD_CJK_ASSUMED => "CJK probe: no answer, drawing as if glyphs take two columns.",
+        "CJK 探测：未取得回答，按 2 列绘制。";
+}
+
+type Ui = Terminal<drawsync::SyncBackend<CrosstermBackend<std::io::Stdout>>>;
 
 /// Render context passed from the session after connect.
 pub struct TuiContext {
     pub session: SessionHandle,
     pub bus: CoreBus,
+    /// Connect the CLI deferred (A5): the target to dial once the screen is
+    /// up. `None` when the process already holds a live session, so `--tui`
+    /// with queries/loopback keeps connecting first.
+    pub pending: Option<PendingConnect>,
+}
+
+/// The deferred connect handed over by `cli::drive`.
+pub struct PendingConnect {
+    pub opts: crate::session::SessionOptions,
+    pub setup: crate::session::SessionSetup,
 }
 
 /// Run the TUI until the user quits. Returns the process exit code.
@@ -103,15 +182,52 @@ fn ui_thread(ctx: TuiContext) -> i32 {
 
 /// Take the terminal over (raw mode + alternate screen) and restore it on
 /// every exit path, including unwinding.
-struct ScreenGuard;
+///
+/// It also opts into the kitty keyboard protocol. Without it the legacy
+/// encoding cannot tell `Ctrl+Enter` from `Enter` — both are the single byte
+/// `0x0d` — so "Ctrl+Enter sends" was undecodable no matter what the code
+/// looked for. Terminals that do not implement the protocol (GNOME Terminal /
+/// VTE, tracked upstream as vte#2601) are required to ignore `CSI > 1 u`, so
+/// they lose nothing here and use the `Alt+Enter` fallback instead. The
+/// support *query* is deliberately not sent: awaiting its reply stalls startup
+/// for 2s on every terminal that never answers it.
+struct ScreenGuard {
+    /// We pushed `CSI > 1 u`, so we owe the terminal a matching `CSI < 1 u`.
+    keyboard_enhanced: bool,
+}
+
+impl ScreenGuard {
+    fn new() -> Self {
+        let keyboard_enhanced = crossterm::execute!(
+            stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            )
+        )
+        .is_ok();
+        Self { keyboard_enhanced }
+    }
+}
 
 impl Drop for ScreenGuard {
     fn drop(&mut self) {
         let mut out = stdout();
+        if self.keyboard_enhanced {
+            let _ = crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+        }
         let _ = crossterm::execute!(out, crossterm::event::DisableBracketedPaste);
         let _ = crossterm::execute!(out, LeaveAlternateScreen);
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(out, crossterm::cursor::Show);
+    }
+}
+
+/// Hand stderr-backed diagnostics back to the console once the TUI is gone.
+struct DiagnosticSinkGuard;
+
+impl Drop for DiagnosticSinkGuard {
+    fn drop(&mut self) {
+        crate::cli::set_diagnostic_sink(None);
     }
 }
 
@@ -120,6 +236,13 @@ fn ui_session(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> i32 {
         eprintln!("linkr: the TUI needs an interactive terminal");
         return 1;
     }
+    // G3: crossterm takes one 1024-byte read per wake-up and returns with the
+    // first parseable event, so a longer paste left the tail in the tty queue
+    // with no edge for mio's epoll to report — it only moved on the next
+    // keypress. The pump makes every read drain the queue. Declared before
+    // `raw` so the real terminal is restored last, once crossterm is done
+    // with the pty in front of it.
+    let _pump = crate::term::InputPump::install();
     let raw = match crate::term::RawModeGuard::enable(true) {
         Ok(raw) => raw,
         Err(err) => {
@@ -134,9 +257,22 @@ fn ui_session(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> i32 {
         drop(raw);
         return 1;
     }
-    let _screen = ScreenGuard;
+    let _screen = ScreenGuard::new();
+    // A click must not be able to freeze us: conhost's Quick Edit mode stops
+    // painting the window and eats the keystrokes while a selection is live
+    // (F2). Restored on drop, once the TUI is gone.
+    let _quick_edit = crate::term::QuickEditGuard::disable();
 
-    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+    // Which way this console measures a CJK glyph decides whether a frame has
+    // to paint the shadow column `Buffer::diff` skips (see `drawsync`).
+    // `Terminal::clear()` below wipes the probe's scratch row with everything
+    // else the screen had.
+    let probe = drawsync::probe_cjk_width();
+
+    let mut terminal = match Terminal::new(drawsync::SyncBackend::new(
+        CrosstermBackend::new(stdout()),
+        probe.width(),
+    )) {
         Ok(terminal) => terminal,
         Err(err) => {
             eprintln!("linkr: cannot attach to the terminal: {err}");
@@ -145,26 +281,27 @@ fn ui_session(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> i32 {
     };
     let _ = terminal.clear();
 
-    let code = event_loop(&mut terminal, rt, ctx);
+    let code = event_loop(&mut terminal, rt, ctx, probe);
     let _ = terminal.show_cursor();
     code
 }
 
 // --- state -------------------------------------------------------------------
 
-fn build_app(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> App {
+fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: CoreBus) -> App {
     let settings = settings::load();
     let lan_host = settings.last_lan_host.clone();
-    let info = ctx.session.info();
+    let info = session.info();
     let state = if info.connected {
         ConnectionState::Connected
     } else {
         ConnectionState::Disconnected
     };
+    let lang = settings.lang;
     let detail = if info.label.is_empty() {
         match state {
-            ConnectionState::Connected => "connected".to_string(),
-            _ => "not connected".to_string(),
+            ConnectionState::Connected => t(MOD_CONNECTED_SHORT, lang).to_string(),
+            _ => t(MOD_NOT_CONNECTED, lang).to_string(),
         }
     } else {
         info.label.clone()
@@ -174,9 +311,9 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> App {
         View::Assistant => Focus::Assistant,
         _ => Focus::Center,
     };
-    App {
-        session: ctx.session,
-        bus: ctx.bus,
+    let mut app = App {
+        session,
+        bus,
         rt,
         settings,
         state,
@@ -200,19 +337,78 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> App {
         quit: false,
         started: Instant::now(),
         force_redraw: true,
+        settle_repaint_at: None,
         pending_connect: None,
+        socket_query: None,
+        lan_device: None,
         center_height: 24,
+        center_width: 80,
+        screen_height: 24,
         center_scroll: 0,
+    };
+    // web `restore()`: the token field follows the saved host, so a session
+    // that starts on the bridge dials with what a BLE session captured.
+    let store = lan_token_store::TokenStore::load();
+    sidebar::fill_token_from_store(&mut app, &store);
+    if app.state == ConnectionState::Connected {
+        // The CLI can hand the TUI a session that is already up; nothing else
+        // would ask for the token then.
+        start_lan_token_capture(&mut app);
     }
+    app
 }
 
 // --- event loop --------------------------------------------------------------
 
-fn event_loop(terminal: &mut Ui, rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> i32 {
-    let mut app = build_app(rt, ctx);
+/// The probe verdict worth telling the user about, and the notice that says it.
+///
+/// `None` on a console that answered nothing and is not Windows: POSIX
+/// terminals already draw two columns, so "no news" is news only where it can
+/// mean a broken CJK rendering.
+fn cjk_notice(probe: drawsync::Probe) -> Option<crate::tui::i18n::Entry> {
+    use drawsync::{CjkWidth, Probe};
+    match probe {
+        Probe::Measured(CjkWidth::Wide) => Some(MOD_CJK_WIDE),
+        Probe::Measured(CjkWidth::Narrow) => Some(MOD_CJK_NARROW),
+        Probe::Assumed if cfg!(windows) => Some(MOD_CJK_ASSUMED),
+        Probe::Assumed => None,
+    }
+}
+
+fn event_loop(
+    terminal: &mut Ui,
+    rt: Arc<tokio::runtime::Runtime>,
+    ctx: TuiContext,
+    probe: drawsync::Probe,
+) -> i32 {
+    let TuiContext {
+        session,
+        bus,
+        pending,
+    } = ctx;
+    let mut app = build_app(rt, session, bus);
+    if let Some(entry) = cjk_notice(probe) {
+        app.toast(NoticeLevel::Info, t(entry, app.lang()).to_string());
+    }
     app.terminal.set_autoscroll(app.settings.autoscroll);
     let mut core = app.bus.subscribe();
     let mut sticky = StickyMods::default();
+    let mut io_budget = IoBudget::default();
+
+    // Everything the transport and the session print (`linkr: connected: …`,
+    // the multi-match warning, ignored-frame notices) has to reach the notice
+    // log: ratatui diffs its own buffer and would never repaint the cells a
+    // stray `eprintln!` overwrote, leaving text stuck on the interface.
+    let (diagnostic_tx, diagnostic_rx) = std::sync::mpsc::channel();
+    crate::cli::set_diagnostic_sink(Some(diagnostic_tx));
+    let _sink_guard = DiagnosticSinkGuard;
+
+    // 0. The CLI's deferred connect: start it only now, so the radio work
+    //    never delays (and never prevents) the interface coming up, and its
+    //    `linkr: …` chatter lands in the notice log above.
+    if let Some(pending) = pending {
+        connect::begin_cli(&mut app, pending.opts, pending.setup);
+    }
 
     while !app.quit {
         // 1. Session bus: UART output, connection lifecycle, notices.
@@ -221,13 +417,17 @@ fn event_loop(terminal: &mut Ui, rt: Arc<tokio::runtime::Runtime>, ctx: TuiConte
                 Ok(event) => on_core_event(&mut app, event),
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(dropped)) => {
-                    app.notices.push(
-                        NoticeLevel::Warn,
-                        format!("{dropped} session events dropped."),
-                    );
+                    let lang = app.lang();
+                    app.notices
+                        .push(NoticeLevel::Warn, tr!(t(MOD_DROPPED, lang), dropped));
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
             }
+        }
+
+        // 1b. Transport/session diagnostics raised while the screen was ours.
+        while let Ok((level, text)) = diagnostic_rx.try_recv() {
+            app.notices.push(level, text);
         }
 
         // 2. Non-blocking work parked on oneshots / broadcast receivers.
@@ -239,7 +439,8 @@ fn event_loop(terminal: &mut Ui, rt: Arc<tokio::runtime::Runtime>, ctx: TuiConte
         }
         dialogs::poll(&mut app);
         network_view::poll(&mut app);
-        app.diagnostics.poll();
+        app.diagnostics.poll(app.lang());
+        poll_lan_token(&mut app);
         assistant_view::poll(&mut app);
         app.notices.tick();
         app.refresh_info();
@@ -250,22 +451,33 @@ fn event_loop(terminal: &mut Ui, rt: Arc<tokio::runtime::Runtime>, ctx: TuiConte
         match event::poll(TICK) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                    io_budget.ok();
                     handle_key(&mut app, &mut sticky, key)
                 }
-                Ok(Event::Resize(_, _)) => app.force_redraw = true,
-                Ok(Event::Paste(text)) => paste(&mut app, &text),
-                Ok(_) => {}
+                Ok(Event::Resize(_, _)) => {
+                    io_budget.ok();
+                    app.schedule_resize_repaint(Instant::now());
+                }
+                Ok(Event::Paste(text)) => {
+                    io_budget.ok();
+                    paste(&mut app, &text);
+                }
+                Ok(_) => io_budget.ok(),
                 Err(err) => {
-                    app.notices
-                        .push(NoticeLevel::Error, format!("Terminal input failed: {err}"));
-                    break;
+                    let lang = app.lang();
+                    let text = tr!(t(MOD_INPUT_FAILED, lang), err);
+                    if io_failure(&mut app, &mut io_budget, text) {
+                        break;
+                    }
                 }
             },
-            Ok(false) => {}
+            Ok(false) => io_budget.ok(),
             Err(err) => {
-                app.notices
-                    .push(NoticeLevel::Error, format!("Terminal input failed: {err}"));
-                break;
+                let lang = app.lang();
+                let text = tr!(t(MOD_INPUT_FAILED, lang), err);
+                if io_failure(&mut app, &mut io_budget, text) {
+                    break;
+                }
             }
         }
 
@@ -277,13 +489,27 @@ fn event_loop(terminal: &mut Ui, rt: Arc<tokio::runtime::Runtime>, ctx: TuiConte
         };
         sync_geometry(&mut app, area);
 
-        // 5. Draw.
-        if let Err(err) = terminal.draw(|frame| layout::draw(frame, &app)) {
-            app.notices
-                .push(NoticeLevel::Error, format!("Draw failed: {err}"));
-            break;
+        // 5. Draw. A forced repaint drops ratatui's model of the screen first:
+        //    the console may have repainted itself behind our back (a Windows
+        //    conhost reflows its buffer when the window changes size), and the
+        //    cell diff would otherwise keep skipping every cell it believes is
+        //    already correct — stale frames then stay up forever (F2). The
+        //    settled repaint scheduled by the resize event lands here as well:
+        //    by then the console has stopped moving, so this frame sticks (K1).
+        app.poll_settle_repaint(Instant::now());
+        if app.take_force_redraw() {
+            let _ = terminal.clear();
         }
-        app.force_redraw = false;
+        match terminal.draw(|frame| layout::draw(frame, &app)) {
+            Ok(_) => io_budget.ok(),
+            Err(err) => {
+                let lang = app.lang();
+                let text = tr!(t(MOD_DRAW_FAILED, lang), err);
+                if io_failure(&mut app, &mut io_budget, text) {
+                    break;
+                }
+            }
+        }
     }
 
     // Teardown: stop the assistant, hang up politely, let the disconnect
@@ -313,22 +539,24 @@ fn on_core_event(app: &mut App, event: CoreEvent) {
             app.info = app.session.info();
             app.state = state;
             app.detail = detail.clone();
+            let lang = app.lang();
             match state {
                 ConnectionState::Disconnected => {
                     app.notices
-                        .push(NoticeLevel::Info, format!("Disconnected: {detail}"));
+                        .push(NoticeLevel::Info, tr!(t(MOD_DISCONNECTED, lang), detail));
                 }
                 ConnectionState::Failed => {
                     app.notices
-                        .push(NoticeLevel::Error, format!("Connection failed: {detail}"));
+                        .push(NoticeLevel::Error, tr!(t(MOD_CONN_FAILED, lang), detail));
                 }
                 _ => {}
             }
         }
         CoreEvent::Notice { level, text } => app.notices.push(level, text),
-        // Management traffic has its own owners (dialogs, diagnostics, the
-        // network form); the assistant reads it from the bus on its own.
-        CoreEvent::MgmtMessage { .. } => {}
+        // Scan results arrive as live events while the request waits for
+        // `@scan done` (web `handleWifiScanLine`, CLI `pump_until`); the rest
+        // of the management traffic keeps its own owner.
+        CoreEvent::MgmtMessage { lines, .. } => network_view::on_mgmt_event(app, &lines),
     }
 }
 
@@ -355,15 +583,114 @@ fn prefill_lan_host(app: &mut App) {
         return;
     };
     if diagnostics_view::looks_like_ipv4(&ip) {
-        app.sidebar.lan_host.set(ip);
+        app.sidebar.lan_host.set(ip.clone());
+        // The alias is the second half of the capture: the web has the token
+        // and the IP in hand for one `lanTokens.capture(deviceId, token, ip)`,
+        // ours arrive on their own schedules (`@s?` may still be in flight,
+        // in which case the reply above writes the alias instead).
+        let token = app.sidebar.lan_token.text.clone();
+        if let (Some(device), false) = (app.lan_device.clone(), token.is_empty()) {
+            let mut store = lan_token_store::TokenStore::load();
+            let _ = store.capture(&device, &token, &ip);
+            let _ = store.save();
+        }
+    }
+}
+
+/// `requestDeviceState()` when a BLE session comes up: diagnostics — they
+/// carry the IP the store's host alias needs — plus `@s?`, the one line the
+/// bridge reports its LAN access token on (web comment: "*capturing it during
+/// the BLE session means the token field is already filled when the user
+/// switches to LAN mode*").
+///
+/// Management commands travel over BLE only, and `@s?` is asked only when the
+/// handshake advertised the bridge (web
+/// `hasManagementCapability(MGMT_CAP_WEBSOCKET)`).
+fn start_lan_token_capture(app: &mut App) {
+    if !app.ble_connected() {
+        return;
+    }
+    app.lan_device = app.info.device_id.clone();
+    // web: `elements.wsTokenInput.value = lanTokens.selectDevice(deviceId)` —
+    // a token belongs to the device that issued it, never to the last one.
+    if let Some(device) = app.lan_device.clone() {
+        let store = lan_token_store::TokenStore::load();
+        app.sidebar
+            .lan_token
+            .set(store.select_device(&device).unwrap_or_default());
+    }
+    app.diagnostics.refresh(&app.session);
+    if let Some(command) = lan_token_store::socket_query_command(app.info.capabilities) {
+        app.socket_query = Some(app.session.request_mgmt(command.to_string(), None));
+    }
+}
+
+/// Drain the `@s?` reply without blocking a frame (web
+/// `handleSocketStatusLine`): the token goes to the field and to the store —
+/// it is never drawn, never logged, and the field only takes it when the
+/// store handed that value out itself.
+fn poll_lan_token(app: &mut App) {
+    let Some(rx) = &mut app.socket_query else {
+        return;
+    };
+    let outcome = match rx.try_recv() {
+        Ok(outcome) => outcome,
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            app.socket_query = None;
+            return;
+        }
+    };
+    app.socket_query = None;
+    let reply = match outcome {
+        Ok(reply) => reply,
+        Err(error) => {
+            // A device that refuses the question says why; the 5 s timeout
+            // arrives empty and there is nothing worth telling.
+            if !error.is_empty() {
+                app.toast(NoticeLevel::Warn, error);
+            }
+            return;
+        }
+    };
+    // The web runs its parser over every line it receives and lets each match
+    // overwrite the field, so the last status line wins here too — the bridge
+    // really does answer with `token=none` before the line that carries the
+    // token.
+    let lines: Vec<&str> = reply
+        .lines
+        .iter()
+        .chain(reply.events.iter())
+        .map(String::as_str)
+        .collect();
+    let Some(token) = lan_token_store::token_from_reply(lines) else {
+        return;
+    };
+    let Some(device) = app.lan_device.clone() else {
+        return;
+    };
+    let host = app.sidebar.lan_host.text.clone();
+    let mut store = lan_token_store::TokenStore::load();
+    let previous = store.select_device(&device).map(str::to_string);
+    let replace =
+        lan_token_store::may_replace_field(app.sidebar.lan_token.as_str(), previous.as_deref());
+    if store.capture(&device, token, &host).is_some() {
+        // The web store writes inside `capture()`; ours takes the caller's
+        // word for which file it belongs to.
+        let _ = store.save();
+        if replace {
+            app.sidebar.lan_token.set(token);
+        }
     }
 }
 
 /// Keep the grid, the pane and the session geometry in sync.
 fn sync_geometry(app: &mut App, area: Rect) {
     let (_top, body, _bottom) = layout::zones(area);
+    app.screen_height = area.height;
     let (_sidebar, center) = layout::columns(body, area.width >= 60);
     app.center_height = center.height;
+    app.center_width = center.width;
     let (cols, rows) =
         terminal_view::grid_dims(center.width, center.height, app.settings.font_size);
     if app.terminal.sync_size(cols, rows) {
@@ -484,16 +811,24 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
             return;
         }
         Global::Palette => {
-            app.palette = Some(PaletteState::default());
+            app.palette = Some(PaletteState::new(app.lang()));
             return;
         }
         Global::ClearTerminal => {
             app.terminal.clear();
-            app.toast(NoticeLevel::Info, "Terminal cleared.");
+            // Clearing the pane's scrollback is only half the job. conhost can
+            // repaint its window behind ratatui's back — a click drops the
+            // console into Quick Edit (`选择`) mode, which freezes painting
+            // while we keep drawing — and the cell diff then skips every cell
+            // it believes is already correct, so those stale rows stay on
+            // screen forever. Ask the event loop for a real `terminal.clear()`
+            // as well, and Ctrl+L recovers the *screen*, not just the pane.
+            app.force_redraw = true;
+            app.toast(NoticeLevel::Info, t(MOD_CLEARED, app.lang()).to_string());
             return;
         }
         Global::Help => {
-            app.dialog = Some(Dialog::Help);
+            app.dialog = Some(Dialog::Help(0));
             return;
         }
         Global::FocusSidebar => {
@@ -560,6 +895,10 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
         Focus::Center => {}
     }
 
+    if handle_center_scroll(app, key) {
+        return;
+    }
+
     match app.view {
         View::Network => {
             network_view::handle_key(app, key);
@@ -618,7 +957,7 @@ fn handle_scroll_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     true
 }
 
-/// Diagnostics keys: `r` re-reads `@i?`, PgUp/PgDn move the grid.
+/// Diagnostics keys: `r` re-reads `@i?`.
 fn handle_diagnostics_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -628,20 +967,40 @@ fn handle_diagnostics_key(app: &mut App, key: crossterm::event::KeyEvent) -> boo
                 let session = app.session.clone();
                 app.diagnostics.refresh(&session);
             } else {
-                app.toast(NoticeLevel::Warn, "Connect over BLE to read diagnostics.");
+                app.toast(
+                    NoticeLevel::Warn,
+                    t(MOD_NEED_BLE_DIAG, app.lang()).to_string(),
+                );
             }
-            true
-        }
-        KeyCode::PageUp => {
-            app.center_scroll = app.center_scroll.saturating_add(5);
-            true
-        }
-        KeyCode::PageDown => {
-            app.center_scroll = app.center_scroll.saturating_sub(5);
             true
         }
         _ => false,
     }
+}
+
+/// PgUp/PgDn page the non-terminal center views (Diagnostics, Network). The
+/// offset counts lines skipped from the top, so it is clamped to the content:
+/// an unclamped value walked the pane blank, and the directions were the
+/// wrong way round before.
+fn handle_center_scroll(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    if app.focus != Focus::Center || !matches!(app.view, View::Diagnostics | View::Network) {
+        return false;
+    }
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    let step = (app.center_height / 2).max(1);
+    let limit = layout::center_scroll_limit(app);
+    let up = match key.code {
+        KeyCode::PageUp => true,
+        KeyCode::PageDown => false,
+        _ => return false,
+    };
+    app.center_scroll = layout::page_scroll(app.center_scroll, limit, step, up);
+    true
 }
 
 /// F3 / palette `diag.refresh`: switch and query (BLE-gated, §3.6 matrix).
@@ -652,16 +1011,91 @@ fn open_diagnostics(app: &mut App) {
         let session = app.session.clone();
         app.diagnostics.refresh(&session);
     } else {
-        app.toast(NoticeLevel::Warn, "Connect over BLE to read diagnostics.");
+        app.toast(
+            NoticeLevel::Warn,
+            t(MOD_NEED_BLE_DIAG, app.lang()).to_string(),
+        );
     }
 }
 
 // --- tests -------------------------------------------------------------------
 
+/// An [`App`] with no transport behind it: enough to render a pane and assert
+/// on what the user actually sees. Shared by the view tests so each of them
+/// can compare its rendered rows against its own key handling.
+#[cfg(test)]
+pub(crate) fn test_app() -> App {
+    App {
+        session: SessionHandle::test_detached(),
+        bus: CoreBus::new(),
+        rt: Arc::new(tokio::runtime::Runtime::new().expect("runtime")),
+        settings: self::settings::TuiSettings::default(),
+        state: ConnectionState::Connected,
+        detail: String::new(),
+        info: crate::session::SessionInfo::default(),
+        view: View::Terminal,
+        focus: Focus::Center,
+        sidebar: SidebarState::new(String::new(), String::new()),
+        terminal: TerminalPane::new(true),
+        diagnostics: self::diagnostics_view::DiagnosticsState::default(),
+        network: self::network_view::NetworkState::new(),
+        assistant: self::assistant_view::AssistantState::default(),
+        palette: None,
+        dialog: None,
+        notices: Notices::default(),
+        exec_mode: crate::agent::ExecMode::Auto,
+        broker: self::dialogs::TuiBroker::new(),
+        agent: None,
+        watch: SerialWatch::new(WatchOptions::default()),
+        watch_ok: true,
+        quit: false,
+        started: Instant::now(),
+        force_redraw: false,
+        settle_repaint_at: None,
+        pending_connect: None,
+        socket_query: None,
+        lan_device: None,
+        center_height: 24,
+        center_width: 80,
+        screen_height: 24,
+        center_scroll: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tui::settings::EnterMode;
+
+    #[test]
+    fn every_loop_notice_is_translated() {
+        super::i18n::assert_bilingual(ALL);
+        assert!(ALL.len() >= 9, "the event loop raises 9 notices");
+    }
+
+    #[test]
+    fn the_cjk_probe_verdict_reaches_the_notice_log() {
+        use drawsync::{CjkWidth, Probe};
+        assert_eq!(
+            cjk_notice(Probe::Measured(CjkWidth::Narrow)),
+            Some(MOD_CJK_NARROW),
+            "a console that counts CJK as one column has to say so"
+        );
+        assert_eq!(
+            cjk_notice(Probe::Measured(CjkWidth::Wide)),
+            Some(MOD_CJK_WIDE)
+        );
+        // On POSIX consoles "no answer" is the normal case, not news — only a
+        // Windows one can mean CJK is about to render wrong.
+        assert_eq!(
+            cjk_notice(Probe::Assumed),
+            if cfg!(windows) {
+                Some(MOD_CJK_ASSUMED)
+            } else {
+                None
+            }
+        );
+    }
 
     #[test]
     fn default_ble_name_is_the_python_cli_default() {
@@ -726,5 +1160,71 @@ mod tests {
         assert_eq!(global_key(KeyCode::Enter, KeyModifiers::NONE), Global::None);
         assert_eq!(global_key(KeyCode::Esc, KeyModifiers::NONE), Global::None);
         assert_eq!(global_key(KeyCode::F(12), KeyModifiers::NONE), Global::None);
+    }
+
+    /// K2: dragging the Windows console to its minimum size made conhost fail a
+    /// read once — and one failure used to end the session. A burst must be
+    /// reported once, ridden out, and only a console that keeps failing is
+    /// worth giving up on.
+    #[test]
+    fn only_the_first_failure_of_a_burst_is_reported() {
+        let mut app = crate::tui::test_app();
+        let mut budget = IoBudget::default();
+        assert!(!io_failure(&mut app, &mut budget, "first".into()));
+        assert!(!io_failure(&mut app, &mut budget, "second".into()));
+        assert_eq!(app.notices.log.len(), 1, "the burst surfaces once");
+        assert_eq!(app.notices.log[0].1, "first");
+    }
+
+    /// K2: the session ends only after [`IO_FAILURE_LIMIT`] failures in a row.
+    #[test]
+    fn the_loop_gives_up_only_when_the_console_keeps_failing() {
+        let mut app = crate::tui::test_app();
+        let mut budget = IoBudget::default();
+        for round in 0..IO_FAILURE_LIMIT {
+            assert!(
+                !io_failure(&mut app, &mut budget, format!("hit {round}")),
+                "failure {round} of {IO_FAILURE_LIMIT} must be tolerated"
+            );
+        }
+        assert!(
+            io_failure(&mut app, &mut budget, "fatal".into()),
+            "a console that never recovers ends the session"
+        );
+    }
+
+    /// K2: one good read ends the burst, so a rare glitch minutes apart is
+    /// never counted towards the limit.
+    #[test]
+    fn one_good_read_clears_the_failure_burst() {
+        let mut budget = IoBudget::default();
+        assert_eq!(budget.failed(), Some(1));
+        budget.ok();
+        assert_eq!(budget.failed(), Some(1), "the burst restarts from one");
+    }
+
+    /// F2: Ctrl+L has to repaint the **screen**, not only empty the pane's
+    /// scrollback. conhost can repaint its own window behind ratatui's back
+    /// (a click drops the console into Quick Edit / `选择` mode, which freezes
+    /// painting while we keep drawing), and the cell diff then skips every
+    /// cell it believes is already correct — those stale rows would otherwise
+    /// stay up for the rest of the session.
+    #[test]
+    fn ctrl_l_clears_the_pane_and_arms_a_full_repaint() {
+        let mut app = crate::tui::test_app();
+        assert!(!app.force_redraw);
+
+        let mut sticky = StickyMods::default();
+        handle_key(
+            &mut app,
+            &mut sticky,
+            crossterm::event::KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.force_redraw, "Ctrl+L must ask for a full repaint");
+        assert!(
+            !app.notices.toasts.is_empty(),
+            "…and the clear must still be announced"
+        );
     }
 }

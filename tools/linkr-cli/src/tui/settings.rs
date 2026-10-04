@@ -9,12 +9,20 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::i18n::strings;
 use super::state::View;
 
 /// Default xterm font size of the web client (`linkr-font` default 13).
 pub const DEFAULT_FONT_SIZE: u8 = 13;
 pub const MIN_FONT_SIZE: u8 = 10;
 pub const MAX_FONT_SIZE: u8 = 28;
+
+// This file carries no interface text: `label()` answers with the `BLE` /
+// `LAN` and `Raw` / `CR` / `LF` / `CRLF` identifiers the parity suites
+// compare byte for byte, `TuiSettings` only persists itself, and the
+// settings dialog itself is rendered by `dialogs.rs` / `agent_settings.rs`.
+// The empty table below is the proof: there is nothing to translate here.
+strings! {}
 
 /// `linkr-enter` equivalent: how a line ending is encoded before sending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -113,10 +121,19 @@ pub struct TuiSettings {
     pub transport: TransportChoice,
     /// `linkr-ws-host`.
     pub last_lan_host: String,
+    /// The `--address` the CLI was started with, remembered so the sidebar's
+    /// Connect dials the same peripheral again instead of the first name
+    /// match (the web picks a device from a chooser; the TUI has no address
+    /// field of its own).
+    pub last_ble_address: String,
     /// `linkr-settings-page` equivalent for the TUI views.
     pub active_view: View,
     /// `linkr-autoscroll` equivalent (web default: pressed).
     pub autoscroll: bool,
+    /// `linkr-lang`. English by default so library behaviour (and the tests
+    /// that pin it) stay deterministic; a first run with no settings file
+    /// picks it up from the locale instead.
+    pub lang: super::i18n::Lang,
 }
 
 impl Default for TuiSettings {
@@ -127,8 +144,10 @@ impl Default for TuiSettings {
             local_echo: false,
             transport: TransportChoice::Ble,
             last_lan_host: String::new(),
+            last_ble_address: String::new(),
             active_view: View::Terminal,
             autoscroll: true,
+            lang: super::i18n::Lang::En,
         }
     }
 }
@@ -139,6 +158,7 @@ impl TuiSettings {
     pub fn normalized(mut self) -> Self {
         self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         self.last_lan_host = self.last_lan_host.trim().to_string();
+        self.last_ble_address = self.last_ble_address.trim().to_string();
         self
     }
 
@@ -168,7 +188,12 @@ pub fn settings_path() -> PathBuf {
 pub fn load() -> TuiSettings {
     match std::fs::read_to_string(settings_path()) {
         Ok(text) => TuiSettings::from_json(&text),
-        Err(_) => TuiSettings::default(),
+        // First run: follow the locale the way the web reads
+        // `navigator.language`; [`TuiSettings::default`] itself stays English.
+        Err(_) => TuiSettings {
+            lang: super::i18n::Lang::from_env(),
+            ..TuiSettings::default()
+        },
     }
 }
 
@@ -185,6 +210,7 @@ pub fn save(settings: &TuiSettings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::i18n::Lang;
 
     #[test]
     fn defaults_match_the_web_client() {
@@ -195,6 +221,7 @@ mod tests {
         assert_eq!(s.transport, TransportChoice::Ble);
         assert!(s.autoscroll);
         assert_eq!(s.active_view, View::Terminal);
+        assert_eq!(s.lang, Lang::En);
     }
 
     #[test]
@@ -205,8 +232,10 @@ mod tests {
             local_echo: true,
             transport: TransportChoice::Lan,
             last_lan_host: "192.168.1.50".to_string(),
+            last_ble_address: "EE:C7:42:34:48:CF".to_string(),
             active_view: View::Network,
             autoscroll: false,
+            lang: Lang::Zh,
         };
         let json = s.to_json();
         assert!(json.contains("\"font_size\": 17"));
@@ -221,6 +250,19 @@ mod tests {
         assert_eq!(s.transport, TransportChoice::Ble);
         assert_eq!(s.active_view, View::Terminal);
         assert!(s.autoscroll);
+        assert_eq!(s.lang, Lang::En, "an old file keeps English");
+    }
+
+    /// The persisted key stays `linkr-lang` with the web's own values.
+    #[test]
+    fn the_language_survives_a_restart() {
+        let json = TuiSettings {
+            lang: Lang::Zh,
+            ..TuiSettings::default()
+        }
+        .to_json();
+        assert!(json.contains("\"lang\": \"zh\""), "{json}");
+        assert_eq!(TuiSettings::from_json(&json).lang, Lang::Zh);
     }
 
     #[test]
@@ -277,5 +319,14 @@ mod tests {
             serde_json::to_string(&View::Diagnostics).unwrap(),
             "\"diagnostics\""
         );
+    }
+
+    /// The settings table is empty on purpose (see the note above the
+    /// `strings!` block): the `label()` texts are identifiers and the dialog
+    /// wording lives in `dialogs.rs` / `agent_settings.rs`.
+    #[test]
+    fn every_set_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.is_empty(), "settings.rs renders no interface text");
     }
 }

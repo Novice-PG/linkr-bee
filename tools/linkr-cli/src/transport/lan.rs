@@ -123,11 +123,81 @@ enum LanCommand {
     Disconnect,
 }
 
+/// Largest single WS frame handed to the bridge. Also the burst the rate
+/// limiter may spend at once, so it must stay under what the bridge queue can
+/// absorb while empty.
+const LAN_FRAME_MAX_BYTES: usize = 1024;
+/// Bytes per second handed over: 8 KiB/s is 70% of the default line rate
+/// (`LINKR_BLE_BRIDGE_UART_BAUD_RATE` 115200 → ≈11.5 KiB/s), so the queue
+/// never grows faster than it drains.
+const LAN_WRITE_BYTES_PER_SEC: f64 = 8.0 * 1024.0;
+
+/// Token bucket for the LAN uplink (`dist/BACKLOG.md` G2).
+///
+/// The bridge queues inbound UART bytes in `ble_to_uart_queue` — 8 slots of
+/// 244 B (`Kconfig` `LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH`) — and **drops
+/// whole chunks** when it is full (`src/ws_bridge.c`: *UART queue full;
+/// dropping*), while the queue only drains at UART line rate. A single
+/// un-paced burst therefore loses everything above ~1.4 KiB: pasted 800 B came
+/// back whole, 1600 B lost 136 B, 3000 B lost 1528 B (`dist/paste_integrity.py`
+/// on real hardware). Pacing keeps the queue empty instead.
+#[derive(Debug)]
+struct Pace {
+    state: tokio::sync::Mutex<PaceState>,
+}
+
+#[derive(Debug)]
+struct PaceState {
+    tokens: f64,
+    last: tokio::time::Instant,
+}
+
+impl Pace {
+    fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(PaceState {
+                tokens: LAN_FRAME_MAX_BYTES as f64,
+                last: tokio::time::Instant::now(),
+            }),
+        }
+    }
+
+    /// Wait until `bytes` may go on the wire. A keystroke finds tokens waiting
+    /// and costs nothing; only sustained bulk input feels the limit.
+    async fn take(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        let now = tokio::time::Instant::now();
+        let elapsed = now.saturating_duration_since(state.last).as_secs_f64();
+        state.last = now;
+        state.tokens =
+            (state.tokens + elapsed * LAN_WRITE_BYTES_PER_SEC).min(LAN_FRAME_MAX_BYTES as f64);
+
+        let need = bytes as f64;
+        if state.tokens >= need {
+            state.tokens -= need;
+            return;
+        }
+        // The wait *is* the payment for these bytes, so the clock restarts
+        // empty once it ends: crediting the slept time again would hand out
+        // the same bytes twice (measured: 3000 B in 125 ms instead of 241).
+        // The lock is held across the wait, which also keeps concurrent
+        // writers in call order instead of interleaving frames.
+        let wait = (need - state.tokens) / LAN_WRITE_BYTES_PER_SEC;
+        state.tokens = 0.0;
+        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        state.last = tokio::time::Instant::now();
+    }
+}
+
 /// A connected LAN bridge: UART bytes travel as binary frames, management
 /// commands are rejected (the bridge has no Management Service).
 pub struct LanTransport {
     commands: mpsc::UnboundedSender<LanCommand>,
     hub: Arc<EventHub>,
+    pace: Pace,
 }
 
 #[async_trait::async_trait]
@@ -143,9 +213,15 @@ impl Transport for LanTransport {
     }
 
     async fn write_uart(&self, chunk: &[u8]) -> anyhow::Result<()> {
-        self.commands
-            .send(LanCommand::Uart(chunk.to_vec()))
-            .map_err(|_| anyhow::anyhow!("LAN bridge closed"))
+        // G2: split to bridge-sized frames and spend the rate limiter on each,
+        // so a bulk paste can never outrun the device's UART queue.
+        for piece in chunk.chunks(LAN_FRAME_MAX_BYTES) {
+            self.pace.take(piece.len()).await;
+            self.commands
+                .send(LanCommand::Uart(piece.to_vec()))
+                .map_err(|_| anyhow::anyhow!("LAN bridge closed"))?;
+        }
+        Ok(())
     }
 
     async fn disconnect(&self) -> anyhow::Result<()> {
@@ -170,6 +246,16 @@ pub async fn connect(host: &str, token: Option<&str>) -> anyhow::Result<Arc<dyn 
 }
 
 /// Connect with explicit timeouts (tests use short ones).
+///
+/// The bridge rejects a fresh connection while it is still reaping the client
+/// that just left (`WS_AUTH_TIMEOUT_MS`, `src/ws_bridge.c`): it stops calling
+/// `accept`, the queue fills and the kernel answers new dials with **RST**, so
+/// the caller sees `… is unreachable.` even though the host is fine — measured
+/// on hardware at 5/8 refused dials and 11/20 failed back-to-back connects
+/// (`dist/BACKLOG.md` G1). Both shapes that follow from it are retried: the
+/// refused connect, and an upgrade that dies. An unroutable address, an HTTP
+/// status, a rejected token and the handshake timeout keep failing fast with
+/// the exact same message as before.
 pub async fn connect_with_timeouts(
     host: &str,
     token: Option<&str>,
@@ -179,19 +265,119 @@ pub async fn connect_with_timeouts(
     if host.trim().is_empty() {
         return Err(anyhow::anyhow!(EMPTY_HOST_ERROR));
     }
-    let mut handshake = Handshake::new(token).map_err(anyhow::Error::msg)?;
+    // A malformed token is a usage error; check it once, before the network.
+    Handshake::new(token).map_err(anyhow::Error::msg)?;
+
+    let mut attempt = 0usize;
+    loop {
+        match dial_once(host, token, connect_timeout, handshake_timeout).await {
+            Ok(transport) => return Ok(transport),
+            Err(DialError::Fatal(err)) => return Err(err),
+            Err(DialError::Transient(err)) => match RETRY_DELAYS.get(attempt) {
+                Some(delay) => {
+                    crate::cli::warn(format!(
+                        "LAN bridge is not accepting yet; retrying in {} ms (attempt {})",
+                        delay.as_millis(),
+                        attempt + 2
+                    ));
+                    tokio::time::sleep(*delay).await;
+                    attempt += 1;
+                }
+                None => return Err(err),
+            },
+        }
+    }
+}
+
+/// A dial failure, split by whether another attempt could succeed.
+enum DialError {
+    /// The bridge was not ready for us: it refused the connect (it stopped
+    /// calling `accept` while reaping the previous client) or took the TCP
+    /// connection and hung up before the access handshake finished. Either
+    /// way its slots are still busy and a later attempt can succeed.
+    Transient(anyhow::Error),
+    /// Nothing a retry would change (no route, bad token, timeout).
+    Fatal(anyhow::Error),
+}
+
+/// Backoff between [`DialError::Transient`] attempts: three steps cover the
+/// bridge's 3 s auth window (`WS_AUTH_TIMEOUT_MS`) with room to spare.
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(700),
+    Duration::from_millis(1600),
+    Duration::from_millis(3000),
+];
+
+/// The bridge hung up mid-handshake: fatal once our token went out (it has
+/// answered, and the answer was no), transient before that.
+fn hangup(url: &str, handshake: &Handshake) -> DialError {
+    let message = anyhow::anyhow!(close_message(url, handshake.token_sent()));
+    if handshake.token_sent() {
+        DialError::Fatal(message)
+    } else {
+        DialError::Transient(message)
+    }
+}
+
+/// Whether a failed dial is worth attempting again.
+///
+/// The bridge shows both shapes while it is still reaping the client that just
+/// left — 5 refused and 3 mid-handshake out of 8 back-to-back dials on the same
+/// run (`dist/BACKLOG.md` G1): it stops calling `accept`, so the kernel RSTs a
+/// fresh connect (`ECONNREFUSED`), and a connect that did get in is closed
+/// without a status before `@ws auth=` (`linkr_ws_setup` → `-ENOENT`). Both are
+/// transient. An unroutable address, a bad local address, a handshake timeout,
+/// an HTTP status and a rejected token are not: a retry cannot change them, and
+/// a host that is really gone answers with a route error rather than a refusal.
+fn handshake_error_is_transient(err: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use std::io::ErrorKind as IoKind;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+
+    match err {
+        WsError::Protocol(_) | WsError::AlreadyClosed => true,
+        WsError::Io(io) => !matches!(
+            io.kind(),
+            IoKind::AddrNotAvailable
+                | IoKind::AddrInUse
+                | IoKind::NotConnected
+                | IoKind::TimedOut
+                | IoKind::InvalidInput
+                | IoKind::NetworkUnreachable
+                | IoKind::HostUnreachable
+        ),
+        _ => false,
+    }
+}
+
+/// One dial attempt. Kept separate from [`connect_with_timeouts`] so the retry
+/// loop stays a loop and this function reads exactly like it used to.
+async fn dial_once(
+    host: &str,
+    token: Option<&str>,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> Result<Arc<dyn Transport>, DialError> {
+    let mut handshake =
+        Handshake::new(token).map_err(|err| DialError::Fatal(anyhow::anyhow!(err)))?;
     let url = normalize_url(host);
 
     let connected =
         tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(&url)).await;
     let (stream, _) = match connected {
         Err(_) => {
-            return Err(anyhow::anyhow!(
+            return Err(DialError::Fatal(anyhow::anyhow!(
                 "WebSocket connection timed out after {} seconds.",
                 connect_timeout.as_secs()
-            ))
+            )))
         }
-        Ok(Err(_)) => return Err(anyhow::anyhow!(unreachable(&url))),
+        Ok(Err(err)) => {
+            let message = anyhow::anyhow!(unreachable(&url));
+            return Err(if handshake_error_is_transient(&err) {
+                DialError::Transient(message)
+            } else {
+                DialError::Fatal(message)
+            });
+        }
         Ok(Ok(pair)) => pair,
     };
 
@@ -202,35 +388,32 @@ pub async fn connect_with_timeouts(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(anyhow::anyhow!(HANDSHAKE_TIMEOUT_MSG));
+            return Err(DialError::Fatal(anyhow::anyhow!(HANDSHAKE_TIMEOUT_MSG)));
         }
         let next = tokio::time::timeout(remaining, stream.next()).await;
         let frame = match next {
-            Err(_) => return Err(anyhow::anyhow!(HANDSHAKE_TIMEOUT_MSG)),
-            Ok(None) => return Err(anyhow::anyhow!(close_message(&url, handshake.token_sent()))),
-            Ok(Some(Err(_))) => {
-                return Err(anyhow::anyhow!(close_message(&url, handshake.token_sent())))
-            }
+            Err(_) => return Err(DialError::Fatal(anyhow::anyhow!(HANDSHAKE_TIMEOUT_MSG))),
+            // Gone before our token went out: retryable (G1).
+            Ok(None) | Ok(Some(Err(_))) => return Err(hangup(&url, &handshake)),
             Ok(Some(Ok(frame))) => frame,
         };
         match frame {
             Message::Text(text) => match handshake
                 .on_text(text.as_str())
-                .map_err(anyhow::Error::msg)?
+                .map_err(|err| DialError::Fatal(anyhow::anyhow!(err)))?
             {
                 HandshakeAction::Done => break,
                 HandshakeAction::Send(token) => {
-                    stream.send(Message::text(token)).await.map_err(|_| {
-                        anyhow::anyhow!(close_message(&url, handshake.token_sent()))
-                    })?;
+                    stream
+                        .send(Message::text(token))
+                        .await
+                        .map_err(|_| hangup(&url, &handshake))?;
                 }
                 HandshakeAction::Ignore => crate::cli::warn(IGNORED_FRAME),
                 HandshakeAction::Continue => {}
             },
             Message::Binary(bytes) => buffered.push(bytes.to_vec()),
-            Message::Close(_) => {
-                return Err(anyhow::anyhow!(close_message(&url, handshake.token_sent())))
-            }
+            Message::Close(_) => return Err(hangup(&url, &handshake)),
             // Ping/Pong before the handshake carries nothing useful yet.
             _ => {}
         }
@@ -251,6 +434,7 @@ pub async fn connect_with_timeouts(
     Ok(Arc::new(LanTransport {
         commands: commands_tx,
         hub,
+        pace: Pace::new(),
     }))
 }
 
@@ -525,11 +709,17 @@ mod tests {
             ws.close(None).await.unwrap();
         });
 
+        let started = tokio::time::Instant::now();
         let err = connect(&addr, Some(token))
             .await
             .err()
             .expect("a wrong token must fail the handshake");
         assert_eq!(err.to_string(), TOKEN_REJECTED);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a rejected token is a final answer, not a busy bridge: it must not be retried (took {:?})",
+            started.elapsed()
+        );
         server.await.unwrap();
     }
 
@@ -555,13 +745,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_reports_unreachable_when_nothing_listens() {
+    async fn a_refused_dial_is_retried_until_the_bridge_starts_listening() {
+        // The bridge stops calling `accept` while it is still reaping the
+        // client that just left, so the kernel answers a fresh dial with RST —
+        // 5 of 8 back-to-back dials on hardware (`dist/BACKLOG.md` G1).
+        // Refusal therefore means "busy", not "gone": a host that is gone
+        // answers with a route error, which stays fatal.
         let addr = free_addr();
-        let err = connect(&addr, None)
+        let started = tokio::time::Instant::now();
+        let dial = tokio::spawn({
+            let addr = addr.clone();
+            async move { connect(&addr, None).await }
+        });
+
+        // Attempt one lands on an empty port and backs off; the bridge comes up
+        // inside that window, so only a retry can possibly succeed.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let listener = TcpListener::bind(&addr).await.unwrap();
+        let _server = tokio::spawn(async move {
+            let mut ws = serve_once(listener).await;
+            ws.send(WSMessage::text("@ws auth=none\r\n")).await.unwrap();
+            // Stay open while the retryer finishes its handshake; a close here
+            // would race the frame above and turn this back into a hang-up test.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            ws
+        });
+
+        let transport = dial
             .await
-            .err()
-            .expect("an unreachable bridge must fail");
-        assert_eq!(err.to_string(), unreachable(&normalize_url(&addr)));
+            .unwrap()
+            .expect("a refused dial must be retried until the bridge listens");
+        assert_eq!(transport.kind(), TransportKind::Lan);
+        assert!(
+            started.elapsed() >= RETRY_DELAYS[0],
+            "success must come from a retry, not from the first dial: {:?}",
+            started.elapsed()
+        );
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_handshake_is_retried_until_the_bridge_answers() {
+        let addr = free_addr();
+        let listener = TcpListener::bind(&addr).await.unwrap();
+        let server = tokio::spawn(async move {
+            // First contact: take the TCP connection and hang up before the
+            // upgrade, which is what a bridge whose client slots are still
+            // busy does (src/ws_bridge.c `linkr_ws_setup` → -ENOENT).
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+            // The retry lands on a healthy bridge.
+            let mut ws = serve_once(listener).await;
+            ws.send(WSMessage::text("@ws auth=none\r\n")).await.unwrap();
+        });
+
+        let started = tokio::time::Instant::now();
+        let transport = connect(&addr, None)
+            .await
+            .expect("a hang-up before the handshake must be retried");
+        assert_eq!(transport.kind(), TransportKind::Lan);
+        assert!(
+            started.elapsed() >= Duration::from_millis(600),
+            "attempts are backed off, not hammered: {:?}",
+            started.elapsed()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bulk_lan_write_is_split_and_paced_to_the_bridge() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let transport = LanTransport {
+            commands: tx,
+            hub: Arc::new(EventHub::new()),
+            pace: Pace::new(),
+        };
+
+        let started = tokio::time::Instant::now();
+        transport.write_uart(&vec![b'A'; 3000]).await.unwrap();
+        let elapsed = started.elapsed();
+
+        let mut sizes = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            match command {
+                LanCommand::Uart(bytes) => sizes.push(bytes.len()),
+                LanCommand::Disconnect => panic!("a write must not disconnect"),
+            }
+        }
+        assert_eq!(
+            sizes,
+            vec![LAN_FRAME_MAX_BYTES, LAN_FRAME_MAX_BYTES, 952],
+            "bulk input is cut into frames the bridge queue can take"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "frames must be spaced out, not fired at once: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_keystroke_is_not_held_back_by_the_rate_limiter() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let transport = LanTransport {
+            commands: tx,
+            hub: Arc::new(EventHub::new()),
+            pace: Pace::new(),
+        };
+
+        let started = tokio::time::Instant::now();
+        transport.write_uart(b"x").await.unwrap();
+        assert!(rx.try_recv().is_ok(), "the byte must go out immediately");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "typing must never wait for the limiter: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -588,7 +886,11 @@ mod tests {
         // same message.
         let hub = Arc::new(EventHub::new());
         let (tx, _rx) = mpsc::unbounded_channel();
-        let transport = LanTransport { commands: tx, hub };
+        let transport = LanTransport {
+            commands: tx,
+            hub,
+            pace: Pace::new(),
+        };
         let result = futures::executor::block_on(transport.write_mgmt(b"@i?"));
         assert_eq!(
             result.unwrap_err().to_string(),

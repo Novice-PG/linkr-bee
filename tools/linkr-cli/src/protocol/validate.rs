@@ -301,8 +301,8 @@ pub fn match_device(devices: &[(Option<String>, String)], name: &str) -> Option<
         return None;
     }
     if prefixed.len() > 1 {
-        // Python warns from inside match_device; there is no other channel
-        // here, so print the same `linkr: warning:` line.
+        // Python warns from inside match_device; route it through `cli::warn`
+        // so the TUI can capture it instead of dropping it on the screen.
         let listed: Vec<(String, String)> = prefixed
             .iter()
             .take(4)
@@ -310,7 +310,7 @@ pub fn match_device(devices: &[(Option<String>, String)], name: &str) -> Option<
                 (device_name.clone().unwrap_or_default(), address.clone())
             })
             .collect();
-        eprintln!("linkr: warning: {}", multi_match_warning(&prefix, &listed));
+        crate::cli::warn(multi_match_warning(&prefix, &listed));
     }
     Some(prefixed[0].1.clone())
 }

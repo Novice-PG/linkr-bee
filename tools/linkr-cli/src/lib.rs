@@ -8,6 +8,7 @@ pub mod agent;
 pub mod cli;
 pub mod event;
 pub mod journal;
+pub mod lan_token_store;
 pub mod protocol;
 pub mod session;
 pub mod target_files;

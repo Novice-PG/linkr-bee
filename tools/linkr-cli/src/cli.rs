@@ -10,6 +10,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -30,7 +32,7 @@ use crate::session::{CoreBus, SessionHandle, SessionOptions, SessionSetup, Trans
 use crate::term;
 use crate::transport::lan::{validate_token, EMPTY_HOST_ERROR};
 use crate::transport::{ble, DiscoveredDevice};
-use crate::tui::TuiContext;
+use crate::tui::{PendingConnect, TuiContext};
 
 /// Default `--name`; the Python parser's `DEFAULT_NAME`.
 pub const DEFAULT_NAME: &str = "Linkr BLE UART";
@@ -77,18 +79,47 @@ pub fn yes() -> bool {
 /// `linkr: {msg}` on stderr, suppressed by `--quiet`.
 pub fn info(msg: impl AsRef<str>) {
     if !quiet() {
-        eprintln!("linkr: {}", msg.as_ref());
+        diagnostic(NoticeLevel::Info, format!("linkr: {}", msg.as_ref()));
     }
 }
 
 /// `linkr: warning: {msg}` on stderr, never suppressed.
 pub fn warn(msg: impl AsRef<str>) {
-    eprintln!("linkr: warning: {}", msg.as_ref());
+    diagnostic(
+        NoticeLevel::Warn,
+        format!("linkr: warning: {}", msg.as_ref()),
+    );
 }
 
 /// `linkr: error: {msg}` on stderr, never suppressed.
 pub fn error(msg: impl AsRef<str>) {
-    eprintln!("linkr: error: {}", msg.as_ref());
+    diagnostic(
+        NoticeLevel::Error,
+        format!("linkr: error: {}", msg.as_ref()),
+    );
+}
+
+/// While the TUI owns the screen, `linkr:` diagnostics must not be printed:
+/// the alternate screen is painted by ratatui, which diffs its own buffer and
+/// never repaints cells a stray `eprintln!` overwrote, so the text would sit
+/// on top of the interface. The TUI installs a sink and drains it into its
+/// notice log instead. `None` (every other mode) keeps stderr, byte for byte.
+static DIAGNOSTIC_SINK: Mutex<Option<Sender<(NoticeLevel, String)>>> = Mutex::new(None);
+
+/// Install (or clear, with `None`) the TUI diagnostic sink.
+pub fn set_diagnostic_sink(sink: Option<Sender<(NoticeLevel, String)>>) {
+    *DIAGNOSTIC_SINK.lock().expect("diagnostic sink poisoned") = sink;
+}
+
+fn diagnostic(level: NoticeLevel, line: String) {
+    let slot = DIAGNOSTIC_SINK.lock().expect("diagnostic sink poisoned");
+    if let Some(tx) = slot.as_ref() {
+        // A full or dropped channel must never take the caller down.
+        let _ = tx.send((level, line));
+        return;
+    }
+    drop(slot);
+    eprintln!("{line}");
 }
 
 /// One line of output the renderer wants on the screen. Keeping rendering
@@ -163,6 +194,13 @@ fn render_event(json: bool, quiet: bool, event: CoreEvent) -> (Flow, Vec<Output>
             command,
             final_: _,
         } => {
+            // `@s?` answers with the bridge's LAN access token; display and
+            // export are redacted (web `redactSecrets`), parsing reads the
+            // raw line.
+            let lines: Vec<String> = lines
+                .iter()
+                .map(|line| crate::lan_token_store::redact_secrets(line))
+                .collect();
             if json {
                 let record = json_record(kind, id, ok, &lines, command.as_deref());
                 let mut bytes = record.into_bytes();
@@ -354,7 +392,11 @@ pub struct Cli {
     )]
     pub ble_write_size: String,
 
-    #[arg(long, global = true, help = "use GATT write-with-response")]
+    #[arg(
+        long,
+        global = true,
+        help = "use GATT write-with-response (NUS fallback only; Reliable UART always writes with-response)"
+    )]
     pub write_response: bool,
 
     #[arg(
@@ -363,7 +405,7 @@ pub struct Cli {
         default_value = "5.0",
         allow_negative_numbers = true,
         value_name = "MILLISECONDS",
-        help = "delay between BLE write chunks"
+        help = "delay between BLE write chunks (NUS fallback only; never applied on Reliable UART)"
     )]
     pub write_delay_ms: String,
 
@@ -419,7 +461,9 @@ pub struct Cli {
         long,
         global = true,
         value_name = "HEX",
-        help = "LAN bridge access token, 32 lowercase hex characters"
+        help = "LAN bridge access token, 32 lowercase hex characters \
+                (precedence: this flag, --lan-token-file, LINKR_LAN_TOKEN, \
+                then the token captured during a BLE session)"
     )]
     pub lan_token: Option<String>,
 
@@ -776,9 +820,23 @@ enum TokenSource {
     Env,
 }
 
-/// `--lan-token` → `--lan-token-file` → `LINKR_LAN_TOKEN`, validated before
-/// anything dials out.
-fn resolve_lan_token(cli: &Cli) -> Result<Option<String>, i32> {
+/// The store's token for the host `--lan` names — the last of the four
+/// sources [`resolve_lan_token`] consults, and the only one that is not an
+/// input on the command line. Kept out of the run itself so the lookup reads
+/// a store the test owns instead of the user's config directory.
+fn stored_lan_token(cli: &Cli, store: &crate::lan_token_store::TokenStore) -> Option<String> {
+    cli.lan
+        .as_deref()
+        .and_then(|host| store.select_host(host).map(str::to_string))
+}
+
+/// `--lan-token` → `--lan-token-file` → `LINKR_LAN_TOKEN` → `stored`, the
+/// token a BLE session captured for this host (the web dials with whatever
+/// `lanTokens` already put in its field), validated before anything dials
+/// out. `stored` is the store's own: `select_host` only hands out what
+/// [`crate::lan_token_store::TokenStore::capture`] accepted, so it is a
+/// fallback, never a usage error.
+fn resolve_lan_token(cli: &Cli, stored: Option<String>) -> Result<Option<String>, i32> {
     let (raw, source) = if let Some(token) = cli.lan_token.as_deref() {
         (Some(token.to_string()), TokenSource::Flag)
     } else if let Some(path) = cli.lan_token_file.as_deref() {
@@ -790,12 +848,16 @@ fn resolve_lan_token(cli: &Cli) -> Result<Option<String>, i32> {
             }
         }
     } else {
-        (
-            std::env::var("LINKR_LAN_TOKEN")
-                .ok()
-                .map(|value| value.trim().to_string()),
-            TokenSource::Env,
-        )
+        match std::env::var("LINKR_LAN_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+        {
+            Some(token) => (Some(token), TokenSource::Env),
+            // Nothing was asked for: the store is the last word. An empty
+            // stored token means the bridge runs with authentication off, and
+            // that dials as "no token supplied", like the empty file does.
+            None => return Ok(stored.filter(|token| !token.is_empty())),
+        }
     };
     let Some(token) = raw else {
         return Ok(None);
@@ -828,6 +890,14 @@ pub fn run() -> i32 {
     }
 }
 
+/// `true` when the process can walk straight into the TUI and dial later
+/// (A5). Anything that has to produce output or mutate the device over a live
+/// session — `--query-*`, `@u`/`@w`/`@d` mutations, `--loopback-test`,
+/// `--no-terminal` — keeps connecting up front, like Python.
+fn tui_defers_connect(cli: &Cli, commands: &[(String, Option<Duration>)]) -> bool {
+    cli.tui && !cli.no_terminal && cli.loopback_test.is_none() && commands.is_empty()
+}
+
 fn execute(cli: Cli) -> i32 {
     set_quiet(cli.quiet);
     set_yes(cli.yes);
@@ -842,7 +912,10 @@ fn execute(cli: Cli) -> i32 {
         Ok(wifi) => wifi,
         Err(code) => return code,
     };
-    let lan_token = match resolve_lan_token(&cli) {
+    // A LAN dial also knows the token a BLE session captured for this host;
+    // nothing else in the run needs it.
+    let stored = stored_lan_token(&cli, &crate::lan_token_store::TokenStore::load());
+    let lan_token = match resolve_lan_token(&cli, stored) {
         Ok(token) => token,
         Err(code) => return code,
     };
@@ -898,6 +971,14 @@ async fn drive(
         }
     }
 
+    // A5: `--tui` on its own must not gate the interface on the radio — the
+    // TUI opens first and dials in the background, so a dead adapter or a
+    // missing device can only toast, never keep the user out. Anything that
+    // needs a live session up front (queries, WiFi/WebDAV mutations,
+    // `--loopback-test`) still connects first, exactly like Python.
+    let pending_commands = build_commands(&cli, validated.uart.as_deref(), wifi.clone());
+    let defer_connect = tui_defers_connect(&cli, &pending_commands);
+
     // 2. Pick the target: an explicit address wins, then a match against the
     //    scan we just ran, otherwise ble::connect scans (PYTHON_CLI_SPEC 8.5).
     let mut address = cli.address.clone();
@@ -917,7 +998,7 @@ async fn drive(
                     return EXIT_ERROR;
                 }
             }
-        } else {
+        } else if !defer_connect {
             info(format!(
                 "scanning for BLE device matching {}*",
                 normalize_name_prefix(&cli.name)
@@ -926,12 +1007,7 @@ async fn drive(
     }
 
     // 3. Connect (PYTHON_CLI_SPEC 8.6: connecting... -> GPIO hint -> log).
-    info("connecting...");
-    if cli.lan.is_none() {
-        info(
-            "new host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.",
-        );
-    }
+    //    Deferred connects report "connecting over …" from inside the TUI.
     let transport = match cli.lan.as_deref() {
         Some(host) => TransportSpec::Lan {
             host: host.to_string(),
@@ -954,25 +1030,44 @@ async fn drive(
         pair: cli.pair,
         json: cli.json,
     };
-    let session = match crate::session::spawn_session_with(opts, bus.clone(), setup).await {
-        Ok(session) => session,
-        Err(failure) => {
-            error(failure.to_string());
-            return EXIT_ERROR;
+    let session = if defer_connect {
+        // Nothing to hand the UI but a disconnected shell; `connect::begin_cli`
+        // starts the real session once the screen is up.
+        SessionHandle::detached(bus.clone())
+    } else {
+        info("connecting...");
+        if cli.lan.is_none() {
+            info(
+                "new host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.",
+            );
         }
+        let session = match crate::session::spawn_session_with(
+            opts.clone(),
+            bus.clone(),
+            setup.clone(),
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(failure) => {
+                error(failure.to_string());
+                return EXIT_ERROR;
+            }
+        };
+        if cli.lan.is_none() {
+            if let Err(message) = precheck_capabilities(&cli, session.info().capabilities) {
+                error(message);
+                session.disconnect();
+                return EXIT_ERROR;
+            }
+        }
+        session
     };
-
-    if cli.lan.is_none() {
-        if let Err(message) = precheck_capabilities(&cli, session.info().capabilities) {
-            error(message);
-            session.disconnect();
-            return EXIT_ERROR;
-        }
-    }
+    let pending = defer_connect.then_some(PendingConnect { opts, setup });
 
     // Ctrl-C behaves like Python's KeyboardInterrupt: disconnect, then 130.
     tokio::select! {
-        code = drive_connected(&cli, &validated, wifi, session.clone(), &mut events) => code,
+        code = drive_connected(&cli, &validated, wifi, session.clone(), &mut events, pending) => code,
         () = interrupt() => {
             session.disconnect();
             // Let the teardown command reach the transport task.
@@ -997,6 +1092,7 @@ async fn drive_connected(
     wifi: Option<String>,
     session: SessionHandle,
     events: &mut broadcast::Receiver<CoreEvent>,
+    pending: Option<PendingConnect>,
 ) -> i32 {
     // 4. Management commands in table order (PYTHON_CLI_SPEC 3.2).
     for (command, wait_final) in build_commands(cli, validated.uart.as_deref(), wifi) {
@@ -1030,7 +1126,11 @@ async fn drive_connected(
     }
     if cli.tui {
         let bus = session.bus().clone();
-        return crate::tui::run(TuiContext { session, bus });
+        return crate::tui::run(TuiContext {
+            session,
+            bus,
+            pending,
+        });
     }
     terminal_loop(session, events, validated, cli).await
 }
@@ -1310,6 +1410,36 @@ mod tests {
     use crate::event::MgmtKind;
     use std::sync::{Arc, Mutex};
 
+    /// The TUI owns the screen, so `linkr:` diagnostics must reach its notice
+    /// log instead of the console: ratatui diffs its own buffer and never
+    /// repaints the cells a stray `eprintln!` overwrote. The routed line has
+    /// to stay byte-identical to the stderr one, or the log would disagree
+    /// with the CLI's own output.
+    #[test]
+    fn diagnostics_route_to_the_sink_while_the_screen_is_owned() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        set_diagnostic_sink(Some(tx));
+
+        warn("two devices match");
+        error("management channel closed");
+        // A sink whose reader already went away must not take us down.
+        let (dead_tx, dead_rx) = std::sync::mpsc::channel::<(NoticeLevel, String)>();
+        drop(dead_rx);
+        set_diagnostic_sink(Some(dead_tx));
+        warn("nobody is listening");
+
+        set_diagnostic_sink(None);
+        let seen: Vec<String> = rx.try_iter().map(|(_, text)| text).collect();
+        assert!(
+            seen.contains(&"linkr: warning: two devices match".to_string()),
+            "warn must keep its exact prefix, got {seen:?}"
+        );
+        assert!(
+            seen.contains(&"linkr: error: management channel closed".to_string()),
+            "error must keep its exact prefix, got {seen:?}"
+        );
+    }
+
     /// Parse a full argv (`linkr ...`) through clap only.
     fn parse(args: &[&str]) -> Cli {
         let mut argv: Vec<&str> = vec![BIN_NAME];
@@ -1327,6 +1457,32 @@ mod tests {
         }
     }
 
+    /// A5: `--tui` alone opens the interface without dialling first (the TUI
+    /// connects in the background); every flag whose output needs a live
+    /// session still connects up front, exactly like Python.
+    #[test]
+    fn the_tui_only_defers_the_connect_when_nothing_needs_a_session() {
+        let cli = parse(&["--tui"]);
+        assert!(tui_defers_connect(&cli, &build_commands(&cli, None, None)));
+
+        let cli = parse(&["--tui", "--query-info"]);
+        let commands = build_commands(&cli, None, None);
+        assert_eq!(commands.len(), 1, "--query-info asks the device");
+        assert!(!tui_defers_connect(&cli, &commands));
+
+        let cli = parse(&["--tui", "--loopback-test"]);
+        assert!(!tui_defers_connect(&cli, &build_commands(&cli, None, None)));
+
+        let cli = parse(&["--tui", "--no-terminal"]);
+        assert!(!tui_defers_connect(&cli, &build_commands(&cli, None, None)));
+
+        let cli = parse(&[]);
+        assert!(
+            !tui_defers_connect(&cli, &[]),
+            "without --tui the CLI connects as it always did"
+        );
+    }
+
     fn outputs_text(outputs: &[Output]) -> String {
         let mut text = String::new();
         for output in outputs {
@@ -1339,6 +1495,27 @@ mod tests {
             }
         }
         text
+    }
+
+    /// B6: PYTHON_CLI_SPEC 2.3/4.4 keep `--write-response`/`--write-delay-ms`
+    /// as dead options and note that "a faithful port should still implement
+    /// the branch". This port cannot: `connect` rejects any device that does
+    /// not advertise Reliable UART, and adding the two settings would change
+    /// `SessionOptions`, whose shape CONTRACTS.md fixes. So the flags keep
+    /// parsing and validating exactly like argparse (CLI parity) and `--help`
+    /// says plainly that they never take effect.
+    #[test]
+    fn the_nus_only_flags_parse_and_say_that_they_are_inert() {
+        let cli = parse(&["--write-response", "--write-delay-ms", "12"]);
+        assert!(cli.write_response);
+        assert_eq!(cli.write_delay_ms, "12");
+        let rejected = validate(&parse(&["--write-delay-ms", "-1"]))
+            .expect_err("a negative delay must not validate, inert or not");
+        assert!(rejected.contains("argument --write-delay-ms"), "{rejected}");
+
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(help.contains("NUS fallback only"), "{help}");
     }
 
     #[test]
@@ -2018,6 +2195,29 @@ mod tests {
         assert!(resolve_wifi_command(&parse(&[])).unwrap().is_none());
     }
 
+    /// B5/B7: `@s?` answers with the bridge's LAN access token and that line
+    /// travels through `render_event` on its way out — display and export are
+    /// redacted (web `redactSecrets`), in both output shapes.
+    #[test]
+    fn the_socket_status_line_is_redacted_wherever_it_is_printed() {
+        const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+        let event = CoreEvent::MgmtMessage {
+            kind: MgmtKind::Response,
+            id: 9,
+            ok: true,
+            final_: true,
+            lines: vec![format!("OK ws=up port=80 token={TOKEN}")],
+            command: Some("@s?".to_string()),
+        };
+        let plain = outputs_text(&render_event(false, false, event.clone()).1);
+        assert!(plain.contains("token=<redacted>"), "{plain}");
+        assert!(!plain.contains(TOKEN), "{plain}");
+
+        let json = outputs_text(&render_event(true, false, event).1);
+        assert!(json.contains("token=<redacted>"), "{json}");
+        assert!(!json.contains(TOKEN), "{json}");
+    }
+
     #[test]
     fn lan_tokens_resolve_and_validate_before_dialing() {
         let valid = "0123456789abcdef0123456789abcdef";
@@ -2031,26 +2231,109 @@ mod tests {
         // Flag beats file; the file is trimmed.
         let mut cli = parse(&["--lan-token", valid, "--lan-token-file", "ignored"]);
         cli.lan_token_file = Some(bad.clone());
-        assert_eq!(resolve_lan_token(&cli).unwrap().as_deref(), Some(valid));
+        assert_eq!(
+            resolve_lan_token(&cli, None).unwrap().as_deref(),
+            Some(valid)
+        );
 
         let mut cli = parse(&[]);
         cli.lan_token_file = Some(good.clone());
-        assert_eq!(resolve_lan_token(&cli).unwrap().as_deref(), Some(valid));
+        assert_eq!(
+            resolve_lan_token(&cli, None).unwrap().as_deref(),
+            Some(valid)
+        );
 
         // An invalid file token is a usage error naming the flag.
         let mut cli = parse(&[]);
         cli.lan_token_file = Some(bad.clone());
-        assert_eq!(resolve_lan_token(&cli).unwrap_err(), EXIT_USAGE);
+        assert_eq!(resolve_lan_token(&cli, None).unwrap_err(), EXIT_USAGE);
 
         // An unreadable file is a usage error too.
         let mut cli = parse(&[]);
         cli.lan_token_file = Some(dir.join("missing"));
-        assert_eq!(resolve_lan_token(&cli).unwrap_err(), EXIT_USAGE);
+        assert_eq!(resolve_lan_token(&cli, None).unwrap_err(), EXIT_USAGE);
 
         // An invalid inline token names --lan-token.
         let cli = parse(&["--lan-token", "XYZ"]);
-        assert_eq!(resolve_lan_token(&cli).unwrap_err(), EXIT_USAGE);
+        assert_eq!(resolve_lan_token(&cli, None).unwrap_err(), EXIT_USAGE);
+
+        // A captured token only ever fills in: it is last in the precedence
+        // and it never gets to argue about validity — the store only hands
+        // out what `capture` accepted. Both need a clear LINKR_LAN_TOKEN,
+        // which outranks the store.
+        if std::env::var_os("LINKR_LAN_TOKEN").is_none() {
+            let empty = parse(&[]);
+            assert_eq!(
+                resolve_lan_token(&empty, Some(valid.to_string()))
+                    .unwrap()
+                    .as_deref(),
+                Some(valid)
+            );
+            assert_eq!(
+                resolve_lan_token(&empty, Some(String::new())).unwrap(),
+                None,
+                "auth-less bridge dials without a token"
+            );
+        }
+        assert_eq!(
+            resolve_lan_token(&parse(&["--lan-token", valid]), Some(String::new()))
+                .unwrap()
+                .as_deref(),
+            Some(valid),
+            "an explicit token outranks the captured one"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B5/B7: four token sources, and `--help` names all of them — the
+    /// captured one is the only source the user never typed themselves, so it
+    /// has to be written down.
+    #[test]
+    fn the_lan_token_help_names_every_source() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(help.contains("--lan-token-file"), "{help}");
+        assert!(help.contains("LINKR_LAN_TOKEN"), "{help}");
+        assert!(help.contains("captured"), "{help}");
+    }
+
+    /// The glue between `--lan` and the store: only a LAN dial looks, and it
+    /// looks up exactly the host it is about to dial. The store is handed in
+    /// so this runs without touching the user's config directory.
+    #[test]
+    fn the_store_serves_the_token_of_the_host_being_dialed() {
+        const DEVICE: &str = "4c494e4b52424c45010058bf2533078c";
+        const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+        let mut store = crate::lan_token_store::TokenStore::default();
+        store
+            .capture(DEVICE, TOKEN, "192.168.0.104")
+            .expect("a valid capture is accepted");
+
+        let cli = parse(&["--lan", "192.168.0.104"]);
+        assert_eq!(
+            stored_lan_token(&cli, &store).as_deref(),
+            Some(TOKEN),
+            "the alias written by the BLE session is the one that dials"
+        );
+
+        // A host the store does not know gets nothing …
+        let cli = parse(&["--lan", "192.168.0.9"]);
+        assert_eq!(stored_lan_token(&cli, &store), None);
+        // … and a run that is not dialing LAN never asks.
+        let cli = parse(&[]);
+        assert_eq!(stored_lan_token(&cli, &store), None);
+
+        // End to end through the precedence: with no flag, file or environment
+        // the stored token is what dials (LINKR_LAN_TOKEN outranks it).
+        if std::env::var_os("LINKR_LAN_TOKEN").is_none() {
+            let cli = parse(&["--lan", "192.168.0.104"]);
+            assert_eq!(
+                resolve_lan_token(&cli, stored_lan_token(&cli, &store))
+                    .unwrap()
+                    .as_deref(),
+                Some(TOKEN)
+            );
+        }
     }
 }

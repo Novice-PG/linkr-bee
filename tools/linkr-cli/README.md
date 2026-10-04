@@ -66,6 +66,40 @@ CI (`.github/workflows/build.yml`, job `terminal`) builds the five targets —
 linux x86_64 and arm64, windows x86_64, macOS arm64 and x86_64 — runs the test
 suite and the lints, and uploads the binaries plus the bundle as artifacts.
 
+### Cross-build the Windows binary from Linux
+
+`tools/build_terminal.sh --target x86_64-pc-windows-gnu` emits
+`dist/linkr-terminal-x86_64-pc-windows-gnu/linkr.exe`. It needs mingw-w64;
+unpacking the packages somewhere local is enough, nothing is installed
+system-wide:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+mkdir -p mingw && cd mingw
+apt-get download gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
+    mingw-w64-x86-64-dev mingw-w64-common
+for f in *.deb; do dpkg-deb -x "$f" "$PWD"; done
+# The plain `x86_64-w64-mingw32-gcc` name comes from update-alternatives,
+# which does not run when a .deb is only unpacked.
+ln -sf x86_64-w64-mingw32-gcc-posix usr/bin/x86_64-w64-mingw32-gcc
+cd ..
+
+PATH="$PWD/mingw/usr/bin:$PATH" \
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+    tools/build_terminal.sh --target x86_64-pc-windows-gnu
+```
+
+The exe links the mingw runtime statically and imports Windows system DLLs
+only, so it runs without any MinGW installation. CI still ships the
+`x86_64-pc-windows-msvc` build; use `build_terminal.ps1` on Windows for that
+one. Either exe can be wrapped into the self-extracting script:
+
+```sh
+python3 tools/build_terminal_bundle.py \
+    --exe dist/linkr-terminal-x86_64-pc-windows-gnu/linkr.exe \
+    --output dist/linkr-bee-terminal.ps1
+```
+
 ## Use
 
 ```sh

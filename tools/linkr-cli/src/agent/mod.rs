@@ -305,7 +305,10 @@ pub fn spawn(
     handle
 }
 
-fn store_path(name: &str) -> std::path::PathBuf {
+/// Storage location of one of the agent's JSON stores (and of anything else
+/// that belongs beside them): the config directory when there is one, the
+/// working directory otherwise.
+pub(crate) fn store_path(name: &str) -> std::path::PathBuf {
     config::config_dir()
         .map(|dir| dir.join(name))
         .unwrap_or_else(|| std::path::PathBuf::from(name))

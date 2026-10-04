@@ -3,6 +3,46 @@
 //! Every TUI surface that shows a reply uses these — never a private copy —
 //! so `OK uart=…`, `OK wifi=…`, `OK webdav=…`, `@scan` lines and the
 //! `replyStatus` rule behave exactly like the web client.
+//!
+//! The parsers keep every wire token verbatim; only the two helpers that
+//! *word* a parsed state on screen ([`wifi_state_text`] /
+//! [`webdav_state_text`]) follow the interface language.
+
+use super::i18n::{strings, t, Lang};
+
+strings! {
+    RPL_STATE_CONNECTED => "connected", "已连接";
+    RPL_STATE_CONNECTING => "connecting", "连接中";
+    RPL_STATE_OFF => "off", "关闭";
+    RPL_STATE_ON => "on", "开启";
+    RPL_STATE_ERROR => "error", "错误";
+    RPL_STATE_FAILED => "failed", "失败";
+    RPL_STATE_UNKNOWN => "unknown", "未知";
+}
+
+/// How an `OK wifi=…` state is worded in a feedback line. The known states
+/// get the localized wording, anything else the firmware reports is passed
+/// through untouched (it is data, not interface text).
+pub fn wifi_state_text(state: &str, lang: Lang) -> &str {
+    match state {
+        "connected" => t(RPL_STATE_CONNECTED, lang),
+        "connecting" => t(RPL_STATE_CONNECTING, lang),
+        "off" => t(RPL_STATE_OFF, lang),
+        "error" => t(RPL_STATE_ERROR, lang),
+        "failed" => t(RPL_STATE_FAILED, lang),
+        "unknown" => t(RPL_STATE_UNKNOWN, lang),
+        other => other,
+    }
+}
+
+/// Same for an `OK webdav=…` state (`on` / `off` are its documented values).
+pub fn webdav_state_text(state: &str, lang: Lang) -> &str {
+    match state {
+        "on" => t(RPL_STATE_ON, lang),
+        "off" => t(RPL_STATE_OFF, lang),
+        other => other,
+    }
+}
 
 /// Result of the `replyStatus(text)` helper: the first `^ERR` line wins,
 /// otherwise `ok` when any `^OK` line exists.
@@ -346,6 +386,26 @@ mod tests {
         assert_eq!(r.security.as_deref(), Some("open"));
         assert!(parse_scan_line("@scan done").is_none());
         assert!(parse_scan_line("@scan error").is_none());
+    }
+
+    /// The parsed states are the only thing here that reaches the screen as
+    /// words; the parsers themselves stay byte-for-byte on the wire tokens.
+    #[test]
+    fn state_words_follow_the_language_and_pass_unknown_values_through() {
+        assert_eq!(wifi_state_text("connected", Lang::En), "connected");
+        assert_eq!(wifi_state_text("connected", Lang::Zh), "已连接");
+        assert_eq!(wifi_state_text("off", Lang::Zh), "关闭");
+        assert_eq!(wifi_state_text("unknown", Lang::Zh), "未知");
+        assert_eq!(wifi_state_text("dhcp", Lang::Zh), "dhcp");
+        assert_eq!(webdav_state_text("on", Lang::Zh), "开启");
+        assert_eq!(webdav_state_text("on", Lang::En), "on");
+        assert_eq!(webdav_state_text("weird", Lang::Zh), "weird");
+    }
+
+    #[test]
+    fn every_replies_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.len() >= 7, "replies carries 7 state words");
     }
 
     #[test]

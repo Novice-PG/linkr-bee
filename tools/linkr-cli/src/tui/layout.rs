@@ -41,7 +41,7 @@ pub fn columns(body: Rect, sidebar_visible: bool) -> (Option<Rect>, Rect) {
 pub fn status_model(app: &App) -> StatusModel {
     StatusModel {
         state: app.state,
-        transport: app.info.kind,
+        transport: app.live_kind(),
         label: app.info.label.clone(),
         device_id: app.info.device_id.clone(),
         rx_bytes: app.info.rx_bytes,
@@ -50,6 +50,7 @@ pub fn status_model(app: &App) -> StatusModel {
         mode: app.exec_mode,
         clock: chrono::Local::now().format("%H:%M:%S").to_string(),
         detail: app.detail.clone(),
+        lang: app.lang(),
     }
 }
 
@@ -61,6 +62,37 @@ pub fn center_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         View::Network => super::network_view::render_lines(app),
         View::Assistant => super::assistant_view::render_lines(app, width),
     }
+}
+
+/// Rows a `lines`-long body can scroll through a `rows`-tall pane. Scrolling
+/// past this shows nothing: the offset is applied after rendering, so an
+/// unclamped value walks the pane blank (same failure as the palette had).
+pub fn scroll_limit(lines: usize, rows: u16) -> u16 {
+    (lines as u16).saturating_sub(rows)
+}
+
+/// "As far down as the content allows" ([`page_scroll`] resolves it before
+/// moving, so it can be stored without knowing the current geometry). The
+/// assistant pins to it: the composer is the last line of the transcript.
+pub const PIN_END: u16 = u16::MAX;
+
+/// One page of a `Paragraph` scroll offset. The offset counts lines skipped
+/// from the top, so `up` walks towards the start — the old code added on
+/// PageUp, which paged *down*, and never checked the limit.
+pub fn page_scroll(current: u16, limit: u16, step: u16, up: bool) -> u16 {
+    let base = current.min(limit);
+    if up {
+        base.saturating_sub(step)
+    } else {
+        (base.saturating_add(step)).min(limit)
+    }
+}
+
+/// [`scroll_limit`] for the center pane as the key handler sees it. The
+/// renderer clamps against the live frame; both read the geometry that
+/// `sync_geometry` writes every iteration, so they agree.
+pub fn center_scroll_limit(app: &App) -> u16 {
+    scroll_limit(center_lines(app, app.center_width).len(), app.center_height)
 }
 
 fn terminal_lines(app: &App, width: u16) -> Vec<Line<'static>> {
@@ -113,19 +145,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Center pane.
     let lines = center_lines(app, center.width);
+    let offset = app
+        .center_scroll
+        .min(scroll_limit(lines.len(), center.height));
     frame.render_widget(
         ratatui::widgets::Paragraph::new(lines)
-            .scroll((app.center_scroll, 0))
+            .scroll((offset, 0))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         center,
     );
 
     // Bottom status line.
+    let lang = app.lang();
     let bottom_text = super::status::bottom_line(
-        app.focus.label(),
-        app.view.label(),
+        app.focus.label(lang),
+        app.view.label(lang),
         &app.detail,
         bottom.width,
+        lang,
     );
     frame.render_widget(
         ratatui::widgets::Paragraph::new(Line::from(Span::styled(
@@ -195,16 +232,26 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = super::palette::render_lines(app);
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2).max(3));
-    let rect = centered(area, 72, height);
+    let Some(state) = &app.palette else {
+        return;
+    };
+    // Height tracks how many actions match — never the selection — so the box
+    // stays put while the list scrolls. The old sizing used `lines.len()`,
+    // which shrank as the window slid and, together with a second scroll of an
+    // already-windowed list, walked everything off the top of the box.
+    const BORDER: u16 = 2;
+    const HEADER: u16 = 2; // prompt line + separator
+    let rows = super::palette::matches(&state.query)
+        .len()
+        .clamp(1, super::palette::MAX_VISIBLE) as u16;
+    let rect = centered(area, 72, BORDER + HEADER + rows);
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(
         ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Command palette (Ctrl+P) "),
+            .title(super::palette::panel_title(state.lang)),
         rect,
     );
     let inner = Rect {
@@ -213,29 +260,25 @@ fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
         width: rect.width.saturating_sub(2),
         height: rect.height.saturating_sub(2),
     };
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(lines).scroll((
-            app.palette
-                .as_ref()
-                .map(|state| state.selected.saturating_sub(9) as u16)
-                .unwrap_or(0),
-            0,
-        )),
-        inner,
-    );
-    if let Some(state) = &app.palette {
-        let col = 2 + unicode_width::UnicodeWidthStr::width(state.query.as_str()) as u16;
-        frame.set_cursor_position((inner.x + col.min(inner.width.saturating_sub(1)), inner.y));
-    }
+    // The window is computed once, in `render_lines`; the paragraph never
+    // scrolls, so the prompt line the cursor sits on cannot drift away.
+    let lines =
+        super::palette::render_lines(state, usize::from(inner.height.saturating_sub(HEADER)));
+    frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
+    let col = 2 + unicode_width::UnicodeWidthStr::width(state.query.as_str()) as u16;
+    frame.set_cursor_position((inner.x + col.min(inner.width.saturating_sub(1)), inner.y));
 }
 
 fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = super::dialogs::render_lines(app, 74);
+    let lines = super::dialogs::render_lines(app, super::dialogs::DIALOG_WIDTH);
     let title = app
         .dialog
         .as_ref()
-        .map(|dialog| dialog.title())
-        .unwrap_or("Dialog");
+        .map(|dialog| dialog.title_lang(app.lang()))
+        .unwrap_or(super::i18n::t(
+            super::dialogs::DLG_TITLE_FALLBACK,
+            app.lang(),
+        ));
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2).max(3));
     let rect = centered(area, 78, height);
     frame.render_widget(ratatui::widgets::Clear, rect);
@@ -253,15 +296,25 @@ fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
         width: rect.width.saturating_sub(2),
         height: rect.height.saturating_sub(2),
     };
+    // Scrollable overlays (help / notices) offset their body; the clamp keeps
+    // a stale offset from painting an empty box after a terminal resize.
+    let scroll = app
+        .dialog
+        .as_ref()
+        .map(super::dialogs::Dialog::scroll_offset)
+        .unwrap_or(0)
+        .min((lines.len() as u16).saturating_sub(inner.height));
     frame.render_widget(
-        ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        ratatui::widgets::Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((scroll, 0)),
         inner,
     );
 }
 
 /// Focus label used when nothing else says it (kept here for the tests).
-pub fn focus_label(focus: Focus) -> &'static str {
-    focus.label()
+pub fn focus_label(focus: Focus, lang: super::i18n::Lang) -> &'static str {
+    focus.label(lang)
 }
 
 #[cfg(test)]
@@ -270,6 +323,54 @@ mod tests {
 
     fn area(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
+    }
+
+    /// The offset counts lines skipped from the top, so PageUp walks towards
+    /// the start. The old handler *added* on PageUp — paging down — and never
+    /// checked the limit, which walked the pane blank (the same failure the
+    /// command palette had).
+    #[test]
+    fn paging_follows_the_offset_direction_and_stays_inside_the_content() {
+        assert_eq!(scroll_limit(40, 22), 18, "40 lines in a 22-row pane");
+        assert_eq!(scroll_limit(10, 22), 0, "content that fits cannot scroll");
+        assert_eq!(scroll_limit(0, 22), 0);
+
+        // PageUp moves towards the start (a smaller offset).
+        assert_eq!(page_scroll(18, 18, 5, true), 13);
+        assert_eq!(page_scroll(5, 18, 5, true), 0, "clamped at the top");
+        assert_eq!(page_scroll(0, 18, 5, true), 0);
+        // PageDown moves towards the end and stops at the limit.
+        assert_eq!(page_scroll(0, 18, 5, false), 5);
+        assert_eq!(page_scroll(15, 18, 5, false), 18, "clamped at the bottom");
+        assert_eq!(page_scroll(18, 18, 5, false), 18);
+        assert_eq!(page_scroll(0, 0, 5, false), 0, "no room to move");
+    }
+
+    /// The assistant stores "pin to the end" without knowing the geometry;
+    /// the value has to resolve to the limit *before* it moves, or PageUp from
+    /// the newest message would clatter against the bottom and do nothing.
+    #[test]
+    fn the_pin_to_end_sentinel_resolves_before_paging() {
+        assert_eq!(page_scroll(PIN_END, 18, 5, true), 13, "PageUp walks up");
+        assert_eq!(page_scroll(PIN_END, 18, 5, false), 18, "PageDown stays");
+        assert_eq!(page_scroll(PIN_END, 0, 5, true), 0, "content that fits");
+    }
+
+    /// A stale offset (the transcript shrank, the terminal resized) must paint
+    /// the end of the content rather than an empty pane.
+    #[test]
+    fn a_stale_offset_paints_the_content_not_a_blank_pane() {
+        let lines = 25usize;
+        let rows = 20u16;
+        let limit = scroll_limit(lines, rows);
+        assert_eq!(limit, 5);
+        for stale in [0u16, 1, 5, 500, PIN_END] {
+            let painted = stale.min(limit);
+            assert!(
+                lines - painted as usize >= rows as usize,
+                "offset {stale} painted past the pane: {lines} - {painted} < {rows}"
+            );
+        }
     }
 
     #[test]
@@ -309,5 +410,33 @@ mod tests {
         assert!(rect.height <= 8);
         assert!(rect.x + rect.width <= 40);
         assert!(rect.y + rect.height <= 10);
+    }
+
+    /// `SessionInfo::kind` is written when the session is built and teardown
+    /// never clears it, so the bottom bar kept printing `Disconnected · BLE`
+    /// after the link it named was gone. Only a session that still exists
+    /// may name a transport (an attempt in flight still may).
+    #[test]
+    fn the_status_bar_names_a_transport_only_while_a_session_exists() {
+        use crate::event::ConnectionState;
+
+        let mut app = crate::tui::test_app();
+        app.info.kind = Some(crate::transport::TransportKind::Ble);
+
+        app.state = ConnectionState::Disconnected;
+        assert_eq!(status_model(&app).transport, None, "the link is gone");
+
+        app.state = ConnectionState::Connecting;
+        assert_eq!(
+            status_model(&app).transport,
+            Some(crate::transport::TransportKind::Ble),
+            "an attempt is still dialled over something"
+        );
+
+        app.state = ConnectionState::Connected;
+        assert_eq!(
+            status_model(&app).transport,
+            Some(crate::transport::TransportKind::Ble)
+        );
     }
 }

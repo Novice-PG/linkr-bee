@@ -3,20 +3,100 @@
 //!
 //! The registry is a plain `&'static [Action]` so a unit test can assert its
 //! completeness against the canonical id list without building an `App`.
+//!
+//! The labels (titles, categories, the toasts the actions raise) are
+//! bilingual per WEB_UX_SPEC section 9 (`linkr-lang`); the action ids and the
+//! key hints are protocol / key literals and stay identical in both
+//! languages.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::i18n::{strings, t, tr, Entry, Lang, MSG_SAVE_SETTINGS};
 use super::settings::TransportChoice;
+use super::sidebar::MSG_TRANSPORT_LOCKED;
 use super::state::{App, Focus, View};
 use crate::event::NoticeLevel;
 
+strings! {
+    PAL_TITLE => " Command palette (Ctrl+P) ", " 命令面板（Ctrl+P） ";
+    PAL_NO_MATCH => "No matching action.", "无匹配动作。";
+    // Categories
+    PAL_CAT_VIEW => "View", "视图";
+    PAL_CAT_FOCUS => "Focus", "焦点";
+    PAL_CAT_CONNECTION => "Connection", "连接";
+    PAL_CAT_TERMINAL => "Terminal", "终端";
+    PAL_CAT_DIAGNOSTICS => "Diagnostics", "诊断";
+    PAL_CAT_NETWORK => "Network", "网络";
+    PAL_CAT_ASSISTANT => "Assistant", "助手";
+    PAL_CAT_APP => "App", "应用";
+    // Views
+    PAL_T_VIEW_TERMINAL => "Open terminal view", "打开终端视图";
+    PAL_T_VIEW_DIAGNOSTICS => "Open diagnostics view", "打开诊断视图";
+    PAL_T_VIEW_NETWORK => "Open network view", "打开网络视图";
+    PAL_T_VIEW_ASSISTANT => "Open assistant view", "打开助手视图";
+    // Focus
+    PAL_T_FOCUS_SIDEBAR => "Focus the sidebar", "聚焦侧栏";
+    PAL_T_FOCUS_TERMINAL => "Focus the terminal", "聚焦终端";
+    PAL_T_FOCUS_ASSISTANT => "Focus the assistant composer", "聚焦助手输入框";
+    // Connection
+    PAL_T_CONNECT => "Connect", "连接";
+    PAL_T_DISCONNECT => "Disconnect", "断开连接";
+    PAL_T_TRANSPORT => "Toggle BLE / LAN transport", "切换 BLE / LAN 传输方式";
+    PAL_T_UART => "UART settings…", "UART 设置…";
+    // Terminal
+    PAL_T_FONT_BIGGER => "Bigger font", "增大字号";
+    PAL_T_FONT_SMALLER => "Smaller font", "减小字号";
+    PAL_T_FONT_RESET => "Reset font size", "重置字号";
+    PAL_T_AUTOSCROLL => "Toggle autoscroll", "切换自动滚动";
+    PAL_T_ECHO => "Toggle local echo", "切换本地回显";
+    PAL_T_ENTER_MODE => "Cycle Enter mode", "循环切换回车模式";
+    PAL_T_CLEAR => "Clear the terminal", "清屏";
+    PAL_T_SAVE_LOG => "Save log to file", "保存日志到文件";
+    PAL_T_COPY => "Copy visible output (OSC 52)", "复制可见输出（OSC 52）";
+    // Diagnostics / network
+    PAL_T_DIAG_REFRESH => "Refresh diagnostics (@i?)", "刷新诊断（@i?）";
+    PAL_T_WIFI_SCAN => "Scan WiFi networks", "扫描 WiFi 网络";
+    PAL_T_WIFI_STATUS => "Query WiFi status", "查询 WiFi 状态";
+    PAL_T_WEBDAV_STATUS => "Query WebDAV status", "查询 WebDAV 状态";
+    // Assistant
+    PAL_T_AGENT_ASK => "Ask the assistant", "向助手提问";
+    PAL_T_AGENT_MODE => "Cycle execution mode", "循环切换执行模式";
+    PAL_T_AGENT_SETTINGS => "AI configuration…", "AI 配置…";
+    PAL_T_NEW_CHAT => "New chat", "新建对话";
+    PAL_T_AGENT_STOP => "Stop the running turn", "停止当前轮次";
+    PAL_T_EXPORT => "Export report", "导出报告";
+    // App
+    PAL_T_HELP => "Keyboard help", "键盘帮助";
+    PAL_T_NOTICES => "Notice log", "通知记录";
+    PAL_T_LANGUAGE => "Switch language", "切换界面语言";
+    PAL_MSG_LANGUAGE => "Interface language: {}", "界面语言：{}";
+    PAL_T_QUIT => "Quit the TUI", "退出 TUI";
+    // Toasts and notices raised by the actions below
+    PAL_MSG_ENTER_MODE => "Enter mode: {}", "回车模式：{}";
+    PAL_MSG_SAVED_LOG => "Saved {} bytes to {}", "已保存 {} 字节到 {}";
+    PAL_MSG_SAVE_FAILED => "Save failed: {}", "保存失败：{}";
+    PAL_MSG_COPIED => "Copied {} characters (OSC 52).", "已复制 {} 个字符（OSC 52）。";
+    PAL_MSG_COPY_FAILED => "Copy failed: {}", "复制失败：{}";
+    PAL_MSG_BLE_DIAGNOSTICS => "Connect over BLE to read diagnostics.",
+        "请先通过 BLE 连接再读取诊断。";
+    PAL_MSG_NEW_CHAT => "New chat.", "新建对话。";
+    PAL_MSG_EXPORT_EMPTY => "Nothing to export yet: no tasks or notes for this device.",
+        "暂无可导出内容：此设备没有任务或笔记。";
+    PAL_MSG_REPORT_WRITTEN => "Report written to {}", "报告已写入 {}";
+    PAL_MSG_REPORT_FAILED => "Could not write the report: {}", "报告写入失败：{}";
+}
+
 /// One palette entry. `run` is a plain function so the table stays `const`.
+///
+/// The title and category are [`Entry`]s rather than bare strings: the id is
+/// the protocol identifier and stays English in both languages, the labels
+/// are interface text and follow `linkr-lang`.
 pub struct Action {
     pub id: &'static str,
-    pub title: &'static str,
-    pub category: &'static str,
+    pub title: Entry,
+    pub category: Entry,
     pub shortcut: &'static str,
     pub run: fn(&mut App),
 }
@@ -97,9 +177,10 @@ fn toggle_echo(app: &mut App) {
 fn cycle_enter(app: &mut App) {
     app.settings.enter_mode = app.settings.enter_mode.next();
     persist(app);
+    let label = app.settings.enter_mode.label();
     app.toast(
         NoticeLevel::Info,
-        format!("Enter mode: {}", app.settings.enter_mode.label()),
+        tr!(t(PAL_MSG_ENTER_MODE, app.lang()), label),
     );
 }
 
@@ -108,19 +189,22 @@ fn clear_terminal(app: &mut App) {
 }
 
 fn save_log(app: &mut App) {
+    let lang = app.lang();
     let name = super::terminal_view::TerminalPane::default_log_name();
     let path = std::path::PathBuf::from(&name);
     match app.terminal.save_log(&path) {
-        Ok(bytes) => app
-            .notices
-            .push(NoticeLevel::Info, format!("Saved {bytes} bytes to {name}")),
+        Ok(bytes) => app.notices.push(
+            NoticeLevel::Info,
+            tr!(t(PAL_MSG_SAVED_LOG, lang), bytes, name),
+        ),
         Err(err) => app
             .notices
-            .push(NoticeLevel::Error, format!("Save failed: {err}")),
+            .push(NoticeLevel::Error, tr!(t(PAL_MSG_SAVE_FAILED, lang), err)),
     }
 }
 
 fn copy_visible(app: &mut App) {
+    let lang = app.lang();
     let text = app.terminal.visible_text();
     // OSC 52 is addressed to the *host* terminal emulator, so it goes to
     // stdout (the grid records it too through the VT parser).
@@ -131,19 +215,19 @@ fn copy_visible(app: &mut App) {
     match outcome {
         Ok(()) => app.toast(
             NoticeLevel::Info,
-            format!("Copied {} characters (OSC 52).", text.chars().count()),
+            tr!(t(PAL_MSG_COPIED, lang), text.chars().count()),
         ),
         Err(err) => app
             .notices
-            .push(NoticeLevel::Error, format!("Copy failed: {err}")),
+            .push(NoticeLevel::Error, tr!(t(PAL_MSG_COPY_FAILED, lang), err)),
     }
 }
 
 fn toggle_transport(app: &mut App) {
-    if app.connected() {
+    if app.transport_locked() {
         app.toast(
             NoticeLevel::Warn,
-            "Disconnect before switching the transport.",
+            t(MSG_TRANSPORT_LOCKED, app.lang()).to_string(),
         );
         return;
     }
@@ -172,7 +256,10 @@ fn refresh_diagnostics(app: &mut App) {
         let session = app.session.clone();
         app.diagnostics.refresh(&session);
     } else {
-        app.toast(NoticeLevel::Warn, "Connect over BLE to read diagnostics.");
+        app.toast(
+            NoticeLevel::Warn,
+            t(PAL_MSG_BLE_DIAGNOSTICS, app.lang()).to_string(),
+        );
     }
 }
 
@@ -209,8 +296,9 @@ fn agent_settings(app: &mut App) {
 }
 
 fn new_chat(app: &mut App) {
+    let status = t(PAL_MSG_NEW_CHAT, app.lang()).to_string();
     app.assistant = super::assistant_view::AssistantState::default();
-    app.assistant.status = "New chat.".to_string();
+    app.assistant.status = status;
 }
 
 fn stop_agent(app: &mut App) {
@@ -222,26 +310,100 @@ fn stop_agent(app: &mut App) {
         app.assistant
             .entries
             .push(super::assistant_view::Entry::System(
-                super::assistant_view::STOP_MESSAGE.to_string(),
+                super::i18n::t(super::assistant_view::ASST_STOP_MESSAGE, app.lang()).to_string(),
             ));
     }
 }
 
+/// Export the Markdown report the web's `agentExport` button downloads
+/// (`web/agent_panel.js` → `buildTaskReport`), from the same two stores the
+/// agent writes. The offer is gated the same way: with nothing to report it
+/// says so instead of writing an empty file.
+///
+/// The Rust agent never records per-command executions (the web keeps those
+/// for the live session only), so `records` is empty and `build_report`
+/// simply omits that section.
+/// The report text for `key`, or `None` when there is nothing to report —
+/// the same condition that disables the web's export button. Kept pure so the
+/// gate and the body can be pinned without a live session.
+///
+/// The body itself follows `linkr-lang` (`build_report` carries the headings
+/// in both languages), so the file a Chinese user downloads is Chinese too.
+fn report_body(
+    key: &str,
+    tasks: &[crate::agent::memory::Task],
+    notes: &[crate::agent::memory::Note],
+    generated_at: Option<&str>,
+    lang: Lang,
+) -> Option<String> {
+    if tasks.is_empty() && notes.is_empty() {
+        return None;
+    }
+    Some(crate::agent::build_report(&crate::agent::ReportInput {
+        lang: lang.code(),
+        device: key,
+        task: None,
+        tasks,
+        records: &[],
+        notes,
+        generated_at,
+    }))
+}
+
 fn export_report(app: &mut App) {
-    // `agent::build_report` (workstream A) is not exported yet; the action
-    // stays discoverable and says so instead of silently doing nothing.
-    app.toast(
-        NoticeLevel::Warn,
-        "Report export needs agent::build_report, which this build does not export yet.",
-    );
+    let lang = app.lang();
+    let info = app.session.info();
+    let transport = match info.kind {
+        Some(crate::transport::TransportKind::Ble) => "ble",
+        _ => "ws",
+    };
+    let key = crate::agent::memory::device_identity(transport, info.device_id.as_deref(), None)
+        .unwrap_or_default();
+    let tasks = crate::agent::memory::TaskStore::open(crate::agent::store_path("agent_tasks.json"))
+        .list(&key);
+    let notes = crate::agent::memory::NoteStore::open(crate::agent::store_path("agent_notes.json"))
+        .list(&key);
+    let Some(report) = report_body(&key, &tasks, &notes, None, lang) else {
+        app.toast(NoticeLevel::Warn, t(PAL_MSG_EXPORT_EMPTY, lang).to_string());
+        return;
+    };
+    let stamp = chrono::Utc::now()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        .replace([':', '.'], "-");
+    let path = crate::agent::store_path(&format!("linkr-agent-{stamp}.md"));
+    match std::fs::write(&path, &report) {
+        Ok(()) => app.toast(
+            NoticeLevel::Info,
+            tr!(t(PAL_MSG_REPORT_WRITTEN, lang), path.display()),
+        ),
+        Err(err) => app.toast(NoticeLevel::Error, tr!(t(PAL_MSG_REPORT_FAILED, lang), err)),
+    }
 }
 
 fn show_help(app: &mut App) {
-    app.dialog = Some(super::dialogs::Dialog::Help);
+    app.dialog = Some(super::dialogs::Dialog::Help(0));
 }
 
 fn show_notices(app: &mut App) {
-    app.dialog = Some(super::dialogs::Dialog::Notices);
+    app.dialog = Some(super::dialogs::Dialog::Notices(0));
+}
+
+/// `app.language`: flip `linkr-lang` and persist it, exactly like the web's
+/// language buttons. Everything on screen re-reads `app.lang()` every frame,
+/// so the switch takes effect on the next draw.
+fn toggle_language(app: &mut App) {
+    app.settings.lang = app.settings.lang.toggled();
+    if let Err(err) = super::settings::save(&app.settings) {
+        app.toast(
+            NoticeLevel::Warn,
+            tr!(t(MSG_SAVE_SETTINGS, app.lang()), err),
+        );
+        return;
+    }
+    app.toast(
+        NoticeLevel::Info,
+        tr!(t(PAL_MSG_LANGUAGE, app.lang()), app.lang().endonym()),
+    );
 }
 
 fn quit(app: &mut App) {
@@ -250,248 +412,259 @@ fn quit(app: &mut App) {
 
 fn persist(app: &mut App) {
     if let Err(err) = super::settings::save(&app.settings) {
+        let lang = app.lang();
         app.notices
-            .push(NoticeLevel::Warn, format!("Could not save settings: {err}"));
+            .push(NoticeLevel::Warn, tr!(t(MSG_SAVE_SETTINGS, lang), err));
     }
 }
 
 /// The canonical registry, grouped for display. Order = render order.
+///
+/// Only `id` and `shortcut` are protocol / key literals; `title` and
+/// `category` are bilingual entries resolved at render time.
 pub const ACTIONS: &[Action] = &[
     // Views
     Action {
         id: "view.terminal",
-        title: "Open terminal view",
-        category: "View",
+        title: PAL_T_VIEW_TERMINAL,
+        category: PAL_CAT_VIEW,
         shortcut: "F2",
         run: view_terminal,
     },
     Action {
         id: "view.diagnostics",
-        title: "Open diagnostics view",
-        category: "View",
+        title: PAL_T_VIEW_DIAGNOSTICS,
+        category: PAL_CAT_VIEW,
         shortcut: "F3",
         run: view_diagnostics,
     },
     Action {
         id: "view.network",
-        title: "Open network view",
-        category: "View",
+        title: PAL_T_VIEW_NETWORK,
+        category: PAL_CAT_VIEW,
         shortcut: "F4",
         run: view_network,
     },
     Action {
         id: "view.assistant",
-        title: "Open assistant view",
-        category: "View",
+        title: PAL_T_VIEW_ASSISTANT,
+        category: PAL_CAT_VIEW,
         shortcut: "F5",
         run: view_assistant,
     },
     // Focus
     Action {
         id: "focus.sidebar",
-        title: "Focus the sidebar",
-        category: "Focus",
+        title: PAL_T_FOCUS_SIDEBAR,
+        category: PAL_CAT_FOCUS,
         shortcut: "Ctrl+Up",
         run: focus_sidebar,
     },
     Action {
         id: "focus.terminal",
-        title: "Focus the terminal",
-        category: "Focus",
+        title: PAL_T_FOCUS_TERMINAL,
+        category: PAL_CAT_FOCUS,
         shortcut: "Esc",
         run: focus_center,
     },
     Action {
         id: "focus.assistant",
-        title: "Focus the assistant composer",
-        category: "Focus",
+        title: PAL_T_FOCUS_ASSISTANT,
+        category: PAL_CAT_FOCUS,
         shortcut: "Ctrl+Shift+K",
         run: focus_assistant,
     },
     // Connection
     Action {
         id: "connect",
-        title: "Connect",
-        category: "Connection",
+        title: PAL_T_CONNECT,
+        category: PAL_CAT_CONNECTION,
         shortcut: "",
         run: connect,
     },
     Action {
         id: "disconnect",
-        title: "Disconnect",
-        category: "Connection",
+        title: PAL_T_DISCONNECT,
+        category: PAL_CAT_CONNECTION,
         shortcut: "",
         run: disconnect,
     },
     Action {
         id: "transport.toggle",
-        title: "Toggle BLE / LAN transport",
-        category: "Connection",
+        title: PAL_T_TRANSPORT,
+        category: PAL_CAT_CONNECTION,
         shortcut: "",
         run: toggle_transport,
     },
     Action {
         id: "uart.settings",
-        title: "UART settings…",
-        category: "Connection",
+        title: PAL_T_UART,
+        category: PAL_CAT_CONNECTION,
         shortcut: "",
         run: open_uart,
     },
     // Terminal
     Action {
         id: "term.font_bigger",
-        title: "Bigger font",
-        category: "Terminal",
+        title: PAL_T_FONT_BIGGER,
+        category: PAL_CAT_TERMINAL,
         shortcut: "Ctrl+=",
         run: font_bigger,
     },
     Action {
         id: "term.font_smaller",
-        title: "Smaller font",
-        category: "Terminal",
+        title: PAL_T_FONT_SMALLER,
+        category: PAL_CAT_TERMINAL,
         shortcut: "Ctrl+-",
         run: font_smaller,
     },
     Action {
         id: "term.font_reset",
-        title: "Reset font size",
-        category: "Terminal",
+        title: PAL_T_FONT_RESET,
+        category: PAL_CAT_TERMINAL,
         shortcut: "Ctrl+0",
         run: font_reset,
     },
     Action {
         id: "term.autoscroll",
-        title: "Toggle autoscroll",
-        category: "Terminal",
+        title: PAL_T_AUTOSCROLL,
+        category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: toggle_autoscroll,
     },
     Action {
         id: "term.echo",
-        title: "Toggle local echo",
-        category: "Terminal",
+        title: PAL_T_ECHO,
+        category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: toggle_echo,
     },
     Action {
         id: "term.enter_mode",
-        title: "Cycle Enter mode",
-        category: "Terminal",
+        title: PAL_T_ENTER_MODE,
+        category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: cycle_enter,
     },
     Action {
         id: "term.clear",
-        title: "Clear the terminal",
-        category: "Terminal",
+        title: PAL_T_CLEAR,
+        category: PAL_CAT_TERMINAL,
         shortcut: "Ctrl+L",
         run: clear_terminal,
     },
     Action {
         id: "term.save_log",
-        title: "Save log to file",
-        category: "Terminal",
+        title: PAL_T_SAVE_LOG,
+        category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: save_log,
     },
     Action {
         id: "term.copy",
-        title: "Copy visible output (OSC 52)",
-        category: "Terminal",
+        title: PAL_T_COPY,
+        category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: copy_visible,
     },
     // Diagnostics / network
     Action {
         id: "diag.refresh",
-        title: "Refresh diagnostics (@i?)",
-        category: "Diagnostics",
+        title: PAL_T_DIAG_REFRESH,
+        category: PAL_CAT_DIAGNOSTICS,
         shortcut: "",
         run: refresh_diagnostics,
     },
     Action {
         id: "wifi.scan",
-        title: "Scan WiFi networks",
-        category: "Network",
+        title: PAL_T_WIFI_SCAN,
+        category: PAL_CAT_NETWORK,
         shortcut: "",
         run: wifi_scan,
     },
     Action {
         id: "wifi.status",
-        title: "Query WiFi status",
-        category: "Network",
+        title: PAL_T_WIFI_STATUS,
+        category: PAL_CAT_NETWORK,
         shortcut: "",
         run: wifi_status,
     },
     Action {
         id: "webdav.status",
-        title: "Query WebDAV status",
-        category: "Network",
+        title: PAL_T_WEBDAV_STATUS,
+        category: PAL_CAT_NETWORK,
         shortcut: "",
         run: webdav_status,
     },
     // Assistant
     Action {
         id: "agent.ask",
-        title: "Ask the assistant",
-        category: "Assistant",
+        title: PAL_T_AGENT_ASK,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: ask_assistant,
     },
     Action {
         id: "agent.mode",
-        title: "Cycle execution mode",
-        category: "Assistant",
+        title: PAL_T_AGENT_MODE,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: cycle_mode,
     },
     Action {
         id: "agent.settings",
-        title: "AI configuration…",
-        category: "Assistant",
+        title: PAL_T_AGENT_SETTINGS,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: agent_settings,
     },
     Action {
         id: "agent.new_chat",
-        title: "New chat",
-        category: "Assistant",
+        title: PAL_T_NEW_CHAT,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: new_chat,
     },
     Action {
         id: "agent.stop",
-        title: "Stop the running turn",
-        category: "Assistant",
+        title: PAL_T_AGENT_STOP,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: stop_agent,
     },
     Action {
         id: "agent.export",
-        title: "Export report",
-        category: "Assistant",
+        title: PAL_T_EXPORT,
+        category: PAL_CAT_ASSISTANT,
         shortcut: "",
         run: export_report,
     },
     // App
     Action {
         id: "app.help",
-        title: "Keyboard help",
-        category: "App",
+        title: PAL_T_HELP,
+        category: PAL_CAT_APP,
         shortcut: "F1",
         run: show_help,
     },
     Action {
         id: "app.notices",
-        title: "Notice log",
-        category: "App",
+        title: PAL_T_NOTICES,
+        category: PAL_CAT_APP,
         shortcut: "",
         run: show_notices,
     },
     Action {
+        id: "app.language",
+        title: PAL_T_LANGUAGE,
+        category: PAL_CAT_APP,
+        shortcut: "",
+        run: toggle_language,
+    },
+    Action {
         id: "app.quit",
-        title: "Quit the TUI",
-        category: "App",
+        title: PAL_T_QUIT,
+        category: PAL_CAT_APP,
         shortcut: "Ctrl+Q",
         run: quit,
     },
@@ -502,31 +675,113 @@ pub const ACTIONS: &[Action] = &[
 pub struct PaletteState {
     pub query: String,
     pub selected: usize,
+    /// `linkr-lang` of this overlay. The default stays `Lang::En` so an
+    /// opener that only calls `PaletteState::default()` is still correct for
+    /// English; pass [`PaletteState::new`] with `app.lang()` for 中文.
+    pub lang: Lang,
 }
 
-/// Indices of the actions matching `query` (id / title / category substring).
+impl PaletteState {
+    /// Fresh overlay in `lang`, so the very first frame is already in the
+    /// right language (the opener has the `App`, `render_lines` does not).
+    pub fn new(lang: Lang) -> Self {
+        Self {
+            query: String::new(),
+            selected: 0,
+            lang,
+        }
+    }
+
+    /// Move down one match, wrapping past the last row back to the first.
+    pub fn step_down(&mut self, total: usize) {
+        self.selected = if self.selected + 1 >= total {
+            0
+        } else {
+            self.selected + 1
+        };
+        self.clamp_to(total);
+    }
+
+    /// Move up one match, wrapping past the first row back to the last, so the
+    /// top row is one keypress away from the bottom of the list.
+    pub fn step_up(&mut self, total: usize) {
+        self.selected = if self.selected == 0 {
+            total.saturating_sub(1)
+        } else {
+            self.selected - 1
+        };
+        self.clamp_to(total);
+    }
+
+    /// Keep the selection inside `total` matches — typing may have shrunk the
+    /// list underneath it.
+    pub fn clamp_to(&mut self, total: usize) {
+        self.selected = self.selected.min(total.saturating_sub(1));
+    }
+}
+
+/// Indices of the actions matching `query` (id / title / category substring,
+/// in either language — a 中文 needle finds the Chinese labels, an English
+/// one still finds them through the English half of the entry).
 pub fn matches(query: &str) -> Vec<usize> {
     let needle = query.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return (0..ACTIONS.len()).collect();
     }
+    let hit = |text: &str| text.to_ascii_lowercase().contains(&needle);
     ACTIONS
         .iter()
         .enumerate()
         .filter(|(_, action)| {
             action.id.to_ascii_lowercase().contains(&needle)
-                || action.title.to_ascii_lowercase().contains(&needle)
-                || action.category.to_ascii_lowercase().contains(&needle)
+                || action.title.iter().any(|text| hit(text))
+                || action.category.iter().any(|text| hit(text))
         })
         .map(|(index, _)| index)
         .collect()
 }
 
-/// Body lines of the palette overlay.
-pub fn render_lines(app: &App) -> Vec<Line<'static>> {
-    let Some(state) = &app.palette else {
-        return Vec::new();
-    };
+/// Rows of actions painted at once. The overlay box keeps this height while
+/// the selection moves; only the window slides, so the box never shrinks.
+pub const MAX_VISIBLE: usize = 18;
+
+/// First visible row for `selected`. Keeps the selection near the middle and
+/// slides back when the end approaches, so the window stays *full* while it
+/// scrolls instead of walking off the bottom of the list.
+pub fn window_start(selected: usize, total: usize, visible: usize) -> usize {
+    selected
+        .saturating_sub(visible / 2)
+        .min(total.saturating_sub(visible))
+}
+
+/// Title of the overlay border, spaces included so the caller can pass it to
+/// `Block::title` untouched (`layout.rs::draw_palette`).
+pub fn panel_title(lang: Lang) -> &'static str {
+    t(PAL_TITLE, lang)
+}
+
+/// Column widths of the two padded columns (28 + 12, as before).
+const TITLE_WIDTH: usize = 28;
+const CATEGORY_WIDTH: usize = 12;
+
+/// Left-align `text` inside `width` **display** columns.
+///
+/// `format!("{:<28}")` counts characters, which walks the id column out of
+/// line as soon as a title is 中文 (one glyph, two columns). Padding by
+/// width keeps the columns in the same place in both languages, and leaves
+/// English byte for byte unchanged: every English label is ASCII plus `…`,
+/// and `…` is one column wide.
+fn pad_to(text: &str, width: usize) -> String {
+    let mut out = String::with_capacity(width);
+    out.push_str(text);
+    out.push_str(&" ".repeat(width.saturating_sub(unicode_width::UnicodeWidthStr::width(text))));
+    out
+}
+
+/// Body lines of the palette overlay: prompt, separator, then the visible
+/// window of matches. Pure over the state, so a unit test can pin the height.
+pub fn render_lines(state: &PaletteState, visible: usize) -> Vec<Line<'static>> {
+    let lang = state.lang;
     let found = matches(&state.query);
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -548,13 +803,14 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     )));
     if found.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No matching action.",
+            t(PAL_NO_MATCH, lang),
             Style::default().fg(Color::DarkGray),
         )));
         return lines;
     }
-    let start = state.selected.saturating_sub(9);
-    for (row, index) in found.iter().skip(start).take(18).enumerate() {
+    let visible = visible.clamp(1, MAX_VISIBLE);
+    let start = window_start(state.selected, found.len(), visible);
+    for (row, index) in found.iter().skip(start).take(visible).enumerate() {
         let action = &ACTIONS[*index];
         let selected = start + row == state.selected;
         lines.push(Line::from(vec![
@@ -563,7 +819,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                format!("{:<28}", action.title),
+                pad_to(t(action.title, lang), TITLE_WIDTH),
                 Style::default()
                     .fg(if selected {
                         Color::Yellow
@@ -577,7 +833,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
                     }),
             ),
             Span::styled(
-                format!("{:<12}", action.category),
+                pad_to(t(action.category, lang), CATEGORY_WIDTH),
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(action.id.to_string(), Style::default().fg(Color::DarkGray)),
@@ -596,9 +852,14 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
 
 /// Keys while the palette is open. Returns `true` when consumed.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    // The overlay follows the session language: this is the only hook that
+    // runs while it is open, so it also repairs an opener that left the
+    // default `Lang::En` in place.
+    let lang = app.lang();
     let Some(state) = app.palette.as_mut() else {
         return false;
     };
+    state.lang = lang;
     let found = matches(&state.query);
     match key.code {
         KeyCode::Esc => {
@@ -611,13 +872,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 (ACTIONS[index].run)(app);
             }
         }
-        KeyCode::Up | KeyCode::BackTab => {
-            state.selected = state.selected.saturating_sub(1);
-        }
-        KeyCode::Down | KeyCode::Tab => {
-            let last = found.len().saturating_sub(1);
-            state.selected = (state.selected + 1).min(last);
-        }
+        KeyCode::Up | KeyCode::BackTab => state.step_up(found.len()),
+        KeyCode::Down | KeyCode::Tab => state.step_down(found.len()),
         KeyCode::Home => state.selected = 0,
         KeyCode::End => state.selected = found.len().saturating_sub(1),
         KeyCode::Backspace => {
@@ -634,10 +890,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         _ => {}
     }
-    // Re-clamp after the query changed.
+    // Re-clamp: typing may have shrunk the match list under the selection.
     if let Some(state) = app.palette.as_mut() {
-        let last = matches(&state.query).len().saturating_sub(1);
-        state.selected = state.selected.min(last);
+        state.clamp_to(matches(&state.query).len());
     }
     true
 }
@@ -645,6 +900,60 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate matches the web's `agentExport` disabled state, and the body
+    /// is the same Markdown `buildTaskReport` would produce for these stores.
+    /// The Rust agent keeps no per-command executions, so that section must
+    /// be absent rather than fabricated.
+    #[test]
+    fn the_report_export_offers_only_what_exists() {
+        let key = "[\"ble\",\"aa:bb\",\"\"]";
+        assert!(
+            report_body(key, &[], &[], None, Lang::En).is_none(),
+            "with nothing stored the action has nothing to offer"
+        );
+
+        let tasks = vec![crate::agent::memory::Task {
+            id: "task-1".to_string(),
+            device_key: key.to_string(),
+            updated_at: 0,
+            goal: "read the sensor registers".to_string(),
+            summary: String::new(),
+            status: "open".to_string(),
+            plan: Vec::new(),
+            executions: Vec::new(),
+        }];
+        let body = report_body(key, &tasks, &[], Some("2026-10-03T00:00:00.000Z"), Lang::En)
+            .expect("a stored task is reportable");
+        assert!(body.contains("read the sensor registers"), "{body}");
+        assert!(body.contains("2026-10-03T00:00:00.000Z"), "{body}");
+        assert!(
+            !body.contains("Target executions"),
+            "no executions are recorded, so the section must not appear"
+        );
+
+        // A note alone is enough, exactly as `!tasks.length &&
+        // !notes.length && !records.length` works in agent_panel.js.
+        let notes = vec![crate::agent::memory::Note {
+            id: "note-1".to_string(),
+            device_key: key.to_string(),
+            text: "the board reports 3V3".to_string(),
+            evidence: String::new(),
+            created_at: 0,
+            duplicate: false,
+        }];
+        let body = report_body(key, &[], &notes, Some("2026-10-03T00:00:00.000Z"), Lang::En)
+            .expect("a stored note is reportable");
+        assert!(body.contains("the board reports 3V3"), "{body}");
+
+        // The body follows `linkr-lang` — headings translate, the stored text
+        // and the timestamps do not.
+        let zh = report_body(key, &tasks, &[], Some("2026-10-03T00:00:00.000Z"), Lang::Zh)
+            .expect("a stored task is reportable");
+        assert!(zh.contains("# Linkr Bee 排查报告"), "{zh}");
+        assert!(zh.contains("read the sensor registers"), "{zh}");
+        assert!(!zh.contains("Target executions"), "{zh}");
+    }
 
     /// The canonical id list of CONTRACTS.md section 5 ("palette lists every
     /// action"). The registry must match it exactly, in order.
@@ -681,6 +990,7 @@ mod tests {
         "agent.export",
         "app.help",
         "app.notices",
+        "app.language",
         "app.quit",
     ];
 
@@ -690,11 +1000,147 @@ mod tests {
         assert_eq!(ids, CANONICAL, "palette registry drifted from the contract");
     }
 
+    /// The window must stay full while the selection moves: the old
+    /// `selected - 9` walk produced a shorter window near the end, which
+    /// shrank the box and, with a second scroll on top, emptied it.
+    #[test]
+    fn window_keeps_the_list_full_while_scrolling() {
+        let total = ACTIONS.len();
+        let visible = MAX_VISIBLE;
+        let mut previous = 0;
+        for selected in 0..total {
+            let start = window_start(selected, total, visible);
+            assert!(
+                start + visible <= total,
+                "selected {selected}: window {start}.. overflows {total}"
+            );
+            assert!(
+                start <= selected && selected < start + visible,
+                "selected {selected} is off-screen (window {start}, {visible} rows)"
+            );
+            assert!(
+                start - previous <= 1,
+                "window jumped from {previous} to {start} — it must scroll one row at a time"
+            );
+            previous = start;
+        }
+        // The end of the list still shows a full window.
+        assert_eq!(
+            window_start(total - 1, total, visible),
+            total - visible,
+            "the last selection must pin the window to the bottom"
+        );
+    }
+
+    /// Same line count at the top, the middle and the bottom of the list: the
+    /// overlay box is sized from this, so it must not resize while scrolling.
+    #[test]
+    fn the_box_does_not_shrink_while_scrolling() {
+        let mut state = PaletteState::default();
+        let top = render_lines(&state, MAX_VISIBLE);
+        state.selected = ACTIONS.len() / 2;
+        let middle = render_lines(&state, MAX_VISIBLE);
+        state.selected = ACTIONS.len() - 1;
+        let bottom = render_lines(&state, MAX_VISIBLE);
+
+        assert_eq!(top.len(), 2 + MAX_VISIBLE, "prompt, separator, 18 rows");
+        assert_eq!(top.len(), middle.len(), "box resized mid-list");
+        assert_eq!(top.len(), bottom.len(), "box shrank at the end");
+
+        // The prompt line stays first: that is where the cursor is drawn.
+        assert_eq!(top[0].spans[0].content, "› ");
+        assert_eq!(middle[0].spans[0].content, "› ");
+        assert_eq!(bottom[0].spans[0].content, "› ");
+
+        // Exactly one row is marked selected, and it is the right one.
+        for lines in [&top, &middle, &bottom] {
+            let marked = lines.iter().filter(|l| l.spans[0].content == "▸ ").count();
+            assert_eq!(marked, 1, "expected exactly one selected row");
+        }
+        let start = window_start(ACTIONS.len() - 1, ACTIONS.len(), MAX_VISIBLE);
+        assert_eq!(
+            bottom[2 + (ACTIONS.len() - 1 - start)].spans[0].content,
+            "▸ ",
+            "the last action must be the marked row"
+        );
+    }
+
+    /// The top row is one keypress away from the bottom of the list.
+    #[test]
+    fn the_selection_wraps_at_both_ends() {
+        let total = ACTIONS.len();
+        let mut state = PaletteState::default();
+
+        state.step_down(total);
+        assert_eq!(state.selected, 1);
+        state.step_up(total);
+        assert_eq!(state.selected, 0);
+
+        state.step_up(total);
+        assert_eq!(
+            state.selected,
+            total - 1,
+            "Up on the first row wraps to the last"
+        );
+        state.step_down(total);
+        assert_eq!(state.selected, 0, "Down on the last row wraps to the first");
+
+        // A filtered list wraps inside its own matches.
+        let filtered = matches("wifi").len();
+        assert!(filtered > 1);
+        state.clamp_to(filtered);
+        state.step_up(filtered);
+        assert_eq!(state.selected, filtered - 1);
+
+        // An empty result set stays put instead of underflowing.
+        let mut empty = PaletteState {
+            query: "no-such-action".to_string(),
+            ..PaletteState::default()
+        };
+        empty.step_up(0);
+        empty.step_down(0);
+        assert_eq!(empty.selected, 0);
+    }
+
+    /// Typing shrinks the match list under the selection: it must clamp, not
+    /// point past the end (which used to render nothing at all).
+    #[test]
+    fn a_shrinking_query_clamps_the_selection() {
+        let mut state = PaletteState {
+            query: "wifi".to_string(),
+            selected: ACTIONS.len() - 1,
+            ..PaletteState::default()
+        };
+        state.clamp_to(matches(&state.query).len());
+        assert_eq!(state.selected, matches(&state.query).len() - 1);
+
+        let lines = render_lines(&state, MAX_VISIBLE);
+        assert_eq!(lines.len(), 2 + matches(&state.query).len());
+        assert!(
+            lines.iter().any(|line| line.spans[0].content == "▸ "),
+            "the selection must still be visible after filtering"
+        );
+    }
+
     #[test]
     fn every_action_is_labelled() {
         for action in ACTIONS {
-            assert!(!action.title.is_empty(), "{} has no title", action.id);
-            assert!(!action.category.is_empty(), "{} has no category", action.id);
+            assert!(!action.title[0].is_empty(), "{} has no title", action.id);
+            assert!(
+                !action.title[1].is_empty(),
+                "{} has no chinese title",
+                action.id
+            );
+            assert!(
+                !action.category[0].is_empty(),
+                "{} has no category",
+                action.id
+            );
+            assert!(
+                !action.category[1].is_empty(),
+                "{} has no chinese category",
+                action.id
+            );
         }
     }
 
@@ -739,7 +1185,10 @@ mod tests {
         assert!(ids.contains(&"agent.ask"), "{ids:?}");
         assert!(ids.contains(&"view.assistant"), "{ids:?}");
         assert!(ids.contains(&"focus.assistant"), "{ids:?}");
-        for action in ACTIONS.iter().filter(|a| a.category == "Assistant") {
+        for action in ACTIONS
+            .iter()
+            .filter(|a| t(a.category, Lang::En) == "Assistant")
+        {
             assert!(
                 ids.contains(&action.id),
                 "{} not found for \"assistant\"",
@@ -755,5 +1204,90 @@ mod tests {
 
         assert!(matches("nothing-matches-this").is_empty());
         assert_eq!(matches("").len(), ACTIONS.len());
+    }
+
+    /// Both languages of every palette message carry text and differ — a
+    /// copied English string is a missing translation, not a translation.
+    #[test]
+    fn every_palette_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(
+            ALL.len() >= 53,
+            "the palette alone carries 53 messages, got {}",
+            ALL.len()
+        );
+    }
+
+    /// Chinese must reach the rendered rows: labels translate, the protocol
+    /// ids and the key hints stay byte for byte.
+    #[test]
+    fn the_palette_follows_the_language() {
+        let paint = |state: &PaletteState| {
+            render_lines(state, MAX_VISIBLE)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let zh = paint(&PaletteState::new(Lang::Zh));
+        assert!(zh.contains("打开终端视图"), "{zh}");
+        assert!(zh.contains("聚焦侧栏"), "{zh}");
+        assert!(zh.contains("连接"), "{zh}");
+        assert!(!zh.contains("Open terminal view"), "{zh}");
+        assert!(
+            zh.contains("view.terminal"),
+            "ids stay protocol-literal: {zh}"
+        );
+        assert!(zh.contains("F2"), "key hints stay literal: {zh}");
+
+        let en = paint(&PaletteState::new(Lang::En));
+        assert!(en.contains("Open terminal view"), "{en}");
+        assert!(!en.contains("打开终端视图"), "{en}");
+
+        // The border title is painted by the caller (`layout.rs`).
+        assert_eq!(panel_title(Lang::En), " Command palette (Ctrl+P) ");
+        assert_eq!(panel_title(Lang::Zh), " 命令面板（Ctrl+P） ");
+
+        // The empty-result line follows the language too.
+        let none = paint(&PaletteState {
+            query: "no-such-action".to_string(),
+            lang: Lang::Zh,
+            ..PaletteState::default()
+        });
+        assert!(none.contains("无匹配动作。"), "{none}");
+        assert!(!none.contains("No matching action."), "{none}");
+
+        // A 中文 needle filters like an English one.
+        assert_eq!(
+            matches("扫描"),
+            vec![ACTIONS.iter().position(|a| a.id == "wifi.scan").unwrap()]
+        );
+    }
+
+    /// The padded columns are measured in display columns now, so 中文 rows
+    /// line up; for the English labels — ASCII plus `…`, one column wide —
+    /// the bytes must still be the ones `format!` used to produce.
+    #[test]
+    fn english_rows_keep_their_exact_padding() {
+        for action in ACTIONS {
+            let title = t(action.title, Lang::En);
+            let category = t(action.category, Lang::En);
+            assert_eq!(
+                pad_to(title, TITLE_WIDTH),
+                format!("{:<28}", title),
+                "{title}"
+            );
+            assert_eq!(
+                pad_to(category, CATEGORY_WIDTH),
+                format!("{:<12}", category),
+                "{category}"
+            );
+        }
     }
 }
