@@ -8,9 +8,18 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::i18n::{
+    strings, t, Lang, CONNECTED, CONNECTING, DISCONNECTED, MODE_AUTO, MODE_FULL_AUTO, MODE_MANUAL,
+};
 use crate::agent::ExecMode;
 use crate::event::ConnectionState;
 use crate::transport::TransportKind;
+
+strings! {
+    ST_FAILED => "Failed", "连接失败";
+    ST_HINTS => "Ctrl+P palette · F1 help · F2-F5 views · Ctrl+Q quit",
+        "Ctrl+P 面板 · F1 帮助 · F2-F5 视图 · Ctrl+Q 退出";
+}
 
 /// Everything the status bar renders, already detached from the session so the
 /// formatter stays testable.
@@ -28,6 +37,8 @@ pub struct StatusModel {
     pub clock: String,
     /// Last connection detail (right side of the bottom line).
     pub detail: String,
+    /// `linkr-lang` for this frame.
+    pub lang: Lang,
 }
 
 impl Default for StatusModel {
@@ -43,6 +54,7 @@ impl Default for StatusModel {
             mode: ExecMode::Auto,
             clock: "00:00:00".to_string(),
             detail: String::new(),
+            lang: Lang::En,
         }
     }
 }
@@ -79,16 +91,18 @@ pub fn state_dot_style(state: ConnectionState) -> Style {
     }
 }
 
-pub fn state_text(state: ConnectionState) -> &'static str {
+pub fn state_text(state: ConnectionState, lang: Lang) -> &'static str {
     match state {
-        ConnectionState::Connected => "Connected",
-        ConnectionState::Connecting => "Connecting…",
-        ConnectionState::Failed => "Failed",
-        ConnectionState::Disconnected => "Disconnected",
+        ConnectionState::Connected => t(CONNECTED, lang),
+        ConnectionState::Connecting => t(CONNECTING, lang),
+        ConnectionState::Failed => t(ST_FAILED, lang),
+        ConnectionState::Disconnected => t(DISCONNECTED, lang),
     }
 }
 
-pub fn transport_text(kind: Option<TransportKind>) -> &'static str {
+/// Transport names are identifiers (the web keeps them verbatim), so only the
+/// "no transport" placeholder differs.
+pub fn transport_text(kind: Option<TransportKind>, _lang: Lang) -> &'static str {
     match kind {
         Some(TransportKind::Ble) => "BLE",
         Some(TransportKind::Lan) => "LAN",
@@ -96,11 +110,11 @@ pub fn transport_text(kind: Option<TransportKind>) -> &'static str {
     }
 }
 
-pub fn mode_text(mode: ExecMode) -> &'static str {
+pub fn mode_text(mode: ExecMode, lang: Lang) -> &'static str {
     match mode {
-        ExecMode::Manual => "Manual",
-        ExecMode::Auto => "Auto",
-        ExecMode::FullAuto => "Full Auto",
+        ExecMode::Manual => t(MODE_MANUAL, lang),
+        ExecMode::Auto => t(MODE_AUTO, lang),
+        ExecMode::FullAuto => t(MODE_FULL_AUTO, lang),
     }
 }
 
@@ -127,8 +141,8 @@ pub fn status_left(m: &StatusModel) -> String {
     format!(
         "{} {} · {} · {}",
         state_dot(m.state),
-        state_text(m.state),
-        transport_text(m.transport),
+        state_text(m.state, m.lang),
+        transport_text(m.transport, m.lang),
         device_text(&m.label, m.device_id.as_deref()),
     )
 }
@@ -145,7 +159,7 @@ pub fn status_right(m: &StatusModel) -> String {
         format_count(m.rx_bytes),
         format_count(m.tx_bytes),
         baud,
-        mode_text(m.mode),
+        mode_text(m.mode, m.lang),
         m.clock,
     )
 }
@@ -158,7 +172,7 @@ pub fn status_left_spans(m: &StatusModel) -> Vec<Span<'static>> {
             state_dot_style(m.state).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" {}", state_text(m.state)),
+            format!(" {}", state_text(m.state, m.lang)),
             match m.state {
                 ConnectionState::Connected => Style::default().fg(Color::Green),
                 ConnectionState::Connecting => Style::default().fg(Color::Yellow),
@@ -167,7 +181,7 @@ pub fn status_left_spans(m: &StatusModel) -> Vec<Span<'static>> {
             },
         ),
         Span::styled(
-            format!(" · {} · ", transport_text(m.transport)),
+            format!(" · {} · ", transport_text(m.transport, m.lang)),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
@@ -215,7 +229,7 @@ pub fn join_status(left: &str, right: &str, width: u16) -> String {
 ///
 /// The status cluster wins: when the hints do not fit they are truncated with
 /// an ellipsis instead of the focus/view/detail text.
-pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16) -> String {
+pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16, lang: Lang) -> String {
     let left = format!(
         "[{focus}] {view}{}",
         if detail.is_empty() {
@@ -224,7 +238,7 @@ pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16) -> String 
             format!(" · {detail}")
         }
     );
-    let right = "Ctrl+P palette · F1 help · F2-F5 views · Ctrl+Q quit";
+    let right = t(ST_HINTS, lang);
     let width = width as usize;
     if width == 0 {
         return String::new();
@@ -327,6 +341,7 @@ mod tests {
             mode: ExecMode::Auto,
             clock: "13:04:11".to_string(),
             detail: "API v1.0 device=aabbccddeeff0011".to_string(),
+            lang: Lang::En,
         }
     }
 
@@ -375,9 +390,9 @@ mod tests {
 
     #[test]
     fn mode_labels_match_the_web_picker() {
-        assert_eq!(mode_text(ExecMode::Manual), "Manual");
-        assert_eq!(mode_text(ExecMode::Auto), "Auto");
-        assert_eq!(mode_text(ExecMode::FullAuto), "Full Auto");
+        assert_eq!(mode_text(ExecMode::Manual, Lang::En), "Manual");
+        assert_eq!(mode_text(ExecMode::Auto, Lang::En), "Auto");
+        assert_eq!(mode_text(ExecMode::FullAuto, Lang::En), "Full Auto");
     }
 
     #[test]
@@ -404,7 +419,7 @@ mod tests {
 
     #[test]
     fn bottom_line_contains_the_documented_hints() {
-        let line = bottom_line("Terminal", "Serial Terminal", "detail", 100);
+        let line = bottom_line("Terminal", "Serial Terminal", "detail", 100, Lang::En);
         assert!(line.starts_with("[Terminal] Serial Terminal · detail"));
         assert!(line.contains("Ctrl+P palette"));
         assert!(line.contains("F1 help"));
@@ -412,16 +427,34 @@ mod tests {
         assert_eq!(line.chars().count(), 100);
 
         // At 80 columns the hint cluster is truncated; the status wins.
-        let line = bottom_line("Terminal", "Serial Terminal", "detail", 80);
+        let line = bottom_line("Terminal", "Serial Terminal", "detail", 80, Lang::En);
         assert!(line.starts_with("[Terminal] Serial Terminal · detail"));
         assert!(line.contains("Ctrl+P palette"));
         assert!(line.contains('…'));
         assert_eq!(line.chars().count(), 80);
 
         // A tiny bar keeps the status and stays inside the width.
-        let line = bottom_line("Terminal", "Serial Terminal", "detail", 20);
+        let line = bottom_line("Terminal", "Serial Terminal", "detail", 20, Lang::En);
         assert_eq!(line.chars().count(), 20);
         assert!(line.starts_with("[Terminal] Serial"));
+    }
+
+    /// Both languages of every status message carry text and differ.
+    #[test]
+    fn every_status_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.len() >= 2, "the status bar adds at least two messages");
+    }
+
+    /// Chinese must reach the rendered bar, not just the table.
+    #[test]
+    fn the_bottom_line_follows_the_language() {
+        let zh = bottom_line("终端", "串口终端", "详情", 80, Lang::Zh);
+        assert!(zh.contains("Ctrl+P 面板"), "{zh}");
+        assert!(zh.contains("Ctrl+Q 退出"), "{zh}");
+        assert!(!zh.contains("Ctrl+P palette"), "{zh}");
+        assert_eq!(state_text(ConnectionState::Failed, Lang::Zh), "连接失败");
+        assert_eq!(mode_text(ExecMode::FullAuto, Lang::Zh), "全自动");
     }
 
     #[test]

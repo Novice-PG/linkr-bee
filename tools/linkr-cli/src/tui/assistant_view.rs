@@ -14,28 +14,62 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::agent_settings;
+use super::i18n::{strings, t, tr, Lang};
 use super::state::{AgentRuntime, App, TextField};
 use crate::agent::{AgentEvent, ExecMode};
 use crate::event::NoticeLevel;
 
-/// Help text of the three modes (WEB_UX_SPEC section 7.2, English column).
-pub const MODE_HELP: [(&str, &str); 3] = [
-    (
-        "Manual",
-        "AI proposes commands; click Send to enter them on the target.",
-    ),
-    (
-        "Auto · Recommended",
-        "Low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode.",
-    ),
-    (
-        "Full Auto",
-        "Commands run without confirmation. Recognized destructive or irreversible commands still need your approval.",
-    ),
+strings! {
+    ASST_AGENT => "Agent", "助手";
+    ASST_ACTIONS => "  Settings · New chat · Exit", "  设置 · 新建对话 · 退出";
+    ASST_MODE_MANUAL => "Manual", "手动";
+    ASST_MODE_AUTO => "Auto · Recommended", "自动 · 推荐";
+    ASST_MODE_FULL_AUTO => "Full Auto", "全自动";
+    ASST_MODE_MANUAL_HELP => "AI proposes commands; click Send to enter them on the target.",
+        "AI 提出命令；点击发送，在目标上执行。";
+    ASST_MODE_AUTO_HELP => "Low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode.",
+        "低风险查询在识别到的 shell 提示符下执行；其他输入需要审批。破坏性命令在任何模式下都需要审批。";
+    ASST_MODE_FULL_AUTO_HELP => "Commands run without confirmation. Recognized destructive or irreversible commands still need your approval.",
+        "命令直接执行，无需确认。识别出的破坏性或不可逆命令仍需审批。";
+    ASST_PICKER_TITLE => "Execution mode", "执行模式";
+    ASST_PICKER_HINT => "↑/↓ pick · Enter engage · Esc close",
+        "↑/↓ 选择 · Enter 应用 · Esc 关闭";
+    ASST_EMPTY_HINT => "Ask a question about the device; the assistant reads the serial journal.",
+        "就设备提问；助手会读取串口日志。";
+    ASST_SPEAKER_YOU => "you › ", "你 › ";
+    ASST_SPEAKER_AI => "ai › ", "AI › ";
+    ASST_COMPOSER_HINT => "Describe the problem", "描述问题";
+    ASST_KEYS_LINE_1 => "Enter newline · Ctrl/Alt+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S settings",
+        "Enter 换行 · Ctrl/Alt+Enter 发送 · Ctrl+Shift+M 模式 · Ctrl+Shift+S 设置";
+    ASST_KEYS_LINE_2 => "Ctrl+Shift+N new chat · Esc exit to the terminal · Ctrl+Q quit the TUI",
+        "Ctrl+Shift+N 新建对话 · Esc 返回终端 · Ctrl+Q 退出 TUI";
+    ASST_NEW_CHAT_STATUS => "New chat.", "已新建对话。";
+    ASST_MODE_CHANGED => "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
+        "模式已切换；对话保留。本次运行已停止，待发送输入已取消；已发送的输入无法撤回。重新提问以继续。";
+    ASST_MODE_STATUS => "Mode: {}", "模式：{}";
+    ASST_SET_CONFIG_HINT => "Set the AI configuration first (Ctrl+P → agent.settings).",
+        "请先设置 AI 配置（Ctrl+P → agent.settings）。";
+    ASST_NO_CONFIG => "No AI configuration saved.", "未保存 AI 配置。";
+    ASST_RUNTIME_MISSING => "The assistant runtime is not available in this build.",
+        "此构建不含助手运行时。";
+    ASST_UNAVAILABLE => "Assistant unavailable.", "助手不可用。";
+    ASST_STOP_MESSAGE => "Stopped. Already sent input cannot be recalled; use Ctrl-C in the terminal to interrupt the target program.",
+        "已停止。已发送的输入无法撤回；在终端用 Ctrl-C 中断目标程序。";
+    ASST_USAGE_TOTAL => "Tokens this conversation {} · ↑{} ↓{}",
+        "本次对话 tokens {} · ↑{} ↓{}";
+    ASST_USAGE_COST => " · Estimated cost ~{}", " · 预估成本 ~{}";
+    ASST_USAGE_NO_PRICES => " · Prices not set", " · 未设置价格";
+}
+
+/// Help text of the three modes (WEB_UX_SPEC section 7.2): label and help in
+/// both languages. The test pins the English column byte for byte.
+pub const MODE_HELP: [(super::i18n::Entry, super::i18n::Entry); 3] = [
+    (ASST_MODE_MANUAL, ASST_MODE_MANUAL_HELP),
+    (ASST_MODE_AUTO, ASST_MODE_AUTO_HELP),
+    (ASST_MODE_FULL_AUTO, ASST_MODE_FULL_AUTO_HELP),
 ];
 
 pub const COMPOSER_MAX: usize = 4000;
-pub const STOP_MESSAGE: &str = "Stopped. Already sent input cannot be recalled; use Ctrl-C in the terminal to interrupt the target program.";
 
 /// One rendered row of the chat log.
 #[derive(Debug, Clone)]
@@ -67,7 +101,6 @@ pub struct AssistantState {
     pub busy: bool,
     pub status: String,
     pub usage: Option<(u64, u64, u64, f64)>,
-    pub scroll: usize,
 }
 
 impl AssistantState {
@@ -88,11 +121,16 @@ impl AssistantState {
     }
 
     /// `Tokens this conversation …` line (WEB_UX_SPEC section 7.5).
-    pub fn usage_line(&self) -> Option<String> {
+    ///
+    /// The language is a parameter rather than an `AssistantState` field: the
+    /// state is rebuilt from `AssistantState::default()` in `mod.rs` and
+    /// `palette.rs`, files this workstream cannot edit, so a stored field
+    /// would silently fall back to English after "New chat".
+    pub fn usage_line(&self, lang: Lang) -> Option<String> {
         let (input, output, cache, cost) = self.usage?;
         let total = input + output;
-        let mut line = format!(
-            "Tokens this conversation {} · ↑{} ↓{}",
+        let mut line = tr!(
+            t(ASST_USAGE_TOTAL, lang),
             super::status::format_count(total),
             super::status::format_count(input),
             super::status::format_count(output),
@@ -101,9 +139,9 @@ impl AssistantState {
             line.push_str(&format!(" ⚡{}", super::status::format_count(cache)));
         }
         if cost > 0.0 {
-            line.push_str(&format!(" · Estimated cost ~{}", format_cost(cost)));
+            line.push_str(&tr!(t(ASST_USAGE_COST, lang), format_cost(cost)));
         } else {
-            line.push_str(" · Prices not set");
+            line.push_str(t(ASST_USAGE_NO_PRICES, lang));
         }
         Some(line)
     }
@@ -196,6 +234,7 @@ fn wrapped(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
 
 /// Body of the Assistant view.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let lang = app.lang();
     let state = &app.assistant;
     let width = width.max(20);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -204,31 +243,28 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let (mode_label, mode_help) = MODE_HELP[AssistantState::mode_index(app.exec_mode)];
     lines.push(Line::from(vec![
         Span::styled(
-            "Agent",
+            t(ASST_AGENT, lang),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled(
-            format!("[{mode_label}]"),
+            format!("[{}]", t(mode_label, lang)),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "  Settings · New chat · Exit",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(t(ASST_ACTIONS, lang), Style::default().fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(Span::styled(
-        mode_help.to_string(),
+        t(mode_help, lang),
         Style::default().fg(Color::DarkGray),
     )));
 
     if state.picker_open {
         lines.push(Line::from(Span::styled(
-            "Execution mode",
+            t(ASST_PICKER_TITLE, lang),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -249,7 +285,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Green),
                 ),
                 Span::styled(
-                    (*label).to_string(),
+                    t(*label, lang).to_string(),
                     Style::default()
                         .fg(if selected { Color::White } else { Color::Gray })
                         .add_modifier(if selected {
@@ -261,7 +297,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             ]));
             if selected {
                 for line in wrapped(
-                    help,
+                    t(*help, lang),
                     width.saturating_sub(4),
                     Style::default().fg(Color::DarkGray),
                 ) {
@@ -275,7 +311,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             }
         }
         lines.push(Line::from(Span::styled(
-            "↑/↓ pick · Enter engage · Esc close",
+            t(ASST_PICKER_HINT, lang),
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(""));
@@ -283,7 +319,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if state.entries.is_empty() && state.streaming.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Ask a question about the device; the assistant reads the serial journal.",
+            t(ASST_EMPTY_HINT, lang),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -292,7 +328,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         match entry {
             Entry::User(text) => {
                 lines.push(Line::from(Span::styled(
-                    "you › ",
+                    t(ASST_SPEAKER_YOU, lang),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -305,7 +341,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             }
             Entry::Assistant(text) => {
                 lines.push(Line::from(Span::styled(
-                    "ai › ",
+                    t(ASST_SPEAKER_AI, lang),
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
@@ -365,7 +401,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    if let Some(usage) = state.usage_line() {
+    if let Some(usage) = state.usage_line(lang) {
         lines.push(Line::from(Span::styled(
             usage,
             Style::default().fg(Color::DarkGray),
@@ -380,7 +416,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     // Composer.
     lines.push(Line::from(Span::styled(
-        "Describe the problem",
+        t(ASST_COMPOSER_HINT, lang),
         Style::default().fg(Color::DarkGray),
     )));
     let (text, _) = state.composer.display(None);
@@ -414,7 +450,11 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        "Enter newline · Ctrl+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S settings",
+        t(ASST_KEYS_LINE_1, lang),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        t(ASST_KEYS_LINE_2, lang),
         Style::default().fg(Color::DarkGray),
     )));
     lines
@@ -426,6 +466,12 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // The legacy terminal encoding cannot distinguish Ctrl+Enter from Enter at
+    // all (both are 0x0d), so `Alt+Enter` — `0x1b 0x0d`, accepted by every
+    // terminal, unlike the kitty keyboard protocol GNOME Terminal still lacks
+    // — is a second way to send. Terminals that do speak kitty report the real
+    // Ctrl+Enter as `CSI 13;5u`.
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
 
     if app.assistant.picker_open {
         match key.code {
@@ -466,10 +512,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('s') if ctrl && shift => open_settings(app),
         KeyCode::Char('n') if ctrl && shift => {
+            let lang = app.lang();
             app.assistant = super::assistant_view::AssistantState::default();
-            app.assistant.status = "New chat.".to_string();
+            app.assistant.status = t(ASST_NEW_CHAT_STATUS, lang).to_string();
         }
-        KeyCode::Enter if ctrl => submit(app),
+        KeyCode::Enter if ctrl || alt => submit(app),
         KeyCode::Enter => app.assistant.composer.insert_char('\n'),
         KeyCode::Char(c) if !ctrl => {
             let len = app.assistant.composer.text.chars().count();
@@ -485,8 +532,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down if !shift => app.assistant.composer.end(),
         KeyCode::Home => app.assistant.composer.home(),
         KeyCode::End => app.assistant.composer.end(),
-        KeyCode::PageUp => app.assistant.scroll = app.assistant.scroll.saturating_add(5),
-        KeyCode::PageDown => app.assistant.scroll = app.assistant.scroll.saturating_sub(5),
+        KeyCode::PageUp => {
+            let limit = super::layout::center_scroll_limit(app);
+            app.center_scroll = super::layout::page_scroll(app.center_scroll, limit, 5, true);
+        }
+        KeyCode::PageDown => {
+            let limit = super::layout::center_scroll_limit(app);
+            app.center_scroll = super::layout::page_scroll(app.center_scroll, limit, 5, false);
+        }
         _ => {}
     }
 }
@@ -494,7 +547,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 /// Open the AI configuration dialog.
 pub fn open_settings(app: &mut App) {
     if app.assistant.busy {
-        app.toast(NoticeLevel::Warn, agent_settings::BUSY);
+        app.toast(
+            NoticeLevel::Warn,
+            super::i18n::t(agent_settings::ASST_BUSY, app.lang()).to_string(),
+        );
         return;
     }
     app.dialog = Some(super::dialogs::Dialog::Settings(
@@ -505,21 +561,20 @@ pub fn open_settings(app: &mut App) {
 /// Engage an execution mode (the running turn is stopped first, web
 /// `stop("modeChanged")`).
 pub fn set_mode(app: &mut App, mode: ExecMode) {
+    let lang = app.lang();
     if app.exec_mode == mode {
         return;
     }
     if app.assistant.busy {
-        push_system(
-            app,
-            "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
-        );
+        push_system(app, t(ASST_MODE_CHANGED, lang));
         if let Some(agent) = &app.agent {
             agent.handle.stop();
         }
         app.assistant.busy = false;
     }
     app.exec_mode = mode;
-    app.assistant.status = format!("Mode: {}", MODE_HELP[AssistantState::mode_index(mode)].0);
+    let name = MODE_HELP[AssistantState::mode_index(mode)].0;
+    app.assistant.status = tr!(t(ASST_MODE_STATUS, lang), t(name, lang));
 }
 
 fn push_system(app: &mut App, text: &str) {
@@ -532,13 +587,11 @@ fn ensure_agent(app: &mut App) -> bool {
     if app.agent.is_some() {
         return true;
     }
+    let lang = app.lang();
     let config = agent_settings::runtime_config();
     if config.is_none() {
-        app.toast(
-            NoticeLevel::Warn,
-            "Set the AI configuration first (Ctrl+P → agent.settings).",
-        );
-        app.assistant.status = "No AI configuration saved.".to_string();
+        app.toast(NoticeLevel::Warn, t(ASST_SET_CONFIG_HINT, lang).to_string());
+        app.assistant.status = t(ASST_NO_CONFIG, lang).to_string();
         return false;
     }
     let broker = Arc::new(app.broker.clone()) as Arc<dyn crate::agent::ApprovalBroker>;
@@ -560,9 +613,9 @@ fn ensure_agent(app: &mut App) -> bool {
         Err(_) => {
             app.toast(
                 NoticeLevel::Error,
-                "The assistant runtime is not available in this build.",
+                t(ASST_RUNTIME_MISSING, lang).to_string(),
             );
-            app.assistant.status = "Assistant unavailable.".to_string();
+            app.assistant.status = t(ASST_UNAVAILABLE, lang).to_string();
             false
         }
     }
@@ -579,6 +632,9 @@ pub fn submit(app: &mut App) {
     }
     app.assistant.composer.clear();
     app.assistant.entries.push(Entry::User(question.clone()));
+    // The reply lands at the end of the transcript: follow it instead of
+    // leaving the view pinned where the previous turn ended.
+    app.center_scroll = super::layout::PIN_END;
     app.assistant.streaming.clear();
     app.assistant.busy = true;
     app.assistant.status = String::new();
@@ -662,13 +718,17 @@ mod tests {
 
     #[test]
     fn mode_labels_and_help_match_the_spec() {
-        assert_eq!(MODE_HELP[0].0, "Manual");
-        assert_eq!(MODE_HELP[1].0, "Auto · Recommended");
-        assert_eq!(MODE_HELP[2].0, "Full Auto");
+        assert_eq!(t(MODE_HELP[0].0, Lang::En), "Manual");
+        assert_eq!(t(MODE_HELP[1].0, Lang::En), "Auto · Recommended");
+        assert_eq!(t(MODE_HELP[2].0, Lang::En), "Full Auto");
         assert_eq!(
-            MODE_HELP[1].1,
+            t(MODE_HELP[1].1, Lang::En),
             "Low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode."
         );
+        // The Chinese column carries the same three modes.
+        assert_eq!(t(MODE_HELP[0].0, Lang::Zh), "手动");
+        assert_eq!(t(MODE_HELP[1].0, Lang::Zh), "自动 · 推荐");
+        assert_eq!(t(MODE_HELP[2].0, Lang::Zh), "全自动");
     }
 
     #[test]
@@ -678,6 +738,28 @@ mod tests {
             assert_eq!(AssistantState::mode_index(mode), index);
         }
         assert_eq!(AssistantState::exec_of(9), ExecMode::Auto);
+    }
+
+    /// A bare Enter is a newline; both send chords take the submit path.
+    /// Regression: only CONTROL was checked, and no terminal can encode
+    /// `Ctrl+Enter` in the legacy key set (both are the byte `0x0d`), so
+    /// sending was impossible on e.g. GNOME Terminal. `Alt+Enter` is the chord
+    /// every terminal can actually transmit.
+    #[test]
+    fn alt_enter_sends_exactly_like_ctrl_enter() {
+        let mut app = crate::tui::test_app();
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.assistant.composer.text, "\n", "Enter inserts a newline");
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            app.assistant.composer.clear();
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, modifiers));
+            assert_eq!(
+                app.assistant.composer.text, "",
+                "{modifiers:?} + Enter must submit, not insert a newline"
+            );
+        }
     }
 
     #[test]
@@ -704,13 +786,46 @@ mod tests {
             usage: Some((1234, 56, 7, 0.0)),
             ..AssistantState::default()
         };
-        let line = state.usage_line().unwrap();
+        let line = state.usage_line(Lang::En).unwrap();
         assert_eq!(
             line,
             "Tokens this conversation 1,290 · ↑1,234 ↓56 ⚡7 · Prices not set"
         );
         state.usage = Some((100, 50, 0, 0.5));
-        let line = state.usage_line().unwrap();
+        let line = state.usage_line(Lang::En).unwrap();
         assert!(line.ends_with("· Estimated cost ~$0.500"), "{line}");
+
+        // Same numbers in Chinese, counts and all.
+        let zh = state.usage_line(Lang::Zh).unwrap();
+        assert_eq!(zh, "本次对话 tokens 150 · ↑100 ↓50 · 预估成本 ~$0.500");
+    }
+
+    /// Both languages of every assistant message carry text and differ.
+    #[test]
+    fn every_assistant_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.len() >= 27, "the assistant view carries 27 messages");
+    }
+
+    /// Chinese has to reach the rendered panel, and the stop notice — which
+    /// `palette::stop_agent` pushes when a run is cancelled — keeps its
+    /// wording in both languages.
+    #[test]
+    fn chinese_reaches_the_panel_and_the_stop_notice_is_pinned() {
+        assert_eq!(t(ASST_AGENT, Lang::Zh), "助手");
+        assert_eq!(t(ASST_SPEAKER_YOU, Lang::En), "you › ");
+        assert_eq!(
+            t(ASST_KEYS_LINE_2, Lang::Zh),
+            "Ctrl+Shift+N 新建对话 · Esc 返回终端 · Ctrl+Q 退出 TUI"
+        );
+        assert!(!t(ASST_EMPTY_HINT, Lang::Zh).contains("Ask a question about the device"));
+        assert_eq!(
+            t(ASST_STOP_MESSAGE, Lang::En),
+            "Stopped. Already sent input cannot be recalled; use Ctrl-C in the terminal to interrupt the target program."
+        );
+        assert_eq!(
+            t(ASST_STOP_MESSAGE, Lang::Zh),
+            "已停止。已发送的输入无法撤回；在终端用 Ctrl-C 中断目标程序。"
+        );
     }
 }

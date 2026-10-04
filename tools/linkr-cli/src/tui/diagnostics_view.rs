@@ -7,9 +7,32 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::oneshot;
 
+use super::i18n::{strings, t, tr, Lang};
 use super::state::App;
 use crate::protocol::MgmtReply;
 use crate::session::SessionHandle;
+
+strings! {
+    DIAG_HEADER => "Diagnostics", "诊断";
+    DIAG_UPDATED => "@i? · updated {}", "@i? · 已更新 {}";
+    DIAG_NOT_READ => "@i? not read yet", "@i? 尚未读取";
+    DIAG_NO_BLE => "Connect over BLE to read diagnostics (management commands are BLE-only).",
+        "通过 BLE 连接后才能读取诊断（管理命令仅限 BLE）。";
+    DIAG_LOADING => "reading @i?…", "正在读取 @i?…";
+    DIAG_EMPTY => "No device information yet.", "暂无设备信息。";
+    DIAG_KEYS_HINT => "r refresh · PgUp/PgDn scroll · F2 terminal",
+        "r 刷新 · PgUp/PgDn 滚动 · F2 终端";
+    DIAG_POLL_CLOSED => "disconnected before diagnostics arrived",
+        "诊断数据到达前连接已断开";
+    DIAG_LABEL_FIRMWARE => "Firmware", "固件";
+    DIAG_LABEL_UPTIME => "Uptime", "运行时间";
+    DIAG_LABEL_BLE_ACCESS => "BLE access", "BLE 访问";
+    DIAG_LABEL_UART_BUFFER => "UART Buffer", "UART 缓冲";
+    DIAG_LABEL_UPLOAD_QUEUE => "Upload Queue", "上传队列";
+    DIAG_ACCESS_OPEN => "open", "开放";
+    DIAG_ACCESS_SCOPED => "scoped", "受限";
+    DIAG_LINK_LEVEL => "link L{}", "链路 L{}";
+}
 
 /// `state.diagnostics[group][key] = value`.
 pub type InfoGroups = BTreeMap<String, BTreeMap<String, String>>;
@@ -96,15 +119,16 @@ pub fn fmt_uptime(groups: &InfoGroups) -> String {
     }
 }
 
-/// `open`/`scoped` + ` · link L<level>`.
-pub fn fmt_ble_access(groups: &InfoGroups) -> String {
+/// `open`/`scoped` + ` · link L<level>` (the web words both through its own
+/// i18n table, so these two are interface text, not wire tokens).
+pub fn fmt_ble_access(groups: &InfoGroups, lang: Lang) -> String {
     let owner = match get(groups, "sys", "owner") {
-        Some("0") => "open",
-        Some(_) => "scoped",
+        Some("0") => t(DIAG_ACCESS_OPEN, lang),
+        Some(_) => t(DIAG_ACCESS_SCOPED, lang),
         None => return "–".to_string(),
     };
     match get(groups, "sys", "security") {
-        Some(level) => format!("{owner} · link L{level}"),
+        Some(level) => format!("{owner} · {}", tr!(t(DIAG_LINK_LEVEL, lang), level)),
         None => owner.to_string(),
     }
 }
@@ -133,14 +157,16 @@ pub fn fmt_upload(groups: &InfoGroups) -> String {
 }
 
 /// The six rows of the web `#diagnosticsGrid`, in order.
-pub fn value_rows(groups: &InfoGroups) -> [(&'static str, String); 6] {
+pub fn value_rows(groups: &InfoGroups, lang: Lang) -> [(&'static str, String); 6] {
     [
-        ("Firmware", fmt_firmware(groups)),
-        ("Uptime", fmt_uptime(groups)),
-        ("BLE access", fmt_ble_access(groups)),
-        ("UART Buffer", fmt_uart_buffer(groups)),
+        (t(DIAG_LABEL_FIRMWARE, lang), fmt_firmware(groups)),
+        (t(DIAG_LABEL_UPTIME, lang), fmt_uptime(groups)),
+        (t(DIAG_LABEL_BLE_ACCESS, lang), fmt_ble_access(groups, lang)),
+        (t(DIAG_LABEL_UART_BUFFER, lang), fmt_uart_buffer(groups)),
+        // "WiFi" reads the same in both languages (web `diagWifi`), so it is
+        // not a bilingual entry — a copied translation would fail the check.
         ("WiFi", fmt_wifi(groups)),
-        ("Upload Queue", fmt_upload(groups)),
+        (t(DIAG_LABEL_UPLOAD_QUEUE, lang), fmt_upload(groups)),
     ]
 }
 
@@ -195,8 +221,9 @@ impl DiagnosticsState {
         self.pending = Some(session.request_mgmt("@i?".to_string(), None));
     }
 
-    /// Drain a completed request without blocking the render loop.
-    pub fn poll(&mut self) {
+    /// Drain a completed request without blocking the render loop. `lang` only
+    /// words the local "never arrived" failure; device errors pass through.
+    pub fn poll(&mut self, lang: Lang) {
         let Some(rx) = &mut self.pending else { return };
         match rx.try_recv() {
             Ok(Ok(reply)) => {
@@ -223,7 +250,7 @@ impl DiagnosticsState {
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.loading = false;
                 self.pending = None;
-                self.error = Some("disconnected before diagnostics arrived".to_string());
+                self.error = Some(t(DIAG_POLL_CLOSED, lang).to_string());
             }
         }
     }
@@ -269,18 +296,19 @@ fn clip(text: &str, width: usize) -> String {
 
 /// Header + the six-row grid + status, mirroring WEB_UX_SPEC section 5.2.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let lang = app.lang();
     let state = &app.diagnostics;
     let mut lines = vec![
         Line::from(Span::styled(
-            "Diagnostics",
+            t(DIAG_HEADER, lang),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             match &state.updated {
-                Some(at) => format!("@i? · updated {at}"),
-                None => "@i? not read yet".to_string(),
+                Some(at) => tr!(t(DIAG_UPDATED, lang), at),
+                None => t(DIAG_NOT_READ, lang).to_string(),
             },
             Style::default().fg(Color::DarkGray),
         )),
@@ -289,7 +317,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if !app.ble_connected() {
         lines.push(Line::from(Span::styled(
-            "Connect over BLE to read diagnostics (management commands are BLE-only).",
+            t(DIAG_NO_BLE, lang),
             Style::default().fg(Color::LightYellow),
         )));
         lines.push(Line::from(""));
@@ -303,7 +331,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     if state.has_data() {
-        for (label, value) in value_rows(&state.groups) {
+        for (label, value) in value_rows(&state.groups, lang) {
             lines.push(row_line(label, &value, width));
         }
         // Extra `@info` groups beyond the six web rows stay visible so the
@@ -318,19 +346,19 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         }
     } else if state.loading {
         lines.push(Line::from(Span::styled(
-            "reading @i?…",
+            t(DIAG_LOADING, lang),
             Style::default().fg(Color::Gray),
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "No device information yet.",
+            t(DIAG_EMPTY, lang),
             Style::default().fg(Color::DarkGray),
         )));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "r refresh · PgUp/PgDn scroll · F2 terminal",
+        t(DIAG_KEYS_HINT, lang),
         Style::default().fg(Color::DarkGray),
     )));
     lines
@@ -400,13 +428,22 @@ mod tests {
         let (groups, _) = parse_info_lines(SAMPLE.iter().copied());
         assert_eq!(fmt_firmware(&groups), "0.2.0 · Z4.4.1");
         assert_eq!(fmt_uptime(&groups), "2m 3s");
-        assert_eq!(fmt_ble_access(&groups), "open · link L1");
+        assert_eq!(fmt_ble_access(&groups, Lang::En), "open · link L1");
         assert_eq!(fmt_uart_buffer(&groups), "0/16384 · drop 0");
         assert_eq!(fmt_wifi(&groups), "connected · IP ready · err 0");
         assert_eq!(fmt_upload(&groups), "0 B · HTTP 201 · fail 0");
-        let rows = value_rows(&groups);
+        let rows = value_rows(&groups, Lang::En);
         assert_eq!(rows[0].0, "Firmware");
         assert_eq!(rows[5].0, "Upload Queue");
+
+        // The Chinese grid labels reach the render; the values stay the
+        // byte-for-byte web formatters.
+        let zh = value_rows(&groups, Lang::Zh);
+        assert_eq!(zh[0].0, "固件");
+        assert_eq!(zh[1].0, "运行时间");
+        assert_eq!(zh[2].0, "BLE 访问");
+        assert_eq!(zh[2].1, "开放 · 链路 L1");
+        assert_eq!(zh[5].0, "上传队列");
     }
 
     #[test]
@@ -433,15 +470,16 @@ mod tests {
         let (groups, _) = parse_info_lines(Vec::<&str>::new());
         assert_eq!(fmt_uptime(&groups), "–");
         assert_eq!(fmt_firmware(&groups), "—");
-        assert_eq!(fmt_ble_access(&groups), "–");
+        assert_eq!(fmt_ble_access(&groups, Lang::En), "–");
     }
 
     #[test]
     fn ble_access_scoped_when_owner_is_not_open() {
         let (groups, _) = parse_info_lines(["@info sys uptime_ms=1 owner=1 security=2"]);
-        assert_eq!(fmt_ble_access(&groups), "scoped · link L2");
+        assert_eq!(fmt_ble_access(&groups, Lang::En), "scoped · link L2");
+        assert_eq!(fmt_ble_access(&groups, Lang::Zh), "受限 · 链路 L2");
         let (groups, _) = parse_info_lines(["@info sys uptime_ms=1 owner=1"]);
-        assert_eq!(fmt_ble_access(&groups), "scoped");
+        assert_eq!(fmt_ble_access(&groups, Lang::En), "scoped");
     }
 
     #[test]
@@ -466,7 +504,13 @@ mod tests {
         assert_eq!(state.updated, None);
         // poll() without a pending request is a no-op.
         let mut state = state;
-        state.poll();
+        state.poll(Lang::En);
         assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn every_diagnostics_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.len() >= 16, "the diagnostics view carries 16 messages");
     }
 }

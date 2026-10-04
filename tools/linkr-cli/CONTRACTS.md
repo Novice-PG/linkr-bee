@@ -218,8 +218,28 @@ Deliberate deviations from `specs/PYTHON_CLI_SPEC.md` (all covered by tests):
 - `--pair` is accepted everywhere but only has an effect where the platform
   stack can bond (macOS); NUS fallback writes and `--write-response` /
   `--write-delay-ms` are parsed and validated but unused — the Reliable UART
-  path is mandatory after the handshake.
+  path is mandatory after the handshake. Their `--help` says so plainly
+  (`NUS fallback only; …`) so the flags cannot look silently broken —
+  `the_nus_only_flags_parse_and_say_that_they_are_inert`.
+- The BLE transport retries adapter-busy failures (`org.bluez.Error.InProgress`)
+  three times over 750 ms per operation, and `Connect` stops dialling while
+  somebody else is dialling the same accessory, watching for their link and
+  joining it instead — Python/bleak surfaces `InProgress` immediately. Covered
+  by `busy_failures_are_recognised_in_every_spelling`,
+  `only_busy_failures_gain_the_adapter_hint` and
+  `transient_link_drops_are_retried_and_explained`; `term::restore_sigpipe`
+  (exit 134 from `linkr … | head`) is likewise Unix-only behaviour Python gets
+  for free from CPython.
 - `--tui`/`tui` is ignored when `--no-terminal` is also given.
+- `--lan-token` takes a fourth source after the flag, the file and
+  `LINKR_LAN_TOKEN`: the token a TUI BLE session captured from `@s?` (the web
+  dials with whatever `lanTokens` already holds, and it has no script mode of
+  its own). Management reply lines are printed with `token=<32 hex>` replaced
+  by `token=<redacted>` in both output shapes, because `@s?` is the one line
+  that carries the token — Python has no LAN mode and so never sends it.
+  Covered by `lan_tokens_resolve_and_validate_before_dialing`,
+  `the_lan_token_help_names_every_source` and
+  `the_socket_status_line_is_redacted_wherever_it_is_printed`.
 
 ## 5. Workstream T — TUI (`src/tui/`)
 
@@ -250,7 +270,7 @@ OpenCode-style shell rendered with ratatui; feature parity with
   `specs/WEB_UX_SPEC.md` §3.6 matrix).
 - **Bottom status line + command palette** (`Ctrl+P`) + help overlay (`?`):
   palette lists every action (connect, set uart, scan wifi, save log, switch
-  view, toggle autoscroll, ask assistant, quit...). Global keys: `Ctrl+Q`
+  view, toggle autoscroll, switch language, ask assistant, quit...). Global keys: `Ctrl+Q`
   quit (confirm when connected), `Ctrl+Shift+K` focus assistant (web parity),
   `F1` help, `F2..F4` views, `Ctrl+L` clear terminal.
 - Modal dialogs: UART settings (validated by `protocol::validate`), WiFi
@@ -263,7 +283,13 @@ Reuse library code, never fork it: UART specs go through
 
 Config persistence under `dirs::config_dir()/linkr/`: `tui.json`
 (font size, enter mode, transport, last host, view) — same spirit as the web
-`linkr-*` localStorage keys (WEB_UX_SPEC §9 lists them).
+`linkr-*` localStorage keys (WEB_UX_SPEC §9 lists them). The LAN access token
+is deliberately **not** in `tui.json`: it lives in `lan_tokens.json`, written
+`0600` in the web store's own `{tokens, hosts}` shape
+(`web/lan_token_store.js`), filled from `@s?` during a BLE session
+(`requestDeviceState()` in `web/app.js`: diagnostics + `@s?` when the
+`MGMT_CAP_WEBSOCKET` bit is set) and read back as the token of a host alias —
+which is what makes a LAN dial work with an empty token field.
 
 ## 6. Workstream A — assistant
 

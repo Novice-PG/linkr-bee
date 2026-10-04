@@ -1451,6 +1451,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "libc",
  "ratatui",
  "regex",
  "reqwest",
@@ -1464,6 +1465,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "vte",
+ "winapi",
 ]
 
 [[package]]

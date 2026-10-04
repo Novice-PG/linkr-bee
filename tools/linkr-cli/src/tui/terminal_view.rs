@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
+use super::i18n::strings;
 use super::settings::{EnterMode, MAX_FONT_SIZE, MIN_FONT_SIZE};
 
 /// xterm scrollback default of the web client (`scrollback: 10000`).
@@ -28,6 +29,14 @@ pub const ATTR_UNDERLINE: u8 = 1 << 3;
 pub const ATTR_REVERSED: u8 = 1 << 4;
 pub const ATTR_HIDDEN: u8 = 1 << 5;
 pub const ATTR_STRIKE: u8 = 1 << 6;
+
+// The VT grid prints what the device sent, byte for byte, and composes no
+// interface text of its own: every literal left here is protocol (ESC
+// sequences, the OSC 52 payload), a format template or a file name. The
+// terminal pane's own wording — the help rows for scrolling, clearing and
+// copying — is drawn by `dialogs.rs` and `palette.rs`, which own those
+// tables. Nothing for the language tables to hold.
+strings! {}
 
 /// SGR color: default (reset), 256-color palette index or 24-bit RGB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1605,5 +1614,13 @@ mod tests {
     fn prepare_line_translates_enter_and_echoes_raw_text() {
         assert_eq!(prepare_line("help\n", EnterMode::Raw, true), b"help\n");
         assert_eq!(prepare_line("help\n", EnterMode::Crlf, false), b"help\r\n");
+    }
+
+    /// The grid renders device output and protocol bytes only, so its table
+    /// is empty on purpose (see the note above the `strings!` block).
+    #[test]
+    fn every_term_message_is_translated() {
+        super::super::i18n::assert_bilingual(ALL);
+        assert!(ALL.is_empty(), "terminal_view.rs renders no interface text");
     }
 }

@@ -93,6 +93,22 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// A handle with no session task behind it: every send fails, the bus is
+    /// empty and `info()` reports a fresh (disconnected) state. The TUI opens
+    /// with one of these when the CLI deferred the connect (A5: the interface
+    /// must come up with the radio down), and UI tests use it to render panes
+    /// without a transport (fields stay private, so this is the only way to
+    /// build one outside `session.rs`).
+    pub fn detached(bus: CoreBus) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        Self {
+            tx,
+            info: Arc::new(Mutex::new(SessionInfo::default())),
+            bus,
+        }
+    }
+
     /// Queue raw UART bytes for the target (reliable framing applied by the
     /// session when the transport supports it; raw for LAN).
     pub fn send_uart(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
@@ -139,19 +155,10 @@ impl SessionHandle {
 
 #[cfg(test)]
 impl SessionHandle {
-    /// A handle with no session task behind it: every send fails, the bus is
-    /// empty and `info()` reports a fresh (disconnected) state. UI tests use
-    /// it to render panes without a transport (fields stay private, so this
-    /// is the only way to build one outside `session.rs`).
+    /// [`SessionHandle::detached`] on a fresh bus: what the view tests want.
     #[allow(dead_code)]
     pub fn test_detached() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        SessionHandle {
-            tx,
-            info: Arc::new(Mutex::new(SessionInfo::default())),
-            bus: CoreBus::new(),
-        }
+        SessionHandle::detached(CoreBus::new())
     }
 }
 
@@ -552,16 +559,25 @@ impl SessionTask {
     /// Frame (BLE) or pass through (LAN) `data` and write it to the wire.
     async fn write_uart(&mut self, data: &[u8]) -> anyhow::Result<()> {
         match self.kind {
-            TransportKind::Lan => self.transport.write_uart(data).await?,
+            TransportKind::Lan => {
+                self.transport.write_uart(data).await?;
+                self.info.lock().expect("session info poisoned").tx_bytes += data.len() as u64;
+            }
             TransportKind::Ble => {
                 let codec = self
                     .uart
                     .as_mut()
                     .ok_or_else(|| anyhow::anyhow!("reliable UART unavailable"))?;
                 let att = self.transport.write_size().clamp(20, 244);
+                let header = crate::protocol::uart::UART_HEADER_SIZE;
+                // Payload carried by each logical frame, in write order.
+                let frames: Vec<usize> =
+                    data.chunks(codec.max_payload()).map(<[u8]>::len).collect();
+                let progress = tx_progress(&frames, header, att);
                 let chunks = codec.encode_write(data, att);
                 let mut sequence = 0u32;
-                for chunk in &chunks {
+                let mut counted = 0u64;
+                for (chunk, cumulative) in chunks.iter().zip(progress) {
                     if self.debug_io {
                         if chunk.len() >= 12 && &chunk[..2] == b"LR" {
                             sequence = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -572,10 +588,19 @@ impl SessionTask {
                         });
                     }
                     self.transport.write_uart(chunk).await?;
+                    // Count the payload that just hit the wire, not the whole
+                    // payload up front: the web bumps `txBytes` per chunk
+                    // (app.js writeBytes), so a long paste must not freeze the
+                    // counters for its whole duration (it used to jump once,
+                    // ~12 s after the paste started).
+                    if cumulative > counted {
+                        self.info.lock().expect("session info poisoned").tx_bytes +=
+                            cumulative - counted;
+                        counted = cumulative;
+                    }
                 }
             }
         }
-        self.info.lock().expect("session info poisoned").tx_bytes += data.len() as u64;
         Ok(())
     }
 
@@ -599,6 +624,33 @@ impl SessionTask {
             });
         }
     }
+}
+
+/// Cumulative user payload written after each ATT chunk, in write order.
+///
+/// `frames` are the logical frame payload sizes the codec produced (each frame
+/// is a `header`-byte LR header plus payload, split into `att`-sized writes).
+/// The result zips 1:1 with the chunk list, so progress counters can advance as
+/// every write lands instead of once for the whole payload. Only payload bytes
+/// are counted — headers are framing overhead, never user data (matching the
+/// web's `state.txBytes += chunk.length`).
+fn tx_progress(frames: &[usize], header: usize, att: usize) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    for &payload_len in frames {
+        let frame_len = header + payload_len;
+        let mut pos = 0usize;
+        while pos < frame_len {
+            let start = pos.max(header);
+            let end = (pos + att).min(frame_len);
+            if end > start {
+                total += (end - start) as u64;
+            }
+            pos += att;
+            out.push(total);
+        }
+    }
+    out
 }
 
 /// The request pipeline: chunked writes, 5 s response timeout, optional
@@ -1131,6 +1183,52 @@ mod tests {
         assert!(!written[0].0, "UART frames use write_uart");
         assert_eq!(&written[0].1[..2], b"LR");
         assert!(written[0].1.ends_with(b"hello"));
+        mock.session.disconnect();
+    }
+
+    /// The progress ledger must count payload only (never the 12-byte LR
+    /// header), advance on every chunk, and end at exactly the payload length.
+    #[test]
+    fn tx_progress_counts_payload_per_chunk() {
+        // Two frames: 200 B and 100 B payload, 20 B ATT writes.
+        let frames = [200usize, 100usize];
+        let progress = tx_progress(&frames, 12, 20);
+        // ceil((12 + 200) / 20) + ceil((12 + 100) / 20) = 11 + 6 chunks.
+        assert_eq!(progress.len(), 17);
+        assert!(
+            progress.windows(2).all(|w| w[0] < w[1]),
+            "must grow every chunk: {progress:?}"
+        );
+        assert_eq!(
+            *progress.last().expect("non-empty"),
+            300,
+            "payload only, no headers"
+        );
+        assert_eq!(
+            progress[0], 8,
+            "the first write carries 20 - 12 header bytes"
+        );
+        assert_eq!(*progress.iter().max().expect("non-empty"), 300);
+    }
+
+    #[tokio::test]
+    async fn a_bulk_uart_write_counts_every_chunk_as_it_lands() {
+        let mock = spawn_mock(TransportKind::Ble, 0, false);
+        let payload = vec![b'x'; 300];
+        mock.session.send_uart(payload.clone()).expect("queued");
+        assert!(
+            wait_for(|| mock.session.info().tx_bytes == payload.len() as u64).await,
+            "the counter must reach the payload length (got {})",
+            mock.session.info().tx_bytes
+        );
+        // Frames are 200 B + 100 B, so the wire carries 17 ATT writes: the
+        // counter has to have been raised once per chunk, not once at the end.
+        let written = frames(&mock);
+        assert_eq!(written.len(), 17, "300 B must be framed into 17 ATT writes");
+        assert!(
+            written.iter().all(|(mgmt, _)| !mgmt),
+            "UART uses write_uart"
+        );
         mock.session.disconnect();
     }
 

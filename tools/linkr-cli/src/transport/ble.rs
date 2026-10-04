@@ -33,6 +33,206 @@ pub const NUS_RX_UUID: Uuid = uuid!("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
 pub const NUS_TX_UUID: Uuid = uuid!("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
 
 const SCAN_POLL: Duration = Duration::from_millis(200);
+/// BlueZ answers `org.bluez.Error.InProgress` while another scan or connection
+/// owns the adapter — a second `linkr`, a phone app, or a session of ours that
+/// never tore down. The CLI used to surface that raw (`linkr: error: In
+/// Progress`), so back off and try again before giving up.
+const BUSY_RETRIES: u32 = 3;
+/// Backoff between those attempts: long enough for the holder to let go of the
+/// adapter, short enough that three of them stay invisible next to a scan.
+const BUSY_BACKOFF: Duration = Duration::from_millis(750);
+/// The wall-clock budget every busy retry gets: three attempts (2.25 s), then
+/// the real error.
+const BUSY_BUDGET: Duration =
+    Duration::from_millis(BUSY_BACKOFF.as_millis() as u64 * BUSY_RETRIES as u64);
+/// How often to look for a link somebody else is dialling while we wait for it
+/// (only `Connect` waits instead of re-dialling — see [`connect_with_retry`]).
+const BUSY_POLL: Duration = Duration::from_millis(250);
+
+/// `true` when a failure is BlueZ saying "someone else is using this" — the
+/// D-Bus message (`In Progress`), the error name (`…Error.InProgress`) or the
+/// same words in any casing.
+fn is_busy(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("in progress") || lowered.contains("inprogress")
+}
+
+/// BlueZ's transient `Connect` failures: the attempt died before any link
+/// came up — another client won the race, the controller gave up, or the
+/// accessory stopped answering mid-handshake. Nothing succeeded, so starting
+/// over is safe. btleplug's `Not connected` belongs here too: the link died
+/// between two calls (usually because the other instance released it), and
+/// dialling again is the only fix. The permanent refusals
+/// (`br-connection-rej-security`, `br-connection-params-rejected`, …) are
+/// deliberately left out.
+fn is_transient_connect(text: &str) -> bool {
+    const TRANSIENT: [&str; 5] = [
+        "br-connection-canceled",
+        "br-connection-timeout",
+        "br-connection-failed",
+        "br-connection-adv-timeout",
+        "Not connected",
+    ];
+    TRANSIENT.iter().any(|needle| text.contains(needle))
+}
+
+/// A busy failure gets a sentence a person can act on, and so does a link that
+/// dropped while we were on it; every other failure keeps its original message
+/// and source chain untouched.
+fn adapter_error(error: btleplug::Error) -> anyhow::Error {
+    let text = error.to_string();
+    if is_busy(&text) {
+        anyhow::anyhow!(
+            "Bluetooth adapter is busy: {text} — another scan or connection is still \
+             running; retry in a second"
+        )
+    } else if is_transient_connect(&text) {
+        anyhow::anyhow!(
+            "BLE link dropped: {text} — the accessory or another client let go of the \
+             connection; retry in a second"
+        )
+    } else {
+        anyhow::Error::new(error)
+    }
+}
+
+/// Run `operation` while BlueZ reports a failure `retryable` recognises and
+/// `budget` has not run out, back off between the attempts, then hand whatever
+/// is left to [`adapter_error`].
+///
+/// `retryable` must only accept failures where the operation demonstrably did
+/// **not** happen: `In Progress` (`org.bluez.Error.InProgress`) means BlueZ
+/// never started it — a second `linkr`, a phone app or a session of ours that
+/// never tore down holds the adapter — and the transient `br-connection-*`
+/// answers mean the attempt never produced a link. Retrying those cannot
+/// duplicate anything, which is why the CLI can now stand two instances
+/// instead of failing the loser with a bare `linkr: error: In Progress`.
+async fn retry_when<T, R, F, Fut>(
+    budget: Duration,
+    retryable: R,
+    mut operation: F,
+) -> anyhow::Result<T>
+where
+    R: Fn(&str) -> bool,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if retryable(&error.to_string()) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(BUSY_BACKOFF).await;
+            }
+            Err(error) => return Err(adapter_error(error)),
+        }
+    }
+}
+
+/// [`retry_when`] for everything that must stay busy-only: a write, read or
+/// notify that already landed must never be replayed.
+async fn retry_busy<T, F, Fut>(operation: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+{
+    retry_when(BUSY_BUDGET, is_busy, operation).await
+}
+
+/// `StartScan` with that backoff (3 × 750 ms before the real error).
+async fn start_scan_with_retry(adapter: &Adapter) -> anyhow::Result<()> {
+    retry_busy(|| async {
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![MGMT_SERVICE_UUID],
+            })
+            .await
+    })
+    .await
+}
+
+/// `Connect`, with the rule that stopped two instances of the CLI from killing
+/// each other's link:
+///
+/// * a link that is already up (ours, or a second `linkr` that got there
+///   first) is joined instead of dialled again;
+/// * `In Progress` means another client is dialling right now — and *our*
+///   `Connect` request is exactly what makes BlueZ cancel theirs — so we stop
+///   asking and watch for their link instead, joining it when it appears;
+/// * the transient `br-connection-*` answers mean our own attempt died, so the
+///   leftovers are cleared and we dial again within the budget;
+/// * a permanent refusal (or a budget that ran out) fails at once, worded by
+///   [`adapter_error`] instead of BlueZ's raw status.
+async fn connect_with_retry(peripheral: &Peripheral, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + BUSY_BUDGET;
+    loop {
+        if link_is_up(peripheral).await {
+            return Ok(());
+        }
+        let error = match peripheral.connect_with_timeout(timeout).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        if is_transient_connect(&text) && tokio::time::Instant::now() < deadline {
+            // Best effort: BlueZ answers `Not Connected` when there is nothing
+            // to clear.
+            let _ = peripheral.disconnect().await;
+            tokio::time::sleep(BUSY_BACKOFF).await;
+            continue;
+        }
+        if is_busy(&text) {
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(BUSY_POLL).await;
+                if link_is_up(peripheral).await {
+                    return Ok(());
+                }
+            }
+        }
+        return Err(adapter_error(error));
+    }
+}
+
+/// `true` when BlueZ already reports a link to the accessory — whether this
+/// process owns it or another `linkr` does.
+async fn link_is_up(peripheral: &Peripheral) -> bool {
+    peripheral.is_connected().await.unwrap_or(false)
+}
+
+/// A GATT write with the same backoff: a busy chunk is what used to kill the
+/// very first management command of a second instance.
+async fn write_with_retry(
+    peripheral: &Peripheral,
+    characteristic: &Characteristic,
+    data: &[u8],
+    write_type: WriteType,
+) -> anyhow::Result<()> {
+    retry_busy(|| async { peripheral.write(characteristic, data, write_type).await }).await
+}
+
+/// `StartNotify` with the same backoff (a pending notification setup from
+/// another client answers `In Progress` too).
+async fn subscribe_with_retry(
+    peripheral: &Peripheral,
+    characteristic: &Characteristic,
+) -> anyhow::Result<()> {
+    retry_busy(|| async { peripheral.subscribe(characteristic).await }).await
+}
+
+/// `ReadValue` with the same backoff (reads are idempotent).
+async fn read_with_retry(
+    peripheral: &Peripheral,
+    characteristic: &Characteristic,
+) -> anyhow::Result<Vec<u8>> {
+    retry_busy(|| async { peripheral.read(characteristic).await }).await
+}
+
+/// `DiscoverServices` with the same backoff (it just re-runs discovery).
+async fn discover_with_retry(peripheral: &Peripheral) -> anyhow::Result<()> {
+    retry_busy(|| async { peripheral.discover_services().await }).await
+}
 
 async fn default_adapter() -> anyhow::Result<Adapter> {
     let manager = btleplug::platform::Manager::new().await?;
@@ -50,11 +250,7 @@ async fn scan_until(
     timeout: Duration,
     mut done: impl FnMut(&[Peripheral]) -> bool,
 ) -> anyhow::Result<Vec<Peripheral>> {
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![MGMT_SERVICE_UUID],
-        })
-        .await?;
+    start_scan_with_retry(adapter).await?;
     let deadline = tokio::time::Instant::now() + timeout;
     // The loop only leaves through the break below, so `found` is always set.
     let mut found: Vec<Peripheral>;
@@ -252,7 +448,7 @@ pub async fn connect(
     let peripheral =
         located.ok_or_else(|| anyhow::anyhow!("device not found matching: {target}"))?;
 
-    peripheral.connect_with_timeout(timeout).await?;
+    connect_with_retry(&peripheral, timeout).await?;
     crate::cli::info(format!("connected: {target}"));
     if pair && cfg!(target_os = "macos") {
         crate::cli::info(
@@ -261,7 +457,7 @@ pub async fn connect(
     }
     // Python calls `client.pair()` here; btleplug 0.13 has no pairing
     // call, and macOS/Linux both bond on the encrypted read below.
-    peripheral.discover_services().await?;
+    discover_with_retry(&peripheral).await?;
 
     // 3. Write size, then the handshake reads in the documented order
     //    (docs/LINKR_BLE_API.zh-CN.md section 9).
@@ -273,7 +469,7 @@ pub async fn connect(
 
     let protocol_char = find_characteristic(&peripheral, MGMT_PROTOCOL_UUID)
         .ok_or_else(|| missing(MGMT_PROTOCOL_UUID))?;
-    let protocol = peripheral.read(&protocol_char).await?;
+    let protocol = read_with_retry(&peripheral, &protocol_char).await?;
     if protocol.len() < 10 || protocol[0] != MGMT_API_MAJOR {
         return Err(anyhow::anyhow!("unsupported Linkr Management API version"));
     }
@@ -295,7 +491,7 @@ pub async fn connect(
 
     let device_id_char = find_characteristic(&peripheral, MGMT_DEVICE_ID_UUID)
         .ok_or_else(|| missing(MGMT_DEVICE_ID_UUID))?;
-    let device_id = peripheral.read(&device_id_char).await?;
+    let device_id = read_with_retry(&peripheral, &device_id_char).await?;
     if device_id.len() != 16 {
         return Err(anyhow::anyhow!("invalid Linkr Device ID length"));
     }
@@ -308,11 +504,11 @@ pub async fn connect(
 
     let response_char = find_characteristic(&peripheral, MGMT_RESPONSE_UUID)
         .ok_or_else(|| missing(MGMT_RESPONSE_UUID))?;
-    peripheral.subscribe(&response_char).await?;
+    subscribe_with_retry(&peripheral, &response_char).await?;
 
     let state_char = find_characteristic(&peripheral, RELIABLE_UART_STATE_UUID)
         .ok_or_else(|| missing(RELIABLE_UART_STATE_UUID))?;
-    let state = peripheral.read(&state_char).await?;
+    let state = read_with_retry(&peripheral, &state_char).await?;
     if state.len() != 16 || state[0] != 1 {
         return Err(anyhow::anyhow!("unsupported Reliable UART version"));
     }
@@ -325,7 +521,7 @@ pub async fn connect(
 
     let uart_tx_char = find_characteristic(&peripheral, RELIABLE_UART_TX_UUID)
         .ok_or_else(|| missing(RELIABLE_UART_TX_UUID))?;
-    peripheral.subscribe(&uart_tx_char).await?;
+    subscribe_with_retry(&peripheral, &uart_tx_char).await?;
 
     let label = peripheral
         .properties()
@@ -453,17 +649,23 @@ impl Transport for BleTransport {
 
     async fn write_mgmt(&self, chunk: &[u8]) -> anyhow::Result<()> {
         // BLE management writes are always write-with-response.
-        self.peripheral
-            .write(&self.command, chunk, WriteType::WithResponse)
-            .await
-            .map_err(Into::into)
+        write_with_retry(
+            &self.peripheral,
+            &self.command,
+            chunk,
+            WriteType::WithResponse,
+        )
+        .await
     }
 
     async fn write_uart(&self, chunk: &[u8]) -> anyhow::Result<()> {
-        self.peripheral
-            .write(&self.uart_rx, chunk, WriteType::WithResponse)
-            .await
-            .map_err(Into::into)
+        write_with_retry(
+            &self.peripheral,
+            &self.uart_rx,
+            chunk,
+            WriteType::WithResponse,
+        )
+        .await
     }
 
     async fn disconnect(&self) -> anyhow::Result<()> {
@@ -575,5 +777,69 @@ mod tests {
             NUS_RX_UUID.to_string(),
             "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
         );
+    }
+
+    /// B1: `org.bluez.Error.InProgress` (second linkr holding the adapter) has
+    /// to be recognised in every spelling BlueZ and the D-Bus layer produce.
+    #[test]
+    fn busy_failures_are_recognised_in_every_spelling() {
+        assert!(is_busy("In Progress"), "the D-Bus message");
+        assert!(is_busy("org.bluez.Error.InProgress"), "the error name");
+        assert!(is_busy("IN PROGRESS"), "casing");
+        assert!(!is_busy("device not found matching: AA:BB:CC:DD:EE:FF"));
+        assert!(!is_busy("Timed out after 8s"));
+        assert!(!is_busy(""));
+    }
+
+    /// …and only those get the extra sentence; every other failure keeps the
+    /// message (and the chain) the transport produced.
+    #[test]
+    fn only_busy_failures_gain_the_adapter_hint() {
+        let busy = adapter_error(btleplug::Error::Other("In Progress".into()));
+        let busy = busy.to_string();
+        assert!(busy.contains("Bluetooth adapter is busy"), "{busy}");
+        assert!(busy.contains("In Progress"), "{busy}");
+        assert!(busy.contains("retry in a second"), "{busy}");
+
+        // `Not connected` is the one *transient* failure that is not a BlueZ
+        // status string, so it gets the same readable wording.
+        let dropped_link = adapter_error(btleplug::Error::NotConnected).to_string();
+        assert!(dropped_link.contains("BLE link dropped"), "{dropped_link}");
+        assert!(dropped_link.contains("Not connected"), "{dropped_link}");
+
+        let other = adapter_error(btleplug::Error::DeviceNotFound);
+        assert_eq!(other.to_string(), "Device not found");
+    }
+
+    /// B1, second family: BlueZ cancels the *loser's* `Connect` outright when
+    /// two instances dial the same accessory (`br-connection-canceled`), and
+    /// that one has to be retried too — while a permanent refusal must not be.
+    #[test]
+    fn transient_link_drops_are_retried_and_explained() {
+        assert!(is_transient_connect("br-connection-canceled"));
+        assert!(is_transient_connect("br-connection-timeout"));
+        assert!(is_transient_connect("br-connection-failed"));
+        assert!(is_transient_connect("br-connection-adv-timeout"));
+        assert!(
+            is_transient_connect("Not connected"),
+            "the link died mid-run"
+        );
+        assert!(!is_transient_connect("br-connection-rej-security"));
+        assert!(!is_transient_connect("In Progress"));
+        assert!(!is_transient_connect("device not found matching: AA:BB"));
+
+        // …and after the retries run out the message is still readable.
+        let dropped = adapter_error(btleplug::Error::Other("br-connection-canceled".into()));
+        let dropped = dropped.to_string();
+        assert!(dropped.contains("BLE link dropped"), "{dropped}");
+        assert!(dropped.contains("br-connection-canceled"), "{dropped}");
+        assert!(dropped.contains("retry in a second"), "{dropped}");
+
+        let busy = adapter_error(btleplug::Error::Other("In Progress".into())).to_string();
+        assert!(busy.contains("Bluetooth adapter is busy"), "{busy}");
+
+        // A permanent refusal keeps BlueZ's own words.
+        let refused = adapter_error(btleplug::Error::Other("br-connection-rej-security".into()));
+        assert_eq!(refused.to_string(), "br-connection-rej-security");
     }
 }
