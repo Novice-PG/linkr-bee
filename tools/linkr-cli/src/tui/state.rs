@@ -467,6 +467,29 @@ impl App {
         }
     }
 
+    /// True while a modal overlay (command palette or dialog) owns a slice of
+    /// the frame.
+    pub fn overlay_open(&self) -> bool {
+        self.palette.is_some() || self.dialog.is_some()
+    }
+
+    /// Arm a full repaint when the overlay state moved since `before`.
+    ///
+    /// An overlay covers a large part of the screen, and a console that
+    /// repaints itself underneath us (conhost reflows whenever the window or
+    /// the buffer changes) leaves the panel's text behind: the cell diff
+    /// believes those cells already hold the right characters and never
+    /// writes them again — cancelling the palette then looked like text that
+    /// only `Ctrl+L` could wipe, because the clear blanks the viewport first
+    /// (K5, the same family as F2). Repainting at the moment an overlay opens
+    /// or closes removes it without waiting for the user to notice, and it
+    /// costs one repaint per key press that touches an overlay.
+    pub fn sync_overlay_repaint(&mut self, before: bool) {
+        if self.overlay_open() != before {
+            self.force_redraw = true;
+        }
+    }
+
     pub fn toast(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notices.push(level, text);
     }
@@ -602,6 +625,45 @@ mod tests {
 
         app.poll_settle_repaint(start + Duration::from_millis(40) + RESIZE_SETTLE);
         assert!(app.take_force_redraw(), "one repaint after the drag ends");
+    }
+
+    /// K5: the loop watches this flag, so it has to read as "open" for both
+    /// overlays and as "closed" again afterwards — a miss would silently skip
+    /// the repaint that wipes the panel's text.
+    #[test]
+    fn the_palette_and_a_dialog_read_as_an_open_overlay() {
+        let mut app = crate::tui::test_app();
+        assert!(!app.overlay_open(), "nothing covers the frame at boot");
+
+        app.palette = Some(PaletteState::new(app.lang()));
+        assert!(app.overlay_open(), "the command palette covers the frame");
+        app.palette = None;
+
+        app.dialog = Some(Dialog::Help(0));
+        assert!(app.overlay_open(), "a dialog covers the frame");
+        app.dialog = None;
+        assert!(!app.overlay_open(), "and both read as closed again");
+    }
+
+    /// K5: opening and closing repaint; a frame in which the overlay did not
+    /// move must not repaint (otherwise every key press would clear the
+    /// screen).
+    #[test]
+    fn only_an_overlay_transition_arms_a_full_repaint() {
+        let mut app = crate::tui::test_app();
+
+        let before = app.overlay_open();
+        app.palette = Some(PaletteState::new(app.lang()));
+        app.sync_overlay_repaint(before);
+        assert!(app.take_force_redraw(), "opening repaints the screen");
+
+        let before = app.overlay_open();
+        app.sync_overlay_repaint(before);
+        assert!(!app.force_redraw, "an unchanged overlay arms nothing");
+
+        app.palette = None;
+        app.sync_overlay_repaint(before);
+        assert!(app.take_force_redraw(), "closing repaints the screen");
     }
 
     /// F1: a connect that has not landed yet locks the transport choice, not

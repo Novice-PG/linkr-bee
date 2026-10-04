@@ -411,6 +411,12 @@ fn event_loop(
     }
 
     while !app.quit {
+        // An overlay covers a large slice of the frame: if one opens or
+        // closes during this iteration the screen is repainted in full, so a
+        // console that repainted underneath it cannot leave the panel's text
+        // behind (K5).
+        let overlay_before = app.overlay_open();
+
         // 1. Session bus: UART output, connection lifecycle, notices.
         loop {
             match core.try_recv() {
@@ -496,6 +502,7 @@ fn event_loop(
         //    already correct — stale frames then stay up forever (F2). The
         //    settled repaint scheduled by the resize event lands here as well:
         //    by then the console has stopped moving, so this frame sticks (K1).
+        app.sync_overlay_repaint(overlay_before);
         app.poll_settle_repaint(Instant::now());
         if app.take_force_redraw() {
             let _ = terminal.clear();
