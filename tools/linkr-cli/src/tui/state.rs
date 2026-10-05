@@ -490,6 +490,41 @@ impl App {
         }
     }
 
+    /// What the left sidebar currently says about the link: the connection
+    /// state, the transport it offers and the link actually in play.
+    pub fn link_signature(
+        &self,
+    ) -> (
+        ConnectionState,
+        TransportChoice,
+        Option<crate::transport::TransportKind>,
+    ) {
+        (self.state, self.transport_choice(), self.live_kind())
+    }
+
+    /// Arm a full repaint when the link state moved since `before`.
+    ///
+    /// Switching between LAN (WiFi) and BLE rewrites most of the sidebar —
+    /// transport row, address, state line — and a console that repainted
+    /// itself underneath us (conhost, whenever it reflows or paints behind
+    /// our back) leaves the previous transport's text standing: the cell diff
+    /// believes those cells already hold the right characters and never
+    /// writes them again, so the two states end up stacked until `Ctrl+L`
+    /// blanks the viewport (the same family as F2/K5, K6). Link changes are
+    /// rare and user-triggered, so one full repaint per transition is free.
+    pub fn sync_link_repaint(
+        &mut self,
+        before: (
+            ConnectionState,
+            TransportChoice,
+            Option<crate::transport::TransportKind>,
+        ),
+    ) {
+        if self.link_signature() != before {
+            self.force_redraw = true;
+        }
+    }
+
     pub fn toast(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notices.push(level, text);
     }
@@ -664,6 +699,43 @@ mod tests {
         app.palette = None;
         app.sync_overlay_repaint(before);
         assert!(app.take_force_redraw(), "closing repaints the screen");
+    }
+
+    /// K6: switching WiFi/LAN ↔ BLE rewrites the whole link block of the
+    /// sidebar (transport row, address, state line), so the event loop arms a
+    /// full repaint the moment any part of the signature moved — conhost
+    /// repaints itself underneath us and ratatui's cell diff then skips the
+    /// sidebar cells it believes already hold the right characters, leaving
+    /// the two transports stacked until `Ctrl+L`. A frame in which nothing
+    /// moved must arm nothing, or every key press would clear the screen.
+    #[test]
+    fn only_a_link_transition_arms_a_full_repaint() {
+        let mut app = crate::tui::test_app();
+
+        // The transport toggle is the reported case (K6).
+        let before = app.link_signature();
+        app.settings.transport = match app.settings.transport {
+            TransportChoice::Lan => TransportChoice::Ble,
+            _ => TransportChoice::Lan,
+        };
+        app.sync_link_repaint(before);
+        assert!(app.take_force_redraw(), "flipping the transport repaints");
+
+        let before = app.link_signature();
+        app.sync_link_repaint(before);
+        assert!(!app.force_redraw, "an unchanged link arms nothing");
+
+        // The connection state is part of the same sidebar block …
+        app.state = ConnectionState::Connecting;
+        app.sync_link_repaint(before);
+        assert!(app.take_force_redraw(), "a state change repaints");
+
+        // … and so is the transport a live session actually runs on, which
+        // can move without `settings.transport` moving at all.
+        let before = app.link_signature();
+        app.info.kind = Some(crate::transport::TransportKind::Ble);
+        app.sync_link_repaint(before);
+        assert!(app.take_force_redraw(), "a live link change repaints");
     }
 
     /// F1: a connect that has not landed yet locks the transport choice, not
