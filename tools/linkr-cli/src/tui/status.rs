@@ -7,6 +7,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::i18n::{
     strings, t, Lang, CONNECTED, CONNECTING, DISCONNECTED, MODE_AUTO, MODE_FULL_AUTO, MODE_MANUAL,
@@ -198,6 +199,45 @@ pub fn status_right_spans(m: &StatusModel) -> Vec<Span<'static>> {
     )]
 }
 
+/// The rendered width of `s` in console columns: what the terminal counts, and
+/// what decides whether a bar fits. A CJK glyph is two columns wide, so
+/// counting characters instead lets a Chinese bar overflow the screen and lose
+/// the tail of its right cluster.
+fn cols(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// As much of `text` as fits in `width` columns, with nothing added. A wide
+/// glyph is never split: the column it cannot have is left empty, so the
+/// result never exceeds `width`.
+fn cut_columns(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
+/// [`cut_columns`] with an ellipsis that lives inside the budget, so a cut
+/// stays at most `width` columns wide.
+fn clip(text: &str, width: usize) -> String {
+    if cols(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = cut_columns(text, width - 1);
+    out.push('…');
+    out
+}
+
 /// Compose `left` and `right` into one bar of `width` columns: left cluster,
 /// padding, right cluster. Overlong left clusters are truncated first.
 pub fn join_status(left: &str, right: &str, width: u16) -> String {
@@ -205,21 +245,20 @@ pub fn join_status(left: &str, right: &str, width: u16) -> String {
     if width == 0 {
         return String::new();
     }
-    let right_len = right.chars().count();
+    let right_len = cols(right);
     if right_len >= width {
         // Not even room for the right cluster: hard-truncate it.
-        return right.chars().take(width).collect();
+        return cut_columns(right, width);
     }
     let room = width - right_len;
-    let left_len = left.chars().count();
+    let left_len = cols(left);
     let (left, gap) = if left_len < room {
         (left.to_string(), room - left_len)
     } else {
         // Truncate with an ellipsis, like the web topbar overflow does; the
         // ellipsis takes one of the two columns it frees for the gap.
-        let mut cut: String = left.chars().take(room.saturating_sub(2)).collect();
-        cut.push('…');
-        let gap = room - cut.chars().count();
+        let cut = clip(left, room.saturating_sub(1));
+        let gap = room - cols(&cut);
         (cut, gap)
     };
     format!("{}{}{}", left, " ".repeat(gap), right)
@@ -243,20 +282,17 @@ pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16, lang: Lang
     if width == 0 {
         return String::new();
     }
-    let left_len = left.chars().count();
+    let left_len = cols(&left);
     if left_len >= width {
-        let mut cut: String = left.chars().take(width - 1).collect();
-        cut.push('…');
-        return cut;
+        return clip(&left, width);
     }
     let room = width - left_len;
-    let right_len = right.chars().count();
+    let right_len = cols(right);
     let (tail, gap) = if right_len < room {
         (right.to_string(), room - right_len)
     } else if room >= 2 {
-        let mut cut: String = right.chars().take(room - 2).collect();
-        cut.push('…');
-        let gap = room - cut.chars().count();
+        let cut = clip(right, room - 1);
+        let gap = room - cols(&cut);
         (cut, gap)
     } else {
         (String::new(), room)
@@ -272,20 +308,19 @@ pub fn status_line(model: &StatusModel, width: u16) -> Line<'static> {
     if width == 0 {
         return Line::from("");
     }
-    let right_len = right.chars().count();
+    let right_len = cols(&right);
     if right_len >= width {
         // Not even the right cluster fits: show it truncated, alone.
         return Line::from(truncate_spans(status_right_spans(model), width));
     }
     let room = width - right_len;
-    let left_len = left.chars().count();
+    let left_len = cols(&left);
     let (left_text, gap, truncated) = if left_len < room {
         (left.clone(), room - left_len, false)
     } else {
         // Ellipsis truncation: the cut keeps one column for the gap.
-        let mut cut: String = left.chars().take(room.saturating_sub(2)).collect();
-        cut.push('…');
-        let gap = room - cut.chars().count();
+        let cut = clip(&left, room.saturating_sub(1));
+        let gap = room - cols(&cut);
         (cut, gap, true)
     };
 
@@ -304,7 +339,7 @@ pub fn status_line(model: &StatusModel, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Cut a span list down to `width` characters (used when the bar is narrow).
+/// Cut a span list down to `width` columns (used when the bar is narrow).
 fn truncate_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     let mut out = Vec::with_capacity(spans.len());
     let mut budget = width;
@@ -312,12 +347,12 @@ fn truncate_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>>
         if budget == 0 {
             break;
         }
-        let len = span.content.chars().count();
+        let len = cols(&span.content);
         if len <= budget {
             out.push(span);
             budget -= len;
         } else {
-            let text: String = span.content.chars().take(budget).collect();
+            let text = cut_columns(&span.content, budget);
             out.push(Span::styled(text, span.style));
             budget = 0;
         }
@@ -465,5 +500,34 @@ mod tests {
             let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(len as u16 <= width, "width {width}: rendered {len}");
         }
+    }
+
+    /// A CJK glyph is two columns wide. Measuring the bar in characters made
+    /// the Chinese UI render past the right edge of the console, where the
+    /// terminal drops the tail of the RX/TX cluster.
+    #[test]
+    fn the_bar_is_measured_in_columns_not_characters() {
+        let mut m = model();
+        m.lang = Lang::Zh;
+        for width in [10u16, 40, 80, 200] {
+            let line = status_line(&m, width);
+            let spanned: usize = line.spans.iter().map(|s| cols(s.content.as_ref())).sum();
+            assert!(
+                spanned as u16 <= width,
+                "width {width}: the Chinese bar renders {spanned} columns"
+            );
+        }
+        for width in [20u16, 80] {
+            let zh = bottom_line("终端", "串口终端", "详情", width, Lang::Zh);
+            assert!(
+                cols(&zh) as u16 <= width,
+                "width {width}: the Chinese bottom line renders {} columns: {zh}",
+                cols(&zh)
+            );
+        }
+        // A two-column glyph is never split across the cut: the cut stays
+        // inside its budget rather than spilling one column over it.
+        assert_eq!(cols(&clip("中文测试", 5)), 5);
+        assert!(clip("中文测试", 5).chars().count() <= 5);
     }
 }
