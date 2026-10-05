@@ -319,6 +319,35 @@ pub fn wrap_line(text: &str, width: u16) -> Vec<Line<'static>> {
     out
 }
 
+/// As much of `text` as fits in `budget` display columns, with the ellipsis
+/// *inside* the budget so the row still ends where the caller planned it to.
+/// A wide glyph is never split: the column it cannot have is left empty.
+///
+/// Counting characters instead of columns put every CJK value one column over
+/// for each glyph, and the dialog (which wraps with `trim: false`) shifted
+/// every row below it by one.
+pub fn clip_columns(text: &str, budget: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(text) <= budget {
+        return text.to_string();
+    }
+    if budget == 0 {
+        return String::new();
+    }
+    let room = budget - 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// Body lines of the open dialog. `width` is the inner width available.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let lang = app.lang();
@@ -962,6 +991,32 @@ mod tests {
             text.chars().count(),
             "no character is lost while cutting"
         );
+    }
+
+    /// The ellipsis sits *inside* the budget and a wide glyph is never split:
+    /// whatever comes out still has to leave room for the columns around it.
+    #[test]
+    fn clip_columns_never_exceeds_the_budget() {
+        assert_eq!(clip_columns("short value", 12), "short value");
+        assert_eq!(clip_columns("abcdef", 6), "abcdef");
+        assert_eq!(clip_columns("abcdef", 4), "abc…");
+        // Two columns per glyph: the cut lands on a glyph boundary, never in
+        // the middle of one.
+        assert_eq!(clip_columns("中文测试", 5), "中文…");
+        assert_eq!(clip_columns("中文测试", 4), "中…");
+        assert_eq!(clip_columns("中文", 1), "…");
+        assert_eq!(clip_columns("anything", 0), "");
+
+        for budget in 0..24 {
+            for text in ["", "abc", "中文测试字符", "mix中文abc"] {
+                let clipped = clip_columns(text, budget);
+                let width = unicode_width::UnicodeWidthStr::width(clipped.as_str());
+                assert!(
+                    width <= budget,
+                    "{text:?} clipped to {budget} columns rendered {width}: {clipped:?}"
+                );
+            }
+        }
     }
 
     /// Both languages of every dialog message carry text and differ.

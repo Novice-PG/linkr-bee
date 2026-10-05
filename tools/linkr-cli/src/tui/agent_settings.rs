@@ -647,13 +647,16 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
             Span::styled(marker, Style::default().fg(Color::Yellow)),
             label(name, sel(field)),
         ];
+        // marker (2 columns) + label (padded to 18) + one column of air, so
+        // the value gets the rest. Measured in columns, never in characters:
+        // a CJK value is two columns wide, and the character count ran every
+        // such row one column over the dialog, wrapping it.
         let tail = width.saturating_sub(21);
-        if text.chars().count() > tail {
-            let clipped: String = text.chars().take(tail.saturating_sub(1)).collect();
-            spans.push(value(format!("{clipped}…"), sel(field), masked));
-        } else {
-            spans.push(value(text, sel(field), masked));
-        }
+        spans.push(value(
+            super::dialogs::clip_columns(&text, tail),
+            sel(field),
+            masked,
+        ));
         lines.push(Line::from(spans));
     };
 
@@ -1092,5 +1095,58 @@ mod tests {
         assert_eq!(t(REASONING[0].1, Lang::En), "Off");
         assert_eq!(t(REASONING[0].1, Lang::Zh), "关闭");
         assert_eq!(t(REASONING[3].1, Lang::Zh), "高");
+    }
+
+    /// A field row has to end inside the dialog whatever the value holds: a
+    /// CJK value is two columns wide, and the character count used for the
+    /// cut put such a row one column over per glyph, wrapping the dialog and
+    /// shifting every row below it.
+    #[test]
+    fn a_cjk_value_stays_inside_the_dialog() {
+        let mut state = state_with("https://api.example.com/v1", "gpt-4o");
+        state
+            .endpoint
+            .set("https://".to_string() + &"中".repeat(60));
+        state.model.set("模型".repeat(30));
+
+        for width in [24u16, 40, 74] {
+            for lang in [Lang::En, Lang::Zh] {
+                let mut rows = 0usize;
+                for line in render_lines(&state, width, lang) {
+                    let spans: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    if !matches!(spans.first().copied(), Some("▸ ") | Some("  ")) {
+                        continue;
+                    }
+                    rows += 1;
+                    let cols: usize = spans
+                        .iter()
+                        .map(|s| unicode_width::UnicodeWidthStr::width(*s))
+                        .sum();
+                    assert!(
+                        cols <= width as usize,
+                        "width {width} {lang:?}: row is {cols} columns: {}",
+                        spans.concat()
+                    );
+                }
+                assert!(rows >= 12, "{lang:?}: only {rows} rows were checked");
+            }
+        }
+
+        // And the value really was cut, not merely accepted.
+        let zh = render_lines(&state, 74, Lang::Zh)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(zh.contains('…'), "the long value must be cut: {zh}");
+        assert!(
+            !zh.contains(&"中".repeat(30)),
+            "the whole value must not be drawn: {zh}"
+        );
     }
 }
