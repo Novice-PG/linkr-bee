@@ -876,8 +876,11 @@ mod tests {
         apply_scan_lines(
             &mut state,
             &[
-                "@scan result HomeWiFi -50 dBm ch=6 WPA2".to_string(),
-                "@scan result CoffeeShop -70 dBm ch=1 open".to_string(),
+                // Field order as the firmware emits it (`src/wifi.c`:
+                // `@scan result %.*s %s ch=%u %ddBm`) — the RSSI sits at the
+                // end, which is where the web's pattern looks for it.
+                "@scan result HomeWiFi WPA2 ch=6 -50 dBm".to_string(),
+                "@scan result CoffeeShop open ch=1 -70 dBm".to_string(),
                 "@scan done".to_string(),
             ],
         );
@@ -886,7 +889,10 @@ mod tests {
         assert_eq!(state.scan[0].ssid, "HomeWiFi");
         assert_eq!(state.scan[0].rssi, Some(-50));
         assert_eq!(state.scan[0].channel, Some(6));
-        assert_eq!(state.scan[0].security.as_deref(), Some("WPA2"));
+        // The web lowercases the token when it matches
+        // (`web/app.js` → `securityMatch[1].toLowerCase()`), and the spec
+        // spells the set lowercase too, so the row shows `wpa2`.
+        assert_eq!(state.scan[0].security.as_deref(), Some("wpa2"));
         assert_eq!(state.feedback, "Found 2 networks.");
     }
 
@@ -897,8 +903,8 @@ mod tests {
         apply_scan_lines(
             &mut state,
             &[
-                "@scan result HomeWiFi -80 dBm ch=6".to_string(),
-                "@scan result HomeWiFi -40 dBm ch=11".to_string(),
+                "@scan result HomeWiFi ch=6 -80 dBm".to_string(),
+                "@scan result HomeWiFi ch=11 -40 dBm".to_string(),
                 "@scan done".to_string(),
             ],
         );
@@ -1064,5 +1070,40 @@ mod tests {
             );
             previous = row;
         }
+    }
+
+    /// K7 end to end: the wire line, the fold into the list and the row the
+    /// eye reads. An SSID with spaces survives all three — the parser took
+    /// the first whitespace-delimited token, so `My Home Network` reached the
+    /// screen as `My`.
+    #[test]
+    fn a_scan_result_with_spaces_in_the_ssid_draws_whole() {
+        let mut state = NetworkState::new();
+        state.scan_running = true;
+        // Field order as the firmware emits it (`src/wifi.c`:
+        // `@scan result %.*s %s ch=%u %ddBm`).
+        apply_scan_lines(
+            &mut state,
+            &["@scan result My Home Network wpa2 ch=6 -48dBm".to_string()],
+        );
+        assert_eq!(state.scan.len(), 1, "the line is one network");
+        assert_eq!(state.scan[0].ssid, "My Home Network");
+        assert_eq!(state.scan[0].rssi, Some(-48));
+
+        let mut app = crate::tui::test_app();
+        app.network = state;
+        let rows: Vec<String> = render_lines(&app)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("My Home Network")),
+            "the scan row must draw the whole SSID, drew {rows:?}"
+        );
     }
 }
