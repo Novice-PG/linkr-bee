@@ -416,6 +416,9 @@ fn event_loop(
         // console that repainted underneath it cannot leave the panel's text
         // behind (K5).
         let overlay_before = app.overlay_open();
+        // …and the same for the sidebar's link rows: switching between WiFi
+        // and Bluetooth rewrites them wholesale (K6).
+        let link_before = app.link_signature();
 
         // 1. Session bus: UART output, connection lifecycle, notices.
         loop {
@@ -503,6 +506,7 @@ fn event_loop(
         //    settled repaint scheduled by the resize event lands here as well:
         //    by then the console has stopped moving, so this frame sticks (K1).
         app.sync_overlay_repaint(overlay_before);
+        app.sync_link_repaint(link_before);
         app.poll_settle_repaint(Instant::now());
         if app.take_force_redraw() {
             let _ = terminal.clear();
