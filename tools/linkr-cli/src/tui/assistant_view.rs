@@ -232,6 +232,39 @@ fn wrapped(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
 
 // --- rendering ---------------------------------------------------------------
 
+/// The composer row is `› ` plus what is typed, and it has to fit the pane:
+/// the center pane wraps with `trim: false`, so an over-long row was carried
+/// onto the next line and pushed the key hints down with it. Measured in
+/// columns — a CJK glyph is two of them — because the character count let the
+/// Chinese line run one column over for every glyph it kept, and the old cut
+/// built the row two columns wider than the pane even in English.
+///
+/// Returns the `…` prefix (present only when something was dropped) and the
+/// tail of the text that still fits: the composer shows what you just typed,
+/// so the end is the part worth keeping.
+fn composer_tail(text: &str, width: u16) -> (String, String) {
+    const PROMPT_COLS: usize = 2;
+    let budget = (width as usize).saturating_sub(PROMPT_COLS);
+    if budget == 0 {
+        return (String::new(), String::new());
+    }
+    if unicode_width::UnicodeWidthStr::width(text) <= budget {
+        return (String::new(), text.to_string());
+    }
+    let room = budget - 1; // one column of the budget is the ellipsis
+    let mut kept = String::new();
+    let mut used = 0usize;
+    for ch in text.chars().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        kept.push(ch);
+        used += w;
+    }
+    (String::from("…"), kept.chars().rev().collect())
+}
+
 /// Body of the Assistant view.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let lang = app.lang();
@@ -421,19 +454,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     )));
     let (text, _) = state.composer.display(None);
     let shown = if text.is_empty() { String::new() } else { text };
-    let (head, tail) = if shown.chars().count() > width as usize {
-        let cut: String = shown
-            .chars()
-            .rev()
-            .take(width as usize - 1)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        ("…".to_string(), cut)
-    } else {
-        (String::new(), shown)
-    };
+    let (head, tail) = composer_tail(&shown, width);
     lines.push(Line::from(vec![
         Span::styled(
             "› ",
@@ -827,5 +848,58 @@ mod tests {
             t(ASST_STOP_MESSAGE, Lang::Zh),
             "已停止。已发送的输入无法撤回；在终端用 Ctrl-C 中断目标程序。"
         );
+    }
+
+    /// The composer row is `› ` plus what is typed and has to fit the pane:
+    /// the center pane wraps with `trim: false`, so an over-long row was
+    /// carried onto the next line and pushed the key hints down with it.
+    /// Counting characters put the Chinese line one column over for every
+    /// glyph it kept, and the old cut built the row two columns wider than
+    /// the pane even in English.
+    #[test]
+    fn the_composer_row_stays_inside_the_pane() {
+        // `render_lines` floors the layout at 20 columns, so the pane widths
+        // it can actually be given start there.
+        for width in [20u16, 21, 24, 40, 74, 120] {
+            for text in [
+                String::new(),
+                "hello".to_string(),
+                "中文".repeat(60),
+                "mix中文abc".repeat(30),
+            ] {
+                let mut app = crate::tui::test_app();
+                app.assistant.composer.text = text.clone();
+                let lines = render_lines(&app, width);
+                let row = lines
+                    .iter()
+                    .find(|line| line.spans.first().map(|s| s.content.as_ref()) == Some("› "))
+                    .expect("the composer row is rendered");
+                let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
+                let cols: usize = spans
+                    .iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(*s))
+                    .sum();
+                assert!(
+                    cols <= width as usize,
+                    "width {width}: the row is {cols} columns: {spans:?}"
+                );
+
+                // What survives is the *end* of the line: that is what the
+                // composer shows you of the text you are typing.
+                let head = spans.get(1).copied().unwrap_or_default();
+                let tail = spans.get(2).copied().unwrap_or_default();
+                let budget = (width as usize).saturating_sub(2);
+                if unicode_width::UnicodeWidthStr::width(text.as_str()) <= budget {
+                    assert_eq!(head, "", "width {width}: the text fits, nothing is cut");
+                    assert_eq!(tail, text.as_str());
+                } else {
+                    assert_eq!(head, "…", "width {width}: something has to be cut");
+                    assert!(
+                        text.ends_with(tail),
+                        "width {width}: {tail:?} is not the end of what was typed"
+                    );
+                }
+            }
+        }
     }
 }
