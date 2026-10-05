@@ -8,7 +8,7 @@
 以及怎么全程用键盘操作每一个界面。默认你已经刷好并接好了 Linkr Bee 配件 ——
 刷写、接线、配对五步见[项目首页](../README.zh-CN.md#快速开始)。
 
-所有界面都有中英两版；[第 11 步](#11-切换界面语言)讲怎么切换。
+所有界面都有中英两版；[第 12 步](#12-切换界面语言)讲怎么切换。
 
 ## 1. 你会得到什么
 
@@ -142,7 +142,105 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 如果一点输出都没有，先查三根线 —— 目标 TX 接配件 RX、目标 RX 接配件 TX、
 共地 —— 而不是别的什么。
 
-## 4. 界面总览
+## 4. CLI 模式
+
+下面这些都不需要 TUI：同一个二进制既能跑一次性命令喂脚本和 CI，也能直接
+给你一个裸串行会话。`linkr --help` 列出全部旗标；这一节是常用集，打包相关
+的事在[参考手册](../tools/linkr-cli/README.md#use)里。
+
+它有三种形态：
+
+| 形态 | 命令 | 用来做什么 |
+| --- | --- | --- |
+| 找到配件 | `linkr --scan`（或 `linkr scan`） | 先看一眼，或写进脚本里探活 |
+| 连上、跑命令、退出 | 下面任一旗标**再加** `--no-terminal` | 脚本、CI、体检 |
+| 交互会话 | 裸的 `linkr`，或加 `--tui` 接着进界面 | 日常使用 |
+
+### 连接
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--name <NAME>` | 蓝牙名或前缀；默认 `Linkr BLE UART`，匹配 `Linkr BLE UART*` |
+| `--address <ADDR>` | 按地址或 UUID 直连，跳过按名扫描 |
+| `--scan` | 列出附近所有蓝牙设备，不管有没有名字 |
+| `--timeout <SEC>` | 扫描预算，默认 `8.0` |
+| `--pair` | 请求系统配对 —— 执行期间把配件的 GPIO1 按到 GND；macOS 在读取加密服务时弹系统对话框，配好之后这台主机就记住了 |
+| `--lan <HOST[:PORT]>` | 走局域网 WebSocket 桥，而不是无线电 |
+| `--lan-token <HEX>` · `--lan-token-file <PATH>` | 桥的 32 位十六进制令牌；[第 10 步](#10-局域网模式)讲它从哪来 |
+
+### 管理命令
+
+想加几个加几个。它们在连上之后、**任何终端打开之前**执行，而且**只能走
+蓝牙**：经 `--lan` 时每条都回
+`management commands are not available over the LAN bridge; connect over BLE to run them`。
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--query-info` | 发 `@i?` 并打印诊断 —— 固件、uptime、WiFi、队列 |
+| `--query-uart` | 发 `@u?` 并打印串口设置 |
+| `--uart <SPEC>` | 串口设成 `baud,data,parity,stop,flow`，如 `115200,8,n,1,n`（波特率 300–3000000、数据位 5–8、校验 `n`/`o`/`e`、停止位 1/2、流控 `n`/`rtscts`） |
+| `--wifi-scan` | 扫配件看得见的 2.4 GHz 网络 |
+| `--wifi <SSID[,PASSWORD]>` | 让配件连网 |
+| `--wifi-key-file <PATH>` | 从 `PATH` 的第一行读密码；配一个光 `--wifi <SSID>` 用，密钥就不进 `argv`、也不进 shell 历史 |
+| `--wifi-off` | 忘掉记住的网络 |
+| `--query-wifi` | 发 `@w?` 并打印 WiFi 状态 |
+| `--webdav <URL>` · `--webdav-off` · `--query-webdav` | 设置、清除、打印日志上传目标 |
+| `--loopback-test [<STR>]` | 发一段载荷并要求原样回吐 —— 证明整条链路通的最便宜办法 |
+| `--loopback-timeout <SEC>` | 等回显多久，默认 `3.0` |
+
+### 输出
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--json` | 管理命令的回复与事件按 JSON Lines 走 stdout；敏感命令正文仍然打码 |
+| `--quiet` | 去掉进度提示 —— 结果、警告、错误照常打印 |
+| `--debug-io` | stderr 上打逐字节 TX/RX 轨迹 |
+| `--log-file <PATH>` | 收到的每个字节都追加进文件 |
+
+### 终端会话
+
+| 旗标 | 作用 |
+| --- | --- |
+| `--no-terminal` | 连上、跑完上面的命令、退出 —— 不进 raw 模式，没有回滚缓冲 |
+| `--enter <raw\|cr\|lf\|crlf>` | `Enter` 发什么，默认 `raw` |
+| `--local-echo` | 本地回显 —— 目标机不回显时用 |
+| `--line-mode` | 一次发一行可见字符，而不是 raw 终端 |
+| `--escape <TYPE>` | 退出会话的按键，默认 `^]` |
+| `--ble-write-size <BYTES>` | 限制单次 NUS 写入长度；`0`（默认）自动协商 |
+| `--write-response` | 每块都写确认 —— 仅 NUS 回退路径；Reliable UART 本来就带确认 |
+| `--write-delay-ms <MS>` | 块间停顿，默认 `5.0` —— 仅 NUS 回退路径 |
+| `--tui` | 把连好的会话交给 TUI，和 `linkr tui` 一模一样 |
+| `--yes` | 让助手自己批准自己的命令（TUI 审批代理） |
+
+### 子命令
+
+| 命令 | 等价于 |
+| --- | --- |
+| `linkr scan` | `linkr --scan` |
+| `linkr tui` | `linkr --tui` |
+| `linkr completion <bash\|fish\|zsh\|powershell>` | `linkr --print-completion <shell>` |
+
+### 配方
+
+```sh
+linkr --scan                                    # 配件在不在？
+linkr --query-info --no-terminal                # 打 @i? 诊断，然后退出
+linkr --json --query-info --no-terminal | jq .  # 同上，机器可读
+linkr --wifi-scan --no-terminal                 # 配件看得见哪些网络
+linkr --wifi MySSID --wifi-key-file ./pw --no-terminal   # 密钥不进 argv
+linkr --loopback-test ping --no-terminal        # 端到端自检
+linkr --uart 115200,8,n,1,n --tui               # 先设串口，再开始打字
+linkr --lan 192.168.1.10 --tui                  # 走局域网桥
+linkr completion zsh > _linkr                   # 给你的 shell 装补全
+```
+
+它们每一个都以[退出码](#11-退出码)收尾，所以体检只要一行：
+
+```sh
+linkr --loopback-test ping --no-terminal || echo "配件没回应"
+```
+
+## 5. 界面总览
 
 | 区域 | 位置 | 作用 |
 | --- | --- | --- |
@@ -156,7 +254,7 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 
 所有功能也都能从命令面板里找到，所以下面的键位表是快捷方式，不是硬性要求。
 
-## 5. 键位
+## 6. 键位
 
 这就是完整的 `F1` 帮助，按其显示顺序：
 
@@ -200,7 +298,7 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 在视图内部，视图获得焦点后 `PgUp` / `PgDn` / `Home` / `End` 翻动该窗格；
 明确要滚终端回滚缓冲时请按住 `Shift`。
 
-## 6. 命令面板
+## 7. 命令面板
 
 按 `Ctrl+P` 再输入。搜索同时匹配**中英文**动作标题以及动作 id，所以
 `view`、`视图`、`wifi`、`term.copy` 都能命中。完整注册表（34 个动作，按序）：
@@ -219,7 +317,7 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 `↑` `↓` 移动，`Enter` 执行，`Esc` 关闭。当前用不了的动作不会被隐藏，而是显示为
 禁用 —— 比如在通过 BLE 连接前的那些 WiFi 动作 —— 试着触发时会说明原因。
 
-## 7. 侧栏
+## 8. 侧栏
 
 ### 连接卡
 
@@ -241,7 +339,7 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 选中后按 `Enter`，证据会以气泡提示展示。如果显示 *监控引擎未就绪*，
 说明引擎在这台机器上没能启动。
 
-## 8. 四个视图
+## 9. 四个视图
 
 ### F2 —— 终端
 
@@ -320,14 +418,14 @@ linkr --query-info --tui                   # 进入前先打印 @i? 诊断
 第一次提问前先配置模型端点（`Ctrl+Shift+S`）：API 基础 URL、模型 ID、
 API 密钥、协议（OpenAI 兼容、Anthropic、Google AI）、推理力度、上下文窗口、
 最大输出 token 与按 token 计价。`Ctrl+S` 保存，`Esc` 关闭。
-密钥只存在本机 —— 见[第 12 步](#12-磁盘上的设置)。
+密钥只存在本机 —— 见[第 13 步](#13-磁盘上的设置)。
 如果端点是明文 `http` 且非本地回环，对话框会在存密钥之前警告你。
 
 `Ctrl+P` → **导出报告**会把排查结论写成 Markdown，保存到
 `<配置目录>/linkr/linkr-agent-<时间戳>.md`，包含助手为这台目标机记录的任务与
 笔记。没有可导出的内容时它会明说，而不是写一个空文件。
 
-## 9. 局域网模式
+## 10. 局域网模式
 
 配件接入 2.4 GHz 网络后就可以不用蓝牙：
 
@@ -347,7 +445,7 @@ BLE 会话建立时 TUI 会自己向设备索取令牌（`@s?`，与网页前端
 记住：诊断、WiFi 配网和 WebDAV 仅限 BLE —— 局域网上你得到的是终端和助手，
 那几个界面会解释它们为什么被禁用。
 
-## 10. 退出码
+## 11. 退出码
 
 | 码 | 含义 |
 | --- | --- |
@@ -359,7 +457,7 @@ BLE 会话建立时 TUI 会自己向设备索取令牌（`@s?`，与网页前端
 
 连接中按 `Ctrl+Q` 会先确认，所以一次误按不会掉线。
 
-## 11. 切换界面语言
+## 12. 切换界面语言
 
 `Ctrl+P` → **切换界面语言**（`app.language`）在中英文之间切换并保存。
 所有界面在下一帧重新读取设置，切换立即生效。同一个设置在网页端就是
@@ -368,7 +466,7 @@ BLE 会话建立时 TUI 会自己向设备索取令牌（`@s?`，与网页前端
 首次运行会从 `LC_ALL` / `LC_MESSAGES` / `LANG` 取语言，之后以保存的值为准。
 想手动改，就编辑设置文件里的 `lang` —— 当然直接用命令面板更省事。
 
-## 12. 磁盘上的设置
+## 13. 磁盘上的设置
 
 | 文件 | 内容 |
 | --- | --- |
@@ -401,7 +499,7 @@ BLE 会话建立时 TUI 会自己向设备索取令牌（`@s?`，与网页前端
 `active_view` 取 `terminal`、`diagnostics`、`network` 或 `assistant`，
 `lang` 取 `en` 或 `zh`。未知或缺失的字段会回落到默认值，所以旧文件照样能用。
 
-## 13. 故障排查
+## 14. 故障排查
 
 | 现象 | 检查什么 |
 | --- | --- |
@@ -421,7 +519,7 @@ BLE 会话建立时 TUI 会自己向设备索取令牌（`@s?`，与网页前端
 更多见 [README 常见问题](../README.zh-CN.md#常见问题)与
 [开发指南](DEVELOPMENT.zh-CN.md)（构建与刷写）。
 
-## 14. 延伸阅读
+## 15. 延伸阅读
 
 - [项目首页](../README.zh-CN.md) —— Linkr Bee 是什么、刷写、接线、配对
 - [Rust 终端参考](../tools/linkr-cli/README.md) —— 构建、打包、参数、退出码、模块布局

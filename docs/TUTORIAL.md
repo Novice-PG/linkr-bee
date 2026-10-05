@@ -10,7 +10,7 @@ have a Linkr Bee accessory flashed and wired — the
 [README](../README.md#getting-started) covers flashing, wiring and pairing in
 five steps.
 
-Every screen exists in English and Chinese; [step 11](#11-switch-the-language)
+Every screen exists in English and Chinese; [step 12](#12-switch-the-language)
 shows how to switch.
 
 ## 1. What you get
@@ -156,7 +156,108 @@ connections need no button press.
 If nothing arrives, check the three wires — target TX to accessory RX, target
 RX to accessory TX, and a shared ground — before touching anything else.
 
-## 4. The screen at a glance
+## 4. CLI mode
+
+None of this needs the TUI: the same binary runs one-shot commands for
+scripts and CI, or hands you a raw serial session. `linkr --help` lists every
+flag; this section is the working set, and the
+[reference](../tools/linkr-cli/README.md#use) covers the packaging around it.
+
+There are three shapes:
+
+| Shape | Command | Use it for |
+| --- | --- | --- |
+| Find the accessory | `linkr --scan` (or `linkr scan`) | a first look, a scripted check |
+| Connect, run commands, exit | any flag below **plus** `--no-terminal` | scripts, CI, health checks |
+| Interactive session | plain `linkr`, or `--tui` to continue in the TUI | daily driving |
+
+### Connection
+
+| Flag | What it does |
+| --- | --- |
+| `--name <NAME>` | BLE name or prefix; the default `Linkr BLE UART` matches `Linkr BLE UART*` |
+| `--address <ADDR>` | connect by address or UUID and skip the name scan |
+| `--scan` | list every nearby BLE device, named or not |
+| `--timeout <SEC>` | scan budget, default `8.0` |
+| `--pair` | request OS bonding — hold the Bee's GPIO1 to GND while it runs; on macOS the system dialog pops when the encrypted service is read, and the bond is remembered afterwards |
+| `--lan <HOST[:PORT]>` | talk to the LAN WebSocket bridge instead of the radio |
+| `--lan-token <HEX>` · `--lan-token-file <PATH>` | the 32 hex characters of the bridge token; [step 10](#10-lan-mode) says where they come from |
+
+### Management commands
+
+Pass as many as you like. They run as soon as the link is up, **before** any
+terminal opens, and they are **BLE-only**: over `--lan` each one answers
+`management commands are not available over the LAN bridge; connect over BLE
+to run them`.
+
+| Flag | What it does |
+| --- | --- |
+| `--query-info` | send `@i?` and print the diagnostics — firmware, uptime, WiFi, queues |
+| `--query-uart` | send `@u?` and print the UART settings |
+| `--uart <SPEC>` | set the UART as `baud,data,parity,stop,flow`, e.g. `115200,8,n,1,n` (baud 300–3000000, data 5–8, parity `n`/`o`/`e`, stop 1/2, flow `n`/`rtscts`) |
+| `--wifi-scan` | scan the 2.4 GHz networks the accessory can see |
+| `--wifi <SSID[,PASSWORD]>` | connect the accessory to a network |
+| `--wifi-key-file <PATH>` | read the password from the first line of `PATH`; pair it with a bare `--wifi <SSID>` so the secret stays out of `argv` and your shell history |
+| `--wifi-off` | forget the saved network |
+| `--query-wifi` | send `@w?` and print the WiFi state |
+| `--webdav <URL>` · `--webdav-off` · `--query-webdav` | set, clear and print the log-upload target |
+| `--loopback-test [<STR>]` | send a payload and require the same bytes back — the cheapest proof that the whole link works |
+| `--loopback-timeout <SEC>` | how long to wait for the echo, default `3.0` |
+
+### Output
+
+| Flag | What it does |
+| --- | --- |
+| `--json` | management replies and events as JSON lines on stdout; sensitive command text stays redacted |
+| `--quiet` | drop progress messages — results, warnings and errors still print |
+| `--debug-io` | byte-level TX/RX traces on stderr |
+| `--log-file <PATH>` | append every received byte to a file |
+
+### The terminal session
+
+| Flag | What it does |
+| --- | --- |
+| `--no-terminal` | connect, run the commands above, exit — no raw mode, no scrollback |
+| `--enter <raw\|cr\|lf\|crlf>` | what `Enter` sends, default `raw` |
+| `--local-echo` | echo typed bytes locally, for a target that does not |
+| `--line-mode` | send one visible line at a time instead of raw terminal mode |
+| `--escape <TYPE>` | the key that leaves the session, default `^]` |
+| `--ble-write-size <BYTES>` | cap each NUS write; `0` (the default) negotiates one automatically |
+| `--write-response` | acknowledge every chunk — NUS fallback only; Reliable UART always does |
+| `--write-delay-ms <MS>` | pause between chunks, default `5.0` — NUS fallback only |
+| `--tui` | hand the connected session to the TUI, exactly what `linkr tui` does |
+| `--yes` | let the assistant approve its own commands (TUI approval broker) |
+
+### Subcommands
+
+| Command | Equivalent |
+| --- | --- |
+| `linkr scan` | `linkr --scan` |
+| `linkr tui` | `linkr --tui` |
+| `linkr completion <bash\|fish\|zsh\|powershell>` | `linkr --print-completion <shell>` |
+
+### Recipes
+
+```sh
+linkr --scan                                    # is the accessory there?
+linkr --query-info --no-terminal                # @i? diagnostics, then exit
+linkr --json --query-info --no-terminal | jq .  # the same, machine-readable
+linkr --wifi-scan --no-terminal                 # what the accessory can see
+linkr --wifi MySSID --wifi-key-file ./pw --no-terminal   # secret out of argv
+linkr --loopback-test ping --no-terminal        # end-to-end sanity check
+linkr --uart 115200,8,n,1,n --tui               # set the UART, then type
+linkr --lan 192.168.1.10 --tui                  # through the LAN bridge
+linkr completion zsh > _linkr                   # completions for your shell
+```
+
+Every one of them ends in an [exit code](#11-exit-codes), so a health check
+stays a single line:
+
+```sh
+linkr --loopback-test ping --no-terminal || echo "accessory is not answering"
+```
+
+## 5. The screen at a glance
 
 | Region | Where | What it does |
 | --- | --- | --- |
@@ -171,7 +272,7 @@ RX to accessory TX, and a shared ground — before touching anything else.
 Everything you can do is also reachable from the command palette, so the key
 map below is a shortcut, not a requirement.
 
-## 5. Keyboard
+## 6. Keyboard
 
 This is the whole `F1` help, in the order it is shown:
 
@@ -216,7 +317,7 @@ Two rules worth remembering:
 Inside a view, `PgUp` / `PgDn` / `Home` / `End` page that pane once a view has
 focus; hold `Shift` when you mean the terminal's scrollback specifically.
 
-## 6. Command palette
+## 7. Command palette
 
 Press `Ctrl+P` and type. The search matches action titles in **both**
 languages, plus the action id, so `view`, `视图`, `wifi` and `term.copy` all
@@ -237,7 +338,7 @@ land. The full registry (34 actions, in order):
 disabled rather than hidden — for example the WiFi actions until you are
 connected over BLE — and say why when you try them.
 
-## 7. The sidebar
+## 8. The sidebar
 
 ### Connection card
 
@@ -262,7 +363,7 @@ Findings appear here as they are noticed; select one and press `Enter` to see
 the evidence as a toast. If it reads *watch engine not ready*, the engine
 could not start on this host.
 
-## 8. The four views
+## 9. The four views
 
 ### F2 — Terminal
 
@@ -350,7 +451,7 @@ Before the first question, configure a model endpoint (`Ctrl+Shift+S`): API
 base URL, model ID, API key, protocol (OpenAI-compatible, Anthropic, Google
 AI), reasoning effort, context window, max output tokens and per-token prices.
 `Ctrl+S` saves, `Esc` closes. The key is stored on this machine only — see
-[step 12](#12-settings-on-disk). If the endpoint is plain `http` and not
+[step 13](#13-settings-on-disk). If the endpoint is plain `http` and not
 loopback, the dialog warns before it stores a key.
 
 `Ctrl+P` → **Export report** writes the diagnosis as Markdown to
@@ -358,7 +459,7 @@ loopback, the dialog warns before it stores a key.
 the assistant kept for this target. It says so when there is nothing to export
 rather than writing an empty file.
 
-## 9. LAN mode
+## 10. LAN mode
 
 Once the accessory is on your 2.4 GHz network you can drop Bluetooth:
 
@@ -382,7 +483,7 @@ Remember that diagnostics, WiFi provisioning and WebDAV stay BLE-only: over
 LAN you get the terminal and the assistant, and those screens explain why they
 are disabled.
 
-## 10. Exit codes
+## 11. Exit codes
 
 | Code | Meaning |
 | --- | --- |
@@ -395,7 +496,7 @@ are disabled.
 `Ctrl+Q` asks for confirmation while connected, so an accidental keystroke
 cannot drop your session.
 
-## 11. Switch the language
+## 12. Switch the language
 
 `Ctrl+P` → **Switch language** (`app.language`) flips the interface between
 English and Chinese and saves it. Every screen re-reads the setting on the
@@ -406,7 +507,7 @@ The language is picked up from `LC_ALL` / `LC_MESSAGES` / `LANG` on the first
 run, and remembered afterwards. To change it by hand, edit `lang` in the
 settings file — or just use the palette action.
 
-## 12. Settings on disk
+## 13. Settings on disk
 
 | File | Holds |
 | --- | --- |
@@ -440,7 +541,7 @@ macOS, and `%APPDATA%` on Windows.
 is `en` or `zh`. An unknown or missing field falls back to its default, so an
 older file keeps working.
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
@@ -460,7 +561,7 @@ older file keeps working.
 More: [README troubleshooting](../README.md#troubleshooting) and the
 [development guide](DEVELOPMENT.md) for building and flashing.
 
-## 14. See also
+## 15. See also
 
 - [Project README](../README.md) · [中文](../README.zh-CN.md) — what Linkr Bee
   is, flashing, wiring, pairing
