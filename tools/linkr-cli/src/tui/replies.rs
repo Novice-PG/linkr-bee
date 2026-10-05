@@ -9,6 +9,8 @@
 //! [`webdav_state_text`]) follow the interface language.
 
 use super::i18n::{strings, t, Lang};
+use regex::Regex;
+use std::sync::OnceLock;
 
 strings! {
     RPL_STATE_CONNECTED => "connected", "已连接";
@@ -240,27 +242,85 @@ pub struct ScanResult {
     pub security: Option<String>,
 }
 
-pub fn parse_scan_line(line: &str) -> Option<ScanResult> {
-    let line = line.trim();
-    let rest = line.strip_prefix("@scan result ")?;
-    let mut fields = rest.split_whitespace();
-    let ssid = fields.next()?.to_string();
-    let mut result = ScanResult {
-        ssid,
-        rssi: None,
-        channel: None,
-        security: None,
+/// The patterns `web/app.js` matches with in `parseWifiScanResult`,
+/// compiled once: the RSSI carries a `dB`/`dBm` suffix, the channel is
+/// `ch=N`, and the security is one of the tokens of WEB_UX_SPEC §5.3.
+struct ScanPats {
+    rssi: Regex,
+    channel: Regex,
+    security: Regex,
+    numbering: Regex,
+}
+
+fn scan_pats() -> &'static ScanPats {
+    static PATS: OnceLock<ScanPats> = OnceLock::new();
+    PATS.get_or_init(|| ScanPats {
+        rssi: Regex::new(r"(?i)\s+(-?\d+)\s*dBm?$").expect("rssi pattern is valid"),
+        channel: Regex::new(r"(?i)\s+ch=(\d+)$").expect("channel pattern is valid"),
+        security: Regex::new(r"(?i)\s+(open|wep|wpa|wpa2|wpa2-sha256|wpa3|eap|wapi|unknown)$")
+            .expect("security pattern is valid"),
+        numbering: Regex::new(r"^\d+[).]\s*").expect("numbering pattern is valid"),
+    })
+}
+
+/// Match `re` at the **right** edge of `value`, cut the match off — the web
+/// does `value.slice(0, match.index).trim()` — and return its first group.
+fn peel(re: &Regex, value: &mut String) -> Option<String> {
+    let (start, group) = {
+        let caps = re.captures(value)?;
+        let start = caps.get(0)?.start();
+        (start, caps.get(1).map(|m| m.as_str().to_string()))
     };
-    for field in fields {
-        if let Ok(v) = field.parse::<i32>() {
-            result.rssi = Some(v);
-        } else if let Some(ch) = field.strip_prefix("ch=") {
-            result.channel = ch.parse().ok();
-        } else {
-            result.security = Some(field.to_string());
-        }
+    value.truncate(start);
+    value.truncate(value.trim_end().len());
+    group
+}
+
+/// Drop one leading and one trailing quote (web `replace(/^["']|["']$/g, "")`).
+fn strip_quotes(value: &str) -> &str {
+    let mut out = value;
+    if let Some(rest) = out.strip_prefix(['"', '\'']) {
+        out = rest;
     }
-    Some(result)
+    if let Some(rest) = out.strip_suffix(['"', '\'']) {
+        out = rest;
+    }
+    out
+}
+
+/// Parse one `@scan result …` line exactly the way the web client does
+/// (`web/app.js` → `parseWifiScanResult`): peel the known fields **off the
+/// right** and keep whatever is left whole, so an SSID that contains spaces
+/// survives — the old left-to-right split stopped the SSID at the first
+/// space (K7). The SSID guards are the web's too: at most 32 UTF-16 units
+/// (its `.length`), nothing starting with `[` or `@`, no leading `1)`
+/// numbering, no surrounding quotes and never `<hidden>`.
+pub fn parse_scan_line(line: &str) -> Option<ScanResult> {
+    let rest = line.trim().strip_prefix("@scan result ")?.trim();
+    let pats = scan_pats();
+    let mut value = rest.to_string();
+
+    let rssi = peel(&pats.rssi, &mut value).and_then(|v| v.parse().ok());
+    let channel = peel(&pats.channel, &mut value).and_then(|v| v.parse().ok());
+    let security = peel(&pats.security, &mut value).map(|v| v.to_lowercase());
+
+    if value.is_empty() || value.encode_utf16().count() > 32 {
+        return None;
+    }
+    if value.starts_with('[') || value.starts_with('@') {
+        return None;
+    }
+    let value = pats.numbering.replace(&value, "").to_string();
+    let ssid = strip_quotes(&value).trim();
+    if ssid.is_empty() || ssid == "<hidden>" {
+        return None;
+    }
+    Some(ScanResult {
+        ssid: ssid.to_string(),
+        rssi,
+        channel,
+        security,
+    })
 }
 
 /// Redact secrets for display (`redactCommand`/`redactSecrets` in the web
@@ -374,7 +434,12 @@ mod tests {
 
     #[test]
     fn scan_lines_parse_all_documented_shapes() {
-        let r = parse_scan_line("@scan result MyNet -54 ch=6 wpa2").unwrap();
+        // Firmware order (`src/wifi.c`: `@scan result %.*s %s ch=%u %ddBm`).
+        // The RSSI always carries its `dBm`, which is also what the web's
+        // pattern `/\s+(-?\d+)\s*dBm?$/i` and WEB_UX_SPEC's `[-N dBm]`
+        // require — a bare `-54` is emitted by nobody, so the sample this
+        // test used to use could not occur on the wire.
+        let r = parse_scan_line("@scan result MyNet wpa2 ch=6 -54dBm").unwrap();
         assert_eq!(r.ssid, "MyNet");
         assert_eq!(r.rssi, Some(-54));
         assert_eq!(r.channel, Some(6));
@@ -386,6 +451,50 @@ mod tests {
         assert_eq!(r.security.as_deref(), Some("open"));
         assert!(parse_scan_line("@scan done").is_none());
         assert!(parse_scan_line("@scan error").is_none());
+    }
+
+    /// K7: an SSID may contain spaces. The web peels the known fields off the
+    /// right edge (`web/app.js` → `parseWifiScanResult`) and keeps the rest
+    /// whole; the old parser took the first whitespace-delimited token, so
+    /// `My Home Network` came out as `My` and everything after the first
+    /// space was dropped.
+    #[test]
+    fn an_ssid_with_spaces_is_kept_whole() {
+        let r = parse_scan_line("@scan result My Home Network wpa2 ch=6 -48dBm").unwrap();
+        assert_eq!(r.ssid, "My Home Network");
+        assert_eq!(r.rssi, Some(-48));
+        assert_eq!(r.channel, Some(6));
+        assert_eq!(r.security.as_deref(), Some("wpa2"));
+
+        // The other shape the spec spells out (`WEB_UX_SPEC.md` §5: ssid,
+        // rssi, ch, security) with the fields in the order the firmware
+        // really emits them (`src/wifi.c`: `%.*s %s ch=%u %ddBm` — the RSSI
+        // is last, which is exactly where the web's pattern looks for it):
+        // the peeling is anchored at the right edge, so it stays whole.
+        let r = parse_scan_line("@scan result Cafe Free WiFi open ch=1 -60 dBm").unwrap();
+        assert_eq!(r.ssid, "Cafe Free WiFi");
+        assert_eq!(r.rssi, Some(-60));
+        assert_eq!(r.channel, Some(1));
+        assert_eq!(r.security.as_deref(), Some("open"));
+    }
+
+    /// The SSID guards are the web's, byte for byte: 32 UTF-16 units (its
+    /// `.length`), no `[`/`@` prefix, no `1)` numbering, no quotes, and
+    /// `<hidden>` is not a name worth showing.
+    #[test]
+    fn the_scan_parser_rejects_what_the_web_rejects() {
+        assert!(parse_scan_line("@scan result").is_none());
+        assert!(parse_scan_line("@scan result <hidden> open").is_none());
+        assert!(parse_scan_line("@scan result [redacted] open").is_none());
+        assert!(parse_scan_line("@scan result @home open").is_none());
+        let too_long = "x".repeat(33);
+        assert!(parse_scan_line(&format!("@scan result {too_long} open")).is_none());
+        assert!(parse_scan_line(&format!("@scan result {} open", "x".repeat(32))).is_some());
+
+        let r = parse_scan_line("@scan result 2. Guest WiFi open").unwrap();
+        assert_eq!(r.ssid, "Guest WiFi");
+        let r = parse_scan_line("@scan result \"Quoted Net\" wpa2").unwrap();
+        assert_eq!(r.ssid, "Quoted Net");
     }
 
     /// The parsed states are the only thing here that reaches the screen as

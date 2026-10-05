@@ -370,7 +370,7 @@ Assistant-side command constants (`accessory_control.js`): `DIAGNOSTICS_COMMAND=
 | `OK webdav=on,url=http://host/dav/` / `OK webdav off` | `parseWebdavStatus` → `{state, url}` |
 | any | `replyStatus(text)` → `{ok, error}` — first `^ERR` line wins, else `ok` if any `^OK` |
 | `OK ws=… token=none\|<32hex>` | captured into `linkr-lan-tokens-v1` and `#wsTokenInput` |
-| scan | `@scan result <ssid> [-N dBm] [ch=N] [open\|wep\|wpa\|wpa2\|wpa2-sha256\|wpa3\|eap\|wapi\|unknown]`, `@scan done`, `@scan error`, `^ERR` → finish |
+| scan | `@scan result <ssid> [open\|wep\|wpa\|wpa2\|wpa2-sha256\|wpa3\|eap\|wapi\|unknown] [ch=N] [-N dBm]` (the firmware prints the RSSI **last** — `src/wifi.c`: `@scan result %.*s %s ch=%u %ddBm` — and the web parser peels it off the right edge), `@scan done`, `@scan error`, `^ERR` → finish |
 | WiFi status line | `OK wifi=<state>,ssid=<ssid>[,ip=<ip>]`, `OK wifi off` |
 | WiFi events | `parseWifiEvent` FINAL phases `ready`/`failed`/`off`, intermediate `queued`/`connecting`/`dhcp` |
 
