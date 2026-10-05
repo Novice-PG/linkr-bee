@@ -75,7 +75,14 @@ mod tests {
     );
 
     fn source() -> String {
-        std::fs::read_to_string(MJS).expect("read mobile/src/agent-prompt.mjs")
+        // The working tree carries whatever line endings the platform's git
+        // chose: `core.autocrlf=true` (the Git for Windows default the Actions
+        // runner inherits) checks the .mjs out with CRLF, while the Rust side
+        // is built from string literals, which rustc normalizes to LF. Compare
+        // the two in one convention instead of in one checkout.
+        std::fs::read_to_string(MJS)
+            .expect("read mobile/src/agent-prompt.mjs")
+            .replace("\r\n", "\n")
     }
 
     /// Every literal template line of the JS source must appear verbatim in the
