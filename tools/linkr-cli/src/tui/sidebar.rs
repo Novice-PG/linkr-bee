@@ -29,6 +29,11 @@ strings! {
     SIDE_DEVICE => "Device: {}", "设备：{}";
     SIDE_EMPTY_NAME => "   (empty name matches any Linkr device)",
         "   （名称留空则匹配任意 Linkr 设备）";
+    // First open has nothing to show in the host row: without this the field
+    // was simply blank, while the web already carries a placeholder telling
+    // you what shape of value it wants (`192.168.1.50 or ws://host/ws`).
+    SIDE_EMPTY_HOST => "   (the bridge's address, e.g. 192.168.1.50 or ws://host/ws)",
+        "   （桥接的地址，例 192.168.1.50 或 ws://host/ws）";
     SIDE_DISCONNECT => "Disconnect", "断开连接";
     SIDE_CONNECT => "Connect", "连接";
     SIDE_SWITCH_DEVICE => "Switch device", "切换设备";
@@ -268,6 +273,9 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
             ),
             field_style
         );
+        if app.sidebar.lan_host.text.is_empty() {
+            lines.push(hint(t(SIDE_EMPTY_HOST, lang)));
+        }
         item!(
             SideEntry::LanToken,
             tr!(
@@ -525,6 +533,7 @@ fn activate(app: &mut App, entry: SideEntry) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_app;
     use super::*;
     use crate::event::ConnectionState;
 
@@ -549,7 +558,37 @@ mod tests {
     #[test]
     fn every_sidebar_message_is_translated() {
         super::super::i18n::assert_bilingual(ALL);
-        assert!(ALL.len() >= 23, "sidebar alone carries 23 messages");
+        assert!(ALL.len() >= 24, "sidebar alone carries 24 messages");
+    }
+
+    /// First open leaves the host row empty, so it has to say what belongs
+    /// there — the web already tells you the same thing through
+    /// `#wsHostInput`'s placeholder (`192.168.1.50 or ws://host/ws`).
+    #[test]
+    fn the_empty_lan_host_row_points_at_the_expected_address_shape() {
+        let render = |app: &App| -> String {
+            render_lines(app)
+                .iter()
+                .flat_map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref().to_string())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut app = test_app();
+        app.settings.transport = TransportChoice::Lan;
+        app.sidebar.lan_host.text.clear();
+        let text = render(&app);
+        assert!(text.contains("192.168.1.50"), "{text}");
+        assert!(text.contains("ws://host/ws"), "{text}");
+
+        // A real address silences it: the hint is a placeholder, not furniture.
+        app.sidebar.lan_host.text = "192.0.2.1".to_string();
+        let text = render(&app);
+        assert!(!text.contains("192.168.1.50"), "{text}");
     }
 
     /// The sidebar has to draw exactly what `entries()` lists, row for row.

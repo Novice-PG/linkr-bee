@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::oneshot;
 
-use super::i18n::{strings, t, tr, Lang};
+use super::i18n::{strings, t, tr, Lang, MSG_SAVE_SETTINGS};
 use super::replies::{
     parse_scan_line, parse_webdav_reply, parse_wifi_reply, webdav_state_text, wifi_state_text,
     ScanResult, WebdavStatus, WifiStatus,
@@ -671,6 +671,25 @@ pub fn on_mgmt_event(app: &mut App, lines: &[String]) {
     apply_scan_lines(&mut app.network, lines);
 }
 
+/// Point the LAN host form at the IP the bridge just confirmed. Returns true
+/// when anything moved, so the caller writes the settings file on a real
+/// change and not on every status press. Split out from the reply handler so
+/// the test can pin the copy without rewriting the developer's `tui.json`.
+fn aim_host(app: &mut App, ip: &str) -> bool {
+    let changed = app.settings.last_lan_host != ip;
+    app.sidebar.lan_host.text = ip.to_string();
+    if changed {
+        app.settings.last_lan_host = ip.to_string();
+        // Tokens are stored per host: leaving the previous host's token in
+        // the field would make the very next LAN dial authenticate against the
+        // new IP and be rejected. The sidebar does the same when the host is
+        // edited by hand.
+        let store = crate::lan_token_store::TokenStore::load();
+        super::sidebar::fill_token_from_store(app, &store);
+    }
+    changed
+}
+
 fn handle_reply(
     app: &mut App,
     kind: PendingKind,
@@ -743,6 +762,17 @@ fn handle_reply(
                 } else {
                     tr!(t(NET_FEEDBACK_WIFI_IP, lang), state, &status.ip)
                 };
+                // A confirmed IP is already the address the LAN transport
+                // dials, so pressing the WiFi status also points the host
+                // field at it. The value was on screen one line above; making
+                // the user retype it into *局域网主机* was pure friction, and
+                // without it the field kept whatever stale address it was
+                // last handed.
+                if !status.ip.is_empty() && aim_host(app, &status.ip) {
+                    if let Err(err) = super::settings::save(&app.settings) {
+                        app.toast(NoticeLevel::Warn, tr!(t(MSG_SAVE_SETTINGS, lang), err));
+                    }
+                }
                 app.network.wifi_status = Some(status);
             }
             None => {
@@ -857,7 +887,33 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_app;
     use super::*;
+
+    /// Pressing the WiFi status with a confirmed IP has to leave the LAN host
+    /// field holding that IP: the number was printed one line above, and the
+    /// field is what the LAN transport actually dials. Before this the value
+    /// only ever reached the screen, and the form kept a stale address.
+    ///
+    /// Only loopback and documentation addresses here (RFC 5737 `192.0.2.0/24`
+    ///): a test is not the place to bake our own LAN's numbering into the
+    /// source, where it reads like a shipped default.
+    #[test]
+    fn a_confirmed_wifi_ip_points_the_lan_host_field_at_it() {
+        let mut app = test_app();
+        // What the form still holds when the radio has nothing to say yet.
+        app.sidebar.lan_host.text = "127.0.0.1".to_string();
+        app.settings.last_lan_host = "127.0.0.1".to_string();
+
+        assert!(aim_host(&mut app, "192.0.2.1"));
+        assert_eq!(app.sidebar.lan_host.text, "192.0.2.1");
+        assert_eq!(app.settings.last_lan_host, "192.0.2.1");
+
+        // The same IP again is not a change: nothing to persist, so the
+        // settings file is not rewritten on every status press.
+        assert!(!aim_host(&mut app, "192.0.2.1"));
+        assert_eq!(app.sidebar.lan_host.text, "192.0.2.1");
+    }
 
     #[test]
     fn accessory_limits_match_the_web_client() {
