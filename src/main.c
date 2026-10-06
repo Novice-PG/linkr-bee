@@ -28,6 +28,9 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
+#if IS_ENABLED(CONFIG_SYS_HEAP_RUNTIME_STATS)
+#include <zephyr/sys/sys_heap.h>
+#endif
 #include <zephyr/version.h>
 
 #include "target_binding.h"
@@ -145,6 +148,12 @@ static struct {
 static atomic_t uart_rx_dropped;
 static atomic_t uart_reliable_drop_no_conn;
 #endif
+/* Bytes linkr_uart_write() refused because ble_to_uart_queue was full.
+ * Reported as "@info queue dropped=": the third drop point in
+ * docs/BRIDGE_QUEUE_FINDINGS.md had no counter at all, and its only report
+ * was a LOG_WRN that the board's ERR-only log level swallowed, so upstream
+ * loss was completely unobservable on this board. */
+static atomic_t uart_queue_dropped;
 static struct uart_config active_uart_config = {
 	.baudrate = CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE,
 	.parity = DEFAULT_UART_PARITY,
@@ -153,11 +162,27 @@ static struct uart_config active_uart_config = {
 	.flow_ctrl = DEFAULT_UART_FLOW_CONTROL,
 };
 
-K_MSGQ_DEFINE(ble_to_uart_queue, sizeof(struct bridge_packet),
-		      CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH, 4);
+/* Queue backing store in .bss instead of __noinit. K_MSGQ_DEFINE puts it in
+ * __noinit, which the ESP32 linker script maps to dram1_0_seg; .bss lands in
+ * dram0_0_seg, the roomier of the two. This is an exact expansion of
+ * K_MSGQ_DEFINE (same STRUCT_SECTION_ITERABLE entry, same static initializer,
+ * same alignment) with only the buffer's placement changed: contents never
+ * need to survive reset, and both regions sit in the same 32 KB SRAM. */
+static uint8_t __aligned(4)
+	ble_to_uart_storage[sizeof(struct bridge_packet) *
+			    CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH];
+STRUCT_SECTION_ITERABLE(k_msgq, ble_to_uart_queue) =
+	Z_MSGQ_INITIALIZER(ble_to_uart_queue, ble_to_uart_storage,
+			   sizeof(struct bridge_packet),
+			   CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH);
 K_MUTEX_DEFINE(ble_to_uart_queue_lock);
 K_SEM_DEFINE(bridge_start_sem, 0, 5);
-RING_BUF_DECLARE(uart_rx_ring, UART_RX_BUFFER_SIZE);
+/* Same relocation as ble_to_uart_storage above: RING_BUF_DECLARE declares the
+ * byte array as __noinit (dram1), this keeps every field of the initializer
+ * but places the array in .bss (dram0). */
+static uint8_t uart_rx_storage[UART_RX_BUFFER_SIZE];
+struct ring_buf uart_rx_ring =
+	RING_BUF_INIT(uart_rx_storage, UART_RX_BUFFER_SIZE);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) || \
@@ -934,6 +959,29 @@ int linkr_uart_config_reconfigure(uint32_t baudrate)
 }
 #endif /* LINKR_UART_AUTOBAUD */
 
+/* Heap headroom. The system heap is the largest single RAM allocation here and
+ * nothing reported it before, so its size could not be justified from real
+ * numbers: "peak" is what decides whether HEAP_MEM_POOL_SIZE should grow.
+ * Compiled only where CONFIG_SYS_HEAP_RUNTIME_STATS is enabled (ESP32 board).
+ */
+#if IS_ENABLED(CONFIG_SYS_HEAP_RUNTIME_STATS)
+static void heap_status_response(struct bt_conn *conn)
+{
+	struct k_heap *heaps = NULL;
+	struct sys_memory_stats stats;
+
+	if (k_heap_array_get(&heaps) < 1 ||
+	    sys_heap_runtime_stats_get(&heaps[0].heap, &stats) != 0) {
+		return;
+	}
+	(void)send_control_response(conn,
+				    "@info heap free=%u used=%u peak=%u\r\n",
+				    (unsigned int)stats.free_bytes,
+				    (unsigned int)stats.allocated_bytes,
+				    (unsigned int)stats.max_allocated_bytes);
+}
+#endif
+
 static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
@@ -963,6 +1011,14 @@ static void diagnostics_response(struct bt_conn *conn)
 	(void)send_control_response(conn, "@info upload %s\r\n", status);
 	(void)linkr_ws_diagnostics(status, sizeof(status));
 	(void)send_control_response(conn, "@info ws %s\r\n", status);
+	/* Third drop point: BLE/WS RX -> UART. Its own group so the six web
+	 * rows stay untouched (extra groups are already tolerated by the TUI
+	 * and the web parser, both key on the group name). */
+	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
+				    (unsigned int)atomic_get(&uart_queue_dropped));
+#if IS_ENABLED(CONFIG_SYS_HEAP_RUNTIME_STATS)
+	heap_status_response(conn);
+#endif
 	(void)send_control_response(conn, "@info done\r\n");
 }
 
@@ -1414,6 +1470,8 @@ int linkr_uart_write(const uint8_t *data, size_t len)
 	packets_needed = DIV_ROUND_UP(len, sizeof(packet.data));
 	k_mutex_lock(&ble_to_uart_queue_lock, K_FOREVER);
 	if (k_msgq_num_free_get(&ble_to_uart_queue) < packets_needed) {
+		/* Nothing was enqueued: the whole write is lost. */
+		atomic_add(&uart_queue_dropped, len);
 		err = -ENOMEM;
 		goto out;
 	}
@@ -1424,6 +1482,9 @@ int linkr_uart_write(const uint8_t *data, size_t len)
 
 		err = k_msgq_put(&ble_to_uart_queue, &packet, K_NO_WAIT);
 		if (err) {
+			/* `len` still covers this packet plus everything after
+			 * it, none of which reached the queue. */
+			atomic_add(&uart_queue_dropped, len);
 			break;
 		}
 

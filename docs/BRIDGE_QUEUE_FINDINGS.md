@@ -37,9 +37,9 @@ SBC 控制台 ──115200 波特(8N1 ≈ 11520 B/s)──▶
 
 | # | 缓冲 | 默认大小 | ESP32-WROOM 板取值 | 满了怎么办 | 可观测性 |
 |---|---|---|---|---|---|
-| ① | `uart_rx_ring`（`src/main.c:159`） | 16384 B（≈1.4 s） | **4096 B**（≈355 ms） | 计数丢弃（`src/main.c:436`） | `@i?` → `@info uart dropped=` |
-| ② | 每客户端 `tx_ring`（`src/ws_bridge.c:73-74`） | 2048 B | **1024 B**（≈89 ms） | **丢最旧**（`src/ws_bridge.c:882-888`） | `@i?` → `@info ws … dropped=`（`src/ws_bridge.c:920`） |
-| ③ | `ble_to_uart_queue`（`src/main.c:155`） | 深度 **8** × `BLE_TO_UART_MAX_LEN 244` = **1952 B**（≈170 ms） | 同左（板级未改） | **整条拒绝** `-ENOMEM`（`src/main.c:1389-1392`） | **无计数器**；只打 `LOG_WRN`，而板级把 WARN 关了 |
+| ① | `uart_rx_ring`（`src/main.c:165`） | 16384 B（≈1.4 s） | **8192 B**（≈711 ms，2026-10-06 起；压缩期为 4096 B） | 计数丢弃（`src/main.c:442`） | `@i?` → `@info uart dropped=` |
+| ② | 每客户端 `tx_ring`（`src/ws_bridge.c:73-74`） | 2048 B | **2048 B**（≈178 ms，2026-10-06 起；压缩期为 1024 B/≈89 ms） | **丢最旧**（`src/ws_bridge.c:882-888`） | `@i?` → `@info ws … dropped=`（`src/ws_bridge.c:920`） |
+| ③ | `ble_to_uart_queue`（`src/main.c:161`） | 深度 **8** × `BLE_TO_UART_MAX_LEN 244` = **1952 B**（≈170 ms） | 深度 **16** = **3904 B**（≈340 ms，2026-10-06 起） | **整条拒绝** `-ENOMEM`（`src/main.c:1400` 预检 / `:1411` 单条入队） | **2026-10-06 起有计数器**：`@i?` → `@info queue dropped=`；`LOG_WRN` 也随日志级 1→2 恢复可见 |
 
 ### 丢包触发条件
 
