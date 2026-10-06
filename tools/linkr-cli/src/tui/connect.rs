@@ -51,7 +51,16 @@ fn lan_token(raw: &str, lang: Lang) -> Result<Option<String>, String> {
 /// Validate the current form and start connecting. Returns the reason when the
 /// input is not usable (the caller toasts it).
 pub fn start(app: &mut App) -> Result<(), String> {
-    if app.connected() || app.pending_connect.is_some() {
+    // A dial in flight is *not* "already connected": it is what the bottom
+    // status line is reporting at this very moment (`connecting...`, from the
+    // session's own Connection event). Folding it into CONN_ALREADY made the
+    // corner toast read "Already connected." while the bar said the link was
+    // still being set up — the two disagreeing on one screen. The startup
+    // deferred connect (A5) makes this the *first* press, not just a double.
+    if app.pending_connect.is_some() {
+        return Err(t(CONN_CONNECTING, app.lang()).to_string());
+    }
+    if app.connected() {
         return Err(t(CONN_ALREADY, app.lang()).to_string());
     }
     // The token a BLE session captured lives in the store until the dial
@@ -113,6 +122,11 @@ fn begin(app: &mut App, opts: SessionOptions, setup: SessionSetup) {
     };
     app.state = ConnectionState::Connecting;
     app.detail = tr!(t(CONN_CONNECTING_OVER, lang), label);
+    // The corner may only describe *this* attempt: a "Connected to …." toast
+    // from the session that just dropped lives for TOAST_LIFETIME (2.2 s) and
+    // would otherwise sit there claiming success while the bar below already
+    // reads "connecting…". The notice log keeps the history either way.
+    app.notices.toasts.clear();
     let bus = app.bus.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.rt.spawn(async move {
@@ -155,6 +169,13 @@ fn seed_form(app: &mut App, opts: &SessionOptions) {
 /// Sidebar / palette entry point: toast the reason on invalid input.
 pub fn connect(app: &mut App) {
     let lang = app.lang();
+    // The attempt already running owns the status line: its own
+    // "connecting…" toast from the first press plus the bottom bar. Adding a
+    // second one would only stack a redundant line in the corner, so a repeat
+    // press changes nothing.
+    if app.pending_connect.is_some() {
+        return;
+    }
     match start(app) {
         Ok(()) => app
             .notices
@@ -315,6 +336,46 @@ mod tests {
         assert!(app.detail.contains("connecting"), "{}", app.detail);
         assert!(app.pending_connect.is_some());
         assert!(!app.quit, "a connect in flight never quits the UI");
+    }
+
+    /// The contradiction on one screen: with a dial in flight the bottom bar
+    /// reads `connecting...` (the session's own Connection event), so the
+    /// corner must not claim the link is up. `pending_connect` also covers the
+    /// startup deferred connect, which makes this the *first* press a user
+    /// makes rather than only an impatient second one.
+    #[test]
+    fn a_press_while_a_dial_runs_never_says_already_connected() {
+        let mut app = test_app();
+        app.state = ConnectionState::Disconnected;
+        let opts = SessionOptions {
+            transport: TransportSpec::Lan {
+                host: "127.0.0.1:9".to_string(),
+                token: None,
+            },
+            ble_write_size: 0,
+            log_file: None,
+            debug_io: false,
+            geometry: false,
+        };
+        begin(&mut app, opts, SessionSetup::default());
+        assert!(app.pending_connect.is_some());
+        let lang = app.lang();
+
+        // What `connect` adds while a dial runs: nothing — the corner keeps
+        // the first press's "connecting…" line instead of stacking another.
+        let toasts = app.notices.toasts.len();
+        connect(&mut app);
+        assert_eq!(app.notices.toasts.len(), toasts, "no duplicate toast");
+
+        // A caller going through `start` straight still gets the truth.
+        let reason = start(&mut app).unwrap_err();
+        assert_eq!(reason, t(CONN_CONNECTING, lang));
+        assert_ne!(reason, t(CONN_ALREADY, lang));
+
+        // A link that really is up keeps the original wording.
+        app.pending_connect = None;
+        app.state = ConnectionState::Connected;
+        assert_eq!(start(&mut app).unwrap_err(), t(CONN_ALREADY, lang));
     }
 
     /// A5's core promise: a failed connect toasts and stays in the interface
