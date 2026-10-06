@@ -391,8 +391,9 @@ ERR format: @u=115200,8,n,1,n
 
 The diagnostic command is read-only. It reports the application and Zephyr
 versions, uptime, the open BLE access/security state, UART buffer usage and
-dropped-byte count, WiFi/IP state, and WebDAV
-queue, drop, HTTP, failure, and success counters:
+dropped-byte count, WebSocket bridge tx/rx/dropped counters, the upstream
+BLE/WS-to-UART queue drop count, WiFi/IP state, and WebDAV queue, drop, HTTP,
+failure, and success counters:
 
 ```text
 @info fw version=0.2.0 zephyr=4.4.1
@@ -400,6 +401,8 @@ queue, drop, HTTP, failure, and success counters:
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info ws state=up port=80 clients=0 tx=0 rx=0 dropped=0
+@info queue dropped=0
 @info done
 ```
 

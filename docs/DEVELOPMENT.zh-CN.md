@@ -304,8 +304,9 @@ ERR format: @u=115200,8,n,1,n
 ```
 
 诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
-访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态，以及
-WebDAV 队列、丢弃、HTTP、失败和成功计数：
+访问/安全状态、UART 缓冲区使用量和丢字节数、WebSocket 桥接的 tx/rx/丢弃计数、
+上游 BLE/WS→UART 队列的丢弃字节数、WiFi/IP 状态，以及 WebDAV 队列、丢弃、
+HTTP、失败和成功计数：
 
 ```text
 @info fw version=0.2.0 zephyr=4.4.1
@@ -313,6 +314,8 @@ WebDAV 队列、丢弃、HTTP、失败和成功计数：
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info ws state=up port=80 clients=0 tx=0 rx=0 dropped=0
+@info queue dropped=0
 @info done
 ```
 
