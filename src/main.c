@@ -34,6 +34,7 @@
 #include "ble_mgmt.h"
 #include "ble_uart_reliable.h"
 #include "wifi.h"
+#include "uart_autobaud.h"
 #include "ws_bridge.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
@@ -907,6 +908,32 @@ static int apply_uart_config(const struct uart_config *cfg)
 	return err;
 }
 
+#if LINKR_UART_AUTOBAUD
+/*
+ * uart_autobaud.c is a separate translation unit and must not reach into this
+ * file's state, so the only two things it needs — the port's configured rate
+ * and the one reconfigure path — are handed over instead. Both are additions:
+ * nothing that exists here moves or changes signature, which is what keeps this
+ * file mergeable against every other board that compiles it.
+ */
+uint32_t linkr_uart_config_current(void)
+{
+	return active_uart_config.baudrate;
+}
+
+int linkr_uart_config_reconfigure(uint32_t baudrate)
+{
+	struct uart_config cfg;
+
+	k_mutex_lock(&uart_config_lock, K_FOREVER);
+	cfg = active_uart_config;
+	k_mutex_unlock(&uart_config_lock);
+	cfg.baudrate = baudrate;
+
+	return apply_uart_config(&cfg);
+}
+#endif /* LINKR_UART_AUTOBAUD */
+
 static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
@@ -1745,6 +1772,7 @@ int main(void)
 	}
 
 	k_mutex_init(&uart_config_lock);
+	linkr_uart_autobaud_init(DT_REG_ADDR(LINKR_UART_NODE));
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	uart_irq_callback_user_data_set(bridge_uart, uart_rx_irq_callback, NULL);
 #endif
