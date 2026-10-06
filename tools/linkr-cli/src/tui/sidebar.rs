@@ -484,12 +484,16 @@ fn activate(app: &mut App, entry: SideEntry) {
             });
         }
         SideEntry::SwitchDevice => {
-            // Focus the device name field for editing.
-            let items = entries(app);
-            if let Some(pos) = items.iter().position(|e| *e == SideEntry::BleName) {
-                app.sidebar.selection = pos;
-            } else {
+            // Sweep the band and list what answers. The web gives this button
+            // to `connect({ chooseDevice: true })`, which calls
+            // `requestDevice()` and lets the browser both scan and list; the
+            // TUI's version used to do neither — it just moved the cursor onto
+            // the name field, so a second accessory could only be reached by
+            // typing its address by hand.
+            if app.transport_choice() == TransportChoice::Lan {
                 app.toast(NoticeLevel::Info, t(MSG_SWITCH_BLE, lang).to_string());
+            } else {
+                super::connect::begin_scan(app);
             }
         }
         SideEntry::BleName | SideEntry::LanHost | SideEntry::LanToken => {}

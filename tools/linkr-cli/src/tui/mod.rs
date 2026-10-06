@@ -339,6 +339,7 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         force_redraw: true,
         settle_repaint_at: None,
         pending_connect: None,
+        pending_scan: None,
         socket_query: None,
         lan_device: None,
         center_height: 24,
@@ -441,6 +442,7 @@ fn event_loop(
 
         // 2. Non-blocking work parked on oneshots / broadcast receivers.
         connect::poll(&mut app);
+        connect::poll_scan(&mut app);
         if app.dialog.is_none() && app.palette.is_none() {
             if let Some(pending) = app.take_approval() {
                 app.dialog = Some(Dialog::Approval(Box::new(pending)));
@@ -1064,6 +1066,7 @@ pub(crate) fn test_app() -> App {
         force_redraw: false,
         settle_repaint_at: None,
         pending_connect: None,
+        pending_scan: None,
         socket_query: None,
         lan_device: None,
         center_height: 24,
