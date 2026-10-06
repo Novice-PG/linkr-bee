@@ -97,40 +97,59 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux and Windows and macOS, on both architectures: the terminal is
-          # a single Rust crate, so every runner builds the same source. Native
-          # triples are spelled out so the packaging step never has to guess
-          # where cargo put the binary; macOS x86_64 is cross-built from the
-          # Apple silicon runner, which the Apple toolchain supports out of the
-          # box.
+          # The six platforms that were actually exercised end to end:
+          # Windows x64 + x86, Linux x86_64 + i686 + arm64 + armv7. macOS is
+          # left out on purpose — nothing in this repo has ever run on one, and
+          # shipping a binary nobody has tested is a promise we cannot keep.
+          # Native triples are spelled out so the packaging step never has to
+          # guess where cargo put the binary.
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - name: linux-i686
+            os: ubuntu-latest
+            target: i686-unknown-linux-gnu
           - name: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - name: linux-armv7
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-          - name: macos-arm64
-            os: macos-latest
-            target: aarch64-apple-darwin
-          - name: macos-x86_64
-            os: macos-latest
-            target: x86_64-apple-darwin
+          - name: windows-i686
+            os: windows-latest
+            target: i686-pc-windows-msvc
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       # btleplug talks to BlueZ over libdbus, so the Linux runners need the
-      # development package before anything can link.
+      # development package before anything can link. The host package is what
+      # `cargo test` builds against; the cross packages are what the release
+      # binary links against, and the matching libc is what lets the smoke test
+      # actually execute a foreign binary (armv7 additionally needs qemu's
+      # binfmt handler, since that runner is x86_64).
       - name: Install the Linux system libraries
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y libdbus-1-dev pkg-config
+          case "${{ matrix.target }}" in
+            i686-unknown-linux-gnu)
+              sudo dpkg --add-architecture i386
+              sudo apt-get update -y
+              sudo apt-get install -y gcc-i686-linux-gnu libdbus-1-dev:i386 libc6:i386
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              sudo dpkg --add-architecture armhf
+              sudo apt-get update -y
+              sudo apt-get install -y gcc-arm-linux-gnueabihf libdbus-1-dev:armhf libc6:armhf qemu-user-static
+              ;;
+          esac
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -163,6 +182,24 @@ jobs:
         run: |
           set -euo pipefail
           cd tools/linkr-cli
+          # A cross build must see the *target's* dbus, not the runner's, and
+          # must be told which linker speaks the target ABI. Without this the
+          # pkg-config probe resolves the host's libdbus and the link fails
+          # (or, worse, silently picks up the wrong architecture).
+          case "${{ matrix.target }}" in
+            i686-unknown-linux-gnu)
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_SYSROOT_DIR=/
+              export PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_SYSROOT_DIR=/
+              export PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig
+              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+              ;;
+          esac
           cargo build --release --target "${{ matrix.target }}"
 
       - name: Smoke test the binary
@@ -199,8 +236,12 @@ jobs:
           fi
           cat "${out}/SHA256SUMS"
 
+      # One bundle per run: `linkr-bee-terminal-bundle` is a fixed artifact
+      # name, so a second Windows target would collide on upload. The 32-bit
+      # build ships as its own zip like every other platform, which is what
+      # the release stages anyway.
       - name: Generate the self-extracting Windows bundle
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows-x86_64'
         shell: bash
         run: |
           set -euo pipefail
@@ -220,7 +261,7 @@ jobs:
           retention-days: 30
 
       - name: Upload the self-extracting Windows bundle
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows-x86_64'
         uses: actions/upload-artifact@v4
         with:
           name: linkr-bee-terminal-bundle
