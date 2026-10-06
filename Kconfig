@@ -72,6 +72,39 @@ config LINKR_BLE_BRIDGE_UART_BAUD_RATE
 	  Default bridge UART baud rate. Typical SBC console values are 115200,
 	  1500000, 921600, and 1000000.
 
+config LINKR_BLE_BRIDGE_UART_AUTOBAUD
+	bool "Auto-detect the bridge UART line rate"
+	depends on SOC_SERIES_ESP32
+	default n
+	help
+	  Follow the peer's line rate instead of demanding it match us, so a
+	  swapped SBC never has to change a single stty to suit this board.
+
+	  Every 400 ms the ESP32's own hardware detector is re-armed
+	  (UART_AUTOBAUD_EN) and software reads back the shortest low/high
+	  pulse seen on RXD, in source-clock cycles, then turns that into a
+	  rate and reconfigures the port through the existing @u= path:
+	  baud = source clock / min(lowpulse, highpulse). The hardware only
+	  measures; programming the divisor, deciding when to try, and giving
+	  up are all software.
+
+	  It acts only when the line is measured three ways: both polarities
+	  must time the same run, two consecutive windows must agree on the
+	  same rate, and the result must fall outside 2% of the current rate
+	  (inside that, the UART already tolerates it and reconfiguring would
+	  only reset the ring and throw away good data).
+
+	  Limits: it needs the peer to toggle bits, so an idle line is simply
+	  skipped. Traffic made only of bytes 0x80-0xFE with a zero LSB
+	  throughout a whole window would time two-bit runs and report half
+	  the rate; the next windows then see the real line rate again and
+	  put it back, because the measurement depends only on RXD.
+
+	  Restricted to the classic ESP32: this depends on
+	  <soc/uart_struct.h> and the auto-baud registers, which are only
+	  wired up and validated on esp32_devkitc. Widening it to C3/C5/S3
+	  needs a build and a real link test on those parts first.
+
 choice LINKR_BLE_BRIDGE_UART_DATA_BITS
 	prompt "UART data bits"
 	default LINKR_BLE_BRIDGE_UART_DATA_BITS_8
