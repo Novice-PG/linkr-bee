@@ -31,7 +31,7 @@ use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -471,7 +471,7 @@ fn event_loop(
                 }
                 Ok(Event::Paste(text)) => {
                     io_budget.ok();
-                    paste(&mut app, &text);
+                    paste(&mut app, &mut sticky, &text);
                 }
                 Ok(_) => io_budget.ok(),
                 Err(err) => {
@@ -712,7 +712,19 @@ fn sync_geometry(app: &mut App, area: Rect) {
     }
 }
 
-fn paste(app: &mut App, text: &str) {
+fn paste(app: &mut App, sticky: &mut StickyMods, text: &str) {
+    // Bracketed paste is on for the whole TUI, so the terminal hands the
+    // clipboard over as a single `Event::Paste` — never as keystrokes. That
+    // makes the destination an all-or-nothing decision: where a cursor blinks
+    // the text has to be written into that field, or not one character
+    // arrives. Dropping it (what this did until 10-06) is why the AI config
+    // refused Ctrl+V while the pane beside it took it happily.
+    if field_has_focus(app) {
+        for key in paste_keys(app, text) {
+            handle_key(app, sticky, key);
+        }
+        return;
+    }
     if app.dialog.is_some() || app.palette.is_some() {
         return;
     }
@@ -733,6 +745,49 @@ fn paste(app: &mut App, text: &str) {
         plain
     };
     app.send_bytes(payload);
+}
+
+/// True when a text field is what the keyboard currently drives — that is
+/// where a paste belongs, and nowhere else. A `Confirm` is deliberately not
+/// one: it reads a bare `y` as "yes, reboot now" (`dialogs::confirm`), so
+/// pasting into it has to be inert rather than guessed at.
+fn field_has_focus(app: &App) -> bool {
+    if let Some(dialog) = app.dialog.as_ref() {
+        return matches!(dialog, Dialog::Uart { .. } | Dialog::Settings(_));
+    }
+    if app.palette.is_some() {
+        return true;
+    }
+    match app.focus {
+        Focus::Sidebar | Focus::Assistant => true,
+        Focus::Center => app.view == View::Network,
+    }
+}
+
+/// Clipboard text turned into the keystrokes the focused field would have
+/// seen if it had been typed. Line breaks are dropped on a single-line field
+/// (the browser does the same to `<input>`, so `endpoint`, `api_key` and the
+/// rest behave identically) and become Enter in the assistant composer, the
+/// only multiline one; every other control character is dropped too, since
+/// none of the fields can hold it.
+fn paste_keys(app: &App, text: &str) -> Vec<KeyEvent> {
+    let multiline = app.focus == Focus::Assistant;
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut keys = Vec::new();
+    for (index, line) in normalized.split('\n').enumerate() {
+        if index > 0 {
+            if !multiline {
+                continue;
+            }
+            keys.push(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        keys.extend(
+            line.chars()
+                .filter(|c| !c.is_control())
+                .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+        );
+    }
+    keys
 }
 
 // --- keys --------------------------------------------------------------------
@@ -1239,6 +1294,100 @@ mod tests {
         assert!(
             !app.notices.toasts.is_empty(),
             "…and the clear must still be announced"
+        );
+    }
+
+    // Paste. Bracketed paste is on for the whole TUI, so a paste never
+    // arrives as keystrokes: the destination has to be written to directly.
+
+    /// The report that started this (10-06): Ctrl+V in the AI config did
+    /// nothing at all. The endpoint field is `FIELDS[0]`, so the default
+    /// selection is already pointing at it.
+    #[test]
+    fn a_paste_lands_in_the_ai_config_field() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "https://api.example.com/v1\n");
+
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert_eq!(
+            state.endpoint.as_str(),
+            "https://api.example.com/v1",
+            "the trailing line break is not part of a single-line field"
+        );
+        assert!(state.dirty, "a paste is a keystroke, so it flags the form");
+    }
+
+    /// A `Confirm` reads a bare `y` as "yes" (`dialogs::confirm` →
+    /// `app.quit = true` for the quit dialog). Pasting while one is open has
+    /// to be inert: nobody means to quit by pasting an API key.
+    #[test]
+    fn a_paste_cannot_answer_a_confirmation() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Confirm {
+            kind: dialogs::ConfirmKind::Quit,
+            title: String::new(),
+            message: String::new(),
+        });
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "y");
+
+        assert!(!app.quit, "a pasted `y` is not consent");
+        assert!(app.dialog.is_some(), "…and the box stays up");
+    }
+
+    /// The composer is the one multiline field: pasting a paragraph has to
+    /// keep its line breaks (Enter inserts `\n` there).
+    #[test]
+    fn the_composer_pastes_its_lines() {
+        let mut app = test_app();
+        app.focus = Focus::Assistant;
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "line one\r\nline two");
+
+        assert_eq!(app.assistant.composer.as_str(), "line one\nline two");
+    }
+
+    /// A sidebar field is just as editable as a dialog one, and the sidebar
+    /// is where the LAN token (32 hex characters) gets pasted in practice.
+    #[test]
+    fn a_paste_reaches_the_focused_sidebar_field() {
+        let mut app = test_app();
+        app.focus = Focus::Sidebar;
+        let items = sidebar::entries(&app);
+        app.sidebar.selection = items
+            .iter()
+            .position(|entry| matches!(entry, sidebar::SideEntry::BleName))
+            .expect("the device name entry exists while connected over BLE");
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "Linkr BLE UART-3");
+
+        assert_eq!(app.sidebar.ble_name.as_str(), "Linkr BLE UART-3");
+    }
+
+    /// The pane itself keeps the old behaviour: the text is fed to the grid
+    /// (local echo) and sent to the device as bytes.
+    #[test]
+    fn a_paste_in_the_terminal_still_goes_to_the_device() {
+        let mut app = test_app();
+        app.settings.local_echo = true;
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "echo hi");
+
+        assert!(
+            app.terminal.visible_text().contains("echo hi"),
+            "the terminal path must not have been disturbed: {:?}",
+            app.terminal.visible_text()
         );
     }
 }
