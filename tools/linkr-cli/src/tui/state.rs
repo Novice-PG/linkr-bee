@@ -337,6 +337,13 @@ pub struct App {
     /// the event loop so the UI never blocks on the transport handshake.
     pub pending_connect: Option<oneshot::Receiver<Result<SessionHandle, String>>>,
 
+    /// In-flight BLE sweep started by [`super::connect::begin_scan`] when the
+    /// sidebar's *Switch device* entry is pressed. The web can lean on
+    /// `requestDevice()` for both halves; the TUI owns the scan itself, so it
+    /// has to park the oneshot somewhere the loop keeps draining.
+    pub pending_scan:
+        Option<oneshot::Receiver<Result<Vec<crate::transport::DiscoveredDevice>, String>>>,
+
     /// In-flight `@s?` capture (web `requestDeviceState()`): `@s?` is the only
     /// place the bridge reports its LAN access token, so a BLE session asks
     /// for it once and the reply fills the token field and the store.

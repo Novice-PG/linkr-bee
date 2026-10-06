@@ -34,7 +34,16 @@ strings! {
     DLG_TITLE_SETTINGS => "AI configuration", "AI 配置";
     DLG_TITLE_HELP => "Keyboard help", "键盘帮助";
     DLG_TITLE_NOTICES => "Notices", "通知";
+    DLG_TITLE_DEVICES => "Select a device", "选择设备";
     DLG_TITLE_FALLBACK => "Dialog", "对话框";
+
+    // Device picker. The web hands `switchDeviceButton` to
+    // `connect({ chooseDevice: true })`, which calls `requestDevice()` and
+    // lets the browser scan *and* list; a terminal has to do both itself.
+    DLG_DEVICES_SCANNING => "scanning for Linkr devices…", "正在搜索 Linkr 设备…";
+    DLG_DEVICES_EMPTY => "No Linkr device found.", "没有发现 Linkr 设备。";
+    DLG_DEVICES_KEYS => "↑↓ choose · Enter connect · Esc cancel",
+        "↑↓ 选择 · Enter 连接 · Esc 取消";
 
     // Confirmation body (`sidebar.rs` carries the reboot / disconnect texts).
     DLG_QUIT_MSG => "Quit the TUI now?", "立即退出 TUI？";
@@ -194,6 +203,14 @@ pub enum Dialog {
     /// can show, so the overlay scrolls instead of clipping the tail off.
     Help(u16),
     Notices(u16),
+    /// The scan behind the sidebar's "Switch device" entry. `scanning` stays
+    /// true until the oneshot answers, so the box opens at once instead of
+    /// leaving the user staring at a radio that is quietly working.
+    Devices {
+        items: Vec<crate::transport::DiscoveredDevice>,
+        selected: usize,
+        scanning: bool,
+    },
 }
 
 impl Dialog {
@@ -211,6 +228,7 @@ impl Dialog {
             Dialog::Settings(_) => t(DLG_TITLE_SETTINGS, lang),
             Dialog::Help(_) => t(DLG_TITLE_HELP, lang),
             Dialog::Notices(_) => t(DLG_TITLE_NOTICES, lang),
+            Dialog::Devices { .. } => t(DLG_TITLE_DEVICES, lang),
         }
     }
 
@@ -425,6 +443,11 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             lines
         }
         Dialog::Settings(state) => super::agent_settings::render_lines(state, width, lang),
+        Dialog::Devices {
+            items,
+            selected,
+            scanning,
+        } => device_lines(items, *selected, *scanning, width, lang),
         Dialog::Help(_) => help_lines(width, lang),
         Dialog::Notices(_) => {
             if app.notices.log.is_empty() {
@@ -451,6 +474,83 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             }
         }
     }
+}
+
+/// Body of the device picker. One row per discovered peripheral, printed as
+/// the same `name · address · rssi` triple the CLI's `--scan` table shows so
+/// the two listings can be read against each other, with `▸` on the row the
+/// arrow keys are on (the sidebar draws its cursor the same way).
+fn device_lines(
+    items: &[crate::transport::DiscoveredDevice],
+    selected: usize,
+    scanning: bool,
+    width: u16,
+    lang: Lang,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if items.is_empty() {
+        let (text, color) = if scanning {
+            (t(DLG_DEVICES_SCANNING, lang), Color::DarkGray)
+        } else {
+            (t(DLG_DEVICES_EMPTY, lang), Color::LightYellow)
+        };
+        lines.push(Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(color),
+        )));
+    } else {
+        for (index, device) in items.iter().enumerate() {
+            let is_sel = index == selected;
+            let name = device.name.as_deref().unwrap_or("(unknown)");
+            let rssi = device
+                .rssi
+                .map(|v| format!("  {v} dBm"))
+                .unwrap_or_default();
+            // `▸ ` + name + `  ` + address + rssi has to fit the overlay, so the
+            // name is the part that gives way — the address is what is dialled.
+            let room = (width as usize)
+                .saturating_sub(2 + 2 + device.address.len() + rssi.chars().count())
+                .max(1);
+            let name = clip_name(name, room);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if is_sel { "▸ " } else { "  " },
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    name,
+                    Style::default().fg(if is_sel { Color::White } else { Color::Gray }),
+                ),
+                Span::styled(
+                    format!("  {}", device.address),
+                    Style::default().fg(if is_sel {
+                        Color::White
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::styled(rssi, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        t(DLG_DEVICES_KEYS, lang).to_string(),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
+/// Truncate to `room` columns, marking the cut with `…` (a name that lost its
+/// tail silently would be exactly the "name is not complete" complaint again).
+fn clip_name(name: &str, room: usize) -> String {
+    if name.chars().count() <= room {
+        return name.to_string();
+    }
+    let keep = room.saturating_sub(1);
+    let mut out: String = name.chars().take(keep).collect();
+    out.push('…');
+    out
 }
 
 fn approval_lines(
@@ -658,6 +758,54 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             }
             _ => app.dialog = Some(Dialog::Approval(pending)),
         },
+        Dialog::Devices {
+            items,
+            mut selected,
+            scanning,
+        } => {
+            // Esc drops the box; the pending scan, if any, is abandoned by
+            // `poll_scan` when its oneshot finally lands.
+            if key.code == KeyCode::Esc {
+                return;
+            }
+            // Still sweeping the air: there is nothing to point at yet, and
+            // swallowing the keys instead of swallowing the result later is
+            // what keeps the list from appearing under a moved cursor.
+            if scanning {
+                app.dialog = Some(Dialog::Devices {
+                    items,
+                    selected,
+                    scanning,
+                });
+                return;
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected + 1 < items.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Home => selected = 0,
+                KeyCode::End => selected = items.len().saturating_sub(1),
+                KeyCode::Enter => {
+                    // Dial the highlighted row: the address is what gets
+                    // remembered, and the real advertised name replaces
+                    // whatever prefix the form was holding (so the sidebar
+                    // stops showing a half name).
+                    if let Some(device) = items.get(selected).cloned() {
+                        super::connect::pick(app, device);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            app.dialog = Some(Dialog::Devices {
+                items,
+                selected,
+                scanning,
+            });
+        }
         other => {
             app.dialog = Some(other);
             dialog_edit(app, key);
@@ -829,6 +977,78 @@ pub fn request_quit(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device(address: &str, name: Option<&str>, rssi: i32) -> crate::transport::DiscoveredDevice {
+        crate::transport::DiscoveredDevice {
+            address: address.to_string(),
+            name: name.map(str::to_string),
+            rssi: Some(rssi),
+        }
+    }
+
+    fn row_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The picker is what "Switch device" opens: it has its own frame title,
+    /// and the row the cursor sits on is marked the way the sidebar marks its
+    /// own cursor, so the two cannot be confused for different widgets.
+    #[test]
+    fn the_picker_titles_itself_and_marks_the_cursor_row() {
+        let picker = Dialog::Devices {
+            items: Vec::new(),
+            selected: 0,
+            scanning: true,
+        };
+        assert_eq!(picker.title_lang(Lang::En), "Select a device");
+        assert_eq!(picker.title_lang(Lang::Zh), "选择设备");
+
+        let devices = vec![
+            device("AA:1", Some("Linkr BLE UART"), -70),
+            device("AA:2", Some("Linkr BLE UART-3"), -58),
+        ];
+        let lines = device_lines(&devices, 1, false, 80, Lang::En);
+        assert!(row_text(&lines[0]).starts_with("  "), "{:?}", lines[0]);
+        assert!(row_text(&lines[1]).starts_with("▸ "), "{:?}", lines[1]);
+        // The board broadcasts `Linkr BLE UART-3`; a picker that dropped the
+        // suffix would rebuild the very complaint it was written to fix.
+        assert!(
+            row_text(&lines[1]).contains("Linkr BLE UART-3"),
+            "{:?}",
+            lines[1]
+        );
+        assert!(row_text(&lines[1]).contains("AA:2"), "{:?}", lines[1]);
+    }
+
+    /// Before the radio answers the box says so, and afterwards an empty sweep
+    /// says that too — never a blank overlay that looks like a hang.
+    #[test]
+    fn the_picker_reports_a_running_and_an_empty_sweep() {
+        let running = overlay_text(&device_lines(&[], 0, true, 80, Lang::En));
+        assert!(running.contains("scanning for Linkr devices"), "{running}");
+        let empty = overlay_text(&device_lines(&[], 0, false, 80, Lang::Zh));
+        assert!(empty.contains("没有发现 Linkr 设备"), "{empty}");
+        // Both states keep the key legend, or the box is unoperable.
+        for text in [running, empty] {
+            assert!(text.contains("Esc"), "{text}");
+        }
+    }
+
+    /// A name wider than the overlay is cut with `…`: silently losing the tail
+    /// is how the `-3` went missing in the first place.
+    #[test]
+    fn a_name_wider_than_the_row_keeps_the_cut_visible() {
+        assert_eq!(clip_name("Linkr BLE UART-3", 32), "Linkr BLE UART-3");
+        // room 8 → seven columns of name plus the `…`, so the cut is visible
+        // and the row never overflows into the address column.
+        let clipped = clip_name("Linkr BLE UART-3", 8);
+        assert_eq!(clipped.chars().count(), 8, "{clipped}");
+        assert!(clipped.ends_with('…'), "{clipped}");
+        assert!(clipped.starts_with("Linkr B"), "{clipped}");
+    }
 
     #[test]
     fn confirmation_strings_match_the_web_client() {

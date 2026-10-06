@@ -10,8 +10,9 @@ use crate::event::{ConnectionState, NoticeLevel};
 use crate::session::{
     spawn_session_with, SessionHandle, SessionOptions, SessionSetup, TransportSpec,
 };
-use crate::transport::TransportKind;
+use crate::transport::{DiscoveredDevice, TransportKind};
 
+use super::dialogs::Dialog;
 use super::i18n::{strings, t, tr, Lang};
 use super::settings::TransportChoice;
 use super::state::App;
@@ -28,6 +29,9 @@ strings! {
     CONN_FAILED => "Connect failed: {}", "连接失败：{}";
     CONN_CONNECTED => "Connected{}.", "已连接{}。";
     CONN_CONNECTED_TO => " to {}", "到 {}";
+    CONN_SCAN_FAILED => "Scan failed: {}", "搜索失败：{}";
+    CONN_SCAN_STOPPED => "Scan stopped.", "搜索已停止。";
+    CONN_SAVE_FAILED => "Could not save the settings: {}", "无法保存设置：{}";
 }
 
 /// Web `WS_CONNECT_TIMEOUT_MS` is 15 s; BLE keeps the CLI default scan
@@ -184,6 +188,122 @@ pub fn connect(app: &mut App) {
     }
 }
 
+/// Sweep for Linkr accessories and open the picker. The web hands
+/// `switchDeviceButton` straight to `connect({ chooseDevice: true })`, which
+/// calls `requestDevice()` and lets the browser scan *and* list; a terminal
+/// owns both halves, so the box opens first (with "scanning…") and fills when
+/// the radio answers — pressing the entry used to just move the cursor onto a
+/// text field, which is why there was no searching and no choosing at all.
+pub fn begin_scan(app: &mut App) {
+    let lang = app.lang();
+    if app.pending_scan.is_some() {
+        return;
+    }
+    // Nothing to pick while a dial is in flight (the entry is hidden while
+    // connected, so this is the only overlap worth guarding).
+    if app.pending_connect.is_some() {
+        app.notices
+            .push(NoticeLevel::Warn, t(CONN_CONNECTING, lang).to_string());
+        return;
+    }
+    app.dialog = Some(Dialog::Devices {
+        items: Vec::new(),
+        selected: 0,
+        scanning: true,
+    });
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.pending_scan = Some(rx);
+    app.rt.spawn(async move {
+        let outcome = crate::transport::ble::scan(BLE_TIMEOUT)
+            .await
+            .map(|mut devices| {
+                // The same order the CLI's `--scan` table prints, so the two
+                // listings line up row for row.
+                crate::transport::ble::sort_for_display(&mut devices);
+                devices
+            })
+            .map_err(|err| err.to_string());
+        let _ = tx.send(outcome);
+    });
+}
+
+/// Drain the in-flight scan (once per loop tick) and turn its result into the
+/// picker's rows.
+pub fn poll_scan(app: &mut App) {
+    let outcome = {
+        let Some(rx) = &mut app.pending_scan else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                app.pending_scan = None;
+                fill_scan_dialog(app, Vec::new());
+                let lang = app.lang();
+                app.notices
+                    .push(NoticeLevel::Warn, t(CONN_SCAN_STOPPED, lang).to_string());
+                return;
+            }
+        }
+    };
+    app.pending_scan = None;
+    let lang = app.lang();
+    match outcome {
+        Ok(items) => fill_scan_dialog(app, items),
+        Err(message) => {
+            // A failed sweep still has a box on screen: empty it so the reader
+            // sees the failure in the corner instead of waiting on a list that
+            // is never coming.
+            fill_scan_dialog(app, Vec::new());
+            app.notices
+                .push(NoticeLevel::Warn, tr!(t(CONN_SCAN_FAILED, lang), message));
+        }
+    }
+}
+
+/// Put the swept devices into the open picker (a no-op if the user already
+/// dismissed it — the result is dropped, not resurrected over their input).
+fn fill_scan_dialog(app: &mut App, items: Vec<DiscoveredDevice>) {
+    if let Some(Dialog::Devices {
+        items: slot,
+        scanning,
+        ..
+    }) = &mut app.dialog
+    {
+        *slot = items;
+        *scanning = false;
+    }
+}
+
+/// Dial the device the picker's cursor is on.
+pub fn pick(app: &mut App, device: DiscoveredDevice) {
+    aim(app, &device);
+    let lang = app.lang();
+    if let Err(err) = super::settings::save(&app.settings) {
+        app.notices
+            .push(NoticeLevel::Warn, tr!(t(CONN_SAVE_FAILED, lang), err));
+    }
+    connect(app);
+}
+
+/// Point the connection form at `device`. Split out from [`pick`] so the test
+/// can pin both things a pick has to fix without writing a settings file or
+/// waking the radio.
+fn aim(app: &mut App, device: &DiscoveredDevice) {
+    app.dialog = None;
+    app.settings.transport = TransportChoice::Ble;
+    // The address is what the retry path dials, exactly like a `--address` the
+    // CLI was started with; the name is only a display/match convenience.
+    app.settings.last_ble_address = device.address.clone();
+    // The field held the *prefix* it was asked to match (`Linkr BLE UART`),
+    // which is why the sidebar never showed the `-3` the board actually
+    // advertises. The scan sees the real name, so write that back.
+    if let Some(name) = device.name.as_ref().filter(|name| !name.trim().is_empty()) {
+        app.sidebar.ble_name.text = name.clone();
+    }
+}
+
 /// Drain the in-flight connect (once per loop tick).
 pub fn poll(app: &mut App) {
     let outcome = {
@@ -248,6 +368,64 @@ fn adopt(app: &mut App, session: SessionHandle) {
 mod tests {
     use super::super::test_app;
     use super::*;
+
+    /// What "Switch device" has to leave behind after Enter: the address the
+    /// retry path dials, and the **full** advertised name in the sidebar. The
+    /// field used to keep the match prefix (`Linkr BLE UART`), which is why
+    /// every board's `-3` was never on screen.
+    #[test]
+    fn picking_a_scanned_device_dials_its_address_and_shows_its_full_name() {
+        let mut app = test_app();
+        app.sidebar.ble_name.text = "Linkr BLE UART".to_string();
+        app.settings.last_ble_address.clear();
+        app.dialog = Some(Dialog::Devices {
+            items: Vec::new(),
+            selected: 0,
+            scanning: true,
+        });
+
+        aim(
+            &mut app,
+            &DiscoveredDevice {
+                address: "EE:C7:42:34:48:CF".to_string(),
+                name: Some("Linkr BLE UART-3".to_string()),
+                rssi: Some(-58),
+            },
+        );
+
+        assert!(app.dialog.is_none(), "the picker must close on Enter");
+        assert_eq!(app.settings.last_ble_address, "EE:C7:42:34:48:CF");
+        assert_eq!(app.sidebar.ble_name.text, "Linkr BLE UART-3");
+        match spec(&app).expect("the picked device is dialable") {
+            TransportSpec::Ble { name, address, .. } => {
+                assert_eq!(address.as_deref(), Some("EE:C7:42:34:48:CF"));
+                assert_eq!(name, "Linkr BLE UART-3");
+            }
+            other => panic!("expected BLE, got {other:?}"),
+        }
+    }
+
+    /// Not every advertisement carries a name. Blanking the field would throw
+    /// away the prefix a fresh name match still needs, so only a real name
+    /// overwrites it — the address is what actually dials either way.
+    #[test]
+    fn picking_a_nameless_device_keeps_the_name_field() {
+        let mut app = test_app();
+        app.sidebar.ble_name.text = "Linkr BLE UART".to_string();
+        app.settings.last_ble_address.clear();
+
+        aim(
+            &mut app,
+            &DiscoveredDevice {
+                address: "AA:BB:CC:DD:EE:FF".to_string(),
+                name: None,
+                rssi: None,
+            },
+        );
+
+        assert_eq!(app.sidebar.ble_name.text, "Linkr BLE UART");
+        assert_eq!(app.settings.last_ble_address, "AA:BB:CC:DD:EE:FF");
+    }
 
     /// A5: the sidebar's Connect has to dial the target the process was
     /// started with (`--name`/`--address`/`--lan`/`--lan-token`), not the
