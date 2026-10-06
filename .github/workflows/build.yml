@@ -112,8 +112,15 @@ jobs:
           - name: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          # armv7 builds on an arm64 runner: Ubuntu keeps the armhf indexes on
+          # ports.ubuntu.com, and that is the only archive an arm64 runner is
+          # wired to. On `ubuntu-latest` (amd64) every armhf index answers 404
+          # from archive/security/microsoft, which fails `apt-get update` with
+          # exit 100 before a single package is asked for — that is what the
+          # first run of this matrix hit. The arm64 kernel also executes the
+          # armhf binary directly, so the smoke test needs no qemu.
           - name: linux-armv7
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             target: armv7-unknown-linux-gnueabihf
           - name: windows-x86_64
             os: windows-latest
@@ -130,8 +137,8 @@ jobs:
       # development package before anything can link. The host package is what
       # `cargo test` builds against; the cross packages are what the release
       # binary links against, and the matching libc is what lets the smoke test
-      # actually execute a foreign binary (armv7 additionally needs qemu's
-      # binfmt handler, since that runner is x86_64).
+      # actually execute a foreign binary (armv7 gets that for free: its runner
+      # is arm64, whose kernel runs armhf binaries directly).
       - name: Install the Linux system libraries
         if: runner.os == 'Linux'
         run: |
@@ -145,9 +152,13 @@ jobs:
               sudo apt-get install -y gcc-i686-linux-gnu libdbus-1-dev:i386 libc6:i386
               ;;
             armv7-unknown-linux-gnueabihf)
+              # Ports carries armhf; third-party repos on the image do not,
+              # and their 404s are not our failure. The install below is the
+              # real assertion — a package we need missing fails there, with
+              # the package named.
               sudo dpkg --add-architecture armhf
-              sudo apt-get update -y
-              sudo apt-get install -y gcc-arm-linux-gnueabihf libdbus-1-dev:armhf libc6:armhf qemu-user-static
+              sudo apt-get update -y || true
+              sudo apt-get install -y gcc-arm-linux-gnueabihf libdbus-1-dev:armhf libc6:armhf
               ;;
           esac
 
