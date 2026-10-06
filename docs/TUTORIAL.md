@@ -57,7 +57,7 @@ Pushing a `v*` tag makes CI publish everything it built to the repository's
 https://github.com/radxa/linkr-bee/releases/latest
 ```
 
-Linux and macOS ship as `linkr-terminal-<slug>.tar.gz`, Windows as
+Linux ships as `linkr-terminal-<slug>.tar.gz`, Windows as
 `linkr-terminal-<slug>.zip`, and each unpacks to the same folder
 `tools/build_terminal.sh` produces locally, so the check is the one you would
 run on a local build; a `SHA256SUMS` at the top of the release covers every
@@ -89,10 +89,12 @@ may report it as an "unknown publisher"; that is a signature status, not a
 detection.
 
 Until something has been tagged, CI (`.github/workflows/build.yml`, job
-`terminal`) still uploads the binaries for five targets — Linux x86_64 and
-arm64, Windows x86_64, macOS arm64 and x86_64 — as artifacts on the workflow
-run. Those expire after 30 days, which is why the Releases page is the link to
-keep; the check is the same, minus the `tar` line.
+`terminal`) still uploads the binaries for six targets — Linux x86_64, i686,
+arm64 and armv7, and Windows x86_64 and i686 — as artifacts on the workflow
+run. macOS is deliberately not among them: nothing in this repository has ever
+been run on one, and shipping an untested binary would be a promise nobody can
+keep. Those artifacts expire after 30 days, which is why the Releases page is
+the link to keep; the check is the same, minus the `tar` line.
 
 ### Windows
 

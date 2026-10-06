@@ -616,9 +616,10 @@ network, assistant), with `F1` for help, `Ctrl+P` for the command palette,
 key bar. `--tui` (or `linkr tui`) hands a fresh session to it, `--yes` lets the
 assistant approve its own commands.
 
-CI job `terminal` in `.github/workflows/build.yml` builds the five targets
-(linux x86_64 and arm64, windows x86_64, macOS arm64 and x86_64), runs the test
+CI job `terminal` in `.github/workflows/build.yml` builds the six targets
+(linux x86_64, i686, arm64 and armv7; windows x86_64 and i686), runs the test
 suite and the lints, and uploads the binaries and the bundle as artifacts.
+macOS is left out of the matrix on purpose — it has never been exercised here.
 The full reference is `tools/linkr-cli/README.md`.
 
 ### C terminal for Linux or Linkr Buildroot

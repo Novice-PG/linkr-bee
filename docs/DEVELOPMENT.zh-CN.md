@@ -504,9 +504,10 @@ TUI 把 Web 端的四个界面放在 `F2`–`F5`（终端、诊断、网络、�
 `+A` 用于锁定 Shift / Ctrl / Alt，替代 Web 端的按键条。`--tui`（或 `linkr tui`）
 连上后直接进入 TUI，`--yes` 让助手自行批准命令。
 
-`.github/workflows/build.yml` 的 `terminal` job 构建全部五个目标（Linux x86_64 与
-arm64、Windows x86_64、macOS arm64 与 x86_64），跑测试与 lint，并把二进制和打包
-脚本作为构建产物上传。完整参考见 `tools/linkr-cli/README.md`。
+`.github/workflows/build.yml` 的 `terminal` job 构建全部六个目标（Linux
+x86_64、i686、arm64、armv7 与 Windows x86_64、i686），跑测试与 lint，并把二进制和打包
+脚本作为构建产物上传。**矩阵刻意不含 macOS**——这里从没在 macOS 上验证过一次。
+完整参考见 `tools/linkr-cli/README.md`。
 
 ### Linux 或 Linkr Buildroot 的 C 终端
 

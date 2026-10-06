@@ -53,7 +53,7 @@ dist/linkr-terminal-linux-aarch64/linkr --version
 https://github.com/radxa/linkr-bee/releases/latest
 ```
 
-Linux 与 macOS 是 `linkr-terminal-<slug>.tar.gz`，Windows 是
+Linux 是 `linkr-terminal-<slug>.tar.gz`，Windows 是
 `linkr-terminal-<slug>.zip`，解开后的目录名都与 `tools/build_terminal.sh` 本地
 打包**完全一致**，所以校验命令也和本地构建一模一样；Release 顶层另有一份覆盖
 全部文件的 `SHA256SUMS`：
@@ -81,10 +81,11 @@ cd linkr-terminal-x86_64-pc-windows-gnu
 要用它就先加进杀软信任区，并用上面的 SHA-256 核对；exe **未做代码签名**（需要
 购买证书），Windows 可能提示「未知发布者」，那是签名状态，不是查杀结果。
 
-还没打标签时，CI（`.github/workflows/build.yml` 的 `terminal` 任务）仍会把五个
-目标的产物作为 artifact 上传：Linux x86_64 与 arm64、Windows x86_64、macOS
-arm64 与 x86_64——但 30 天就过期，所以上面那个 Release 才是该收藏的链接；校验
-方式相同，少一行 `tar`。
+还没打标签时，CI（`.github/workflows/build.yml` 的 `terminal` 任务）仍会把六个
+目标的产物作为 artifact 上传：Linux x86_64、i686、arm64、armv7 与 Windows
+x86_64、i686——**不含 macOS**：这个仓库从来没在 macOS 上跑过一次，发一个没人测过
+的二进制等于开一张兑现不了的支票。但 30 天就过期，所以上面那个 Release 才是该收藏
+的链接；校验方式相同，少一行 `tar`。
 
 ### Windows
 
