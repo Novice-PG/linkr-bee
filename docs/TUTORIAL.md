@@ -299,6 +299,8 @@ This is the whole `F1` help, in the order it is shown:
 | `Ctrl+Shift+R` | arm one-shot `Shift` for the next key |
 | `Ctrl+Shift+C` | arm one-shot `Ctrl` for the next key |
 | `Ctrl+Shift+A` | arm one-shot `Alt` for the next key |
+| `Ctrl+Shift+V` | paste the clipboard into the focused field (or the device) |
+| drag in the terminal | select text — releasing copies it (OSC 52) |
 | `Enter` | send a line (the Enter mode applies) |
 | `Tab` / `Shift+Tab` | sent to the target as `TAB` / `CSI Z` |
 | `F6`..`F12` | sent to the target unchanged |
@@ -307,6 +309,25 @@ This is the whole `F1` help, in the order it is shown:
 
 Byte sequences match `web/terminal_keys.js`, so a target that behaves in the
 browser behaves identically here.
+
+`Ctrl+Shift+V` reads the system clipboard through the helper your desktop
+ships — `wl-paste` (Wayland), `xclip` / `xsel` (X11), `pbpaste` (macOS),
+PowerShell (Windows) — the way the web toolbar button reads
+`navigator.clipboard.readText()`, and toasts the same kind of refusal when
+nothing answers. With none of those installed it can read nothing at all: use
+your terminal's own paste key instead, which arrives as a bracketed paste and
+lands in the same field. Paste is also the one key an overlay passes through
+— it carries text, not a keystroke.
+
+Copying is the same contract as the web toolbar button, with the gesture in
+place of the button: press inside the terminal, drag over what you want, and
+the release is the copy. The block left on screen is exactly what went to the
+clipboard and the toast names the mechanism — `OSC 52`, the one clipboard
+route a terminal programme can reach once mouse capture has taken the host's
+own selection away. A double click takes the whole word under the pointer,
+even a one-character one, and `Ctrl+L` clears the pane together with the
+selection. `Ctrl+P → term.copy` puts the whole visible pane through that same
+channel when there is nothing selected.
 
 Two rules worth remembering:
 
@@ -345,7 +366,9 @@ connected over BLE — and say why when you try them.
 ### Connection card
 
 - **Transport** toggles between BLE and LAN (`◂▸` marks the toggle; it reads
-  `(locked)` while a session is up, because you have to disconnect first).
+  `(locked)` while an attempt is in flight and while a session is up — wait
+  for the attempt, then disconnect. The web client is the same: it disables
+  the transport buttons and *Switch device* while `connecting`).
 - **Device** is the BLE name or prefix. Leave it empty to match any Linkr
   accessory.
 - **Connect / Disconnect** — `Disconnect` asks for confirmation.
@@ -442,9 +465,9 @@ The three modes, and what they promise:
 
 | Mode | Behaviour |
 | --- | --- |
-| Manual | the assistant proposes commands; you press Send to run them on the target |
-| Auto · Recommended | low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode |
-| Full Auto | commands run without confirmation. Recognized destructive or irreversible commands still need your approval |
+| Manual | AI proposes commands; you press Send to enter them on the target |
+| Auto · Recommended | low-risk queries run at a recognized shell prompt; other input needs approval; destructive commands need approval in every mode |
+| Full Auto | commands run without confirmation; recognized destructive or irreversible commands — recursive/forced deletes, disk and filesystem tools, dd, flashing and bootloader tools, downloaded content piped into a shell, privilege escalation, recursive permission changes — still need your approval; detection does not cover every operation inside scripts or indirect execution |
 
 Changing the mode keeps the conversation but stops the running turn and
 cancels pending input.
@@ -555,6 +578,7 @@ older file keeps working.
 | `Bluetooth adapter is busy` / `BLE link dropped` | a second `linkr` (or a phone app) is using the same accessory — the CLI backs off and retries three times, and joins an existing link instead of fighting for it; if it still fails, wait a second and rerun |
 | The TUI will not start | it needs an interactive terminal; do not redirect stdin or stdout |
 | The TUI opens but the status line never turns connected | the connect runs in the background — press `Connect` in the sidebar to retry, give a slow radio more room with `--timeout 15`, or pass `--address` to skip the scan |
+| "Switch device" answers "Connecting…" | an attempt is in flight — wait for it to settle (worst case about 15 s over LAN, 8 s over BLE); the web client disables that button *and* the transport toggle while `connecting` |
 | WiFi scan reports 0 networks | the scan runs over BLE — switch the transport to BLE first; results arrive while the scan is still running |
 | The assistant refuses to edit its configuration | a turn is running; return to the conversation and stop it first |
 | Save failed for the AI configuration | the OS or browser storage is restricted; clear the configuration and retry |
