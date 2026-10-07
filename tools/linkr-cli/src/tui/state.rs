@@ -348,8 +348,22 @@ pub struct App {
 
     // Assistant runtime.
     pub exec_mode: ExecMode,
+    /// `executionModeExpiresAt` of `web/device_executor.js`: the wall-clock
+    /// millisecond the unattended window ends, `0` when none is armed. Kept
+    /// beside `exec_mode` as well as inside the runtime because the panel
+    /// decides when the window *starts* — possibly long before the runtime
+    /// exists (the TUI spawns it on the first question).
+    pub exec_expires_at: u64,
     pub broker: TuiBroker,
     pub agent: Option<AgentRuntime>,
+
+    /// `Ctrl+Shift+V` answer in flight (`clipboard::spawn_read`). Collected
+    /// by `mod::poll_clipboard`; never waited on, because the frame loop is
+    /// the thread that draws.
+    pub pending_paste: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    /// Inbound `OSC 52` writes in flight (`clipboard::spawn_write`); `false`
+    /// means no helper took the payload.
+    pub clipboard_jobs: Vec<std::sync::mpsc::Receiver<bool>>,
 
     // Serial watch (findings shown in the sidebar).
     pub watch: SerialWatch,
@@ -408,12 +422,56 @@ impl App {
     pub fn refresh_info(&mut self) {
         self.info = self.session.info();
         if self.info.connected {
-            if self.state == ConnectionState::Disconnected {
-                self.state = ConnectionState::Connected;
-            }
+            self.set_connection_state(ConnectionState::Connected);
         } else if self.state == ConnectionState::Connected {
-            self.state = ConnectionState::Disconnected;
+            self.set_connection_state(ConnectionState::Disconnected);
         }
+    }
+
+    /// Apply a connection state change, running the "on connect" side effects
+    /// **once per transition**: spec §6.4 resets the serial journal "on
+    /// connect and on Clear". The feed reads one shared bus, so without this
+    /// the assistant would quote the session that just ended as live evidence
+    /// in the next one. Every path that lands on `Connected` goes through here
+    /// (`refresh_info`, the `CoreEvent::Connection` arm, `connect::adopt`), and
+    /// `Disconnected`/`Failed` stay free of side effects.
+    pub(crate) fn set_connection_state(&mut self, next: ConnectionState) {
+        let was = self.state;
+        self.state = next;
+        if next == ConnectionState::Connected && was != ConnectionState::Connected {
+            self.reset_assistant_evidence();
+            self.end_unattended_window();
+        }
+    }
+
+    /// `AgentHandle::reset_journal()` on whatever runtime is up (`None` before
+    /// the assistant is first used — an empty journal needs no resetting).
+    pub(crate) fn reset_assistant_evidence(&mut self) {
+        if let Some(runtime) = self.agent.as_ref() {
+            runtime.handle.reset_journal();
+        }
+    }
+
+    /// `connectionChanged()` of `web/agent_panel.js`: coming back up drops the
+    /// unattended window and says so, because the run that armed it is gone
+    /// and nobody was watching the gap. Any other mode is left alone.
+    pub(crate) fn end_unattended_window(&mut self) {
+        if self.exec_mode != ExecMode::FullAuto {
+            return;
+        }
+        let notice = t(
+            super::assistant_view::ASST_FULL_AUTO_RECONNECTED,
+            self.lang(),
+        )
+        .to_string();
+        self.exec_mode = ExecMode::Auto;
+        self.exec_expires_at = 0;
+        if let Some(runtime) = self.agent.as_ref() {
+            runtime.handle.set_mode(ExecMode::Auto);
+        }
+        self.assistant
+            .entries
+            .push(super::assistant_view::Entry::System(notice));
     }
 
     pub fn connected(&self) -> bool {
@@ -659,10 +717,32 @@ impl App {
     }
 
     /// Send raw key bytes produced by [`super::keys::encode_key`].
+    ///
+    /// Gated on the link because that is what the web key bar does (its
+    /// buttons are `disabled` until `setConnected()`), and because a keystroke
+    /// typed after a drop used to raise its own "session gone" notice per key,
+    /// evicting the real ones. Answers to the **device** are a different thing
+    /// and go through [`Self::send_reply`].
     pub fn send_bytes(&mut self, bytes: Vec<u8>) {
         if !self.connected() {
             return;
         }
+        if let Err(err) = self.session.send_uart(bytes) {
+            self.notices.push(NoticeLevel::Error, err.to_string());
+        }
+    }
+
+    /// Hand the terminal's own answers (`DSR`/`CPR` from
+    /// [`super::terminal_view::TermGrid::take_pending_reports`]) to the
+    /// session.
+    ///
+    /// Deliberately **not** gated on [`Self::connected`]: that state lags the
+    /// transport by a poll tick (and sits on `Connecting` for the length of an
+    /// adopt), while the question itself only exists because those bytes just
+    /// arrived from the device. Dropping the reply leaves the program that
+    /// asked waiting for an answer it will never get — the gate is about typed
+    /// keys, not about a protocol response to a message we already consumed.
+    pub fn send_reply(&mut self, bytes: Vec<u8>) {
         if let Err(err) = self.session.send_uart(bytes) {
             self.notices.push(NoticeLevel::Error, err.to_string());
         }
@@ -732,6 +812,68 @@ mod tests {
             "the edit lands on that boundary"
         );
         assert_eq!(field.cursor, 4, "…and advances by the inserted char");
+    }
+
+    /// G-2: the evidence window resets on the **edge** into Connected — once
+    /// per connect, never on a poll that already sees the state, and never for
+    /// `Disconnected`/`Failed`. The feed reads a shared bus, so a reset that
+    /// fired on every tick would wipe evidence as fast as it arrived.
+    #[test]
+    fn only_a_transition_into_connected_resets_the_evidence() {
+        let mut app = crate::tui::test_app();
+        let handle = crate::tui::attach_agent(&mut app);
+
+        app.state = ConnectionState::Disconnected;
+        crate::tui::feed_journal(&app, &handle, b"live bytes");
+        app.set_connection_state(ConnectionState::Connected);
+        assert_eq!(handle.journal_len(), 0, "the connect edge resets");
+
+        crate::tui::feed_journal(&app, &handle, b"more live bytes");
+        app.set_connection_state(ConnectionState::Connected);
+        assert!(
+            handle.journal_len() > 0,
+            "a poll that already sees Connected must not wipe live evidence"
+        );
+
+        app.set_connection_state(ConnectionState::Disconnected);
+        crate::tui::feed_journal(&app, &handle, b"bytes after the drop");
+        app.set_connection_state(ConnectionState::Failed);
+        assert!(
+            handle.journal_len() > 0,
+            "Failed is not a connect, so it resets nothing"
+        );
+    }
+
+    /// `connectionChanged()` of `web/agent_panel.js`: reconnecting drops the
+    /// unattended window and leaves the `fullAutoReconnected` note behind; a
+    /// poll that already sees `Connected` does neither.
+    #[test]
+    fn reconnecting_ends_the_unattended_window_with_a_note() {
+        let mut app = crate::tui::test_app();
+        let lang = app.lang();
+        let handle = crate::tui::attach_agent(&mut app);
+        crate::tui::assistant_view::set_mode(&mut app, ExecMode::FullAuto);
+        assert_eq!(handle.mode(), ExecMode::FullAuto);
+
+        app.state = ConnectionState::Disconnected;
+        app.set_connection_state(ConnectionState::Connected);
+
+        assert_eq!(app.exec_mode, ExecMode::Auto, "the panel follows");
+        assert_eq!(handle.mode(), ExecMode::Auto, "…and so does the runtime");
+        let notice = t(crate::tui::assistant_view::ASST_FULL_AUTO_RECONNECTED, lang);
+        assert!(
+            app.assistant.entries.iter().any(
+                |entry| matches!(entry, crate::tui::assistant_view::Entry::System(text) if text == notice)
+            ),
+            "the note explains the fallback"
+        );
+
+        app.assistant.entries.clear();
+        app.set_connection_state(ConnectionState::Connected);
+        assert!(
+            app.assistant.entries.is_empty(),
+            "no second note without a reconnect"
+        );
     }
 
     #[test]

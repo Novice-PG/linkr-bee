@@ -364,7 +364,10 @@ fn adopt(app: &mut App, session: SessionHandle) {
     if app.info.kind == Some(TransportKind::Lan) {
         app.settings.transport = TransportChoice::Lan;
     }
-    app.state = ConnectionState::Connected;
+    // Edge-triggered: if `refresh_info()` above already saw the link, this is
+    // a no-op side-effect-wise; if the session reports it a tick later, this
+    // is where "on connect" fires (spec §6.4).
+    app.set_connection_state(ConnectionState::Connected);
     app.detail = app.info.label.clone();
     app.terminal.set_autoscroll(app.settings.autoscroll);
     let lang = app.lang();

@@ -188,6 +188,11 @@ pub enum AgentEvent {
         reason: String,
     },
     Error(String),
+    /// The unattended window ran out (`armFullAuto`'s timer in
+    /// `web/device_executor.js`): the mode has already fallen back to `Auto`
+    /// by the time this is observed. The panel repeats the fact as its status
+    /// — web's `onModeTimeout` writes `fullAutoExpired` into `agentStatus`.
+    ModeExpired,
 }
 
 /// Handle used by the TUI chat panel.
@@ -197,6 +202,10 @@ pub struct AgentHandle {
     ask_tx: mpsc::Sender<String>,
     stop_tx: watch::Sender<bool>,
     mode: Arc<AtomicU8>,
+    /// `executionModeExpiresAt` of `web/device_executor.js`: the wall-clock
+    /// millisecond the unattended window ends, or `0` when none is armed.
+    deadline: Arc<AtomicU64>,
+    journal: Arc<StdMutex<SerialJournal>>,
 }
 
 impl AgentHandle {
@@ -232,8 +241,72 @@ impl AgentHandle {
     /// Change the execution mode. A run in flight reports
     /// `Device session or mode changed. Start a new conversation.` on its next
     /// tool call, exactly like a session swap (spec §1.4).
+    ///
+    /// This is the *only* path that reaches the runtime: `Runtime::mode()`
+    /// reads the same atomic, so a picker that stops here would be a label
+    /// with no effect — `Manual` would still auto-execute. `setMode` of
+    /// `web/device_executor.js` also decides when the unattended window is
+    /// armed: re-selecting Full Auto **extends** it, every other already
+    /// active mode is a no-op, and anything else closes it.
     pub fn set_mode(&self, mode: ExecMode) {
+        if mode == self.mode() && mode != ExecMode::FullAuto {
+            return;
+        }
         self.mode.store(mode.ordinal(), Ordering::Relaxed);
+        if mode == ExecMode::FullAuto {
+            self.deadline
+                .store(now_ms() + executor::FULL_AUTO_WINDOW_MS, Ordering::Relaxed);
+        } else {
+            self.deadline.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Take over the window the **panel** computed. `setMode` of
+    /// `web/device_executor.js` arms the timer at the pick, which can be long
+    /// before the runtime exists (the TUI spawns it on the first question) —
+    /// so the panel keeps the deadline and pushes it in here. A value already
+    /// in the past expires on the watchdog's next tick, which is exactly what
+    /// `armFullAuto`'s timer would have done.
+    pub fn set_deadline(&self, expires_at: u64) {
+        self.deadline.store(expires_at, Ordering::Relaxed);
+    }
+
+    /// Milliseconds left in the unattended window (`None`: not armed). The
+    /// frame loop repaints every tick, so the panel renders the same read as
+    /// a countdown without a timer of its own — `countdownSuffix()` of
+    /// `web/agent_panel.js` does the arithmetic with `Math.ceil` too.
+    pub fn full_auto_remaining(&self) -> Option<u64> {
+        let expires_at = self.deadline.load(Ordering::Relaxed);
+        if expires_at == 0 {
+            return None;
+        }
+        Some(expires_at.saturating_sub(now_ms()))
+    }
+
+    /// `SerialJournal::reset()`: spec §6.4 empties the evidence window "on
+    /// connect and on Clear", so the model never quotes a previous
+    /// connection's bytes back as if they were live.
+    pub fn reset_journal(&self) {
+        if let Ok(mut log) = self.journal.lock() {
+            log.reset();
+        }
+    }
+}
+
+#[cfg(test)]
+impl AgentHandle {
+    /// Size of the evidence window, so a test can watch Clear (or a connect)
+    /// empty it. The TUI never reads the journal itself — the runtime owns it.
+    #[allow(dead_code)]
+    pub fn journal_len(&self) -> usize {
+        self.journal.lock().map(|log| log.len()).unwrap_or(0)
+    }
+
+    /// Wind the unattended window into the past, the way the wall clock gets
+    /// there without waiting fifteen minutes in a test.
+    pub fn expire_window_now(&self) {
+        self.deadline
+            .store(now_ms().saturating_sub(1), Ordering::Relaxed);
     }
 }
 
@@ -248,18 +321,28 @@ pub fn spawn(
     let (ask_tx, ask_rx) = mpsc::channel::<String>(QUEUE_CAPACITY);
     let (stop_tx, stop_rx) = watch::channel(false);
     let mode = Arc::new(AtomicU8::new(ExecMode::Auto.ordinal()));
-    let handle = AgentHandle {
-        tx: tx.clone(),
-        ask_tx,
-        stop_tx: stop_tx.clone(),
-        mode: mode.clone(),
-    };
+    let deadline = Arc::new(AtomicU64::new(0));
 
     let journal = Arc::new(StdMutex::new(SerialJournal::new()));
     let watch = Arc::new(StdMutex::new(SerialWatch::new(WatchOptions::default())));
     let records = Arc::new(StdMutex::new(ExecutionStore::new()));
 
     spawn_feed(bus, journal.clone(), watch.clone());
+    tokio::spawn(watch_full_auto(
+        deadline.clone(),
+        mode.clone(),
+        stop_tx.clone(),
+        tx.clone(),
+    ));
+
+    let handle = AgentHandle {
+        tx: tx.clone(),
+        ask_tx,
+        stop_tx: stop_tx.clone(),
+        mode: mode.clone(),
+        deadline: deadline.clone(),
+        journal: journal.clone(),
+    };
 
     let runtime = Runtime {
         config,
@@ -352,11 +435,61 @@ fn spawn_feed(
     });
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// How often the unattended window is checked. The window itself is a
+/// wall-clock deadline (`Date.now()`), and the panel only ever renders whole
+/// seconds (` · 14:59`), so a quarter second of slack is invisible.
+const FULL_AUTO_TICK_MS: u64 = 250;
+
+/// The unattended window of `armFullAuto` (`web/device_executor.js`): when it
+/// runs out the mode falls back to `Auto`, a run still in flight is cancelled
+/// the way `cancel()` aborts its controller, and the panel is told once.
+///
+/// A tick instead of an armed timer because `set_mode` can re-arm the window
+/// from another task at any moment; the deadline is compared against the wall
+/// clock, so a re-arm can never be lost — only *this* value is cleared.
+async fn watch_full_auto(
+    deadline: Arc<AtomicU64>,
+    mode: Arc<AtomicU8>,
+    stop_tx: watch::Sender<bool>,
+    tx: broadcast::Sender<AgentEvent>,
+) {
+    loop {
+        tokio::select! {
+            // The runtime is gone: no turn left to fall back from.
+            _ = stop_tx.closed() => break,
+            _ = tokio::time::sleep(Duration::from_millis(FULL_AUTO_TICK_MS)) => {}
+        }
+        let expires_at = deadline.load(Ordering::Relaxed);
+        if expires_at == 0 || now_ms() < expires_at {
+            continue;
+        }
+        if deadline
+            .compare_exchange(expires_at, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            continue; // the picker re-armed or closed the window meanwhile
+        }
+        if mode
+            .compare_exchange(
+                ExecMode::FullAuto.ordinal(),
+                ExecMode::Auto.ordinal(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            continue; // the picker already moved on by hand
+        }
+        let _ = stop_tx.send(true);
+        let _ = tx.send(AgentEvent::ModeExpired);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2325,6 +2458,115 @@ mod tests {
         assert_eq!(executor::MAX_EXECUTION_RECORDS, 50);
         assert_eq!(executor::APPROVAL_STALE_MS, 900_000);
         assert_eq!(executor::EXECUTION_STALE_MS, 300_000);
+    }
+
+    /// Spec §6.4: Clear (and a connect) reset the evidence window, and the
+    /// handle has to clear the **same** journal `spawn_feed` writes into — a
+    /// second, private one would leave the assistant quoting the previous
+    /// connection's bytes as live evidence.
+    #[tokio::test]
+    async fn reset_journal_clears_the_window_the_feed_writes() {
+        let bus = crate::session::CoreBus::new();
+        let handle = spawn(
+            None,
+            Arc::new(NoopBroker),
+            SessionHandle::test_detached(),
+            bus.clone(),
+        );
+        // Publish until the feed has subscribed: a broadcast send with no
+        // subscriber yet is simply lost.
+        for _ in 0..400 {
+            if handle.journal_len() > 0 {
+                break;
+            }
+            bus.publish(CoreEvent::UartRx(
+                b"stale bytes from the previous session".to_vec(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(handle.journal_len() > 0, "the feed filled the window");
+        handle.reset_journal();
+        assert_eq!(handle.journal_len(), 0, "reset reaches that window");
+    }
+
+    /// `setMode` of `web/device_executor.js`: only Full Auto arms the
+    /// unattended window, re-selecting it extends the window, and every other
+    /// mode closes it. `full_auto_remaining` is what the header counts down.
+    #[tokio::test]
+    async fn only_full_auto_arms_the_unattended_window() {
+        let bus = crate::session::CoreBus::new();
+        let handle = spawn(
+            None,
+            Arc::new(NoopBroker),
+            SessionHandle::test_detached(),
+            bus,
+        );
+        assert_eq!(handle.mode(), ExecMode::Auto, "spawned in Auto");
+        assert_eq!(handle.full_auto_remaining(), None, "…with no window");
+
+        handle.set_mode(ExecMode::FullAuto);
+        let armed = handle
+            .full_auto_remaining()
+            .expect("Full Auto arms the window");
+        assert!(
+            armed <= executor::FULL_AUTO_WINDOW_MS && armed > executor::FULL_AUTO_WINDOW_MS - 5_000,
+            "…of fifteen minutes, got {armed} ms"
+        );
+
+        handle.set_mode(ExecMode::FullAuto);
+        let extended = handle.full_auto_remaining().expect("still armed");
+        assert!(
+            extended >= armed,
+            "re-selecting Full Auto extends the window"
+        );
+
+        handle.set_mode(ExecMode::Manual);
+        assert_eq!(handle.mode(), ExecMode::Manual);
+        assert_eq!(handle.full_auto_remaining(), None, "Manual closes it");
+        handle.set_mode(ExecMode::Auto);
+        assert_eq!(handle.full_auto_remaining(), None, "and so does Auto");
+    }
+
+    /// `armFullAuto`'s timer: at the deadline the mode falls back to `Auto`,
+    /// the window closes and the panel is told — once, not on every tick.
+    #[tokio::test]
+    async fn the_unattended_window_falls_back_to_auto_when_it_runs_out() {
+        let bus = crate::session::CoreBus::new();
+        let handle = spawn(
+            None,
+            Arc::new(NoopBroker),
+            SessionHandle::test_detached(),
+            bus,
+        );
+        let mut events = handle.subscribe();
+        handle.set_mode(ExecMode::FullAuto);
+
+        // The wall clock without waiting fifteen minutes.
+        handle.expire_window_now();
+        for _ in 0..120 {
+            if handle.mode() == ExecMode::Auto {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            handle.mode(),
+            ExecMode::Auto,
+            "the watchdog reverted the mode"
+        );
+        assert_eq!(handle.full_auto_remaining(), None, "…and closed the window");
+
+        let mut expiry_notes = 0;
+        for _ in 0..120 {
+            if matches!(events.try_recv(), Ok(AgentEvent::ModeExpired)) {
+                expiry_notes += 1;
+            }
+            if expiry_notes > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(expiry_notes, 1, "the panel hears about it exactly once");
     }
 
     #[test]

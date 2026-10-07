@@ -353,6 +353,9 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         dialog_return: None,
         notices: Notices::default(),
         exec_mode: crate::agent::ExecMode::Auto,
+        exec_expires_at: 0,
+        pending_paste: None,
+        clipboard_jobs: Vec::new(),
         broker: dialogs::TuiBroker::new(),
         agent: None,
         watch: SerialWatch::new(WatchOptions::default()),
@@ -485,6 +488,7 @@ fn event_loop(
         // Host edits reach disk only once the field has sat still (see
         // `sidebar::HOST_PERSIST_SETTLE`); this is where the pause runs them.
         sidebar::poll(&mut app, Instant::now());
+        poll_clipboard(&mut app, &mut sticky);
 
         // 3. Terminal input (blocked at most one frame per key press).
         match event::poll(TICK) {
@@ -590,21 +594,19 @@ fn on_core_event(app: &mut App, event: CoreEvent) {
             // host clipboard did nothing).
             let reports = app.terminal.grid.take_pending_reports();
             if !reports.is_empty() {
-                app.send_bytes(reports);
+                app.send_reply(reports);
             }
             if let Some(payload) = app.terminal.grid.take_clipboard() {
-                if !clipboard::write(&payload) {
-                    let lang = app.lang();
-                    app.notices.push(
-                        NoticeLevel::Warn,
-                        t(MOD_CLIP_WRITE_FAILED, lang).to_string(),
-                    );
-                }
+                // A worker, not `clipboard::write`: this runs on the frame
+                // loop, and a helper that is not answering must not be what
+                // stops the terminal from drawing. `poll_clipboard` raises the
+                // "no helper" notice when it comes back.
+                app.clipboard_jobs.push(clipboard::spawn_write(payload));
             }
         }
         CoreEvent::Connection { state, detail } => {
             app.info = app.session.info();
-            app.state = state;
+            app.set_connection_state(state);
             app.detail = detail.clone();
             let lang = app.lang();
             match state {
@@ -1007,14 +1009,28 @@ fn accepts_paste(app: &App) -> bool {
 /// the user is told instead — and the toast names the route that always
 /// exists, the emulator's own paste key, which arrives here as
 /// `Event::Paste`.
-fn request_paste(app: &mut App, sticky: &mut StickyMods, read: impl FnOnce() -> Option<String>) {
+fn begin_paste(app: &mut App, spawn: impl FnOnce() -> std::sync::mpsc::Receiver<Option<String>>) {
     if !accepts_paste(app) {
         // Same inertness as a bracketed paste with a confirmation open: an
         // unanswered key must not report a failure either — and it must not
         // pay for a clipboard read it is going to drop.
         return;
     }
-    match read() {
+    // Queue, don't wait: the answer is collected by `poll_clipboard` on a
+    // later tick. A second key while one is in flight replaces it — two keys
+    // are one paste, not two.
+    app.pending_paste = Some(spawn());
+}
+
+/// Apply a clipboard answer. `None` (and `Some("")`) means no helper could be
+/// reached: the user is told instead, naming the route that always exists.
+fn finish_paste(app: &mut App, sticky: &mut StickyMods, result: Option<String>) {
+    if !accepts_paste(app) {
+        // The focus moved on while the helper ran; there is nowhere to put it,
+        // exactly as there was nowhere when the key arrived with a box open.
+        return;
+    }
+    match result {
         Some(text) if !text.is_empty() => {
             // The web button calls `resetModifiers()` before pasting so an
             // armed Ctrl cannot rewrite the first character.
@@ -1025,6 +1041,38 @@ fn request_paste(app: &mut App, sticky: &mut StickyMods, read: impl FnOnce() -> 
             NoticeLevel::Error,
             t(MOD_PASTE_UNAVAILABLE, app.lang()).to_string(),
         ),
+    }
+}
+
+/// Collect clipboard answers that finished off the frame loop (once per tick).
+///
+/// Nothing here ever blocks: a receiver with no answer yet is simply put back
+/// for the next frame, which is the whole point of the split — `clipboard`'s
+/// helpers each own a deadline (`FAST` per helper, 1.5 s for PowerShell) and
+/// this thread is the one that draws.
+pub(crate) fn poll_clipboard(app: &mut App, sticky: &mut StickyMods) {
+    if let Some(rx) = app.pending_paste.take() {
+        match rx.try_recv() {
+            Ok(result) => finish_paste(app, sticky, result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.pending_paste = Some(rx),
+            // The worker died without answering: report it like no answer.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => finish_paste(app, sticky, None),
+        }
+    }
+    let jobs = std::mem::take(&mut app.clipboard_jobs);
+    for rx in jobs {
+        match rx.try_recv() {
+            Ok(true) => {}
+            Ok(false) => {
+                let lang = app.lang();
+                app.notices.push(
+                    NoticeLevel::Warn,
+                    t(MOD_CLIP_WRITE_FAILED, lang).to_string(),
+                );
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.clipboard_jobs.push(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
     }
 }
 
@@ -1168,13 +1216,13 @@ fn route_key(
     // Paste carries text, not a keystroke, so it is routed before the
     // overlays: an overlay owns the keyboard (CONTRACTS.md section 5), but
     // the AI configuration dialog is precisely where a clipboard — an API
-    // key — belongs. `request_paste` is inert wherever `Event::Paste` would
+    // key — belongs. `begin_paste` is inert wherever `Event::Paste` would
     // be, so a confirmation still ignores it.
     if matches!(global, Global::PasteClipboard) {
-        // `request_paste` reads the clipboard only once it knows there is
-        // somewhere to put it, so the closure is never called when there is
-        // not.
-        request_paste(app, sticky, clipboard::read);
+        // The gate is read *before* a helper thread is started, so a key with
+        // nowhere to put its answer costs nothing — and the read itself runs
+        // off this thread, whose job is drawing.
+        begin_paste(app, clipboard::spawn_read);
         return;
     }
 
@@ -1214,6 +1262,17 @@ fn route_key(
             // screen forever. Ask the event loop for a real `terminal.clear()`
             // as well, and Ctrl+L recovers the *screen*, not just the pane.
             app.force_redraw = true;
+            // The other half is evidence hygiene (spec §6.2/§6.4): Clear also
+            // empties the assistant's serial journal and cancels a turn still
+            // streaming — web's `clearButton` does `agentJournal.reset()` and
+            // `agentPanel.logsCleared()` (which stops the run) in the same
+            // click. The conversation itself is deliberately left alone: it
+            // belongs to `Ctrl+Shift+N` here, so a wiped screen never costs
+            // the chat.
+            if let Some(runtime) = app.agent.as_ref() {
+                runtime.handle.stop();
+                runtime.handle.reset_journal();
+            }
             app.toast(NoticeLevel::Info, t(MOD_CLEARED, app.lang()).to_string());
             return;
         }
@@ -1448,6 +1507,9 @@ pub(crate) fn test_app() -> App {
         dialog_return: None,
         notices: Notices::default(),
         exec_mode: crate::agent::ExecMode::Auto,
+        exec_expires_at: 0,
+        pending_paste: None,
+        clipboard_jobs: Vec::new(),
         broker: self::dialogs::TuiBroker::new(),
         agent: None,
         watch: SerialWatch::new(WatchOptions::default()),
@@ -1467,6 +1529,37 @@ pub(crate) fn test_app() -> App {
         screen_height: 24,
         center_scroll: 0,
     }
+}
+
+/// `test_app()` with a live assistant runtime attached. The feed task and the
+/// turn loop both run on `app.rt`, so the tests that watch Clear or a connect
+/// empty the evidence window have something to watch — the journal itself
+/// stays private to `agent`, hence the `journal_len()` probe.
+#[cfg(test)]
+pub(crate) fn attach_agent(app: &mut App) -> crate::agent::AgentHandle {
+    let broker = Arc::new(app.broker.clone()) as Arc<dyn crate::agent::ApprovalBroker>;
+    let rt = app.rt.clone();
+    let _guard = rt.handle().enter();
+    let handle = crate::agent::spawn(None, broker, app.session.clone(), app.bus.clone());
+    // Same adoption path as `ensure_agent`, so a mode picked before the first
+    // question is pushed into the runtime here too.
+    crate::tui::assistant_view::adopt_runtime(app, handle.clone());
+    handle
+}
+
+/// Put bytes into the assistant's evidence window and wait for the feed to
+/// take them. Publishing has to repeat: a broadcast send with no subscriber
+/// yet is lost, and the feed task may not have subscribed on the first pass.
+#[cfg(test)]
+pub(crate) fn feed_journal(app: &App, handle: &crate::agent::AgentHandle, bytes: &[u8]) {
+    for _ in 0..400 {
+        if handle.journal_len() > 0 {
+            return;
+        }
+        app.bus.publish(CoreEvent::UartRx(bytes.to_vec()));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the feed never reached the assistant's journal");
 }
 
 #[cfg(test)]
@@ -1519,6 +1612,36 @@ mod tests {
         assert!(
             app.terminal.grid.take_clipboard().is_none(),
             "the `OSC 52` payload has to reach the clipboard layer"
+        );
+    }
+
+    /// The answer used to travel through `send_bytes`, whose `connected()` gate
+    /// is a **typed-key** rule: it drops input after a link drop so one notice
+    /// per keystroke cannot bury the log. But `state` lags the transport by a
+    /// poll tick (and sits on `Connecting` for the length of an adopt), so a
+    /// `CPR` question arriving in that window was consumed and then thrown
+    /// away — the program that asked waited forever, and the queue was empty
+    /// either way, which is why the test above could not see it. A detached
+    /// session fails *every* send with "session gone", so that notice is the
+    /// proof the reply was actually handed over.
+    #[test]
+    fn a_cursor_report_reaches_the_session_even_while_the_link_is_flapping() {
+        let mut app = test_app();
+        app.state = ConnectionState::Failed;
+        assert!(app.notices.log.is_empty(), "starting from a quiet log");
+
+        on_core_event(&mut app, CoreEvent::UartRx(b"\x1b[6n".to_vec()));
+
+        assert!(
+            app.terminal.grid.take_pending_reports().is_empty(),
+            "the question is consumed either way"
+        );
+        assert!(
+            app.notices
+                .log
+                .iter()
+                .any(|(_, text)| text.contains("session gone")),
+            "…but it has to reach the session, not be swallowed by the gate"
         );
     }
 
@@ -1661,6 +1784,46 @@ mod tests {
             !app.notices.toasts.is_empty(),
             "…and the clear must still be announced"
         );
+    }
+
+    /// G-2, in the scope you picked (10-07): Clear also empties the
+    /// save-log ring (`web/app.js:3386` + spec §6.2), resets the assistant's
+    /// serial evidence window (spec §6.4) and cancels a turn still streaming —
+    /// but the conversation stays, because here it belongs to `Ctrl+Shift+N`.
+    #[test]
+    fn ctrl_l_clears_the_evidence_window_and_keeps_the_conversation() {
+        let mut app = crate::tui::test_app();
+        let handle = crate::tui::attach_agent(&mut app);
+        crate::tui::feed_journal(&app, &handle, b"boot: bytes from the old session");
+        assert!(handle.journal_len() > 0, "the window holds evidence");
+
+        app.terminal.feed(b"device output\r\n");
+        app.assistant
+            .entries
+            .push(assistant_view::Entry::User("why?".into()));
+        app.assistant
+            .entries
+            .push(assistant_view::Entry::Assistant("because".into()));
+        let entries = app.assistant.entries.len();
+
+        let mut sticky = StickyMods::default();
+        handle_key(
+            &mut app,
+            &mut sticky,
+            crossterm::event::KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(handle.journal_len(), 0, "Clear resets the serial journal");
+        assert!(
+            app.terminal.grid.log_bytes().is_empty(),
+            "…and empties the save-log ring"
+        );
+        assert_eq!(
+            app.assistant.entries.len(),
+            entries,
+            "the conversation is not part of Clear"
+        );
+        assert!(app.agent.is_some(), "and the runtime stays up");
     }
 
     // Paste. Bracketed paste is on for the whole TUI, so a paste never
@@ -1848,6 +2011,14 @@ mod tests {
         );
     }
 
+    /// A receiver whose answer is already in: production hands back a thread
+    /// that is still running, the tests hand back one that has replied.
+    fn answered(result: Option<String>) -> std::sync::mpsc::Receiver<Option<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(result);
+        rx
+    }
+
     /// The AI config dialog is where a clipboard actually matters — the API
     /// key is a click away in the browser and a paste away here.
     #[test]
@@ -1861,9 +2032,10 @@ mod tests {
             ..StickyMods::default()
         };
 
-        request_paste(&mut app, &mut sticky, || {
-            Some("https://api.example.com/v1".to_string())
+        begin_paste(&mut app, || {
+            answered(Some("https://api.example.com/v1".to_string()))
         });
+        poll_clipboard(&mut app, &mut sticky);
 
         let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
             panic!("the dialog must stay open");
@@ -1886,7 +2058,8 @@ mod tests {
         ));
         let mut sticky = StickyMods::default();
 
-        request_paste(&mut app, &mut sticky, || None);
+        begin_paste(&mut app, || answered(None));
+        poll_clipboard(&mut app, &mut sticky);
 
         let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
             panic!("the dialog must stay open");
@@ -1915,10 +2088,11 @@ mod tests {
         let before = app.notices.log.len();
         let mut reads = 0;
 
-        request_paste(&mut app, &mut sticky, || {
+        begin_paste(&mut app, || {
             reads += 1;
-            Some("y".to_string())
+            answered(Some("y".to_string()))
         });
+        poll_clipboard(&mut app, &mut sticky);
 
         assert_eq!(
             reads, 0,
@@ -1932,6 +2106,74 @@ mod tests {
             app.notices.log.len(),
             before,
             "an inert paste reports nothing"
+        );
+    }
+
+    /// F: the key must return while the answer is still on its way. The
+    /// frame loop is the thread that draws, and `clipboard::read` can spend
+    /// `FAST` per helper (1.5 s for PowerShell) waiting out a wedged desktop
+    /// — a paste may not be what stalls the interface.
+    #[test]
+    fn a_paste_key_returns_before_the_clipboard_answers() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods::default();
+        let before = app.notices.log.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        begin_paste(&mut app, || rx);
+
+        assert!(
+            app.pending_paste.is_some(),
+            "queued for a later tick, not waited on"
+        );
+        assert_eq!(app.notices.log.len(), before, "…and nothing reported yet");
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert!(state.endpoint.as_str().is_empty(), "nothing typed yet");
+
+        // The worker answers; the next tick collects it.
+        assert!(tx
+            .send(Some("https://api.example.com/v1".to_string()))
+            .is_ok());
+        poll_clipboard(&mut app, &mut sticky);
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert_eq!(state.endpoint.as_str(), "https://api.example.com/v1");
+        assert!(app.pending_paste.is_none(), "…and the slot is free again");
+    }
+
+    /// The other half of F: an inbound `OSC 52` used to run its helper chain
+    /// inline in `on_core_event`, so a device copying to the host could stall
+    /// the terminal for the length of a deadline. The payload is consumed and
+    /// handed to a worker instead; the "no helper" notice comes back later.
+    #[test]
+    fn an_inbound_clipboard_set_does_not_run_on_the_frame_loop() {
+        let mut app = test_app();
+        let before = app.notices.log.len();
+
+        on_core_event(
+            &mut app,
+            CoreEvent::UartRx(b"\x1b]52;c;aGVsbG8=\x07".to_vec()),
+        );
+
+        assert!(
+            app.terminal.grid.take_clipboard().is_none(),
+            "the payload is consumed here"
+        );
+        assert_eq!(
+            app.clipboard_jobs.len(),
+            1,
+            "…and the write runs on its own thread"
+        );
+        assert_eq!(
+            app.notices.log.len(),
+            before,
+            "no helper deadline is paid on the frame loop"
         );
     }
 
