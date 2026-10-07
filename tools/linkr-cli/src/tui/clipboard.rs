@@ -95,11 +95,39 @@ fn helpers() -> Vec<Helper> {
     }
 }
 
+/// Read the clipboard **off the frame loop** and hand back where the answer
+/// will land.
+///
+/// The chain below can spend `FAST` per helper (1.5 s for PowerShell) on a
+/// wedged desktop, and the key handler runs on the same thread as the drawing
+/// — so a paste must not be what stalls the interface. `mod::poll_clipboard`
+/// collects the receiver on a later tick; until then the key has already
+/// returned.
+pub fn spawn_read() -> std::sync::mpsc::Receiver<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read());
+    });
+    rx
+}
+
+/// Set the clipboard from an inbound `OSC 52`, **also** off the frame loop: a
+/// device that copies to the host must not freeze the terminal for the length
+/// of a helper that is not answering. `false` (no helper took it) reaches the
+/// caller through the receiver, one tick later.
+pub fn spawn_write(payload: String) -> std::sync::mpsc::Receiver<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(write(&payload));
+    });
+    rx
+}
+
 /// The clipboard as text, or `None` when no helper could answer in time.
 ///
 /// Callers treat `Some("")` like `None`: an empty selection has nothing to
 /// paste and reporting it as a failure reads better than a silent no-op.
-pub fn read() -> Option<String> {
+fn read() -> Option<String> {
     helpers().into_iter().find_map(|helper| {
         let text = run(&helper)?;
         Some(if helper.trims_line_ending {

@@ -47,6 +47,10 @@ strings! {
     ASST_MODE_CHANGED => "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
         "档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。";
     ASST_MODE_STATUS => "Mode: {}", "模式：{}";
+    ASST_FULL_AUTO_EXPIRED => "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
+        "Full Auto 已到时并回退到 Auto，后续命令需要确认。";
+    ASST_FULL_AUTO_RECONNECTED => "Device reconnected; execution mode changed from Full Auto to Auto. Low-risk queries still run automatically; other commands follow the current approval rules.",
+        "设备已重新连接，执行档位已从 Full Auto 回到 Auto。低风险查询仍会自动执行，其他命令按当前规则确认。";
     ASST_SET_CONFIG_HINT => "Set the AI configuration first (Ctrl+P → agent.settings).",
         "请先设置 AI 配置（Ctrl+P → agent.settings）。";
     ASST_NO_CONFIG => "No AI configuration saved.", "未保存 AI 配置。";
@@ -265,6 +269,34 @@ fn composer_tail(text: &str, width: u16) -> (String, String) {
     (String::from("…"), kept.chars().rev().collect())
 }
 
+/// `countdownSuffix()` of `web/agent_panel.js`: ` · 14:59` while the
+/// unattended window is armed, nothing otherwise. The frame loop repaints
+/// every tick, so one read per frame counts the display down on its own.
+fn full_auto_countdown(app: &App) -> String {
+    if app.exec_expires_at == 0 {
+        return String::new();
+    }
+    let seconds = app
+        .exec_expires_at
+        .saturating_sub(crate::agent::now_ms())
+        .div_ceil(1000);
+    format!(" · {}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// Both expiry paths write what `onModeTimeout` of `web/agent_panel.js`
+/// writes: the mode is already `Auto`, the status says why, and the
+/// transcript keeps a copy — `RunFinished` from the cancelled turn overwrites
+/// the status a tick later, and that turn's reason reads "Stopped by user",
+/// which would be a lie here.
+fn expired_window(app: &mut App) {
+    let lang = app.lang();
+    app.exec_mode = ExecMode::Auto;
+    app.exec_expires_at = 0;
+    let notice = t(ASST_FULL_AUTO_EXPIRED, lang).to_string();
+    app.assistant.status = notice.clone();
+    push_system(app, &notice);
+}
+
 /// Body of the Assistant view.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let lang = app.lang();
@@ -289,6 +321,12 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
+        ),
+        // Sibling of the mode caption, exactly like `#agentModeCountdown`
+        // sitting next to `#agentActiveMode` in `refreshMode()`.
+        Span::styled(
+            full_auto_countdown(app),
+            Style::default().fg(Color::DarkGray),
         ),
         Span::styled(t(ASST_ACTIONS, lang), Style::default().fg(Color::DarkGray)),
     ]));
@@ -599,12 +637,20 @@ pub fn open_settings(app: &mut App) {
 
 /// Engage an execution mode (the running turn is stopped first, web
 /// `stop("modeChanged")`).
+///
+/// The runtime has to hear about it: `AgentHandle::set_mode` writes the one
+/// atomic `Runtime::mode()` gates every tool call with, so a picker that stops
+/// here would leave `Manual` as a label with no effect. Re-selecting Full Auto
+/// also extends the unattended window (`setMode` of
+/// `web/device_executor.js`), which is why only a *real* change may cancel the
+/// run in flight.
 pub fn set_mode(app: &mut App, mode: ExecMode) {
     let lang = app.lang();
-    if app.exec_mode == mode {
+    let changed = app.exec_mode != mode;
+    if !changed && mode != ExecMode::FullAuto {
         return;
     }
-    if app.assistant.busy {
+    if changed && app.assistant.busy {
         push_system(app, t(ASST_MODE_CHANGED, lang));
         if let Some(agent) = &app.agent {
             agent.handle.stop();
@@ -612,8 +658,37 @@ pub fn set_mode(app: &mut App, mode: ExecMode) {
         app.assistant.busy = false;
     }
     app.exec_mode = mode;
+    // `armFullAuto` sets the deadline from `Date.now()` **at the pick**, which
+    // can be long before the runtime exists — so the panel computes it once,
+    // counts it down itself and hands the same number over on adoption.
+    app.exec_expires_at = if mode == ExecMode::FullAuto {
+        crate::agent::now_ms() + crate::agent::executor::FULL_AUTO_WINDOW_MS
+    } else {
+        0
+    };
+    if let Some(agent) = &app.agent {
+        agent.handle.set_mode(mode);
+        agent.handle.set_deadline(app.exec_expires_at);
+    }
     let name = MODE_HELP[AssistantState::mode_index(mode)].0;
     app.assistant.status = tr!(t(ASST_MODE_STATUS, lang), t(name, lang));
+}
+
+/// Install a freshly spawned runtime. It starts in `Auto`, so a mode picked
+/// before the first question has to be pushed into it: `Manual` is a promise
+/// about approvals, not a caption. (`AgentHandle::set_mode` had no other
+/// caller — that is how the picker came to be cosmetic.)
+pub(crate) fn adopt_runtime(app: &mut App, handle: crate::agent::AgentHandle) {
+    handle.set_mode(app.exec_mode);
+    // The runtime adopts the window the panel armed, not a fresh one: a pick
+    // twenty minutes ago has to read as already expired, as it does in web.
+    handle.set_deadline(app.exec_expires_at);
+    let events = handle.subscribe();
+    app.agent = Some(AgentRuntime {
+        handle,
+        events,
+        last_error: None,
+    });
 }
 
 fn push_system(app: &mut App, text: &str) {
@@ -648,12 +723,7 @@ fn ensure_agent(app: &mut App) -> bool {
     }));
     match outcome {
         Ok(handle) => {
-            let events = handle.subscribe();
-            app.agent = Some(AgentRuntime {
-                handle,
-                events,
-                last_error: None,
-            });
+            adopt_runtime(app, handle);
             true
         }
         Err(_) => {
@@ -691,6 +761,15 @@ pub fn submit(app: &mut App) {
 
 /// Drain pending agent events (once per loop tick).
 pub fn poll(app: &mut App) {
+    // The watchdog lives in `agent::spawn`, so before the first question the
+    // window would otherwise sit on `Full Auto · 0:00` for the rest of the
+    // session. Only here: once the runtime is up, it owns the expiry.
+    if app.agent.is_none()
+        && app.exec_expires_at != 0
+        && crate::agent::now_ms() >= app.exec_expires_at
+    {
+        expired_window(app);
+    }
     let mut batch = Vec::new();
     if let Some(agent) = &mut app.agent {
         loop {
@@ -763,6 +842,9 @@ pub fn apply_event(app: &mut App, event: AgentEvent) {
             app.assistant.status = super::replies::redact_secrets(&message);
             app.toast(NoticeLevel::Error, super::replies::redact_secrets(&message));
         }
+        // The runtime has already fallen back to `Auto`; this only mirrors it
+        // into the panel (`onModeTimeout`).
+        AgentEvent::ModeExpired => expired_window(app),
     }
 }
 
@@ -824,6 +906,105 @@ mod tests {
             assert_eq!(AssistantState::mode_index(mode), index);
         }
         assert_eq!(AssistantState::exec_of(9), ExecMode::Auto);
+    }
+
+    /// The picker used to write `app.exec_mode` and nothing else:
+    /// `AgentHandle::set_mode` had **no caller at all**, so `Manual` was a
+    /// caption while the runtime kept auto-executing — and Full Auto never
+    /// armed its window. The panel and the runtime are one decision.
+    #[test]
+    fn the_mode_picker_reaches_the_runtime() {
+        let mut app = super::super::test_app();
+        let handle = super::super::attach_agent(&mut app);
+        assert_eq!(handle.mode(), ExecMode::Auto, "spawned in Auto");
+
+        set_mode(&mut app, ExecMode::Manual);
+        assert_eq!(app.exec_mode, ExecMode::Manual);
+        assert_eq!(
+            handle.mode(),
+            ExecMode::Manual,
+            "Manual has to gate the tools, not just the caption"
+        );
+
+        set_mode(&mut app, ExecMode::FullAuto);
+        assert_eq!(handle.mode(), ExecMode::FullAuto);
+        assert!(
+            handle.full_auto_remaining().is_some(),
+            "…and it arms the unattended window"
+        );
+
+        set_mode(&mut app, ExecMode::Auto);
+        assert_eq!(handle.mode(), ExecMode::Auto);
+        assert_eq!(handle.full_auto_remaining(), None, "Auto closes the window");
+    }
+
+    /// The mode picked *before* the first question survives the spawn: the
+    /// runtime starts in `Auto`, so adoption has to carry it over.
+    #[test]
+    fn a_runtime_adopted_afterwards_inherits_the_picked_mode() {
+        let mut app = super::super::test_app();
+        app.exec_mode = ExecMode::Manual;
+        let handle = super::super::attach_agent(&mut app);
+        assert_eq!(handle.mode(), ExecMode::Manual, "inherited on spawn");
+    }
+
+    /// `onModeTimeout` (`web/agent_panel.js`): the panel re-reads the mode the
+    /// runtime already reverted and writes `fullAutoExpired` into its status.
+    #[test]
+    fn an_expired_window_reverts_the_panel_and_says_so() {
+        let mut app = super::super::test_app();
+        let lang = app.lang();
+        set_mode(&mut app, ExecMode::FullAuto);
+        assert_eq!(app.exec_mode, ExecMode::FullAuto);
+
+        apply_event(&mut app, AgentEvent::ModeExpired);
+
+        assert_eq!(
+            app.exec_mode,
+            ExecMode::Auto,
+            "…the same fallback web shows"
+        );
+        assert_eq!(app.exec_expires_at, 0, "…and closes the window");
+        assert_eq!(app.assistant.status, t(ASST_FULL_AUTO_EXPIRED, lang));
+        let notice = t(ASST_FULL_AUTO_EXPIRED, lang);
+        assert!(
+            app.assistant
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::System(text) if text == notice)),
+            "the transcript keeps a copy: RunFinished overwrites the status"
+        );
+    }
+
+    /// `countdownSuffix()` of `web/agent_panel.js`: ` · 14:59` next to the
+    /// mode caption while the window is armed, nothing otherwise. `Math.ceil`
+    /// over the remaining milliseconds, so a whole window reads `15:00`.
+    #[test]
+    fn the_header_counts_the_unattended_window_down() {
+        let mut app = super::super::test_app();
+        assert_eq!(full_auto_countdown(&app), "", "no window is armed");
+
+        // The window starts at the pick, not at the first question: the panel
+        // counts it down while no runtime exists yet.
+        set_mode(&mut app, ExecMode::FullAuto);
+        assert_eq!(
+            full_auto_countdown(&app),
+            " · 15:00",
+            "the sibling caption keeps web's separator"
+        );
+
+        let handle = super::super::attach_agent(&mut app);
+        assert_eq!(handle.mode(), ExecMode::FullAuto, "adopted with the mode");
+        let panel = app.exec_expires_at.saturating_sub(crate::agent::now_ms());
+        let runtime = handle.full_auto_remaining().expect("…and with the window");
+        assert!(
+            runtime.abs_diff(panel) < 50,
+            "the runtime runs the panel's clock: {runtime} ms vs {panel} ms"
+        );
+
+        set_mode(&mut app, ExecMode::Auto);
+        assert_eq!(full_auto_countdown(&app), "", "…and disappears with it");
+        assert_eq!(handle.full_auto_remaining(), None);
     }
 
     /// A bare Enter is a newline; both send chords take the submit path.

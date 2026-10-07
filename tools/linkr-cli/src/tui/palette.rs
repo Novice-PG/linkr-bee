@@ -290,7 +290,14 @@ fn agent_settings(app: &mut App) {
 }
 
 fn new_chat(app: &mut App) {
-    let status = t(PAL_MSG_NEW_CHAT, app.lang()).to_string();
+    let lang = app.lang();
+    if app.exec_mode == crate::agent::ExecMode::FullAuto {
+        // `reset()` of `web/device_executor.js`: a new conversation ends the
+        // unattended execution window. Done before the status line is written
+        // so `set_mode`'s own caption cannot overwrite the new-chat one.
+        super::assistant_view::set_mode(app, crate::agent::ExecMode::Auto);
+    }
+    let status = t(PAL_MSG_NEW_CHAT, lang).to_string();
     app.assistant = super::assistant_view::AssistantState::default();
     app.assistant.status = status;
 }
@@ -894,6 +901,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reset()` of `web/device_executor.js`: a new conversation ends the
+    /// unattended execution window. Manual and Auto stay where they are.
+    #[test]
+    fn a_new_chat_ends_the_unattended_window() {
+        let mut app = crate::tui::test_app();
+        crate::tui::assistant_view::set_mode(&mut app, crate::agent::ExecMode::FullAuto);
+        assert_eq!(app.exec_mode, crate::agent::ExecMode::FullAuto);
+
+        new_chat(&mut app);
+
+        assert_eq!(
+            app.exec_mode,
+            crate::agent::ExecMode::Auto,
+            "the way device.reset() does"
+        );
+        assert_eq!(
+            app.assistant.status,
+            t(PAL_MSG_NEW_CHAT, app.lang()).to_string()
+        );
+
+        crate::tui::assistant_view::set_mode(&mut app, crate::agent::ExecMode::Manual);
+        new_chat(&mut app);
+        assert_eq!(
+            app.exec_mode,
+            crate::agent::ExecMode::Manual,
+            "the other two modes are left alone"
+        );
+    }
 
     /// "Focus the terminal" has to take you there. Setting `Focus::Center`
     /// without moving the view left the keystrokes on the panel the view was

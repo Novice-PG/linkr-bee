@@ -266,13 +266,17 @@ impl TermGrid {
         self.local_log.clear();
     }
 
-    /// Ctrl+L / toolbar Clear: wipe screen and scrollback, keep the log ring.
+    /// Ctrl+L / toolbar Clear: wipe screen, scrollback *and* the save-log ring.
+    /// Web's `clearButton` empties `state.logBytes`/`state.logSize` in the same
+    /// step (`web/app.js:3388`, spec §6.2), so a log saved after Clear starts
+    /// from what arrives next rather than resurrecting a screen the user wiped.
     pub fn clear_pane(&mut self) {
         self.screen = vec![vec![Cell::blank(); self.cols as usize]; self.rows as usize];
         self.scrollback.clear();
         self.cursor = (0, 0);
         self.wrap_pending = false;
         self.alt = None;
+        self.local_log.clear();
     }
 
     /// Re-fit the grid to a new pane size. Cells outside the new width are
@@ -1894,14 +1898,20 @@ mod tests {
         assert_eq!(g.cursor, (5, 0), "next-line clamps to the margin");
     }
 
+    /// Clear empties the save-log ring too: `web/app.js:3386` sets
+    /// `state.logBytes = []; state.logSize = 0;` inside the `clearButton`
+    /// handler, and spec §6.2 lists "empties logBytes/logSize" as Clear's
+    /// second step. The old assertion ("save log must survive Ctrl+L") read
+    /// `clear_pane` as a screen-only operation, which the web does not do.
     #[test]
-    fn clear_pane_keeps_the_log_ring() {
+    fn clear_pane_empties_the_log_ring() {
         let mut g = TermGrid::with_scrollback(6, 2, 10);
         g.feed(b"hello\r\nworld\r\n");
+        assert!(!g.log_bytes().is_empty(), "the feed reaches the ring first");
         g.clear_pane();
         assert_eq!(g.scrollback_len(), 0);
         assert_eq!(row_text(&g, 0), "");
-        assert!(!g.log_bytes().is_empty(), "save log must survive Ctrl+L");
+        assert!(g.log_bytes().is_empty(), "Clear empties logBytes");
     }
 
     #[test]
