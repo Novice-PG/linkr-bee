@@ -155,6 +155,62 @@ pub fn spawn_write(payload: String) -> std::sync::mpsc::Receiver<bool> {
     rx
 }
 
+/// Set the system clipboard from a copy **this** program asked for — the
+/// selection's release and the palette's `term.copy` — off the frame loop.
+///
+/// This is the half `OSC 52` cannot do on its own: that sequence hands the
+/// text to the emulator we run inside, and the emulator is free to parse it
+/// and do nothing with it. VTE has parsed `OSC 52` since 2017 and its handler
+/// is still a no-op (GNOME bug 795774), which is why a "Copied (OSC 52)."
+/// toast used to leave the clipboard untouched on GNOME Terminal. The helper
+/// chain is the same one [`write`] uses and it *answers*: `true` means a tool
+/// accepted the text, `false` means nothing reached the system clipboard —
+/// exactly what the caller has to report instead of claiming a copy.
+pub fn spawn_write_text(text: String) -> std::sync::mpsc::Receiver<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(write_text(&text));
+    });
+    rx
+}
+
+/// How many characters a copy moved, counted for the message that reports it.
+#[derive(Debug, Clone, Copy)]
+pub struct CopyReport {
+    /// What the system clipboard got: the whole selection, uncapped.
+    pub chars: usize,
+    /// What went out over `OSC 52` — cut at the `OSC52_MAX_BYTES` cap, so a
+    /// capped copy reports the smaller number — or `None` when the write to
+    /// stdout failed and nothing left this program at all.
+    pub osc: Option<usize>,
+}
+
+/// One clipboard write waiting for its worker to answer.
+///
+/// The source decides the news: a copy we initiated is reported **either
+/// way** (a helper took it → "copied"; none did → what really happened), while
+/// an inbound `OSC 52` from the device only raises a notice on failure, since
+/// there is no "copied N characters" to give it.
+pub struct ClipboardJob {
+    pub rx: std::sync::mpsc::Receiver<bool>,
+    pub copy: Option<CopyReport>,
+}
+
+impl ClipboardJob {
+    /// A copy this program started (`mod::copy_to_host`).
+    pub fn for_copy(rx: std::sync::mpsc::Receiver<bool>, chars: usize, osc: Option<usize>) -> Self {
+        Self {
+            rx,
+            copy: Some(CopyReport { chars, osc }),
+        }
+    }
+
+    /// The device asked us to set *this machine's* clipboard (`mod::on_core_event`).
+    pub fn for_device(rx: std::sync::mpsc::Receiver<bool>) -> Self {
+        Self { rx, copy: None }
+    }
+}
+
 /// The clipboard as text, or `None` when no helper could answer in time.
 ///
 /// Callers treat `Some("")` like `None`: an empty selection has nothing to

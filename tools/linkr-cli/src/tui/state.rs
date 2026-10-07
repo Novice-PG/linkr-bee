@@ -361,9 +361,16 @@ pub struct App {
     /// by `mod::poll_clipboard`; never waited on, because the frame loop is
     /// the thread that draws.
     pub pending_paste: Option<std::sync::mpsc::Receiver<Option<String>>>,
-    /// Inbound `OSC 52` writes in flight (`clipboard::spawn_write`); `false`
-    /// means no helper took the payload.
-    pub clipboard_jobs: Vec<std::sync::mpsc::Receiver<bool>>,
+    /// Clipboard writes in flight — an inbound `OSC 52`
+    /// (`clipboard::spawn_write`) or one of our own copies
+    /// (`clipboard::spawn_write_text`); `false` means no helper took it, and
+    /// `clipboard::ClipboardJob::copy` says which of the two it was, because
+    /// only our own copy has a "copied N characters" to report.
+    pub clipboard_jobs: Vec<super::clipboard::ClipboardJob>,
+    /// The "no clipboard helper here" hint has already been said this session.
+    /// On a machine without `wl-copy` / `xclip` every selection copy would
+    /// repeat it otherwise.
+    pub copy_hint_shown: bool,
 
     // Serial watch (findings shown in the sidebar).
     pub watch: SerialWatch,

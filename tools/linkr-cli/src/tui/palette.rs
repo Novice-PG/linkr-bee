@@ -77,7 +77,13 @@ strings! {
     PAL_MSG_ENTER_MODE => "Enter mode: {}", "回车模式：{}";
     PAL_MSG_SAVED_LOG => "Saved {} bytes to {}", "已保存 {} 字节到 {}";
     PAL_MSG_SAVE_FAILED => "Save failed: {}", "保存失败：{}";
-    PAL_MSG_COPIED => "Copied {} characters (OSC 52).", "已复制 {} 个字符（OSC 52）。";
+    // The two outcomes of a copy are told apart by who confirmed it: a
+    // clipboard helper that took the text is a copy, while `OSC 52` alone
+    // only reached the emulator — which may drop it (VTE/GNOME Terminal
+    // parses the sequence and acts on nothing, GNOME bug 795774).
+    PAL_MSG_COPIED => "Copied {} characters.", "已复制 {} 个字符。";
+    PAL_MSG_COPY_OSC52_ONLY => "Sent {} characters over OSC 52 — the terminal may ignore it.",
+        "已通过 OSC 52 把 {} 个字符交给终端——它可能直接忽略。";
     PAL_MSG_COPY_FAILED => "Copy failed: {}", "复制失败：{}";
     PAL_MSG_BLE_DIAGNOSTICS => "Connect over BLE to read diagnostics.",
         "请先通过 BLE 连接再读取诊断。";
