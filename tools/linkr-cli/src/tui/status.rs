@@ -489,7 +489,11 @@ mod tests {
         assert!(zh.contains("Ctrl+Q 退出"), "{zh}");
         assert!(!zh.contains("Ctrl+P palette"), "{zh}");
         assert_eq!(state_text(ConnectionState::Failed, Lang::Zh), "连接失败");
-        assert_eq!(mode_text(ExecMode::FullAuto, Lang::Zh), "全自动");
+        // The bar shows the panel's caption, and the web panel prints `Auto`
+        // and `Full Auto` untranslated in both languages.
+        assert_eq!(mode_text(ExecMode::Auto, Lang::Zh), "Auto");
+        assert_eq!(mode_text(ExecMode::FullAuto, Lang::Zh), "Full Auto");
+        assert_eq!(mode_text(ExecMode::Manual, Lang::Zh), "手动");
     }
 
     #[test]

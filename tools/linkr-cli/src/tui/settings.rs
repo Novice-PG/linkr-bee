@@ -178,14 +178,81 @@ impl TuiSettings {
 
 /// `dirs::config_dir()/linkr/tui.json`.
 pub fn settings_path() -> PathBuf {
-    let mut path = dirs::config_dir().unwrap_or_default();
-    path.push("linkr");
-    path.push("tui.json");
-    path
+    #[cfg(test)]
+    {
+        // Tests share one machine — and one `tui.json` — while libtest runs
+        // them side by side, so a test that writes it lands in the middle of
+        // another test's read-assert-restore window (2 of 5 runs of
+        // `cargo test tui::sidebar` failed exactly that way), and both of them
+        // leave the developer's own configuration rewritten behind their back.
+        // Tests get a file of their own.
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-tui-test-{}.json", std::process::id()));
+        path
+    }
+    #[cfg(not(test))]
+    {
+        let mut path = dirs::config_dir().unwrap_or_default();
+        path.push("linkr");
+        path.push("tui.json");
+        path
+    }
+}
+
+/// Everything that touches the settings file inside a test takes this lock,
+/// so no test can read a file another test is halfway through rewriting.
+///
+/// It is re-entrant per thread: a test that already holds it (the sidebar's
+/// `SettingsGuard` holds it for its whole run) reaches `save` again through
+/// the flush it is testing, and would deadlock on a plain `Mutex`.
+#[cfg(test)]
+pub(crate) mod file_lock {
+    use std::cell::Cell;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        static HELD: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub struct FileLock {
+        /// `Some` only for the outermost acquire of this thread.
+        held: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl FileLock {
+        pub fn acquire() -> Self {
+            HELD.with(|held| {
+                if held.get() > 0 {
+                    held.set(held.get() + 1);
+                    return Self { held: None };
+                }
+                let guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+                held.set(1);
+                Self { held: Some(guard) }
+            })
+        }
+    }
+
+    impl Drop for FileLock {
+        fn drop(&mut self) {
+            HELD.with(|held| {
+                let left = held.get().saturating_sub(1);
+                held.set(left);
+                if left == 0 {
+                    drop(self.held.take());
+                }
+            });
+        }
+    }
 }
 
 /// Load settings, substituting defaults when the file is missing or broken.
 pub fn load() -> TuiSettings {
+    // See `settings_path`: in tests the file belongs to whoever is reading it.
+    #[cfg(test)]
+    let _lock = file_lock::FileLock::acquire();
     match std::fs::read_to_string(settings_path()) {
         Ok(text) => TuiSettings::from_json(&text),
         // First run: follow the locale the way the web reads
@@ -200,6 +267,9 @@ pub fn load() -> TuiSettings {
 /// Persist settings; parent directory created on demand. Errors are reported by
 /// the caller as a toast, never fatal.
 pub fn save(settings: &TuiSettings) -> std::io::Result<()> {
+    // See `settings_path`: no test writes while another one is looking.
+    #[cfg(test)]
+    let _lock = file_lock::FileLock::acquire();
     let path = settings_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

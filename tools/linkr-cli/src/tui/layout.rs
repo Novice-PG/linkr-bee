@@ -101,7 +101,171 @@ fn terminal_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let view = app.terminal.grid.render(rows, app.terminal.offset);
     let mut lines = view.lines;
     lines.truncate(rows as usize);
+    // The drag selection, reversed straight into the rows it covers. The
+    // selection names absolute rows, so it belongs to the text and not to the
+    // screen: scrolling the pane moves the highlight with the content, and a
+    // row outside the viewport is simply never visited here.
+    let selection = app.terminal.selection.filter(|it| !it.is_empty());
+    if let Some(selection) = selection {
+        let ((start_row, start_col), (end_row, end_col)) = selection.range();
+        for (index, line) in lines.iter_mut().enumerate() {
+            let row = view.start + index;
+            if row < start_row || row > end_row {
+                continue;
+            }
+            let from = if row == start_row { start_col } else { 0 };
+            let to = if row == end_row {
+                end_col.saturating_add(1)
+            } else {
+                usize::MAX
+            };
+            invert_columns(line, from, to);
+            if from == 0 && to == usize::MAX && line_width(line) == 0 {
+                // A blank row inside the block would read as a hole in it:
+                // give it the pane's width, reversed, like every terminal.
+                line.spans.push(Span::styled(
+                    " ".repeat(usize::from(width)),
+                    Style::default().reversed(),
+                ));
+            }
+        }
+    }
+    // The grid knows where the caret is and whether the device asked for it
+    // to be shown (`GridView::cursor`), but nothing ever drew it: a pane with
+    // no caret is one you type into blind. The mark lives inside the line, so
+    // it stays on the right cell whatever the pane is then scrolled by.
+    //
+    // Not while a selection covers it, though: inverting a cell that is
+    // already inverted would punch a hole in the block, and a hole reads as
+    // "this cell is not selected" while it would still be copied.
+    if selection.is_none() {
+        if let Some((row, col)) = view.cursor {
+            if let Some(line) = lines.get_mut(row as usize) {
+                mark_cursor(line, col);
+            }
+        }
+    }
     lines
+}
+
+/// Display columns taken up by a rendered row.
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+/// Reverse the display columns `[from, to)` of one rendered row: one cell for
+/// the caret, whatever a drag covered for a selection.
+///
+/// `cells_to_line` merges neighbouring cells that share a style into one span,
+/// so the span is walked glyph by glyph and re-cut into the three runs (before,
+/// inside, after) that the range splits it into. A glyph that straddles an edge
+/// counts as *inside* — the same rule [`super::terminal_view`] cuts a selection
+/// with — because inverting half of a wide character paints nothing at all.
+fn invert_columns(line: &mut Line<'static>, from: usize, to: usize) {
+    if from >= to {
+        return;
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut column = 0usize;
+    for span in std::mem::take(&mut line.spans) {
+        let text: String = span.content.into();
+        // 0 = not reached the range yet, 1 = inside it, 2 = past it. The
+        // columns only move forward, so the three runs never interleave.
+        let mut run = 0usize;
+        let mut runs = [String::new(), String::new(), String::new()];
+        for ch in text.chars() {
+            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            let inside = column < to && column + width > from;
+            column += width;
+            run = if inside {
+                1
+            } else if run == 1 {
+                2
+            } else {
+                run
+            };
+            runs[run].push(ch);
+        }
+        for (index, chunk) in runs.into_iter().enumerate() {
+            if chunk.is_empty() {
+                continue;
+            }
+            let style = if index == 1 {
+                span.style.reversed()
+            } else {
+                span.style
+            };
+            out.push(Span::styled(chunk, style));
+        }
+    }
+    line.spans = out;
+}
+
+/// Invert the single cell the caret sits on — a block cursor, the way every
+/// terminal draws one.
+///
+/// `cells_to_line` drops the trailing blanks of a row, so a caret past the
+/// last non-blank cell would sit on a cell that no longer exists: the blanks
+/// are drawn back up to it.
+fn mark_cursor(line: &mut Line<'static>, col: u16) {
+    let col = usize::from(col);
+    let width = line_width(line);
+    if col >= width {
+        let style = line.spans.last().map(|span| span.style).unwrap_or_default();
+        line.spans
+            .push(Span::styled(" ".repeat(col - width + 1), style.reversed()));
+        return;
+    }
+    invert_columns(line, col, col + 1);
+}
+
+/// Cut one row to `budget` display columns, keeping the style of every span
+/// that survives. Without this ratatui wraps an over-wide row, and in a fixed
+/// height pane with no scroll that pushes everything below it down and off
+/// screen.
+fn clip_line(line: Line<'static>, budget: u16) -> Line<'static> {
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    if unicode_width::UnicodeWidthStr::width(text.as_str()) <= budget as usize {
+        return line;
+    }
+    if budget == 0 {
+        return Line::default();
+    }
+    // One column is kept back for the ellipsis, exactly like
+    // `dialogs::clip_columns`.
+    let room = budget - 1;
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
+    let mut used = 0u16;
+    let mut cut = false;
+    for span in line.spans {
+        if cut {
+            break;
+        }
+        let content: String = span.content.into();
+        let mut kept = String::new();
+        for ch in content.chars() {
+            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            if used + width > room {
+                cut = true;
+                break;
+            }
+            kept.push(ch);
+            used += width;
+        }
+        spans.push(Span::styled(kept, span.style));
+    }
+    if cut {
+        let style = spans.last().map(|span| span.style).unwrap_or_default();
+        spans.push(Span::styled("…", style));
+    }
+    Line::from(spans)
 }
 
 /// Render the whole frame.
@@ -121,7 +285,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Sidebar.
     if let Some(rect) = sidebar {
-        let lines = super::sidebar::render_lines(app);
+        // Rows are cut to the pane. The sidebar has no scroll of its own and
+        // its height is fixed, so a row wider than the column — the 32-star
+        // token mask (43 columns with its label, 45 in 中文) or the 59-column
+        // empty-host hint — used to wrap under `.wrap()` into extra physical
+        // lines and push the Quick-send and Watch sections out of view.
+        let lines: Vec<Line<'static>> = super::sidebar::render_lines(app)
+            .into_iter()
+            .map(|line| clip_line(line, rect.width.saturating_sub(1)))
+            .collect();
         frame.render_widget(
             ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
             rect,
@@ -320,6 +492,147 @@ pub fn focus_label(focus: Focus, lang: super::i18n::Lang) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
+
+    /// A pane the same size as the grid, so rendered rows and grid rows line
+    /// up exactly and a test can name the row it means. The grid is built at
+    /// that size rather than resized into it: shrinking one pushes the rows it
+    /// drops into the scrollback, which would move every row a test names.
+    fn app_with_pane(width: u16, height: u16) -> crate::tui::state::App {
+        let mut app = crate::tui::test_app();
+        app.center_width = width;
+        app.center_height = height;
+        let (cols, rows) =
+            super::super::terminal_view::grid_dims(width, height, app.settings.font_size);
+        app.terminal.grid = super::super::terminal_view::TermGrid::new(cols, rows);
+        app.terminal.dims = (cols, rows);
+        app
+    }
+
+    /// The text of a rendered row, and which of its spans are reversed.
+    fn plain(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn reversed(line: &Line<'static>) -> Vec<String> {
+        line.spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| span.content.to_string())
+            .collect()
+    }
+
+    fn runs<'a>(line: &'a Line<'static>) -> Vec<(&'a str, bool, bool)> {
+        line.spans
+            .iter()
+            .map(|span| {
+                (
+                    span.content.as_ref(),
+                    span.style.add_modifier.contains(Modifier::BOLD),
+                    span.style.add_modifier.contains(Modifier::REVERSED),
+                )
+            })
+            .collect()
+    }
+
+    /// The pane used to draw no caret at all: the grid tracks it,
+    /// `GridView::cursor` carries it out, and nothing read it — so a shell on
+    /// the device gave no feedback about where it was about to type.
+    #[test]
+    fn the_caret_marks_exactly_one_cell() {
+        let mut line = Line::from("prompt>");
+
+        mark_cursor(&mut line, 3);
+
+        let marked: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|span| {
+                span.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(marked, vec!["m"], "one cell, not the whole run: {marked:?}");
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text, "prompt>", "the row still reads the same");
+    }
+
+    /// `cells_to_line` drops trailing blanks, so the cell the caret sits on at
+    /// the end of a short row does not exist until it is put back.
+    #[test]
+    fn a_caret_past_the_end_of_the_row_gets_its_cell_back() {
+        let mut line = Line::from("ab");
+
+        mark_cursor(&mut line, 4);
+
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(
+            text, "ab   ",
+            "cols 2 and 3 are blank, the caret owns col 4"
+        );
+        assert_eq!(
+            line.spans
+                .last()
+                .filter(|span| {
+                    span.style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+                .map(|span| span.content.as_ref()),
+            Some("   "),
+            "…and the whole run back there is the reversed one"
+        );
+    }
+
+    /// Splitting the run to place the caret must not lose the style the run
+    /// carried: the rest of the row keeps its colour and its attributes.
+    #[test]
+    fn the_caret_splits_the_run_without_touching_the_rest_of_it() {
+        let mut line = Line::from(vec![
+            Span::styled(">", Style::default().fg(Color::Blue)),
+            Span::styled(
+                "ls",
+                Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+        ]);
+
+        mark_cursor(&mut line, 0);
+
+        let (first, rest) = line.spans.split_first().expect("the caret cell");
+        assert_eq!(first.content.as_ref(), ">");
+        assert!(first
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED));
+        assert_eq!(first.style.fg, Some(Color::Blue), "the colour survives");
+        assert_eq!(
+            rest.iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "ls"
+        );
+        assert!(rest.iter().all(|span| !span
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)));
+        assert!(rest[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
+    }
 
     fn area(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
@@ -437,6 +750,106 @@ mod tests {
         assert_eq!(
             status_model(&app).transport,
             Some(crate::transport::TransportKind::Ble)
+        );
+    }
+
+    /// One span merged two differently styled runs, and a selection has to
+    /// reverse the stretch it covers without touching what is outside it.
+    #[test]
+    fn a_block_cuts_a_styled_run_apart_and_reverses_only_what_it_covers() {
+        let mut line = Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Blue)),
+            Span::styled("ls -la", Style::default().add_modifier(Modifier::BOLD)),
+        ]);
+
+        invert_columns(&mut line, 3, 5);
+
+        assert_eq!(
+            runs(&line),
+            vec![
+                ("> ", false, false),
+                ("l", true, false),
+                ("s ", true, true),
+                ("-la", true, false),
+            ]
+        );
+        assert_eq!(plain(&line), "> ls -la", "the text never changes");
+    }
+
+    #[test]
+    fn an_edge_inside_a_wide_glyph_reverses_the_whole_glyph() {
+        let mut line = Line::from("wide 中x");
+
+        // Column 6 is the *second* cell of 中: a drag that lands on it picks
+        // the character up whole, the way it was read.
+        invert_columns(&mut line, 6, 7);
+
+        assert_eq!(plain(&line), "wide 中x");
+        assert_eq!(reversed(&line), vec!["中"]);
+    }
+
+    #[test]
+    fn the_selection_is_reversed_in_the_rows_it_covers() {
+        let mut app = app_with_pane(40, 10);
+        app.terminal.grid.feed(b"first\r\nsecond\r\n");
+        app.terminal.begin_selection(0, 2);
+        app.terminal.extend_selection(1, 5);
+
+        let lines = terminal_lines(&app, 40);
+
+        assert_eq!(plain(&lines[0]), "first");
+        assert_eq!(reversed(&lines[0]), vec!["rst"], "from the press on");
+        assert_eq!(reversed(&lines[1]), vec!["second"], "up to the release");
+        assert!(
+            reversed(&lines[2]).is_empty(),
+            "a row below the selection stays untouched"
+        );
+    }
+
+    #[test]
+    fn a_blank_row_inside_the_block_gets_the_panes_width() {
+        let mut app = app_with_pane(40, 6);
+        app.terminal.grid.feed(b"aaa\r\n\r\nbbb\r\n");
+        app.terminal.begin_selection(0, 0);
+        app.terminal.extend_selection(2, 0);
+
+        let lines = terminal_lines(&app, 40);
+
+        assert_eq!(lines[1].spans.len(), 1, "{:?}", lines[1]);
+        assert_eq!(plain(&lines[1]), " ".repeat(40));
+        assert_eq!(reversed(&lines[1]), vec![" ".repeat(40)]);
+    }
+
+    /// A caret inside the block would be inverted twice — back to normal video
+    /// — and a hole reads as "this cell is not selected" while it would still
+    /// be copied. So the caret stands down while a selection is up.
+    #[test]
+    fn a_selection_hides_the_caret_instead_of_punching_a_hole_in_the_block() {
+        let mut app = app_with_pane(40, 6);
+        app.terminal.grid.feed(b"abcdef");
+
+        let bare = terminal_lines(&app, 40);
+        assert_eq!(reversed(&bare[0]), vec![" "], "the caret marks its cell");
+
+        app.terminal.begin_selection(0, 0);
+        app.terminal.extend_selection(0, 2);
+
+        let selected = terminal_lines(&app, 40);
+        assert_eq!(reversed(&selected[0]), vec!["abc"], "one unbroken block");
+    }
+
+    #[test]
+    fn an_empty_selection_draws_nothing() {
+        let mut app = app_with_pane(40, 6);
+        app.terminal.grid.feed(b"abcdef");
+        app.terminal.begin_selection(0, 3);
+
+        let lines = terminal_lines(&app, 40);
+
+        assert_eq!(
+            reversed(&lines[0]),
+            vec![" "],
+            "a click that never moved is the caret, not a selection"
         );
     }
 }

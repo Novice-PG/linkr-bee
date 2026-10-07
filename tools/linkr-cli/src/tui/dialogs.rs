@@ -48,8 +48,14 @@ strings! {
     // Confirmation body (`sidebar.rs` carries the reboot / disconnect texts).
     DLG_QUIT_MSG => "Quit the TUI now?", "立即退出 TUI？";
     DLG_TITLE_QUIT => "Quit", "退出";
+    DLG_QUIT_WAIT_APPROVAL => "Answer the pending request first.",
+        "请先处理待确认的请求。";
     DLG_Y_CONFIRM => " confirm · ", " 确认 · ";
     DLG_ESC_CANCEL => " cancel", " 取消";
+    // An action with nowhere to go: the web keeps the presets and the key bar
+    // disabled until `setConnected()`, and `send_text`'s gate would swallow
+    // the command without a word — which for `reboot` reads as success.
+    DLG_NOT_SENT => "Not connected — nothing was sent.", "未连接——没有发送任何内容。";
 
     // Approval cards.
     DLG_APPROVE_RUN => "Run a command on the target?", "在目标设备上运行命令？";
@@ -111,6 +117,8 @@ strings! {
         "为下一个按键启用一次性 Ctrl";
     DLG_HELP_ARM_ALT => "Arm one-shot Alt for the next key",
         "为下一个按键启用一次性 Alt";
+    DLG_HELP_PASTE => "Paste the clipboard (focused field, else the device)",
+        "粘贴剪贴板（当前输入框，否则发给设备）";
     DLG_HELP_ENTER => "Send a line (Enter mode applies)", "发送一行（应用回车模式）";
     DLG_HELP_TAB => "Sent to the target as TAB / CSI Z", "作为 TAB / CSI Z 发送给目标";
     DLG_HELP_FKEYS => "Sent to the target unchanged", "原样发送给目标";
@@ -407,7 +415,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 Line::from(vec![
                     Span::styled("> ", Style::default().fg(Color::Cyan)),
                     Span::styled(
-                        field.text.clone(),
+                        field.as_str().to_string(),
                         Style::default()
                             .fg(Color::White)
                             .add_modifier(Modifier::BOLD),
@@ -641,7 +649,7 @@ fn approval_lines(
 /// F1 overlay. Mirrors the global keys of CONTRACTS.md section 5.
 fn help_lines(width: u16, lang: Lang) -> Vec<Line<'static>> {
     struct Row(&'static str, Entry);
-    const ROWS: [Row; 27] = [
+    const ROWS: [Row; 28] = [
         Row("Ctrl+P", DLG_HELP_PALETTE),
         Row("F1", DLG_HELP_THIS),
         Row("F2", DLG_HELP_TERMINAL),
@@ -664,6 +672,7 @@ fn help_lines(width: u16, lang: Lang) -> Vec<Line<'static>> {
         Row("Ctrl+Shift+R", DLG_HELP_ARM_SHIFT),
         Row("Ctrl+Shift+C", DLG_HELP_ARM_CTRL),
         Row("Ctrl+Shift+A", DLG_HELP_ARM_ALT),
+        Row("Ctrl+Shift+V", DLG_HELP_PASTE),
         Row("Enter", DLG_HELP_ENTER),
         Row("Tab / Shift+Tab", DLG_HELP_TAB),
         Row("F6..F12", DLG_HELP_FKEYS),
@@ -737,8 +746,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             title,
             message,
         } => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => confirm(app, kind),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                app.dialog_return = None;
+                confirm(app, kind);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Declining the ask gives back whatever `request_quit`
+                // displaced instead of leaving the user with nothing.
+                app.dialog = app.dialog_return.take().map(|dialog| *dialog);
+            }
             _ => {
                 app.dialog = Some(Dialog::Confirm {
                     kind,
@@ -850,7 +866,7 @@ fn uart_edit(app: &mut App, key: KeyEvent) {
     // Enter / Ctrl+S: validate the spec and push it to the bridge.
     let lang = app.lang();
     let spec = match &app.dialog {
-        Some(Dialog::Uart { field, .. }) => field.text.clone(),
+        Some(Dialog::Uart { field, .. }) => field.as_str().to_string(),
         _ => return,
     };
     match crate::protocol::validate::normalize_uart_spec(&spec) {
@@ -952,7 +968,17 @@ pub fn open_uart(app: &mut App) {
 /// Run a confirmed action.
 pub fn confirm(app: &mut App, kind: ConfirmKind) {
     match kind {
-        ConfirmKind::Reboot => app.send_text("reboot\n"),
+        ConfirmKind::Reboot => {
+            // The link can drop between the ask and the `y`. `send_text` then
+            // refuses the payload behind its own gate — silently, because a
+            // keystroke spamming "session gone" was the bug that gate fixed —
+            // so the one-shot command has to say it did not go itself.
+            if !app.connected() {
+                app.toast(NoticeLevel::Warn, t(DLG_NOT_SENT, app.lang()).to_string());
+                return;
+            }
+            app.send_text("reboot\n")
+        }
         ConfirmKind::Disconnect => app.session.disconnect(),
         ConfirmKind::Quit => app.quit = true,
     }
@@ -962,7 +988,27 @@ pub fn confirm(app: &mut App, kind: ConfirmKind) {
 /// (`confirmQuit` parity of the web client).
 pub fn request_quit(app: &mut App) {
     let lang = app.lang();
+    // A pending approval must not be displaced: dropping the box closes its
+    // channel, and the agent reads a closed channel as a rejection
+    // ([`PendingApproval`]) — a stray quit keystroke would decide the request
+    // for the user without a keystroke on the request itself.
+    if matches!(app.dialog, Some(Dialog::Approval(_))) {
+        app.toast(NoticeLevel::Info, t(DLG_QUIT_WAIT_APPROVAL, lang));
+        return;
+    }
+    if matches!(
+        app.dialog,
+        Some(Dialog::Confirm {
+            kind: ConfirmKind::Quit,
+            ..
+        })
+    ) {
+        return;
+    }
     app.palette = None;
+    // Keep what was under the confirm: declining it must not cost the user a
+    // half-typed AI configuration, an open UART dialog or a scan result list.
+    app.dialog_return = app.dialog.take().map(Box::new);
     if app.connected() {
         app.dialog = Some(Dialog::Confirm {
             kind: ConfirmKind::Quit,
@@ -971,6 +1017,7 @@ pub fn request_quit(app: &mut App) {
         });
     } else {
         app.quit = true;
+        app.dialog_return = None;
     }
 }
 
@@ -1084,6 +1131,7 @@ mod tests {
             "Ctrl+Shift+M",
             "Ctrl+Shift+S",
             "Ctrl+Shift+N",
+            "Ctrl+Shift+V",
             "Ctrl/Alt+Enter",
             "Ctrl+L",
             "Ctrl+Q",
@@ -1165,6 +1213,68 @@ mod tests {
         }
     }
 
+    /// `Ctrl+Q` used to be handled before anything else and to overwrite
+    /// `app.dialog`. Dropping a pending approval closes its channel, which the
+    /// agent reads as a rejection (`PendingApproval::resolve` doc) — so an
+    /// unrelated quit keystroke decided the request with no keystroke on it.
+    #[test]
+    fn ctrl_q_never_displaces_a_pending_approval() {
+        let mut app = crate::tui::test_app();
+        let request = ApprovalRequest {
+            id: 1,
+            kind: ApprovalKind::SendInput {
+                payload: "ls\n".to_string(),
+            },
+            question: String::new(),
+        };
+        let (tx, _rx) = oneshot::channel();
+        app.dialog = Some(Dialog::Approval(Box::new(PendingApproval { request, tx })));
+
+        request_quit(&mut app);
+
+        assert!(
+            matches!(app.dialog, Some(Dialog::Approval(_))),
+            "the request stays on screen"
+        );
+        assert!(!app.quit, "…and nothing quit behind it");
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|t| t.text.contains("pending request")),
+            "the user is told why: {:?}",
+            app.notices.toasts.last()
+        );
+    }
+
+    /// Declining the quit ask has to hand back the box it displaced, not leave
+    /// the user with a bare view and a lost half-typed form.
+    #[test]
+    fn declining_the_quit_ask_gives_back_the_dialog_it_displaced() {
+        let mut app = crate::tui::test_app();
+        app.dialog = Some(Dialog::Settings(AgentSettingsState::default()));
+
+        request_quit(&mut app);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Confirm {
+                kind: ConfirmKind::Quit,
+                ..
+            })
+        ));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(app.dialog, Some(Dialog::Settings(_))),
+            "the settings dialog comes back: {:?}",
+            app.dialog.is_some()
+        );
+        assert!(!app.quit);
+    }
+
     fn overlay_text(lines: &[Line<'static>]) -> String {
         lines
             .iter()
@@ -1240,6 +1350,21 @@ mod tests {
     }
 
     /// Both languages of every dialog message carry text and differ.
+    /// The link can drop between the ask and the `y`. `send_text` then
+    /// refuses the payload behind its own gate — on purpose, since a
+    /// keystroke per "session gone" was the bug that gate fixed — so the
+    /// one-shot command has to be the one that says it did not go.
+    #[test]
+    fn confirming_a_reboot_with_the_link_gone_reports_that_nothing_was_sent() {
+        let mut app = crate::tui::test_app();
+        app.state = crate::event::ConnectionState::Disconnected;
+
+        confirm(&mut app, ConfirmKind::Reboot);
+
+        let toast = app.notices.toasts.last().expect("it explains itself");
+        assert_eq!(toast.text, t(DLG_NOT_SENT, app.lang()));
+    }
+
     #[test]
     fn every_dlg_message_is_translated() {
         super::super::i18n::assert_bilingual(ALL);

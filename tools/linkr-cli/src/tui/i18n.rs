@@ -147,15 +147,26 @@ macro_rules! strings {
 
 pub(crate) use strings;
 
+/// Messages whose two columns are identical **on purpose**: the web panel
+/// keeps `Full Auto` untranslated in Chinese and prints the literal `Auto` in
+/// both languages (`web/agent_panel.js:44` → `fullAuto: ["Full Auto", "Full
+/// Auto"]`, `:457` → `executionMode === "auto" ? "Auto" : text(...)`).
+/// Everywhere else a copied English string really is a missing translation.
+const SAME_TEXT_BY_DESIGN: &[&str] = &["MODE_AUTO", "MODE_FULL_AUTO", "ASST_MODE_FULL_AUTO"];
+
 /// Invariants of a message table (called by each view's own test): unique
 /// constant names, text in both languages, and nothing left untranslated — a
-/// copied English string is a missing translation, not a translation.
+/// copied English string is a missing translation, not a translation. Entries
+/// listed in [`SAME_TEXT_BY_DESIGN`] are exempt from the last rule only.
 pub fn assert_bilingual(all: &[(&str, Entry)]) {
     let mut seen = std::collections::HashSet::new();
     for (name, entry) in all {
         assert!(seen.insert(*name), "duplicate message constant {name}");
         assert!(!entry[0].trim().is_empty(), "{name}: empty english text");
         assert!(!entry[1].trim().is_empty(), "{name}: empty chinese text");
+        if SAME_TEXT_BY_DESIGN.contains(name) {
+            continue;
+        }
         assert_ne!(
             entry[0], entry[1],
             "{name} was never translated: {}",
@@ -180,8 +191,8 @@ strings! {
     SCROLL_HINT => "PgUp/PgDn pages this pane", "PgUp/PgDn 翻动此窗格";
     MSG_SAVE_SETTINGS => "Could not save settings: {}", "设置保存失败：{}";
     MODE_MANUAL => "Manual", "手动";
-    MODE_AUTO => "Auto", "自动";
-    MODE_FULL_AUTO => "Full Auto", "全自动";
+    MODE_AUTO => "Auto", "Auto";
+    MODE_FULL_AUTO => "Full Auto", "Full Auto";
     MODE_LABEL => "mode: {}", "模式：{}";
 }
 

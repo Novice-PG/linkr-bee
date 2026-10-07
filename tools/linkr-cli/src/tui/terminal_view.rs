@@ -95,6 +95,10 @@ pub struct GridView {
     pub lines: Vec<Line<'static>>,
     /// Cursor position relative to the first rendered row, when visible.
     pub cursor: Option<(u16, u16)>,
+    /// Absolute row of `lines[0]`, in the same numbering [`TermGrid::row_at`]
+    /// answers in: the handle a selection needs to know whether it is on
+    /// screen, and which of its rows are.
+    pub start: usize,
 }
 
 struct AltScreen {
@@ -212,15 +216,28 @@ impl TermGrid {
         self.clipboard.take()
     }
 
+    /// `ESC 8` / `CSI u` / `CSI ?1048l` / `CSI ?1049l`: put the saved cursor
+    /// back, bounded by the grid it may predate (a shrink while it was parked
+    /// would otherwise land past the last column and abort on the next erase).
+    fn restore_cursor(&mut self) {
+        self.cursor = (
+            self.saved_cursor.0.min(self.rows - 1),
+            self.saved_cursor.1.min(self.cols - 1),
+        );
+    }
+
     /// Feed raw UART bytes through the VT parser, keeping a capped copy for
     /// "Save Log" (`state.logBytes` in the web client).
     pub fn feed(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
-            if self.local_log.len() + bytes.len() > LOG_CAP_BYTES {
-                let drop = LOG_CAP_BYTES / 2;
+            self.local_log.extend_from_slice(bytes);
+            if self.local_log.len() > LOG_CAP_BYTES {
+                // Amortise: drop the usual half, but never less than the
+                // overflow — one chunk bigger than the cap (a pasted log) used
+                // to park the ring above its limit for good.
+                let drop = (LOG_CAP_BYTES / 2).max(self.local_log.len() - LOG_CAP_BYTES);
                 self.local_log.drain(..drop.min(self.local_log.len()));
             }
-            self.local_log.extend_from_slice(bytes);
         }
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
@@ -286,6 +303,11 @@ impl TermGrid {
         self.rows = rows;
         self.cursor.0 = self.cursor.0.min(rows - 1);
         self.cursor.1 = self.cursor.1.min(cols - 1);
+        // The saved cursor is restored by `CSI u` / `ESC 8` / `?1048l` / `?1049l`
+        // straight into `self.cursor`, so it has to survive the same shrink or
+        // the next erase/insert indexes past the end of a row and aborts.
+        self.saved_cursor.0 = self.saved_cursor.0.min(rows - 1);
+        self.saved_cursor.1 = self.saved_cursor.1.min(cols - 1);
         self.top_margin = 0;
         self.bottom_margin = rows - 1;
         self.wrap_pending = false;
@@ -603,13 +625,55 @@ impl TermGrid {
             None
         };
 
-        GridView { lines, cursor }
+        GridView {
+            lines,
+            cursor,
+            start,
+        }
+    }
+
+    /// Absolute row shown `view_row` rows into the viewport — the inverse of
+    /// what [`Self::render`] does, so a mouse press can be mapped back into
+    /// the numbering the content is stored in.
+    pub fn row_at(&self, viewport_rows: u16, offset: usize, view_row: u16) -> Option<usize> {
+        let max_offset = if self.alt.is_some() {
+            0
+        } else {
+            self.scrollback.len()
+        };
+        let offset = offset.min(max_offset);
+        let end = self.total_lines().saturating_sub(offset);
+        let start = end.saturating_sub(viewport_rows as usize);
+        start
+            .checked_add(view_row as usize)
+            .filter(|row| *row < end)
+    }
+
+    /// Text of one absolute row: what the pane draws for it, styleless
+    /// trailing blanks and all dropped but styled ones kept, so a selection
+    /// copies exactly the cells the block covers.
+    pub fn row_text(&self, index: usize) -> String {
+        let row: &[Cell] = if index < self.scrollback.len() {
+            &self.scrollback[index]
+        } else {
+            match self.screen_ref().get(index - self.scrollback.len()) {
+                Some(row) => row,
+                None => return String::new(),
+            }
+        };
+        cells_to_text(row)
     }
 }
 
-fn cells_to_line(cells: &[Cell]) -> Line<'static> {
-    // Trailing default-styled blanks are dropped: they would only add dead
-    // space and extra spans to every row of the pane.
+/// The prefix of `cells` that is actually drawn: a trailing blank with no
+/// style at all is dead space, while a blank that carries one is a reversed
+/// cell or a coloured block — it is on screen, so it counts.
+///
+/// [`cells_to_line`] and [`cells_to_text`] share it on purpose. They used to
+/// trim differently, so a selection whose cells were all styled blanks lit
+/// up under the block and then copied an empty string: the highlight showed
+/// what the copy refused to take.
+fn visible_cells(cells: &[Cell]) -> &[Cell] {
     let keep = cells
         .iter()
         .rposition(|cell| {
@@ -621,7 +685,11 @@ fn cells_to_line(cells: &[Cell]) -> Line<'static> {
         })
         .map(|index| index + 1)
         .unwrap_or(0);
-    let cells = &cells[..keep];
+    &cells[..keep]
+}
+
+fn cells_to_line(cells: &[Cell]) -> Line<'static> {
+    let cells = visible_cells(cells);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
@@ -810,11 +878,11 @@ impl Perform for TermGrid {
                 } else {
                     bottom
                 };
-                self.cursor.0 = (self.cursor.0 + n).min(ceil);
+                self.cursor.0 = self.cursor.0.saturating_add(n).min(ceil);
                 self.wrap_pending = false;
             }
             'C' => {
-                self.cursor.1 = (self.cursor.1 + n).min(cols - 1);
+                self.cursor.1 = self.cursor.1.saturating_add(n).min(cols - 1);
                 self.wrap_pending = false;
             }
             'D' => {
@@ -823,7 +891,7 @@ impl Perform for TermGrid {
             }
             'E' => {
                 self.cursor.1 = 0;
-                self.cursor.0 = (self.cursor.0 + n).min(bottom);
+                self.cursor.0 = self.cursor.0.saturating_add(n).min(bottom);
                 self.wrap_pending = false;
             }
             'F' => {
@@ -874,7 +942,7 @@ impl Perform for TermGrid {
             }
             's' => self.saved_cursor = self.cursor,
             'u' => {
-                self.cursor = self.saved_cursor;
+                self.restore_cursor();
                 self.wrap_pending = false;
             }
             'm' => self.sgr(params),
@@ -908,7 +976,7 @@ impl Perform for TermGrid {
         match (intermediates, byte) {
             ([], b'7') => self.saved_cursor = self.cursor,
             ([], b'8') => {
-                self.cursor = self.saved_cursor;
+                self.restore_cursor();
                 self.wrap_pending = false;
             }
             ([], b'D') => {
@@ -992,7 +1060,7 @@ impl TermGrid {
                 if set {
                     self.saved_cursor = self.cursor;
                 } else {
-                    self.cursor = self.saved_cursor;
+                    self.restore_cursor();
                 }
             }
             1049 => {
@@ -1011,7 +1079,7 @@ impl TermGrid {
                     }
                 } else if let Some(alt) = self.alt.take() {
                     self.screen = alt.screen;
-                    self.cursor = self.saved_cursor;
+                    self.restore_cursor();
                 }
             }
             _ => {}
@@ -1126,13 +1194,11 @@ fn color_from_slice(values: &[u16]) -> Palette {
 
 /// Serialize a line of cells back to plain text (used by "copy").
 pub fn cells_to_text(cells: &[Cell]) -> String {
-    cells
+    visible_cells(cells)
         .iter()
         .filter(|c| !c.is_continuation())
         .map(|c| c.ch)
-        .collect::<String>()
-        .trim_end()
-        .to_string()
+        .collect()
 }
 
 /// Encode `text` for the OSC 52 clipboard write the way `web/terminal_keys.js`
@@ -1143,6 +1209,76 @@ pub fn osc52_write(text: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
+/// A mouse selection over the terminal pane, in grid coordinates: the
+/// absolute row (scrollback counted first, then screen rows) and the display
+/// column inside it.
+///
+/// Absolute rows rather than viewport rows: the selection belongs to the
+/// *content*, so scrolling the pane under it must keep the highlight on the
+/// same text instead of sliding it onto whatever scrolled into view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// Where the press landed.
+    pub anchor: (usize, usize),
+    /// Where the pointer is now.
+    pub focus: (usize, usize),
+    /// Set when a double click settled on a run of its own: even a one-cell
+    /// word is a *selection*, where an `anchor == focus` would read as the
+    /// click that lit nothing up and copied nothing.
+    pub word: bool,
+}
+
+impl Selection {
+    /// Press point and current point, ordered top-left first — a drag may
+    /// run backwards or up a row and still covers one stretch of text.
+    pub fn range(&self) -> ((usize, usize), (usize, usize)) {
+        if (self.anchor.0, self.anchor.1) <= (self.focus.0, self.focus.1) {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    /// A press that never moved is a *click*, not a selection: it clears what
+    /// was highlighted and copies nothing. A word a double click chose is a
+    /// selection even when its run is a single cell wide.
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.focus && !self.word
+    }
+}
+
+/// Cut `text` to the display columns `[from, to)` (`None` = to the end),
+/// never splitting a glyph: a wide character straddling an edge comes out
+/// whole, the way a terminal highlights it.
+fn slice_columns(text: &str, from: usize, to: Option<usize>) -> String {
+    let to = to.unwrap_or(usize::MAX);
+    let mut out = String::new();
+    let mut column = 0usize;
+    for ch in text.chars() {
+        if column >= to {
+            break;
+        }
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if column + width > from {
+            out.push(ch);
+        }
+        column += width;
+    }
+    out
+}
+
+/// What a double click grabs: a run of word characters, of whitespace, or of
+/// the same punctuation — never a mixture of the three.
+fn word_class(ch: char) -> u8 {
+    if ch.is_alphanumeric() || "_-./~:@#%+=".contains(ch) {
+        1
+    } else if ch.is_whitespace() {
+        2
+    } else {
+        3
+    }
+}
+
 /// The center pane's state: VT grid plus scroll position and autoscroll.
 pub struct TerminalPane {
     pub grid: TermGrid,
@@ -1151,7 +1287,20 @@ pub struct TerminalPane {
     pub autoscroll: bool,
     /// Last (cols, rows) reported to the session for geometry sync.
     pub dims: (u16, u16),
+    /// The drag selection, held here rather than by the host terminal: with
+    /// mouse capture on the host has no selection of its own to offer, and a
+    /// repaint would wipe it anyway.
+    pub selection: Option<Selection>,
+    /// A press in the pane opened this gesture. The release only copies when
+    /// one did, so a stray `Up` elsewhere cannot re-send what is on screen.
+    dragging: bool,
+    /// When and where the previous press landed, so a double click can be
+    /// told from two clicks — crossterm reports no click count.
+    last_click: Option<(std::time::Instant, (usize, usize))>,
 }
+
+/// Two presses inside this window on the same cell count as a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl TerminalPane {
     pub fn new(autoscroll: bool) -> Self {
@@ -1160,7 +1309,119 @@ impl TerminalPane {
             offset: 0,
             autoscroll,
             dims: (80, 24),
+            selection: None,
+            dragging: false,
+            last_click: None,
         }
+    }
+
+    /// A press landed on a cell: start a selection there, or — on a double
+    /// click — grab the whole word under it.
+    pub fn begin_selection(&mut self, row: usize, col: usize) {
+        let double = self
+            .last_click
+            .is_some_and(|(at, cell)| at.elapsed() < DOUBLE_CLICK && cell == (row, col));
+        self.last_click = Some((std::time::Instant::now(), (row, col)));
+        self.dragging = true;
+        let word = if double { self.word_at(row, col) } else { None };
+        self.selection = Some(match word {
+            Some((from, to)) if to > from => Selection {
+                anchor: (row, from),
+                focus: (row, to - 1),
+                word: true,
+            },
+            // A plain press selects nothing until it is dragged: that is what
+            // makes a click able to *clear* a selection without copying a
+            // single character.
+            _ => Selection {
+                anchor: (row, col),
+                focus: (row, col),
+                word: false,
+            },
+        });
+    }
+
+    /// The pointer moved with the button down: stretch the selection to it.
+    pub fn extend_selection(&mut self, row: usize, col: usize) {
+        let previous = self.selection.unwrap_or(Selection {
+            anchor: (row, col),
+            focus: (row, col),
+            word: false,
+        });
+        self.selection = Some(Selection {
+            anchor: previous.anchor,
+            focus: (row, col),
+            // A word stays a word while the drag is on, so letting the
+            // pointer fall back where it started does not turn the selection
+            // into the click that would clear it.
+            word: previous.word,
+        });
+    }
+
+    pub fn clear_selection(&mut self) {
+        // `last_click` deliberately survives: a click *is* half of the double
+        // click that may come next, and dropping it here would turn every
+        // second click into a first one.
+        self.selection = None;
+    }
+
+    /// Is a press that started in the pane still down?
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// Ends the gesture and reports whether one was open.
+    pub fn take_dragging(&mut self) -> bool {
+        std::mem::take(&mut self.dragging)
+    }
+
+    /// The selected text: whole rows in between, the first and the last cut
+    /// to the selected display columns, rows joined the way a terminal copies
+    /// a block.
+    pub fn selection_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        if selection.is_empty() {
+            return None;
+        }
+        let ((start_row, start_col), (end_row, end_col)) = selection.range();
+        let mut rows: Vec<String> = Vec::with_capacity(end_row - start_row + 1);
+        for row in start_row..=end_row {
+            let text = self.grid.row_text(row);
+            let from = if row == start_row { start_col } else { 0 };
+            let to = if row == end_row {
+                Some(end_col + 1)
+            } else {
+                None
+            };
+            rows.push(slice_columns(&text, from, to));
+        }
+        Some(rows.join("\n"))
+    }
+
+    /// Display columns `[from, to)` of the run under `(row, col)`, or `None`
+    /// when the cell is past the end of the row.
+    fn word_at(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let text = self.grid.row_text(row);
+        let mut cells: Vec<(char, usize, usize)> = Vec::with_capacity(text.chars().count());
+        let mut column = 0usize;
+        for ch in text.chars() {
+            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            cells.push((ch, column, width));
+            column += width;
+        }
+        let clicked = cells
+            .iter()
+            .position(|(_, start, width)| col >= *start && col < start + width)?;
+        let class = word_class(cells[clicked].0);
+        let mut first = clicked;
+        let mut last = clicked;
+        while first > 0 && word_class(cells[first - 1].0) == class {
+            first -= 1;
+        }
+        while last + 1 < cells.len() && word_class(cells[last + 1].0) == class {
+            last += 1;
+        }
+        Some((cells[first].1, cells[last].1 + cells[last].2))
     }
 
     /// Feed received UART bytes; autoscroll pins the view to the bottom.
@@ -1194,6 +1455,10 @@ impl TerminalPane {
     pub fn clear(&mut self) {
         self.grid.clear_pane();
         self.offset = 0;
+        // The rows the selection names are gone with it (`Ctrl+L`, palette
+        // Clear): keeping the range would repaint a highlight over whatever
+        // the pane happens to show next.
+        self.selection = None;
     }
 
     /// Resize the grid; returns `true` when the size changed (the caller then
@@ -1584,6 +1849,52 @@ mod tests {
     }
 
     #[test]
+    fn one_chunk_bigger_than_the_cap_cannot_park_the_ring_above_it() {
+        let mut g = TermGrid::new(4, 2);
+        let chunk = vec![b'x'; LOG_CAP_BYTES + 1024 * 1024];
+        g.feed(&chunk);
+        assert!(
+            g.log_bytes().len() <= LOG_CAP_BYTES,
+            "a single oversized chunk must not leave {} bytes",
+            g.log_bytes().len()
+        );
+        g.feed(b"tail");
+        assert!(g.log_bytes().len() <= LOG_CAP_BYTES);
+    }
+
+    #[test]
+    fn a_saved_cursor_from_a_wider_grid_survives_a_shrink() {
+        for restore in [b"\x1b8".as_slice(), b"\x1b[u", b"\x1b[?1048l"] {
+            let mut g = TermGrid::new(20, 4);
+            // Park a saved cursor where an 8-column grid cannot reach (row 3, col 17).
+            g.feed(b"\x1b[3;17H\x1b7");
+            g.resize(8, 4);
+            g.feed(restore);
+            // The first erase/insert after a stale restore used to index past
+            // the end of the row (`&mut line[col..]`, `line.insert(col, …)`),
+            // which `panic = "abort"` turns into a dead process.
+            g.feed(b"\x1b[5@\x1b[5X\x1b[J");
+            assert!(
+                g.cursor.0 < 4 && g.cursor.1 < 8,
+                "restored {restore:?} -> {:?}",
+                g.cursor
+            );
+            assert_eq!(g.screen[2].len(), 8, "row width survives {restore:?}");
+        }
+    }
+
+    #[test]
+    fn saturated_cursor_motion_params_clamp_instead_of_wrapping() {
+        let mut g = TermGrid::new(20, 6);
+        g.feed(b"\x1b[5;1H\x1b[65535B");
+        assert_eq!(g.cursor.0, 5, "cursor-down clamps to the margin");
+        g.feed(b"\x1b[65535C");
+        assert_eq!(g.cursor.1, 19, "cursor-forward clamps to the last column");
+        g.feed(b"\x1b[65535E");
+        assert_eq!(g.cursor, (5, 0), "next-line clamps to the margin");
+    }
+
+    #[test]
     fn clear_pane_keeps_the_log_ring() {
         let mut g = TermGrid::with_scrollback(6, 2, 10);
         g.feed(b"hello\r\nworld\r\n");
@@ -1614,6 +1925,206 @@ mod tests {
     fn prepare_line_translates_enter_and_echoes_raw_text() {
         assert_eq!(prepare_line("help\n", EnterMode::Raw, true), b"help\n");
         assert_eq!(prepare_line("help\n", EnterMode::Crlf, false), b"help\r\n");
+    }
+
+    // --- mouse selection (P8) ---------------------------------------------
+
+    fn pane() -> TerminalPane {
+        let mut pane = TerminalPane::new(false);
+        pane.grid
+            .feed(b"alpha beta\r\nwide \xE4\xB8\xADx here\r\nthird row\r\n");
+        pane
+    }
+
+    #[test]
+    fn a_backwards_drag_still_names_one_stretch_of_text() {
+        let selection = Selection {
+            anchor: (2, 9),
+            focus: (0, 3),
+            word: false,
+        };
+        assert_eq!(selection.range(), ((0, 3), (2, 9)));
+        assert!(!selection.is_empty());
+    }
+
+    #[test]
+    fn a_press_that_never_moved_is_a_click_and_not_a_selection() {
+        let mut pane = pane();
+        pane.begin_selection(0, 4);
+        assert!(pane.is_dragging());
+        assert_eq!(
+            pane.selection,
+            Some(Selection {
+                anchor: (0, 4),
+                focus: (0, 4),
+                word: false,
+            })
+        );
+        assert_eq!(pane.selection_text(), None, "a click copies nothing");
+    }
+
+    #[test]
+    fn selection_text_cuts_both_ends_and_keeps_the_rows_between() {
+        let mut pane = pane();
+        pane.begin_selection(0, 6); // the "b" of "beta"
+        pane.extend_selection(1, 3); // the last cell of "wide"
+
+        assert_eq!(pane.selection_text().as_deref(), Some("beta\nwide"));
+    }
+
+    #[test]
+    fn a_selection_edge_never_splits_a_wide_glyph() {
+        let mut pane = pane();
+        // Row 1 is "wide 中x here": 中 sits on display columns 5 and 6.
+        pane.begin_selection(1, 5);
+        pane.extend_selection(1, 7);
+        assert_eq!(pane.selection_text().as_deref(), Some("中x"));
+
+        // Starting *inside* the glyph still takes the whole of it, because a
+        // half-painted block character is not the character the user picked.
+        pane.begin_selection(1, 6);
+        pane.extend_selection(1, 7);
+        assert_eq!(pane.selection_text().as_deref(), Some("中x"));
+    }
+
+    #[test]
+    fn a_drag_stretches_the_selection_from_the_press() {
+        let mut pane = pane();
+        pane.begin_selection(1, 7);
+        pane.extend_selection(0, 0);
+        pane.extend_selection(0, 0); // dragged back to the very start
+
+        assert_eq!(
+            pane.selection,
+            Some(Selection {
+                anchor: (1, 7),
+                focus: (0, 0),
+                word: false,
+            })
+        );
+        assert_eq!(
+            pane.selection_text().as_deref(),
+            Some("alpha beta\nwide 中x")
+        );
+    }
+
+    #[test]
+    fn a_double_click_grabs_the_whole_word_under_the_cell() {
+        let mut pane = pane();
+        pane.begin_selection(0, 7); // inside "beta", first press
+        assert!(pane.selection.unwrap().is_empty());
+
+        pane.begin_selection(0, 7); // again, right away
+        assert_eq!(pane.selection_text().as_deref(), Some("beta"));
+    }
+
+    /// A double click on a word one cell wide is still a selection: with
+    /// `anchor == focus` it read as a plain click, so the cell lit nothing
+    /// up and the release that follows copied nothing.
+    #[test]
+    fn a_double_click_on_a_single_character_word_still_copies_it() {
+        let mut pane = TerminalPane::new(false);
+        pane.grid.feed(b"a b\r\n");
+
+        pane.begin_selection(0, 0); // first press
+        pane.begin_selection(0, 0); // again, right away
+
+        let selection = pane.selection.expect("a selection was made");
+        assert!(!selection.is_empty(), "one cell wide is still a word");
+        assert_eq!(pane.selection_text().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn two_clicks_apart_in_time_are_not_a_double_click() {
+        let mut pane = pane();
+        pane.begin_selection(0, 7);
+        std::thread::sleep(std::time::Duration::from_millis(520));
+        pane.begin_selection(0, 7);
+
+        assert!(pane.selection.unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismissing_a_selection_keeps_the_memory_of_the_press() {
+        let mut pane = pane();
+        pane.begin_selection(0, 7);
+        pane.clear_selection();
+
+        // The click that dismissed it *is* the first half of a double click.
+        pane.begin_selection(0, 7);
+        assert_eq!(pane.selection_text().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn the_gesture_ends_on_release_whether_or_not_there_was_a_selection() {
+        let mut pane = pane();
+        assert!(!pane.is_dragging());
+        pane.begin_selection(0, 0);
+        assert!(pane.is_dragging());
+        assert!(pane.take_dragging());
+        assert!(!pane.take_dragging(), "one release ends one gesture");
+    }
+
+    /// A styled blank is still a cell the block lights up, so it has to be
+    /// in the copy. The renderer kept those cells and the copy trimmed them,
+    /// which made a selection over reversed padding light up and then hand
+    /// back nothing at all.
+    #[test]
+    fn a_selection_over_styled_blanks_copies_what_it_lights_up() {
+        let mut pane = TerminalPane::new(false);
+        pane.grid.feed(b"a\x1b[41m  \x1b[0m\r\n");
+        assert_eq!(pane.grid.row_text(0), "a  ", "the red blocks are drawn");
+
+        pane.begin_selection(0, 1);
+        pane.extend_selection(0, 2);
+
+        assert_eq!(pane.selection_text().as_deref(), Some("  "));
+    }
+
+    /// `Ctrl+L` empties the pane, so the range that named its rows goes with
+    /// it: a highlight left behind would be painted over whatever the pane
+    /// shows next.
+    #[test]
+    fn clearing_the_pane_takes_the_selection_with_it() {
+        let mut pane = pane();
+        pane.begin_selection(0, 0);
+        pane.extend_selection(1, 3);
+        assert!(pane.selection.is_some(), "the test needs a selection");
+
+        pane.clear();
+
+        assert!(pane.selection.is_none());
+        assert!(pane.selection_text().is_none(), "…and nothing left to copy");
+    }
+
+    #[test]
+    fn row_at_names_the_row_the_viewport_shows() {
+        let mut grid = TermGrid::with_scrollback(10, 4, 20);
+        grid.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
+        assert!(grid.scrollback_len() > 0, "the test needs a scrollback");
+
+        for offset in [0usize, 2, grid.scrollback_len()] {
+            for viewport in [1u16, 4] {
+                let view = grid.render(viewport, offset);
+                for (index, _) in view.lines.iter().enumerate() {
+                    assert_eq!(
+                        grid.row_at(viewport, offset, index as u16),
+                        Some(view.start + index),
+                        "viewport {viewport} offset {offset} row {index}"
+                    );
+                }
+                // One row past what is drawn is off the end of the grid.
+                assert_eq!(grid.row_at(viewport, offset, view.lines.len() as u16), None);
+                if let Some(first) = view.lines.first() {
+                    let shown: String = first
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect();
+                    assert_eq!(grid.row_text(view.start), shown);
+                }
+            }
+        }
     }
 
     /// The grid renders device output and protocol bytes only, so its table

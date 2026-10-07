@@ -11,6 +11,7 @@
 
 pub mod agent_settings;
 pub mod assistant_view;
+pub mod clipboard;
 pub mod connect;
 pub mod diagnostics_view;
 pub mod dialogs;
@@ -31,7 +32,10 @@ use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -114,6 +118,17 @@ strings! {
     MOD_DISCONNECTED => "Disconnected: {}", "连接已断开：{}";
     MOD_CONN_FAILED => "Connection failed: {}", "连接失败：{}";
     MOD_CLEARED => "Terminal cleared.", "终端已清屏。";
+    // Said when `Ctrl+Shift+V` could not read the system clipboard, which is
+    // the only way a TUI can fail that key: the web wording without its
+    // touch-screen advice (`web/app.js` → `pasteUnavailable`).
+    MOD_PASTE_UNAVAILABLE => "Clipboard unavailable. Use your terminal's paste key.",
+        "无法读取剪贴板，请改用你终端的粘贴键。";
+    // Said when an inbound `OSC 52` asked this machine to copy something and
+    // no clipboard helper took it: a headless box, or a desktop without
+    // `wl-copy` / `xclip` / `xsel`. Silent there would leave the device
+    // believing the copy landed.
+    MOD_CLIP_WRITE_FAILED => "The device asked to copy to this machine's clipboard; no clipboard helper is available.",
+        "设备请求写入本机剪贴板，但本机没有可用的剪贴板工具。";
     MOD_NEED_BLE_DIAG => "Connect over BLE to read diagnostics.", "请通过 BLE 连接后再读取诊断。";
     MOD_CJK_WIDE => "CJK probe: glyphs take two columns here.",
         "CJK 探测：本终端把宽字形按 2 列绘制。";
@@ -215,6 +230,7 @@ impl Drop for ScreenGuard {
         if self.keyboard_enhanced {
             let _ = crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
         }
+        let _ = crossterm::execute!(out, crossterm::event::DisableMouseCapture);
         let _ = crossterm::execute!(out, crossterm::event::DisableBracketedPaste);
         let _ = crossterm::execute!(out, LeaveAlternateScreen);
         let _ = crossterm::terminal::disable_raw_mode();
@@ -250,9 +266,15 @@ fn ui_session(rt: Arc<tokio::runtime::Runtime>, ctx: TuiContext) -> i32 {
             return 1;
         }
     };
-    if let Err(err) =
-        crossterm::execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)
-    {
+    if let Err(err) = crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        event::EnableBracketedPaste,
+        // Mouse capture is what makes the pane able to hold its own selection
+        // (`handle_mouse`): the host stops reporting clicks to itself, and the
+        // drag — not the host's — is what gets copied on release.
+        event::EnableMouseCapture
+    ) {
         eprintln!("linkr: cannot enter the alternate screen: {err}");
         drop(raw);
         return 1;
@@ -328,6 +350,7 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         assistant: assistant_view::AssistantState::default(),
         palette: None,
         dialog: None,
+        dialog_return: None,
         notices: Notices::default(),
         exec_mode: crate::agent::ExecMode::Auto,
         broker: dialogs::TuiBroker::new(),
@@ -344,6 +367,8 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         lan_device: None,
         center_height: 24,
         center_width: 80,
+        center_x: 0,
+        center_y: 0,
         screen_height: 24,
         center_scroll: 0,
     };
@@ -457,6 +482,9 @@ fn event_loop(
         app.refresh_info();
         auto_diagnostics(&mut app);
         prefill_lan_host(&mut app);
+        // Host edits reach disk only once the field has sat still (see
+        // `sidebar::HOST_PERSIST_SETTLE`); this is where the pause runs them.
+        sidebar::poll(&mut app, Instant::now());
 
         // 3. Terminal input (blocked at most one frame per key press).
         match event::poll(TICK) {
@@ -472,6 +500,10 @@ fn event_loop(
                 Ok(Event::Paste(text)) => {
                     io_budget.ok();
                     paste(&mut app, &mut sticky, &text);
+                }
+                Ok(Event::Mouse(mouse)) => {
+                    io_budget.ok();
+                    handle_mouse(&mut app, &mut sticky, mouse);
                 }
                 Ok(_) => io_budget.ok(),
                 Err(err) => {
@@ -527,6 +559,9 @@ fn event_loop(
 
     // Teardown: stop the assistant, hang up politely, let the disconnect
     // command reach the transport before the caller's runtime disappears.
+    // First, a host typed in the last `HOST_PERSIST_SETTLE` has not reached
+    // `tui.json` yet — it must not be dropped with the process.
+    sidebar::flush(&mut app);
     if let Some(agent) = app.agent.take() {
         agent.handle.stop();
     }
@@ -547,6 +582,25 @@ fn on_core_event(app: &mut App, event: CoreEvent) {
                 app.watch.feed_bytes(&bytes, at_ms);
             }
             app.terminal.feed(&bytes);
+            // Two things the device is still waiting on used to pile up in
+            // the grid with no caller anywhere in the crate: the terminal's
+            // own answers to `DSR`/`CPR` (`take_pending_reports`, so a program
+            // asking where the cursor was waited forever) and the payload of
+            // an inbound `OSC 52` (`take_clipboard`, so a device setting the
+            // host clipboard did nothing).
+            let reports = app.terminal.grid.take_pending_reports();
+            if !reports.is_empty() {
+                app.send_bytes(reports);
+            }
+            if let Some(payload) = app.terminal.grid.take_clipboard() {
+                if !clipboard::write(&payload) {
+                    let lang = app.lang();
+                    app.notices.push(
+                        NoticeLevel::Warn,
+                        t(MOD_CLIP_WRITE_FAILED, lang).to_string(),
+                    );
+                }
+            }
         }
         CoreEvent::Connection { state, detail } => {
             app.info = app.session.info();
@@ -601,7 +655,7 @@ fn prefill_lan_host(app: &mut App) {
         // and the IP in hand for one `lanTokens.capture(deviceId, token, ip)`,
         // ours arrive on their own schedules (`@s?` may still be in flight,
         // in which case the reply above writes the alias instead).
-        let token = app.sidebar.lan_token.text.clone();
+        let token = app.sidebar.lan_token.as_str().to_string();
         if let (Some(device), false) = (app.lan_device.clone(), token.is_empty()) {
             let mut store = lan_token_store::TokenStore::load();
             let _ = store.capture(&device, &token, &ip);
@@ -682,7 +736,7 @@ fn poll_lan_token(app: &mut App) {
     let Some(device) = app.lan_device.clone() else {
         return;
     };
-    let host = app.sidebar.lan_host.text.clone();
+    let host = app.sidebar.lan_host.as_str().to_string();
     let mut store = lan_token_store::TokenStore::load();
     let previous = store.select_device(&device).map(str::to_string);
     let replace =
@@ -704,12 +758,194 @@ fn sync_geometry(app: &mut App, area: Rect) {
     let (_sidebar, center) = layout::columns(body, area.width >= 60);
     app.center_height = center.height;
     app.center_width = center.width;
+    app.center_x = center.x;
+    app.center_y = center.y;
     let (cols, rows) =
         terminal_view::grid_dims(center.width, center.height, app.settings.font_size);
     if app.terminal.sync_size(cols, rows) {
         app.session.set_terminal_size(cols, rows);
         app.force_redraw = true;
     }
+}
+
+/// Mouse input: a drag in the terminal pane makes a selection of its own, and
+/// the wheel scrolls whatever is under the pointer.
+///
+/// The host terminal's own selection is out of reach once mouse capture is on
+/// (`EnableMouseCapture`) — and a repaint would have wiped it anyway, which is
+/// exactly the "I selected it, then it was gone" of P8 — so the selection
+/// lives here, in grid coordinates, and **releasing the button** is what
+/// copies it. That is the web's `copyBtn` contract (`web/app.js:3559`: read
+/// the selection, `clipboard.writeText`, toast) with the button replaced by
+/// the gesture itself.
+fn handle_mouse(app: &mut App, sticky: &mut StickyMods, mouse: MouseEvent) {
+    if matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        let key = wheel_key(app, mouse.kind == MouseEventKind::ScrollUp);
+        handle_key(app, sticky, key);
+        return;
+    }
+    // The release ends the gesture wherever it lands, so it is handled
+    // **before** the overlay guard below: that guard swallows the event when
+    // a box opens over the pane (or the view switches) mid-drag, which left
+    // `dragging` set — and the next stray release then re-sent a selection
+    // the user had already dismissed, the exact thing
+    // `a_release_with_no_press_behind_it_never_re_sends…` forbids, one path
+    // further along.
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) && app.terminal.take_dragging() {
+        finish_selection(app);
+        return;
+    }
+    // Only the terminal pane has a grid to select in, and an overlay in front
+    // keeps its own clicks (Esc / Enter / the arrows still get through).
+    if app.dialog.is_some() || app.palette.is_some() || app.view != View::Terminal {
+        return;
+    }
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => match pane_cell(app, mouse.column, mouse.row) {
+            Some(cell) => {
+                // A click in the pane takes the keys back from wherever they
+                // were: selecting and typing belong to the same pane.
+                app.focus = Focus::Center;
+                app.terminal.begin_selection(cell.0, cell.1);
+            }
+            // A press *outside* the pane can only be the residue of a gesture
+            // whose release never reached us (a terminal need not report one
+            // let go beyond its window). It dies here rather than stretching
+            // over the sidebar and back into the pane.
+            None => {
+                app.terminal.take_dragging();
+            }
+        },
+        MouseEventKind::Drag(MouseButton::Left) if app.terminal.is_dragging() => {
+            let cell = pane_cell_clamped(app, mouse.column, mouse.row);
+            app.terminal.extend_selection(cell.0, cell.1);
+        }
+        // The release itself is handled above the guard: a press with no
+        // gesture behind it falls through here and does nothing.
+        _ => {}
+    }
+}
+
+/// Copy what the drag covered — or, for a press that never moved, drop the
+/// highlight and copy nothing. A click is how a selection is dismissed, so it
+/// has to stay free of side effects.
+///
+/// Returns what was copied, which is what the tests read: the escape sequence
+/// itself goes to stdout, on its way to the emulator running us.
+fn finish_selection(app: &mut App) -> Option<String> {
+    match app.terminal.selection_text() {
+        Some(text) if !text.is_empty() => {
+            copy_to_host(app, &text);
+            Some(text)
+        }
+        // A click, a drag that never left its cell, or no selection at all:
+        // nothing to send, and the highlight goes away — that is how a
+        // selection is dismissed.
+        _ => {
+            app.terminal.clear_selection();
+            None
+        }
+    }
+}
+
+/// What the wheel presses, so scrolling has one code path with the keys: the
+/// terminal scrolls its own scrollback (which needs `Shift`), the lists take
+/// the plain paging keys, the sidebar and the palette take the arrows.
+fn wheel_key(app: &App, up: bool) -> KeyEvent {
+    let code = if up {
+        KeyCode::PageUp
+    } else {
+        KeyCode::PageDown
+    };
+    let plain = KeyModifiers::NONE;
+    if app.palette.is_some() {
+        return KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, plain);
+    }
+    match app.focus {
+        Focus::Sidebar => KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, plain),
+        Focus::Center if app.view == View::Terminal => KeyEvent::new(code, KeyModifiers::SHIFT),
+        _ => KeyEvent::new(code, plain),
+    }
+}
+
+/// Screen coordinates → grid cell, `None` when the point is not on one.
+fn pane_cell(app: &App, column: u16, row: u16) -> Option<(usize, usize)> {
+    if column < app.center_x || row < app.center_y {
+        return None;
+    }
+    if column >= app.center_x.saturating_add(app.center_width)
+        || row >= app.center_y.saturating_add(app.center_height)
+    {
+        return None;
+    }
+    grid_cell(app, column - app.center_x, row - app.center_y)
+}
+
+/// The same mapping clamped into the pane: a drag or a release that runs past
+/// the edge keeps the far end of the selection *at* that edge instead of
+/// losing it the moment the pointer leaves the pane.
+fn pane_cell_clamped(app: &App, column: u16, row: u16) -> (usize, usize) {
+    let (cols, rows) =
+        terminal_view::grid_dims(app.center_width, app.center_height, app.settings.font_size);
+    let x = column
+        .saturating_sub(app.center_x)
+        .min(cols.saturating_sub(1));
+    let y = row.saturating_sub(app.center_y).min(rows.saturating_sub(1));
+    grid_cell(app, x, y).unwrap_or((0, 0))
+}
+
+/// Pane-relative coordinates → (absolute grid row, display column).
+fn grid_cell(app: &App, x: u16, y: u16) -> Option<(usize, usize)> {
+    let (cols, rows) =
+        terminal_view::grid_dims(app.center_width, app.center_height, app.settings.font_size);
+    let row = app.terminal.grid.row_at(rows, app.terminal.offset, y)?;
+    // With a font larger than the default the grid is narrower than the pane
+    // it is drawn in; a click past its last column belongs to no cell.
+    Some((row, usize::from(x.min(cols.saturating_sub(1)))))
+}
+
+/// Hand text to the *host* terminal's clipboard: `OSC 52` is addressed to the
+/// emulator this program runs inside, so it goes to stdout (the grid records
+/// it too, through the VT parser). Used by the palette's `term.copy` and by
+/// the selection's release.
+pub fn copy_to_host(app: &mut App, text: &str) {
+    let lang = app.lang();
+    let text = cap_osc52(text);
+    let payload = terminal_view::osc52_write(text.as_ref());
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    let outcome = out.write_all(payload.as_bytes()).and_then(|()| out.flush());
+    match outcome {
+        Ok(()) => app.toast(
+            NoticeLevel::Info,
+            tr!(t(palette::PAL_MSG_COPIED, lang), text.chars().count()),
+        ),
+        Err(err) => app.notices.push(
+            NoticeLevel::Error,
+            tr!(t(palette::PAL_MSG_COPY_FAILED, lang), err),
+        ),
+    }
+}
+
+/// What one `OSC 52` may carry. The scrollback ring holds up to 4 MiB and a
+/// selection may name all of it, but the write goes straight to the terminal
+/// on this thread — a payload that size would stall the frame loop behind a
+/// slow emulator. Cut on a glyph boundary; the toast counts what was actually
+/// sent, so a capped copy says the smaller number.
+const OSC52_MAX_BYTES: usize = 512 * 1024;
+
+fn cap_osc52(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.len() <= OSC52_MAX_BYTES {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut cut = OSC52_MAX_BYTES;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    std::borrow::Cow::Owned(text[..cut].to_string())
 }
 
 fn paste(app: &mut App, sticky: &mut StickyMods, text: &str) {
@@ -719,16 +955,13 @@ fn paste(app: &mut App, sticky: &mut StickyMods, text: &str) {
     // the text has to be written into that field, or not one character
     // arrives. Dropping it (what this did until 10-06) is why the AI config
     // refused Ctrl+V while the pane beside it took it happily.
+    if !accepts_paste(app) {
+        return;
+    }
     if field_has_focus(app) {
         for key in paste_keys(app, text) {
             handle_key(app, sticky, key);
         }
-        return;
-    }
-    if app.dialog.is_some() || app.palette.is_some() {
-        return;
-    }
-    if app.focus != Focus::Center || app.view != View::Terminal {
         return;
     }
     let plain = translate_enter(text.as_bytes(), app.settings.enter_mode);
@@ -745,6 +978,54 @@ fn paste(app: &mut App, sticky: &mut StickyMods, text: &str) {
         plain
     };
     app.send_bytes(payload);
+}
+
+/// Where a paste would land: a focused text field, or the pane itself with
+/// nothing over it. Split out of [`paste`] so `Ctrl+Shift+V` can decide
+/// *before* reading the clipboard whether there is anywhere to put it — and
+/// the answer has to be the one `paste` itself gives.
+fn accepts_paste(app: &App) -> bool {
+    if field_has_focus(app) {
+        return true;
+    }
+    !(app.dialog.is_some() || app.palette.is_some())
+        && app.focus == Focus::Center
+        && app.view == View::Terminal
+}
+
+/// `Ctrl+Shift+V`: put the system clipboard where the keyboard currently
+/// writes, which is what the web toolbar button does (`app.js` →
+/// `pasteTerminalButton` reads `navigator.clipboard.readText()` and toasts
+/// when the browser refuses it).
+///
+/// `read` is a *closure* for a reason: reaching for the clipboard means
+/// spawning helpers and waiting out their timeouts (`clipboard::read`, up to
+/// 1.5 s on the first one), so the gate has to decide before that cost is
+/// paid — otherwise a key that lands nowhere froze the loop and threw the
+/// answer away. `None` means no helper answered in time (see [`clipboard`]).
+/// There is no clipboard API to fall back on inside a terminal program, so
+/// the user is told instead — and the toast names the route that always
+/// exists, the emulator's own paste key, which arrives here as
+/// `Event::Paste`.
+fn request_paste(app: &mut App, sticky: &mut StickyMods, read: impl FnOnce() -> Option<String>) {
+    if !accepts_paste(app) {
+        // Same inertness as a bracketed paste with a confirmation open: an
+        // unanswered key must not report a failure either — and it must not
+        // pay for a clipboard read it is going to drop.
+        return;
+    }
+    match read() {
+        Some(text) if !text.is_empty() => {
+            // The web button calls `resetModifiers()` before pasting so an
+            // armed Ctrl cannot rewrite the first character.
+            *sticky = StickyMods::default();
+            paste(app, sticky, &text);
+        }
+        _ => app.toast(
+            NoticeLevel::Error,
+            t(MOD_PASTE_UNAVAILABLE, app.lang()).to_string(),
+        ),
+    }
 }
 
 /// True when a text field is what the keyboard currently drives — that is
@@ -771,7 +1052,11 @@ fn field_has_focus(app: &App) -> bool {
 /// only multiline one; every other control character is dropped too, since
 /// none of the fields can hold it.
 fn paste_keys(app: &App, text: &str) -> Vec<KeyEvent> {
-    let multiline = app.focus == Focus::Assistant;
+    // The destination is whatever `field_has_focus()` picked, and with a
+    // dialog or the palette open that is *not* `app.focus`: reading the focus
+    // here turned a newline into Enter inside the AI configuration dialog
+    // (which answers Enter on the Save/Clear rows) or the palette.
+    let multiline = app.dialog.is_none() && app.palette.is_none() && app.focus == Focus::Assistant;
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut keys = Vec::new();
     for (index, line) in normalized.split('\n').enumerate() {
@@ -819,6 +1104,7 @@ enum Global {
     ArmShift,
     ArmCtrl,
     ArmAlt,
+    PasteClipboard,
 }
 
 /// `F2..F5` → view (the four surfaces).
@@ -843,6 +1129,9 @@ fn global_key(code: KeyCode, mods: KeyModifiers) -> Global {
         KeyCode::F(1) => Global::Help,
         KeyCode::F(n) => fkey_view(n).map(Global::View).unwrap_or(Global::None),
         KeyCode::Up if ctrl => Global::FocusSidebar,
+        // The TUI's half of the web toolbar: `pasteTerminalButton` reads the
+        // clipboard, the modifier buttons latch the one-shot modifiers.
+        KeyCode::Char('v') if ctrl && shift => Global::PasteClipboard,
         // One-shot modifier latches (the TUI's stand-in for the web key bar).
         KeyCode::Char('r') if ctrl && shift => Global::ArmShift,
         KeyCode::Char('c') if ctrl && shift => Global::ArmCtrl,
@@ -853,8 +1142,41 @@ fn global_key(code: KeyCode, mods: KeyModifiers) -> Global {
 
 /// Route one key press: overlays first, then the global bindings, then the
 /// focused pane.
+///
+/// A one-shot modifier latch lives for exactly this press: whatever consumes
+/// the key consumes the latch with it (web `resetModifiers()`), so an armed
+/// Ctrl cannot survive into the sidebar, a dialog or the scrollback and
+/// rewrite a key pressed seconds later — only the terminal branch used to
+/// clear it. The three `Arm*` bindings are the exception: they are how a latch
+/// is released as well as armed, so they keep it for [`arm_sticky`].
 fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::KeyEvent) {
     let global = global_key(key.code, key.modifiers);
+    let arms_a_latch = matches!(global, Global::ArmShift | Global::ArmCtrl | Global::ArmAlt);
+    route_key(app, sticky, key, global);
+    if !arms_a_latch {
+        *sticky = StickyMods::default();
+    }
+}
+
+/// The routing itself; [`handle_key`] wraps it to settle the one-shot latch.
+fn route_key(
+    app: &mut App,
+    sticky: &mut StickyMods,
+    key: crossterm::event::KeyEvent,
+    global: Global,
+) {
+    // Paste carries text, not a keystroke, so it is routed before the
+    // overlays: an overlay owns the keyboard (CONTRACTS.md section 5), but
+    // the AI configuration dialog is precisely where a clipboard — an API
+    // key — belongs. `request_paste` is inert wherever `Event::Paste` would
+    // be, so a confirmation still ignores it.
+    if matches!(global, Global::PasteClipboard) {
+        // `request_paste` reads the clipboard only once it knows there is
+        // somewhere to put it, so the closure is never called when there is
+        // not.
+        request_paste(app, sticky, clipboard::read);
+        return;
+    }
 
     // Overlays own the keyboard entirely (CONTRACTS.md section 5), but quit
     // and the palette toggle stay reachable from inside them.
@@ -913,7 +1235,7 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
         }
         Global::ArmShift => {
             let next = StickyMods {
-                shift: !sticky.shift,
+                shift: true,
                 ..StickyMods::default()
             };
             arm_sticky(app, sticky, next, "Shift");
@@ -921,7 +1243,7 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
         }
         Global::ArmCtrl => {
             let next = StickyMods {
-                ctrl: !sticky.ctrl,
+                ctrl: true,
                 ..StickyMods::default()
             };
             arm_sticky(app, sticky, next, "Ctrl");
@@ -929,12 +1251,16 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
         }
         Global::ArmAlt => {
             let next = StickyMods {
-                alt: !sticky.alt,
+                alt: true,
                 ..StickyMods::default()
             };
             arm_sticky(app, sticky, next, "Alt");
             return;
         }
+        // Already returned at the top of this function, in every state: one
+        // place decides what the paste key does, and the arm exists only so
+        // the match stays exhaustive.
+        Global::PasteClipboard => {}
         Global::None => {}
     }
 
@@ -942,7 +1268,16 @@ fn handle_key(app: &mut App, sticky: &mut StickyMods, key: crossterm::event::Key
     // the terminal view, and only from the terminal view it is a terminal key.
     if key.code == KeyCode::Esc {
         if app.focus == Focus::Sidebar {
-            app.focus = Focus::Center;
+            // One level out lands on the panel under the cursor. The assistant
+            // panel only reads keys under `Focus::Assistant`, so parking it on
+            // `Center` there swallowed every plain keystroke: the view match
+            // below hands `Terminal | Assistant` nothing, and the terminal
+            // branch is skipped because the view is not `Terminal`.
+            app.focus = if app.view == View::Assistant {
+                Focus::Assistant
+            } else {
+                Focus::Center
+            };
             return;
         }
         if app.focus == Focus::Assistant || app.view != View::Terminal {
@@ -1110,6 +1445,7 @@ pub(crate) fn test_app() -> App {
         assistant: self::assistant_view::AssistantState::default(),
         palette: None,
         dialog: None,
+        dialog_return: None,
         notices: Notices::default(),
         exec_mode: crate::agent::ExecMode::Auto,
         broker: self::dialogs::TuiBroker::new(),
@@ -1126,6 +1462,8 @@ pub(crate) fn test_app() -> App {
         lan_device: None,
         center_height: 24,
         center_width: 80,
+        center_x: 0,
+        center_y: 0,
         screen_height: 24,
         center_scroll: 0,
     }
@@ -1163,6 +1501,24 @@ mod tests {
             } else {
                 None
             }
+        );
+    }
+
+    #[test]
+    fn the_terminal_answers_the_device_instead_of_hoarding_the_replies() {
+        let mut app = test_app();
+        // Cursor position request + a clipboard set, in one chunk of output.
+        let bytes = b"\x1b[2;5H\x1b[6n\x1b]52;c;aGVsbG8=\x07".to_vec();
+
+        on_core_event(&mut app, CoreEvent::UartRx(bytes));
+
+        assert!(
+            app.terminal.grid.take_pending_reports().is_empty(),
+            "the device's `CPR` question has to be sent back, not left queued"
+        );
+        assert!(
+            app.terminal.grid.take_clipboard().is_none(),
+            "the `OSC 52` payload has to reach the clipboard layer"
         );
     }
 
@@ -1208,6 +1564,11 @@ mod tests {
         assert_eq!(global_key(KeyCode::Char('r'), both), Global::ArmShift);
         assert_eq!(global_key(KeyCode::Char('c'), both), Global::ArmCtrl);
         assert_eq!(global_key(KeyCode::Char('a'), both), Global::ArmAlt);
+        assert_eq!(
+            global_key(KeyCode::Char('v'), both),
+            Global::PasteClipboard,
+            "paste is the other half of the web toolbar"
+        );
     }
 
     #[test]
@@ -1225,6 +1586,11 @@ mod tests {
         assert_eq!(
             global_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Global::None
+        );
+        assert_eq!(
+            global_key(KeyCode::Char('v'), KeyModifiers::NONE),
+            Global::None,
+            "a bare `v` belongs to the target shell, only the chord is taken"
         );
         assert_eq!(global_key(KeyCode::Enter, KeyModifiers::NONE), Global::None);
         assert_eq!(global_key(KeyCode::Esc, KeyModifiers::NONE), Global::None);
@@ -1356,6 +1722,97 @@ mod tests {
         assert_eq!(app.assistant.composer.as_str(), "line one\nline two");
     }
 
+    /// The newline split used to read `app.focus`, which is *not* the
+    /// destination once an overlay is up — `field_has_focus()` picks the
+    /// dialog/palette regardless. With the AI configuration dialog open and
+    /// focus still on the composer, a pasted newline became a real Enter on
+    /// the focused row: Save writes a half-pasted form, Clear deletes the
+    /// stored record from disk, and the palette runs whatever is highlighted.
+    #[test]
+    fn a_paste_never_forges_an_enter_for_an_overlay() {
+        let mut app = test_app();
+        app.focus = Focus::Assistant; // the stale value `paste_keys` used to read
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let keys = paste_keys(&app, "one\ntwo");
+        assert!(
+            keys.iter().all(|k| k.code != KeyCode::Enter),
+            "a dialog must not receive a forged Enter: {keys:?}"
+        );
+
+        app.dialog = None;
+        app.palette = Some(palette::PaletteState::default());
+        let keys = paste_keys(&app, "one\ntwo");
+        assert!(
+            keys.iter().all(|k| k.code != KeyCode::Enter),
+            "the palette must not receive a forged Enter either: {keys:?}"
+        );
+    }
+
+    /// Arming the same latch twice has to release it (`arm_sticky`'s release
+    /// branch). The callers used to pass the *flipped* state, which made that
+    /// branch unreachable: the second press reported "armed" while disarming.
+    #[test]
+    fn pressing_a_latch_twice_says_that_it_was_released() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        let both = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let arm = KeyEvent::new(KeyCode::Char('r'), both);
+
+        handle_key(&mut app, &mut sticky, arm);
+        assert!(sticky.shift, "the first press arms the latch");
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|t| t.text.contains("armed")),
+            "armed is reported: {:?}",
+            app.notices.toasts.last()
+        );
+
+        handle_key(&mut app, &mut sticky, arm);
+        assert!(!sticky.shift, "the second press releases it");
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|t| t.text.contains("released")),
+            "released is reported: {:?}",
+            app.notices.toasts.last()
+        );
+    }
+
+    /// "Armed for the next key" means the *next* key, wherever it goes: only
+    /// the terminal branch used to consume the latch, so an armed Ctrl could
+    /// sit through sidebar/scroll/dialog keys and rewrite a character typed
+    /// seconds later into `0x03`.
+    #[test]
+    fn a_latch_does_not_outlive_the_key_it_was_armed_for() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        let both = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        handle_key(
+            &mut app,
+            &mut sticky,
+            KeyEvent::new(KeyCode::Char('c'), both),
+        );
+        assert!(sticky.ctrl, "the latch is armed");
+
+        // A view switch is a plain consumed key with nothing to encode.
+        handle_key(
+            &mut app,
+            &mut sticky,
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            sticky,
+            StickyMods::default(),
+            "one shot means one key press"
+        );
+    }
+
     /// A sidebar field is just as editable as a dialog one, and the sidebar
     /// is where the LAN token (32 hex characters) gets pasted in practice.
     #[test]
@@ -1389,5 +1846,460 @@ mod tests {
             "the terminal path must not have been disturbed: {:?}",
             app.terminal.visible_text()
         );
+    }
+
+    /// The AI config dialog is where a clipboard actually matters — the API
+    /// key is a click away in the browser and a paste away here.
+    #[test]
+    fn a_paste_key_types_the_clipboard_into_the_focused_field() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods {
+            ctrl: true,
+            ..StickyMods::default()
+        };
+
+        request_paste(&mut app, &mut sticky, || {
+            Some("https://api.example.com/v1".to_string())
+        });
+
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert_eq!(state.endpoint.as_str(), "https://api.example.com/v1");
+        assert!(
+            sticky.is_empty(),
+            "the web button resets the modifiers so an armed Ctrl cannot rewrite the paste"
+        );
+    }
+
+    /// No helper answered (a desktop with neither `wl-paste` nor `xclip`,
+    /// or one that denied it): the user has to be told, in the UI's language,
+    /// and nothing may be typed anywhere.
+    #[test]
+    fn a_paste_key_that_cannot_read_the_clipboard_says_so() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods::default();
+
+        request_paste(&mut app, &mut sticky, || None);
+
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert!(state.endpoint.as_str().is_empty(), "nothing gets typed");
+        let expected = t(MOD_PASTE_UNAVAILABLE, app.lang());
+        assert!(
+            app.notices.log.iter().any(|(_, line)| line == expected),
+            "the failure must reach the notice log, got {:?}",
+            app.notices.log
+        );
+    }
+
+    /// A bracketed paste is inert while a confirmation is open (`y` would be
+    /// consent), so the key is too — including its failure report: there was
+    /// nowhere to paste, which is not a clipboard problem.
+    #[test]
+    fn a_paste_key_cannot_answer_a_confirmation() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Confirm {
+            kind: dialogs::ConfirmKind::Quit,
+            title: String::new(),
+            message: String::new(),
+        });
+        let mut sticky = StickyMods::default();
+        let before = app.notices.log.len();
+        let mut reads = 0;
+
+        request_paste(&mut app, &mut sticky, || {
+            reads += 1;
+            Some("y".to_string())
+        });
+
+        assert_eq!(
+            reads, 0,
+            "the gate decides before the clipboard is reached for: reading it \
+             means spawning helpers and waiting out their timeouts, for an \
+             answer this key would drop anyway"
+        );
+        assert!(!app.quit, "a pasted `y` is not consent");
+        assert!(app.dialog.is_some(), "…and the box stays up");
+        assert_eq!(
+            app.notices.log.len(),
+            before,
+            "an inert paste reports nothing"
+        );
+    }
+
+    /// `accepts_paste` is the gate the key reads *before* touching the
+    /// clipboard, so it has to answer exactly what `paste` itself accepts.
+    /// Esc is "one level out". From the sidebar in the assistant view that
+    /// used to park the focus on `Focus::Center`, which the assistant panel
+    /// never reads — every plain keystroke then fell through the view match
+    /// (`Terminal | Assistant => {}`) and past the terminal branch (the view is
+    /// not `Terminal`), so the composer stopped receiving anything.
+    #[test]
+    fn escaping_the_sidebar_puts_the_keys_back_in_the_composer() {
+        let mut app = test_app();
+        app.set_view(View::Assistant);
+        app.focus = Focus::Sidebar;
+        let mut sticky = StickyMods::default();
+
+        handle_key(
+            &mut app,
+            &mut sticky,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut app,
+            &mut sticky,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.focus, Focus::Assistant, "the panel reads its own focus");
+        assert_eq!(app.view, View::Assistant);
+        assert_eq!(
+            app.assistant.composer.as_str(),
+            "x",
+            "the keystroke must reach the composer"
+        );
+    }
+
+    #[test]
+    fn the_paste_gate_agrees_with_paste() {
+        let mut app = test_app();
+        app.dialog = None;
+        app.palette = None;
+
+        app.focus = Focus::Center;
+        app.view = View::Terminal;
+        assert!(accepts_paste(&app), "the pane itself takes a paste");
+        app.view = View::Diagnostics;
+        assert!(!accepts_paste(&app), "nothing is focused to receive it");
+        app.view = View::Terminal;
+
+        app.focus = Focus::Sidebar;
+        assert!(accepts_paste(&app), "the sidebar fields take a paste");
+
+        app.focus = Focus::Center;
+        app.dialog = Some(Dialog::Confirm {
+            kind: dialogs::ConfirmKind::Quit,
+            title: String::new(),
+            message: String::new(),
+        });
+        assert!(!accepts_paste(&app), "a confirmation ignores it");
+
+        app.dialog = None;
+        app.palette = Some(palette::PaletteState::new(app.lang()));
+        assert!(accepts_paste(&app), "the palette query is a field");
+    }
+
+    // --- mouse selection and the wheel (P8) --------------------------------
+
+    /// A pane the tests can name coordinates in: sidebar to the left, the
+    /// terminal pane one row down and 60 columns wide.
+    ///
+    /// The grid is built at the pane's size rather than resized into it: a
+    /// shrink pushes the rows it drops into the scrollback, which would move
+    /// every absolute row the assertions name.
+    fn mouse_app() -> App {
+        let mut app = test_app();
+        app.view = View::Terminal;
+        app.focus = Focus::Center;
+        app.center_x = 30;
+        app.center_y = 1;
+        app.center_width = 60;
+        app.center_height = 20;
+        let (cols, rows) = terminal_view::grid_dims(60, 20, app.settings.font_size);
+        app.terminal.grid = terminal_view::TermGrid::new(cols, rows);
+        app.terminal.dims = (cols, rows);
+        app.terminal.grid.feed(b"alpha beta\r\ngamma delta\r\n");
+        app
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn down(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+
+    fn drag(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Drag(MouseButton::Left), column, row)
+    }
+
+    fn up(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Up(MouseButton::Left), column, row)
+    }
+
+    #[test]
+    fn screen_coordinates_land_on_the_grid_cell_under_them() {
+        let app = mouse_app();
+
+        assert_eq!(pane_cell(&app, 30, 1), Some((0, 0)), "the pane's corner");
+        assert_eq!(pane_cell(&app, 36, 2), Some((1, 6)));
+        assert_eq!(pane_cell(&app, 29, 2), None, "the sidebar is not the pane");
+        assert_eq!(pane_cell(&app, 36, 0), None, "nor is the top status bar");
+        assert_eq!(pane_cell(&app, 90, 2), None, "nor past its right edge");
+        assert_eq!(pane_cell(&app, 36, 21), None, "nor below its last row");
+    }
+
+    #[test]
+    fn a_drag_selects_the_block_and_the_release_copies_it() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+        app.focus = Focus::Sidebar;
+
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+
+        assert_eq!(
+            app.focus,
+            Focus::Center,
+            "a click in the pane takes the keys back to it"
+        );
+        assert!(app.terminal.is_dragging());
+        assert_eq!(app.terminal.selection.unwrap().anchor, (1, 6));
+
+        handle_mouse(&mut app, &mut sticky, drag(40, 2));
+        assert_eq!(app.terminal.selection.unwrap().focus, (1, 10));
+
+        handle_mouse(&mut app, &mut sticky, up(40, 2));
+
+        assert!(!app.terminal.is_dragging(), "the release ends the gesture");
+        let (_, text) = app.notices.log.last().expect("a copy reports itself");
+        assert!(text.contains("OSC 52"), "{text}");
+        assert!(
+            text.contains('5'),
+            "gamma delta cols 6..10 = \"delta\": {text}"
+        );
+        assert!(
+            app.terminal.selection.is_some(),
+            "the block stays on screen so the user can see what was copied"
+        );
+    }
+
+    #[test]
+    fn a_click_that_never_moved_dismisses_the_selection_without_copying() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+        app.terminal.begin_selection(1, 0);
+
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        handle_mouse(&mut app, &mut sticky, up(36, 2));
+
+        assert!(app.terminal.selection.is_none());
+        assert!(
+            app.notices.log.is_empty(),
+            "a click is how a selection is dismissed: no side effects"
+        );
+    }
+
+    #[test]
+    fn a_release_with_no_press_behind_it_never_re_sends_what_is_on_screen() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+        app.terminal.begin_selection(1, 0);
+        assert!(app.terminal.take_dragging(), "the gesture is now over");
+
+        handle_mouse(&mut app, &mut sticky, up(36, 2));
+
+        assert!(app.terminal.selection.is_some(), "left exactly as it was");
+        assert!(app.notices.log.is_empty());
+    }
+
+    /// A box opening over the pane before the button lifts must not strand
+    /// the gesture. The release still ends it — copying what the drag
+    /// covered — and leaves nothing behind for a later, unrelated press to
+    /// stretch and re-send.
+    #[test]
+    fn a_box_opening_over_a_drag_ends_the_gesture_when_the_button_lifts() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        handle_mouse(&mut app, &mut sticky, drag(40, 2));
+        app.dialog = Some(Dialog::Confirm {
+            kind: dialogs::ConfirmKind::Quit,
+            title: String::new(),
+            message: String::new(),
+        });
+
+        handle_mouse(&mut app, &mut sticky, up(40, 2));
+
+        assert!(
+            !app.terminal.is_dragging(),
+            "the flag must not outlive the release, or the next stray one \
+             re-sends what is on screen"
+        );
+        let (_, text) = app.notices.log.last().expect("a copy reports itself");
+        assert!(text.contains("OSC 52"), "{text}");
+
+        // Whatever the leftover would have been, it is gone: a press that
+        // lands in the sidebar and drags back into the pane starts nothing.
+        app.dialog = None;
+        let copies = app.notices.log.len();
+        handle_mouse(&mut app, &mut sticky, down(4, 4));
+        handle_mouse(&mut app, &mut sticky, drag(60, 6));
+        handle_mouse(&mut app, &mut sticky, up(60, 6));
+        assert_eq!(
+            app.notices.log.len(),
+            copies,
+            "a gesture that is over cannot be stretched by the next one"
+        );
+    }
+
+    #[test]
+    fn a_drag_past_the_edge_keeps_the_far_end_at_the_edge() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        handle_mouse(&mut app, &mut sticky, drag(400, 400));
+
+        assert_eq!(
+            app.terminal.selection.unwrap().focus,
+            (19, 59),
+            "the last cell of the pane, not off it"
+        );
+    }
+
+    #[test]
+    fn the_mouse_is_ignored_everywhere_but_the_terminal_pane() {
+        let mut app = mouse_app();
+        let mut sticky = StickyMods::default();
+
+        app.view = View::Assistant;
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        assert!(app.terminal.selection.is_none(), "another view");
+
+        app.view = View::Terminal;
+        app.palette = Some(palette::PaletteState::new(app.lang()));
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        assert!(
+            app.terminal.selection.is_none(),
+            "the palette keeps its clicks"
+        );
+
+        app.palette = None;
+        app.dialog = Some(Dialog::Confirm {
+            kind: dialogs::ConfirmKind::Quit,
+            title: String::new(),
+            message: String::new(),
+        });
+        handle_mouse(&mut app, &mut sticky, down(36, 2));
+        assert!(app.terminal.selection.is_none(), "so does a dialog");
+    }
+
+    #[test]
+    fn the_wheel_presses_the_key_the_pane_under_it_expects() {
+        let mut app = mouse_app();
+
+        assert_eq!(
+            wheel_key(&app, true),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
+            "the terminal scrolls its own scrollback, which needs Shift"
+        );
+        assert_eq!(
+            wheel_key(&app, false),
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::SHIFT)
+        );
+
+        app.focus = Focus::Assistant;
+        assert_eq!(
+            wheel_key(&app, true),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)
+        );
+
+        app.focus = Focus::Sidebar;
+        assert_eq!(
+            wheel_key(&app, false),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            "the sidebar is a list: the wheel walks it"
+        );
+
+        app.focus = Focus::Center;
+        app.view = View::Network;
+        assert_eq!(
+            wheel_key(&app, true),
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)
+        );
+
+        app.view = View::Terminal;
+        app.palette = Some(palette::PaletteState::new(app.lang()));
+        assert_eq!(
+            wheel_key(&app, false),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            "the palette walks with the arrows"
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_terminals_scrollback() {
+        let mut app = mouse_app();
+        app.terminal.grid = terminal_view::TermGrid::with_scrollback(60, 20, 40);
+        let feed: String = (0..30).map(|line| format!("line{line}\r\n")).collect();
+        app.terminal.grid.feed(feed.as_bytes());
+        app.terminal.autoscroll = false;
+        app.terminal.offset = 3;
+        let mut sticky = StickyMods::default();
+
+        handle_mouse(
+            &mut app,
+            &mut sticky,
+            mouse(MouseEventKind::ScrollUp, 40, 5),
+        );
+        let scrolled = app.terminal.offset;
+        assert!(
+            scrolled > 3,
+            "wheel up walks back, not forward ({scrolled})"
+        );
+        assert!(scrolled <= app.terminal.grid.scrollback_len());
+
+        handle_mouse(
+            &mut app,
+            &mut sticky,
+            mouse(MouseEventKind::ScrollDown, 40, 5),
+        );
+        assert!(
+            app.terminal.offset < scrolled,
+            "wheel down walks forward again"
+        );
+    }
+
+    #[test]
+    fn an_oversized_selection_is_cut_on_a_glyph_boundary() {
+        assert!(matches!(cap_osc52("héllo"), std::borrow::Cow::Borrowed(_)));
+
+        // The byte the cap lands on is inside a three-byte glyph.
+        let big = format!("{}中", "a".repeat(OSC52_MAX_BYTES - 1));
+        let capped = cap_osc52(&big);
+        assert!(capped.len() <= OSC52_MAX_BYTES);
+        assert_eq!(
+            capped.chars().count(),
+            OSC52_MAX_BYTES - 1,
+            "cut on the glyph boundary, never through the glyph"
+        );
+        assert!(capped.chars().all(|ch| ch == 'a'));
+    }
+
+    #[test]
+    fn a_copy_reports_what_it_sent() {
+        let mut app = mouse_app();
+
+        copy_to_host(&mut app, "héllo");
+
+        let (_, text) = app.notices.log.last().expect("one notice");
+        assert!(text.contains("OSC 52"), "{text}");
+        assert!(text.contains('5'), "five characters: {text}");
     }
 }

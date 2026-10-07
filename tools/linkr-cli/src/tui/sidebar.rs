@@ -1,16 +1,29 @@
 //! Left sidebar: connection card, quick-send presets, watch findings and
 //! section links (CONTRACTS.md section 5).
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::dialogs::{ConfirmKind, Dialog};
+use super::dialogs::{ConfirmKind, Dialog, DLG_NOT_SENT};
 use super::i18n::{strings, t, tr, MSG_SAVE_SETTINGS};
 use super::settings::TransportChoice;
 use super::state::{App, Focus, TextField, View};
 use crate::event::NoticeLevel;
 use crate::lan_token_store::TokenStore;
+
+/// How long the host field has to sit still before its edit reaches disk.
+///
+/// The web keeps settings in `localStorage`, where a write is free — here one
+/// keystroke used to mean one `TokenStore::load()` (432 B) **plus** one full
+/// rewrite of `tui.json`: 482 B, two write syscalls and 2.1 ms per character,
+/// so pasting a 3000-character host stalled the interface for six seconds.
+/// The value still reaches `app.settings` immediately (the dial path and every
+/// other settings write read it from there); only the file waits, and
+/// [`flush`] runs the pending write before a dial and on teardown.
+pub const HOST_PERSIST_SETTLE: Duration = Duration::from_millis(400);
 
 /// Quick-send presets from WEB_UX_SPEC section 4 (in order, `reboot` is the
 /// dangerous one and asks for confirmation first).
@@ -47,8 +60,8 @@ strings! {
     SIDE_WATCH => "Watch", "监控";
     SIDE_WATCH_NOT_READY => "   watch engine not ready", "   监控引擎未就绪";
     SIDE_WATCH_EMPTY => "   no findings yet", "   暂无发现";
-    MSG_TRANSPORT_LOCKED => "Disconnect before switching the transport.",
-        "切换传输方式前请先断开连接。";
+    MSG_TRANSPORT_LOCKED => "Finish the connection attempt, or disconnect, before switching the transport.",
+        "等连接尝试结束（或断开连接）再切换传输方式。";
     MSG_SWITCH_BLE => "Switch the transport to BLE first.", "请先把传输方式切换到 BLE。";
     CONFIRM_DISCONNECT_TITLE => "Disconnect", "断开连接";
     CONFIRM_DISCONNECT_MSG => "Disconnect from the current device now?",
@@ -77,6 +90,15 @@ pub struct SidebarState {
     pub ble_name: TextField,
     pub lan_host: TextField,
     pub lan_token: TextField,
+    /// Set when the host was edited and the store read plus the `tui.json`
+    /// write are still pending; [`poll`] runs them once typing pauses.
+    pub host_persist_since: Option<Instant>,
+    /// The token field as that pending host edit found it. [`flush`] may
+    /// re-select a host's token only while the field still holds this — a
+    /// token typed or pasted inside the settle window belongs to the user,
+    /// and overwriting it would dial (and save) the store's older value
+    /// instead of the one just entered.
+    pub token_at_host_edit: String,
 }
 
 impl SidebarState {
@@ -86,6 +108,8 @@ impl SidebarState {
             ble_name: TextField::new(ble_name),
             lan_host: TextField::new(lan_host),
             lan_token: TextField::new(""),
+            host_persist_since: None,
+            token_at_host_edit: String::new(),
         }
     }
 
@@ -238,7 +262,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
             ),
             field_style
         );
-        if app.sidebar.ble_name.text.is_empty() {
+        if app.sidebar.ble_name.is_empty() {
             lines.push(hint(t(SIDE_EMPTY_NAME, lang)));
         }
     }
@@ -273,7 +297,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
             ),
             field_style
         );
-        if app.sidebar.lan_host.text.is_empty() {
+        if app.sidebar.lan_host.is_empty() {
             lines.push(hint(t(SIDE_EMPTY_HOST, lang)));
         }
         item!(
@@ -426,7 +450,7 @@ fn edit_field(field: &mut TextField, key: KeyEvent) {
 /// field was set — nothing is cleared when the host has no alias, a token the
 /// user typed stays theirs.
 pub fn fill_token_from_store(app: &mut App, store: &TokenStore) -> bool {
-    let host = app.sidebar.lan_host.text.trim().to_string();
+    let host = app.sidebar.lan_host.as_str().trim().to_string();
     if host.is_empty() {
         return false;
     }
@@ -445,18 +469,65 @@ fn persist_connection_fields(app: &mut App) {
         // device); LAN host is.
         return;
     }
-    let host = app.sidebar.lan_host.text.trim().to_string();
-    if app.settings.last_lan_host != host {
-        app.settings.last_lan_host = host;
-        // Editing the host re-selects that host's token.
-        let store = TokenStore::load();
-        fill_token_from_store(app, &store);
-        if let Err(err) = super::settings::save(&app.settings) {
-            app.toast(
-                NoticeLevel::Warn,
-                tr!(t(MSG_SAVE_SETTINGS, app.lang()), err),
-            );
-        }
+    // Compare by `&str`. This runs on **every** key in the field — a paste is
+    // replayed as one keystroke per character (`mod.rs::paste`) — so the
+    // unconditional `to_string()` below copied the whole, growing host on each
+    // of them: O(n²) byte moves and n allocations inside the frame loop,
+    // seconds of freeze for a large paste.
+    if app.settings.last_lan_host == app.sidebar.lan_host.as_str().trim() {
+        return;
+    }
+    // In memory immediately: the dial path, this row and every other settings
+    // write read it from there. The disk half — reading the token store and
+    // rewriting tui.json — waits in `poll()` instead of running per keystroke.
+    app.settings.last_lan_host = app.sidebar.lan_host.as_str().trim().to_string();
+    app.sidebar.token_at_host_edit = app.sidebar.lan_token.as_str().to_string();
+    app.sidebar.host_persist_since = Some(Instant::now());
+}
+
+/// Run a pending host edit once the field has sat still for
+/// [`HOST_PERSIST_SETTLE`]. The main loop calls this every tick; it is a no-op
+/// until [`persist_connection_fields`] marked one.
+pub fn poll(app: &mut App, now: Instant) {
+    let Some(since) = app.sidebar.host_persist_since else {
+        return;
+    };
+    if now.saturating_duration_since(since) < HOST_PERSIST_SETTLE {
+        return;
+    }
+    flush(app);
+}
+
+/// Write the pending host edit out **now**: re-select that host's token and
+/// save `tui.json`.
+///
+/// Dialing calls this before it reads the form, so a host typed a moment ago
+/// still dials with its own token rather than the previous host's — the exact
+/// state the per-keystroke write used to leave behind. Teardown calls it too,
+/// so a host typed right before quitting is not dropped.
+pub fn flush(app: &mut App) {
+    flush_with(app, TokenStore::load);
+}
+
+/// [`flush`] with the store read injected — and read **only when the refill
+/// may use it**, which is the whole point of the guard below.
+fn flush_with(app: &mut App, load: impl FnOnce() -> TokenStore) {
+    if app.sidebar.host_persist_since.take().is_none() {
+        return;
+    }
+    // Editing the host re-selects that host's token — but only while the
+    // field still holds what it held when the edit was made. Settling takes
+    // [`HOST_PERSIST_SETTLE`], long enough to paste a token, and the refill
+    // used to run unconditionally: the value the user had just entered was
+    // replaced by the store's older one, then dialled and saved.
+    if app.sidebar.lan_token.as_str() == app.sidebar.token_at_host_edit {
+        fill_token_from_store(app, &load());
+    }
+    if let Err(err) = super::settings::save(&app.settings) {
+        app.toast(
+            NoticeLevel::Warn,
+            tr!(t(MSG_SAVE_SETTINGS, app.lang()), err),
+        );
     }
 }
 
@@ -507,6 +578,16 @@ fn activate(app: &mut App, entry: SideEntry) {
         SideEntry::BleName | SideEntry::LanHost | SideEntry::LanToken => {}
         SideEntry::Preset(index) => {
             let (cmd, danger) = PRESETS[index];
+            // The web keeps the presets and the key bar disabled until
+            // `setConnected()` says otherwise, so a press with no link behind
+            // it has to answer here — the row is only dimmed, and running the
+            // command into the gate (`send_text`) would have reported nothing
+            // at all, which for `reboot` reads as a success that never
+            // happened.
+            if !app.connected() {
+                app.toast(NoticeLevel::Warn, t(DLG_NOT_SENT, lang).to_string());
+                return;
+            }
             if danger {
                 app.dialog = Some(Dialog::Confirm {
                     kind: ConfirmKind::Reboot,
@@ -536,6 +617,7 @@ mod tests {
     use super::super::test_app;
     use super::*;
     use crate::event::ConnectionState;
+    use crate::tui::settings::settings_path;
 
     #[test]
     fn presets_match_the_web_client() {
@@ -553,6 +635,33 @@ mod tests {
     #[test]
     fn confirmation_text_matches_the_web_client() {
         assert_eq!("Reboot the connected device now?", REBOOT_CONFIRM);
+    }
+
+    /// The web keeps the presets disabled until `setConnected()`; ours are
+    /// only dimmed, so a press with no link has to *say* so — running into
+    /// `send_text`'s gate reported nothing at all, which for `reboot` reads
+    /// as a reboot that never happened.
+    #[test]
+    fn a_preset_with_no_link_says_so_instead_of_sending_nothing() {
+        let mut app = test_app();
+        app.state = ConnectionState::Disconnected;
+
+        activate(&mut app, SideEntry::Preset(1)); // "version"
+        let toast = app.notices.toasts.last().expect("it explains itself");
+        assert_eq!(toast.text, t(DLG_NOT_SENT, app.lang()));
+        assert!(app.dialog.is_none(), "a plain preset never asks anything");
+
+        // The dangerous one does not even open its box.
+        activate(&mut app, SideEntry::Preset(4)); // "reboot"
+        assert!(
+            app.dialog.is_none(),
+            "there is nothing to confirm when nothing can be sent"
+        );
+
+        // With a link behind it, the same press asks first, as always.
+        app.state = ConnectionState::Connected;
+        activate(&mut app, SideEntry::Preset(4));
+        assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
     }
 
     #[test]
@@ -580,13 +689,13 @@ mod tests {
 
         let mut app = test_app();
         app.settings.transport = TransportChoice::Lan;
-        app.sidebar.lan_host.text.clear();
+        app.sidebar.lan_host.clear();
         let text = render(&app);
         assert!(text.contains("192.168.1.50"), "{text}");
         assert!(text.contains("ws://host/ws"), "{text}");
 
         // A real address silences it: the hint is a placeholder, not furniture.
-        app.sidebar.lan_host.text = "192.0.2.1".to_string();
+        app.sidebar.lan_host.set("192.0.2.1".to_string());
         let text = render(&app);
         assert!(!text.contains("192.168.1.50"), "{text}");
     }
@@ -656,17 +765,22 @@ mod tests {
         );
     }
 
-    /// F1: the lock follows a **live link**, never an attempt in flight.
-    /// `--tui` boots with a deferred connect pending, so locking on
-    /// `pending_connect` made BLE/LAN impossible to change for the whole
-    /// timeout window (the reported "cannot switch to LAN").
+    /// Web parity: the lock follows `connecting || state.connected`
+    /// (`web/app.js:1949-1950` disable both mode buttons on exactly that), so
+    /// an attempt in flight renders the row `（已锁定）` just like a live
+    /// session. It used to stay switchable mid-dial — which is what left the
+    /// form on BLE while a LAN attempt was still running, with "Switch device"
+    /// answering "Connecting…" from that dead end.
     #[test]
-    fn the_lock_follows_a_live_link_not_an_attempt_in_flight() {
+    fn the_lock_follows_the_attempt_and_the_live_link() {
         let mut app = crate::tui::test_app();
         app.state = ConnectionState::Connecting;
         app.pending_connect = Some(tokio::sync::oneshot::channel().1);
         let row = transport_row(&app);
-        assert!(row.contains("◂▸"), "switchable in flight: {row}");
+        assert!(
+            row.contains("已锁定") || row.contains("locked"),
+            "locked while an attempt is in flight: {row}"
+        );
 
         app.pending_connect = None;
         app.state = ConnectionState::Connected;
@@ -675,6 +789,37 @@ mod tests {
             row.contains("已锁定") || row.contains("locked"),
             "locked next to a live link: {row}"
         );
+
+        // Settled with nothing up, the marker comes back: the row promises a
+        // toggle it can honour.
+        app.state = ConnectionState::Disconnected;
+        let row = transport_row(&app);
+        assert!(row.contains("◂▸"), "switchable once settled: {row}");
+    }
+
+    /// Mid-attempt the toggle refuses **with a reason** instead of flipping
+    /// the form out from under the dial that is running — the state web
+    /// reaches by disabling both mode buttons (`web/app.js:1949-1950`).
+    #[test]
+    fn switching_the_transport_mid_attempt_is_refused_with_a_reason() {
+        let mut app = crate::tui::test_app();
+        app.settings.transport = TransportChoice::Lan;
+        app.state = ConnectionState::Connecting;
+        app.pending_connect = Some(tokio::sync::oneshot::channel().1);
+
+        activate(&mut app, SideEntry::ToggleTransport);
+
+        assert_eq!(
+            app.settings.transport,
+            TransportChoice::Lan,
+            "the form must not move while an attempt is in flight"
+        );
+        let toast = app
+            .notices
+            .toasts
+            .last()
+            .expect("the refusal explains itself");
+        assert_eq!(toast.text, t(MSG_TRANSPORT_LOCKED, app.lang()));
     }
 
     /// The transport row, as one string: the only row the sidebar renders from
@@ -791,5 +936,177 @@ mod tests {
         // No host to select by fills nothing.
         app.sidebar.lan_host.set("   ");
         assert!(!fill_token_from_store(&mut app, &store));
+    }
+
+    /// A test that reaches `settings::save()` must leave the developer's own
+    /// `tui.json` exactly as it found it — panic or not.
+    ///
+    /// It also holds the settings-file lock for the whole test: libtest runs
+    /// tests side by side, so without it another test could write the file
+    /// between this test's read and its restore (and the assertion in between
+    /// would read that test's bytes). The lock is released only after the
+    /// file has been put back, because `Drop` runs before the fields do.
+    struct SettingsGuard {
+        snapshot: Option<Vec<u8>>,
+        _lock: crate::tui::settings::file_lock::FileLock,
+    }
+
+    impl SettingsGuard {
+        fn new() -> Self {
+            let _lock = crate::tui::settings::file_lock::FileLock::acquire();
+            Self {
+                snapshot: std::fs::read(settings_path()).ok(),
+                _lock,
+            }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            match &self.snapshot {
+                Some(bytes) => {
+                    let _ = std::fs::write(settings_path(), bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(settings_path());
+                }
+            }
+        }
+    }
+
+    fn on_disk() -> Vec<u8> {
+        std::fs::read(settings_path()).unwrap_or_default()
+    }
+
+    /// P2b: the edited host is live in memory at once (the dial path reads it
+    /// from there), but `tui.json` is only rewritten once the field has sat
+    /// still. Before this the write ran on **every** keystroke — 482 B and two
+    /// write syscalls per character, 2.1 ms each, so a long paste stalled the
+    /// interface for seconds.
+    #[test]
+    fn a_host_edit_reaches_disk_once_typing_pauses() {
+        let _settings = SettingsGuard::new();
+        let mut app = crate::tui::test_app();
+        app.settings.transport = TransportChoice::Lan;
+        app.sidebar.lan_host.set("192.0.2.1");
+        app.settings.last_lan_host = "192.0.2.1".to_string();
+
+        app.sidebar.lan_host.set("192.0.2.10");
+        persist_connection_fields(&mut app);
+        assert_eq!(
+            app.settings.last_lan_host, "192.0.2.10",
+            "the value is current in memory right away"
+        );
+        let since = app
+            .sidebar
+            .host_persist_since
+            .expect("the disk half is pending");
+        let snap = on_disk();
+
+        // Inside the settle window the file is untouched.
+        poll(&mut app, since + HOST_PERSIST_SETTLE / 2);
+        assert_eq!(on_disk(), snap, "no write while the user is still typing");
+        assert!(app.sidebar.host_persist_since.is_some());
+
+        // The moment the field has sat still, the pending write runs.
+        poll(&mut app, since + HOST_PERSIST_SETTLE);
+        assert!(
+            app.sidebar.host_persist_since.is_none(),
+            "the pending write has run"
+        );
+        let written = String::from_utf8_lossy(&on_disk()).into_owned();
+        assert!(
+            written.contains("192.0.2.10"),
+            "…and the new host is on disk"
+        );
+
+        // With nothing pending, flushing does nothing at all.
+        let after = on_disk();
+        flush(&mut app);
+        assert_eq!(on_disk(), after, "an idle form writes nothing");
+    }
+
+    /// Dialing runs the pending write first, so a host typed a moment ago is
+    /// dialled with its own token instead of the previous host's — the state
+    /// the per-keystroke write used to leave behind. The token here is not
+    /// 32 hex digits, so `start()` rejects the form and no dial leaves the
+    /// process.
+    #[test]
+    fn dialing_flushes_the_pending_host_write_before_it_reads_the_form() {
+        let _settings = SettingsGuard::new();
+        let mut app = crate::tui::test_app();
+        app.settings.transport = TransportChoice::Lan;
+        app.sidebar.lan_host.set("192.0.2.1");
+        app.settings.last_lan_host = "192.0.2.1".to_string();
+        app.sidebar.lan_token.set("not-a-token");
+
+        app.sidebar.lan_host.set("192.0.2.10");
+        persist_connection_fields(&mut app);
+        assert!(app.sidebar.host_persist_since.is_some());
+
+        super::super::connect::connect(&mut app);
+
+        assert!(
+            app.sidebar.host_persist_since.is_none(),
+            "the dial ran the pending write"
+        );
+        assert!(
+            String::from_utf8_lossy(&on_disk()).contains("192.0.2.10"),
+            "…which reached the settings file"
+        );
+    }
+
+    /// The host edit re-selects that host's token — but only the token it
+    /// found. The settle window is 400 ms, long enough to paste one of one's
+    /// own, and the refill used to run unconditionally: what the user had
+    /// just entered was replaced by the store's older value, then dialled
+    /// *and* written to disk. A leftover from the previous host is still
+    /// replaced, which is what changing the host means.
+    #[test]
+    fn only_the_token_the_host_edit_found_is_replaced() {
+        const DEVICE: &str = "4c494e4b52424c45010058bf2533078c";
+        const MINE: &str = "0123456789abcdef0123456789abcdef";
+        const STORES: &str = "fedcba9876543210fedcba9876543210";
+        fn store_for(host: &str) -> TokenStore {
+            let mut store = TokenStore::default();
+            store.capture(DEVICE, STORES, host).expect("accepted");
+            store
+        }
+
+        let _settings = SettingsGuard::new();
+        let mut app = crate::tui::test_app();
+        app.settings.transport = TransportChoice::Lan;
+        app.sidebar.lan_host.set("192.0.2.1");
+        app.settings.last_lan_host = "192.0.2.1".to_string();
+        app.sidebar.lan_token.set(MINE);
+
+        app.sidebar.lan_host.set("192.0.2.10");
+        persist_connection_fields(&mut app);
+        // Inside the settle window the user pastes a token of their own.
+        app.sidebar.lan_token.set(STORES);
+
+        let mut reads = 0;
+        flush_with(&mut app, || {
+            reads += 1;
+            store_for("192.0.2.10")
+        });
+
+        assert_eq!(
+            app.sidebar.lan_token.as_str(),
+            STORES,
+            "what the user entered is what gets dialled and saved"
+        );
+        assert_eq!(reads, 0, "…so the store is not even read");
+        assert!(app.sidebar.host_persist_since.is_none(), "it still settled");
+
+        // Untouched, the very same flush re-selects the new host's token.
+        app.sidebar.lan_token.set(MINE);
+        app.sidebar.host_persist_since = Some(Instant::now());
+        flush_with(&mut app, || store_for("192.0.2.10"));
+        assert_eq!(
+            app.sidebar.lan_token.as_str(),
+            STORES,
+            "the previous host's leftover is what the switch replaces"
+        );
     }
 }

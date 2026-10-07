@@ -346,17 +346,56 @@ pub fn redact_secrets(text: &str) -> String {
     out
 }
 
+/// Display-side redaction for a tool call's argument JSON. The panel prints
+/// those arguments verbatim (`{"password":"s3cret"}` from `set_wifi`, an
+/// embedded `@w=`/`@d=` command, or a `token=`), so every secret the approval
+/// dialog and the outgoing notices already mask has to be masked here too.
+pub fn redact_tool_args(args: &str) -> String {
+    static WIFI_CMD: OnceLock<Regex> = OnceLock::new();
+    static SECRET_FIELD: OnceLock<Regex> = OnceLock::new();
+    static URL_USERINFO: OnceLock<Regex> = OnceLock::new();
+    // `@w=ssid,password` keeps the SSID (web `redactCommand`) and loses the rest.
+    let wifi = WIFI_CMD.get_or_init(|| Regex::new(r#"@w=[^"\s]*"#).expect("wifi cmd"));
+    // `"password": "s3cret"` / `"token": "<32 hex>"` — the `set_wifi` tool
+    // argument (`agent/tools.rs`) and the LAN token wherever JSON quotes it.
+    let secret = SECRET_FIELD
+        .get_or_init(|| Regex::new(r#""(password|token)"\s*:\s*"[^"]*""#).expect("secret field"));
+    // `http://user:pass@host/` — WebDAV URLs and any other credentialled link.
+    let userinfo = URL_USERINFO
+        .get_or_init(|| Regex::new(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s]+@").expect("url"));
+
+    let text = redact_secrets(args);
+    let text = wifi.replace_all(&text, |caps: &regex::Captures| {
+        let cmd = &caps[0];
+        match cmd.find(',') {
+            Some(comma) => format!("{},<redacted>", &cmd[..comma]),
+            None => cmd.to_string(),
+        }
+    });
+    let text = secret.replace_all(&text, |caps: &regex::Captures| {
+        format!("\"{}\":\"<redacted>\"", &caps[1])
+    });
+    userinfo.replace_all(&text, "$1<redacted>@").into_owned()
+}
+
 fn redact_line(line: &str) -> String {
     let mut result = line.to_string();
-    // `token=<32 hex>` → `token=<redacted>`
-    if let Some(pos) = result.find("token=") {
-        let after = &result[pos + "token=".len()..];
-        let hex_len = after.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+    // `token=<32 hex>` → `token=<redacted>`, **every** occurrence on the line
+    // (web `redactSecrets` is a global regex — one `find` left a second token
+    // in the clear).
+    let mut from = 0;
+    while let Some(rel) = result[from..].find("token=") {
+        let at = from + rel;
+        let value = at + "token=".len();
+        let hex_len = result[value..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count();
         if hex_len == 32 {
-            result.replace_range(
-                pos + "token=".len()..pos + "token=".len() + hex_len,
-                "<redacted>",
-            );
+            result.replace_range(value..value + hex_len, "<redacted>");
+            from = value + "<redacted>".len();
+        } else {
+            from = value;
         }
     }
     result
@@ -530,5 +569,49 @@ mod tests {
         assert_eq!(redacted, "OK ws=up token=<redacted>");
         assert_eq!(redact_secrets("token=short"), "token=short");
         assert_eq!(redact_secrets("a\nb"), "a\nb");
+    }
+
+    #[test]
+    fn every_token_on_a_line_is_redacted_not_just_the_first() {
+        // web `redactSecrets` is a global regex; a line carrying two tokens
+        // used to keep the second one in full on screen.
+        let line =
+            "a token=0123456789abcdef0123456789abcdef and b token=fedcba9876543210fedcba9876543210";
+        assert_eq!(
+            redact_secrets(line),
+            "a token=<redacted> and b token=<redacted>"
+        );
+    }
+
+    #[test]
+    fn tool_arguments_never_show_a_secret() {
+        assert_eq!(
+            redact_tool_args(r#"{"action":"connect","ssid":"MyNet","password":"s3cret"}"#),
+            r#"{"action":"connect","ssid":"MyNet","password":"<redacted>"}"#
+        );
+        assert_eq!(
+            redact_tool_args(r#"{"command":"@w=MyNet,s3cret"}"#),
+            r#"{"command":"@w=MyNet,<redacted>"}"#
+        );
+        assert_eq!(
+            redact_tool_args(r#"{"url":"http://user:pass@host/d/"}"#),
+            r#"{"url":"http://<redacted>@host/d/"}"#
+        );
+        assert_eq!(
+            redact_tool_args(r#"{"command":"@w=off"}"#),
+            r#"{"command":"@w=off"}"#,
+            "a command without a password keeps its argument"
+        );
+        let token = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            redact_tool_args(&format!(r#"{{"host":"192.168.1.5","token":"{token}"}}"#)),
+            r#"{"host":"192.168.1.5","token":"<redacted>"}"#,
+            "a hex token is masked wherever it appears"
+        );
+        assert_eq!(
+            redact_tool_args(r#"{"command":"df -h"}"#),
+            r#"{"command":"df -h"}"#,
+            "an ordinary command is left alone"
+        );
     }
 }
