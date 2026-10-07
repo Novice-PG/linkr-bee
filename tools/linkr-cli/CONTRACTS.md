@@ -272,7 +272,11 @@ OpenCode-style shell rendered with ratatui; feature parity with
   palette lists every action (connect, set uart, scan wifi, save log, switch
   view, toggle autoscroll, switch language, ask assistant, quit...). Global keys: `Ctrl+Q`
   quit (confirm when connected), `Ctrl+Shift+K` focus assistant (web parity),
-  `F1` help, `F2..F4` views, `Ctrl+L` clear terminal.
+  `Ctrl+Shift+V` paste (web `pasteTerminalButton` parity: platform helpers read
+  the system clipboard, and a key nothing can answer toasts like
+  `pasteUnavailable`), mouse selection (press, drag, release copies over OSC 52
+  and toasts — web `copyBtn` parity, double click takes the word), `F1` help,
+  `F2..F4` views, `Ctrl+L` clear terminal.
 - Modal dialogs: UART settings (validated by `protocol::validate`), WiFi
   (scan results, password masked), WebDAV, device info, confirmations
   (reboot preset, quit, disconnect), toasts/notice log (`CoreEvent::Notice`).
