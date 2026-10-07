@@ -3,15 +3,8 @@
 
 use std::path::Path;
 
-pub const EXIT_OK: i32 = 0;
-pub const EXIT_ERROR: i32 = 1;
-pub const EXIT_USAGE: i32 = 2;
-pub const EXIT_DEVICE_DISCONNECTED: i32 = 3;
-pub const EXIT_INTERRUPT: i32 = 130;
-
 pub const UART_BAUD_MIN: u64 = 300;
 pub const UART_BAUD_MAX: u64 = 3_000_000;
-pub const DEFAULT_NAME: &str = "Linkr BLE UART";
 pub const WIFI_PASSWORD_ENV: &str = "LINKR_WIFI_PASSWORD";
 
 const UART_DATA_BITS: [&str; 4] = ["5", "6", "7", "8"];

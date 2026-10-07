@@ -11,11 +11,6 @@ use std::sync::OnceLock;
 
 use super::context::Message;
 
-/// Storage keys (spec §14.2).
-pub const TASKS_KEY: &str = "linkr-agent-tasks-v1";
-pub const NOTES_KEY: &str = "linkr-agent-notes-v1";
-pub const SESSION_KEY: &str = "linkr-agent-session-v1";
-
 pub const TASK_LIMIT: usize = 20;
 pub const NOTE_LIMIT: usize = 12;
 pub const NOTE_MAX_CHARS: usize = 600;

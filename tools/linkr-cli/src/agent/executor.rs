@@ -27,8 +27,6 @@ pub const APPROVAL_STALE_MS: u64 = 900_000;
 pub const EXECUTION_STALE_MS: u64 = 300_000;
 /// `FULL_AUTO_WINDOW_MS = 15 * 60 * 1000` (spec §5.3).
 pub const FULL_AUTO_WINDOW_MS: u64 = 900_000;
-/// `APPROVAL_STALE_MS` again, for the record side of the same rule.
-pub const RECORD_STALE_MS: u64 = EXECUTION_STALE_MS;
 
 /// Serial input limits (spec §14.3).
 pub const MAX_COMMAND_CHARS: usize = 1024;
@@ -50,7 +48,6 @@ pub const ERR_RECORD_UNAVAILABLE: &str = "Execution record is unavailable for th
 pub const ERR_CANCELLED: &str = "Operation cancelled. Do not retry automatically.";
 pub const ERR_TOOL_BUDGET: &str =
     "Tool-call budget exhausted. No further tools will run for this question.";
-pub const ERR_PROBE_NAMES: &str = "Invalid capability probe names.";
 pub const ERR_APPROVAL_GONE: &str = "Approval not pending or expired.";
 pub const ERR_NO_ACTIVE_TASK: &str = "No active task. Send a new question.";
 pub const ERR_QUEUE_ITEM: &str = "Invalid queued message.";
@@ -985,14 +982,6 @@ pub fn parse_device_profile(text: &str, now_ms: u64) -> Option<DeviceProfile> {
 // ---------------------------------------------------------------------------
 // Approval requests
 // ---------------------------------------------------------------------------
-
-/// What the broker is asked to approve, prepared from a tool call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ApprovalPlan {
-    pub tool_name: String,
-    pub question: String,
-    pub needs_approval: bool,
-}
 
 /// Decide whether a serial send must go through the broker, in the exact order
 /// of `web/device_executor.js`.

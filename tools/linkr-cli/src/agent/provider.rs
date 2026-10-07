@@ -922,10 +922,6 @@ fn excerpt_error(text: &str) -> String {
     trimmed.chars().take(LIMIT).collect::<String>() + "…"
 }
 
-pub fn request_timeout() -> Duration {
-    Duration::from_millis(PROVIDER_TIMEOUT_MS)
-}
-
 pub fn panel_timer() -> Duration {
     Duration::from_millis(PANEL_TIMER_MS)
 }

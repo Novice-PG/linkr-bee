@@ -90,22 +90,12 @@ strings! {
 /// byte, so tests and parity callers keep reading them from here.
 pub const ERR_ENDPOINT: &str = ASST_ERR_ENDPOINT[0];
 pub const ERR_MODEL: &str = ASST_ERR_MODEL[0];
-pub const ERR_PROVIDER: &str = ASST_ERR_PROVIDER[0];
-pub const ERR_REASONING: &str = ASST_ERR_REASONING[0];
 pub const ERR_CONTEXT_WINDOW: &str = ASST_ERR_CONTEXT_WINDOW[0];
 pub const ERR_MAX_TOKENS: &str = ASST_ERR_MAX_TOKENS[0];
 pub const ERR_PRICES: &str = ASST_ERR_PRICES[0];
 pub const ERR_HEADERS: &str = ASST_ERR_HEADERS[0];
 pub const SAVED: &str = ASST_SAVED[0];
-pub const CLEARED: &str = ASST_CLEARED[0];
-pub const DIRTY: &str = ASST_DIRTY[0];
-pub const SAVE_ERROR: &str = ASST_SAVE_ERROR[0];
 pub const BUSY: &str = ASST_BUSY[0];
-pub const PLAINTEXT_WARNING: &str = ASST_PLAINTEXT_WARNING[0];
-pub const PLAINTEXT_CONFIRM: &str = ASST_PLAINTEXT_CONFIRM[0];
-pub const PLAINTEXT_BLOCKED: &str = ASST_PLAINTEXT_BLOCKED[0];
-pub const STORAGE_HINT: &str = ASST_STORAGE_HINT[0];
-pub const NOTICE_HINT: &str = ASST_NOTICE_HINT[0];
 
 /// Labels of the reasoning select (`AGENT_REASONING_LEVELS`).
 pub const REASONING: [(&str, Entry); 4] = [

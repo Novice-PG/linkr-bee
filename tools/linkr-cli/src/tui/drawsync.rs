@@ -237,11 +237,6 @@ impl<B> SyncBackend<B> {
     pub fn new(inner: B, cjk: CjkWidth) -> Self {
         Self { inner, cjk }
     }
-
-    /// The glyph width this backend draws for.
-    pub fn cjk_width(&self) -> CjkWidth {
-        self.cjk
-    }
 }
 
 impl<B: Backend> Backend for SyncBackend<B> {
