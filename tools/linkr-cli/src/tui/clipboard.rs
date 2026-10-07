@@ -24,8 +24,40 @@
 //! `navigator.clipboard.readText()` (`web/app.js` → `pasteUnavailable`).
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Worker threads a helper has left behind, from spawn to exit.
+///
+/// Every one of them has to go away with its helper: a reader parked on a
+/// pipe that a stray grandchild keeps open would otherwise sit there for the
+/// rest of the session — one thread and one read end per paste — with nothing
+/// in the program able to see it, let alone reclaim it.
+static LIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts one worker across **every** return path (`Drop`, not a single
+/// `fetch_sub` at the end of the body, so an early `return` cannot lose it).
+struct Worker;
+
+impl Worker {
+    fn start() -> Self {
+        LIVE_WORKERS.fetch_add(1, Ordering::SeqCst);
+        Worker
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        LIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn live_workers() -> usize {
+    LIVE_WORKERS.load(Ordering::SeqCst)
+}
 
 /// One way to ask the desktop for its clipboard.
 struct Helper {
@@ -145,6 +177,15 @@ fn read() -> Option<String> {
 /// waiting for the exit first would only ever reach the deadline — which is
 /// how a paste of anything bigger than that came out as "clipboard
 /// unavailable".
+///
+/// The bytes are accumulated **as they arrive**, not when the pipe finally
+/// reports EOF: a helper that hands its standard output to a background
+/// grandchild (a daemon, a selection owner, anything that inherits the file
+/// descriptors) exits successfully without ever closing the pipe, and what it
+/// had already printed is the clipboard answer. Reading only at EOF threw
+/// that away — the paste came back as `Some("")`, which `read()` reports as
+/// "clipboard unavailable" — and left the reader thread parked on a
+/// descriptor nobody was ever going to close.
 fn run(helper: &Helper) -> Option<String> {
     let mut child = Command::new(helper.program)
         .args(helper.args)
@@ -154,38 +195,158 @@ fn run(helper: &Helper) -> Option<String> {
         .spawn()
         .ok()?;
     let stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let mut reader = stdout;
-        let _ = reader.read_to_end(&mut buffer);
-        let _ = tx.send(buffer);
-    });
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let eof = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = Worker::start();
+    {
+        let bytes = Arc::clone(&bytes);
+        let eof = Arc::clone(&eof);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let _worker = worker;
+            copy_out(stdout, &bytes, &eof, &stop);
+        });
+    }
     let deadline = Instant::now() + helper.timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                // Up to EOF the reader is done with the child; it gets the
-                // rest of its own budget rather than a blocking `join()`,
-                // because a stray grandchild holding the pipe open must not
-                // park the frame loop either.
-                let buffer = rx.recv_timeout(helper.timeout).unwrap_or_default();
-                if !status.success() {
-                    return None;
-                }
-                return String::from_utf8(buffer).ok();
-            }
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(None) | Err(_) => {
+                stop.store(true, Ordering::Release);
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
         }
+    };
+    // The helper is gone; only a stray grandchild that inherited the pipe can
+    // still be holding it open. The reader gets what is left of *this*
+    // helper's own budget — never a fresh one, or a child that exits just
+    // before its deadline would cost a second timeout — and then whatever has
+    // arrived is taken either way.
+    while !eof.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // On the EOF path the reader has already left; on the grandchild path
+    // this is what makes it leave, closing the pipe behind it instead of
+    // parking one thread and one file descriptor per paste for the session.
+    stop.store(true, Ordering::Release);
+    if !status.success() {
+        return None;
+    }
+    let buffer = bytes.lock().expect("clipboard buffer").clone();
+    String::from_utf8(buffer).ok()
+}
+
+/// Drain a helper's standard output into `bytes`, then say so through `eof`.
+///
+/// The wait for readability happens in [`reader_ready`], where `stop` is
+/// honoured, so the transfer itself never has to be interrupted from the
+/// outside.
+fn copy_out(mut stream: ChildStdout, bytes: &Mutex<Vec<u8>>, eof: &AtomicBool, stop: &AtomicBool) {
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if !reader_ready(&mut stream, stop) {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => bytes
+                .lock()
+                .expect("clipboard buffer")
+                .extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    eof.store(true, Ordering::Release);
+}
+
+/// Wait until `stream` can be read without blocking, checking for
+/// cancellation as we go. `false` means the caller was told to give up.
+///
+/// On the platforms without `poll(2)` there is no way to interrupt a blocked
+/// read from another thread, so this is a plain "ready": the data still
+/// arrives in pieces (which is what matters to the caller), but a helper
+/// whose pipe is held open by a grandchild keeps its reader until that
+/// grandchild lets go.
+#[cfg(unix)]
+fn reader_ready(stream: &mut ChildStdout, stop: &AtomicBool) -> bool {
+    use std::os::fd::AsRawFd;
+    wait_for(stream.as_raw_fd(), libc::POLLIN, stop)
+}
+
+#[cfg(unix)]
+fn writer_ready(stream: &mut ChildStdin, stop: &AtomicBool) -> bool {
+    use std::os::fd::AsRawFd;
+    wait_for(stream.as_raw_fd(), libc::POLLOUT, stop)
+}
+
+#[cfg(unix)]
+fn wait_for(fd: libc::c_int, events: libc::c_short, stop: &AtomicBool) -> bool {
+    let mut fds = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    loop {
+        // `poll` sleeps, so the 50 ms is what bounds how long a cancelled
+        // worker takes to notice; a readiness event returns at once.
+        let ready = unsafe { libc::poll(&mut fds, 1, 50) };
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        // Ready, hung up or broken: `read`/`write` decides what that means.
+        if ready > 0 {
+            return true;
+        }
     }
 }
+
+#[cfg(not(unix))]
+fn reader_ready(_stream: &mut ChildStdout, _stop: &AtomicBool) -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn writer_ready(_stream: &mut ChildStdin, _stop: &AtomicBool) -> bool {
+    true
+}
+
+/// Take the blocking wait out of the writer's `write(2)`.
+///
+/// A pipe write that does not fit blocks until somebody reads, and no amount
+/// of polling around it can help: the cancellation flag would never be looked
+/// at again. With `O_NONBLOCK` a full pipe comes back as `WouldBlock`, the
+/// thread returns to [`writer_ready`], and the helper's departure is noticed
+/// there — killing the helper only closes *its* end, a child it left behind
+/// may still be holding the read end open. The flag lives on the write end's
+/// own file description, so the helper's inherited descriptor is untouched.
+#[cfg(unix)]
+fn nonblocking(stream: &mut ChildStdin) {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    }
+}
+
+#[cfg(not(unix))]
+fn nonblocking(_stream: &mut ChildStdin) {}
 
 /// Drop the one line ending PowerShell adds of its own, so pasting an API key
 /// into a single-line field does not also send an Enter to the target.
@@ -287,7 +448,10 @@ fn write_text(text: &str) -> bool {
 ///
 /// The bytes are written from a separate thread: a helper that stops reading
 /// would otherwise block here the moment the 64 KiB pipe fills, and this runs
-/// on the same thread as the drawing.
+/// on the same thread as the drawing. The thread is stopped as soon as the
+/// helper is — a payload the helper never got to is not worth a thread that
+/// outlives the program, and a grandchild holding the read end would
+/// otherwise keep it blocked for good.
 fn run_write(writer: &Writer, text: &str) -> bool {
     let Ok(mut child) = Command::new(writer.program)
         .args(writer.args)
@@ -298,22 +462,50 @@ fn run_write(writer: &Writer, text: &str) -> bool {
     else {
         return false;
     };
+    let stop = Arc::new(AtomicBool::new(false));
     if let Some(mut stdin) = child.stdin.take() {
-        let payload = text.to_string();
+        nonblocking(&mut stdin);
+        let payload = text.as_bytes().to_vec();
+        let stop = Arc::clone(&stop);
+        let worker = Worker::start();
         std::thread::spawn(move || {
-            // The read end is gone once the child is killed; that surfaces as
-            // a broken pipe, which is the point of doing it off-thread.
-            let _ = stdin.write_all(payload.as_bytes());
+            let _worker = worker;
+            let mut written = 0;
+            while written < payload.len() {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                if !writer_ready(&mut stdin, &stop) {
+                    return;
+                }
+                match stdin.write(&payload[written..]) {
+                    // A closed pipe (`Ok(0)` or an error) is the helper
+                    // telling us it is done: that surfaces as a broken pipe,
+                    // which is the point of doing it off-thread. `WouldBlock`
+                    // is a full pipe on a non-blocking descriptor — back to
+                    // `writer_ready` to wait for it to drain.
+                    Ok(0) => return,
+                    Ok(count) => written += count,
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::Interrupted
+                            || err.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => return,
+                }
+            }
         });
     }
     let deadline = Instant::now() + writer.timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                stop.store(true, Ordering::Release);
+                return status.success();
+            }
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(None) | Err(_) => {
+                stop.store(true, Ordering::Release);
                 let _ = child.kill();
                 let _ = child.wait();
                 return false;
@@ -403,6 +595,131 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "the frame loop may not wait for a helper that hung"
+        );
+    }
+
+    /// A helper whose output is inherited by a background grandchild exits 0
+    /// **without ever closing the pipe** — the author of the original code
+    /// knew about that ("a stray grandchild holding the pipe open"), but the
+    /// answer was then read only at EOF. Two things went wrong: the bytes the
+    /// helper had already printed were dropped, so the paste reported
+    /// "clipboard unavailable" instead of pasting, and the reader thread stayed
+    /// parked on a descriptor nobody would ever close, one thread and one file
+    /// descriptor per paste.
+    ///
+    /// The budget is part of the same bug: after the child exited the reader
+    /// was given a *fresh* `helper.timeout` on top of the one already spent,
+    /// so a helper that exits just before its deadline cost a second one.
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipe_delivers_the_answer_and_parks_nothing() {
+        let dir = std::env::temp_dir().join(format!("linkr-clip-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let pidfile = dir.join("pid");
+        // Prints the answer, then leaves `sleep` holding the write end so the
+        // pipe never reports EOF. The pid is written down so the test can
+        // take the grandchild back with it.
+        let script: &'static str = Box::leak(
+            format!(
+                "printf 'key-1234'; (sleep 30 & echo $! > '{}');",
+                pidfile.display()
+            )
+            .into_boxed_str(),
+        );
+        let args: &'static [&'static str] = Box::leak(vec!["-c", script].into_boxed_slice());
+
+        let before = live_workers();
+        let started = Instant::now();
+        let text = run(&helper("/bin/sh", args, 500));
+
+        assert_eq!(
+            text.as_deref(),
+            Some("key-1234"),
+            "what the helper printed is the clipboard, pipe or no pipe"
+        );
+        let elapsed = started.elapsed();
+        // The reader waits out what is left of this helper's budget, never a
+        // second one: 500 ms is the deadline, 750 ms would be the budget paid
+        // twice.
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "the helper's budget was renewed after it exited ({elapsed:?})"
+        );
+
+        // The reader has to let go of the pipe the grandchild is holding.
+        let mut let_go = false;
+        for _ in 0..200 {
+            if live_workers() <= before {
+                let_go = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Take the grandchild home either way: a test must not leave a
+        // process behind on the machine that runs it.
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            if let Ok(pid) = pid.trim().parse::<u32>() {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            let_go,
+            "the reader thread is still parked on the pipe ({} workers)",
+            live_workers()
+        );
+    }
+
+    /// The same shape on the way out: a helper that lets a grandchild hold
+    /// standard input open never drains the payload, so the writer thread
+    /// would block on a full pipe for the rest of the session. The call
+    /// itself must still report at once — and take the thread with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_writer_does_not_outlive_a_helper_that_never_finishes_reading() {
+        let dir = std::env::temp_dir().join(format!("linkr-clip-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let pidfile = dir.join("pid");
+        let script: &'static str =
+            Box::leak(format!("sleep 30 & echo $! > '{}'", pidfile.display()).into_boxed_str());
+        let args: &'static [&'static str] = Box::leak(vec!["-c", script].into_boxed_slice());
+
+        let before = live_workers();
+        let accepted = run_write(
+            &Writer {
+                program: "/bin/sh",
+                args,
+                timeout: Duration::from_millis(500),
+            },
+            // Twice the pipe: without a reader it blocks after the first 64 KiB.
+            &"x".repeat(128 * 1024),
+        );
+        assert!(accepted, "the helper exited successfully");
+
+        let mut let_go = false;
+        for _ in 0..200 {
+            if live_workers() <= before {
+                let_go = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            if let Ok(pid) = pid.trim().parse::<u32>() {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            let_go,
+            "the writer thread is still blocked on the pipe ({} workers)",
+            live_workers()
         );
     }
 
