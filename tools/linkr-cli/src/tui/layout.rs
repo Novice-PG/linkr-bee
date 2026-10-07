@@ -9,7 +9,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::state::{App, Focus, View};
+use super::state::{App, View};
 use super::status::StatusModel;
 use crate::event::NoticeLevel;
 
@@ -482,11 +482,6 @@ fn draw_dialog(frame: &mut Frame, app: &App, area: Rect) {
             .scroll((scroll, 0)),
         inner,
     );
-}
-
-/// Focus label used when nothing else says it (kept here for the tests).
-pub fn focus_label(focus: Focus, lang: super::i18n::Lang) -> &'static str {
-    focus.label(lang)
 }
 
 #[cfg(test)]

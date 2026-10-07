@@ -608,15 +608,6 @@ pub struct WatchSnapshot {
     pub dropped: usize,
 }
 
-/// One short status-line sentence per finding; findings are observations, so
-/// the wording stays "observed" / "出现". English by default, Chinese for zh-*.
-pub fn describe_findings(findings: &[Finding], lang: &str) -> Vec<String> {
-    findings
-        .iter()
-        .map(|finding| SerialWatch::describe(finding, lang))
-        .collect()
-}
-
 /// Minimal convenience for a status line: is a boot-loop observation among
 /// these findings? An observation, not a verdict about the target.
 pub fn is_boot_loop_hint(findings: &[Finding]) -> bool {

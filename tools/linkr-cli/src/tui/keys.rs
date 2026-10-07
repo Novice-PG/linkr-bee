@@ -26,18 +26,8 @@ impl StickyMods {
         !self.shift && !self.ctrl && !self.alt
     }
 
-    pub fn toggle_shift(mut self) -> Self {
-        self.shift = !self.shift;
-        self
-    }
-
     pub fn toggle_ctrl(mut self) -> Self {
         self.ctrl = !self.ctrl;
-        self
-    }
-
-    pub fn toggle_alt(mut self) -> Self {
-        self.alt = !self.alt;
         self
     }
 }

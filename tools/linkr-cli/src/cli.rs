@@ -18,6 +18,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::agent::accessory::{
+    DIAGNOSTICS_COMMAND, UART_QUERY_COMMAND, WEBDAV_QUERY_COMMAND, WIFI_QUERY_COMMAND,
+};
 use crate::event::{ConnectionState, CoreEvent, NoticeLevel};
 use crate::protocol::mgmt::{
     MGMT_CAP_ASYNC_EVENTS, MGMT_CAP_WEBDAV, MGMT_CAP_WIFI, WIFI_OPERATION_TIMEOUT_SECS,
@@ -740,13 +743,13 @@ fn build_commands(
     let scan_final = Some(Duration::from_secs_f64(WIFI_SCAN_TIMEOUT_SECS));
     let mut commands = Vec::new();
     if cli.query_info {
-        commands.push(("@i?".to_string(), None));
+        commands.push((DIAGNOSTICS_COMMAND.to_string(), None));
     }
     if let Some(uart) = uart {
         commands.push((format!("@u={uart}"), None));
     }
     if cli.query_uart {
-        commands.push(("@u?".to_string(), None));
+        commands.push((UART_QUERY_COMMAND.to_string(), None));
     }
     if let Some(wifi) = wifi {
         commands.push((wifi, wifi_final));
@@ -755,7 +758,7 @@ fn build_commands(
         commands.push(("@w off".to_string(), wifi_final));
     }
     if cli.query_wifi {
-        commands.push(("@w?".to_string(), None));
+        commands.push((WIFI_QUERY_COMMAND.to_string(), None));
     }
     if cli.wifi_scan {
         commands.push(("@w scan".to_string(), scan_final));
@@ -767,7 +770,7 @@ fn build_commands(
         commands.push(("@d off".to_string(), None));
     }
     if cli.query_webdav {
-        commands.push(("@d?".to_string(), None));
+        commands.push((WEBDAV_QUERY_COMMAND.to_string(), None));
     }
     commands
 }
