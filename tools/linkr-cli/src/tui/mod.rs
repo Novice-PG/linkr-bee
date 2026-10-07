@@ -1108,10 +1108,14 @@ fn paste_keys(app: &App, text: &str) -> Vec<KeyEvent> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut keys = Vec::new();
     for (index, line) in normalized.split('\n').enumerate() {
-        if index > 0 {
-            if !multiline {
-                continue;
-            }
+        // The line *break* goes; the text on either side of it does not. A
+        // single-line field drops the breaks the way an `<input>` sanitizes a
+        // pasted value (strip U+000A and U+000D, keep the rest), so `a\nb`
+        // becomes `ab`. Skipping the whole iteration on `index > 0` — which
+        // is what this used to do — kept only the first line and threw every
+        // line after it away in silence, and a paste whose first line was
+        // empty did nothing at all.
+        if index > 0 && multiline {
             keys.push(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
         keys.extend(
@@ -1851,6 +1855,49 @@ mod tests {
             "the trailing line break is not part of a single-line field"
         );
         assert!(state.dirty, "a paste is a keystroke, so it flags the form");
+    }
+
+    /// A paste that is more than one line long must not lose everything
+    /// after the first break in a single-line field: the browser strips the
+    /// line *breaks* out of an `<input>` and keeps every other character
+    /// (HTML's value sanitization for `type=text` removes U+000A and U+000D
+    /// and nothing else), so `one\ntwo` arrives as `onetwo`. The loop used to
+    /// skip the whole iteration for `index > 0`, which typed only the first
+    /// line and dropped the rest without a word.
+    #[test]
+    fn a_single_line_field_keeps_every_line_of_a_paste() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "one\ntwo");
+
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert_eq!(state.endpoint.as_str(), "onetwo");
+        assert!(state.dirty, "a paste is a keystroke, so it flags the form");
+    }
+
+    /// …and a paste whose first line is empty is not a paste of nothing:
+    /// once the break goes, the second line is still there to type. Before
+    /// the fix this one was silently inert — no keys, no toast, no paste.
+    #[test]
+    fn a_paste_that_starts_with_a_line_break_still_lands() {
+        let mut app = test_app();
+        app.dialog = Some(Dialog::Settings(
+            agent_settings::AgentSettingsState::default(),
+        ));
+        let mut sticky = StickyMods::default();
+
+        paste(&mut app, &mut sticky, "\nvalue");
+
+        let Some(Dialog::Settings(state)) = app.dialog.as_ref() else {
+            panic!("the dialog must stay open");
+        };
+        assert_eq!(state.endpoint.as_str(), "value");
     }
 
     /// A `Confirm` reads a bare `y` as "yes" (`dialogs::confirm` →
