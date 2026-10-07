@@ -300,7 +300,7 @@ This is the whole `F1` help, in the order it is shown:
 | `Ctrl+Shift+C` | arm one-shot `Ctrl` for the next key |
 | `Ctrl+Shift+A` | arm one-shot `Alt` for the next key |
 | `Ctrl+Shift+V` | paste the clipboard into the focused field (or the device) |
-| drag in the terminal | select text — releasing copies it (OSC 52) |
+| drag in the terminal | select text — releasing copies it |
 | `Enter` | send a line (the Enter mode applies) |
 | `Tab` / `Shift+Tab` | sent to the target as `TAB` / `CSI Z` |
 | `F6`..`F12` | sent to the target unchanged |
@@ -321,13 +321,22 @@ lands in the same field. Paste is also the one key an overlay passes through
 
 Copying is the same contract as the web toolbar button, with the gesture in
 place of the button: press inside the terminal, drag over what you want, and
-the release is the copy. The block left on screen is exactly what went to the
-clipboard and the toast names the mechanism — `OSC 52`, the one clipboard
-route a terminal programme can reach once mouse capture has taken the host's
-own selection away. A double click takes the whole word under the pointer,
-even a one-character one, and `Ctrl+L` clears the pane together with the
-selection. `Ctrl+P → term.copy` puts the whole visible pane through that same
-channel when there is nothing selected.
+the release is the copy. Two routes are taken at once — mouse capture has
+taken the host's own selection away, so these are the routes a terminal
+programme has: the system clipboard through the same helper chain
+`Ctrl+Shift+V` reads (`wl-copy`, `xclip` / `xsel`, `pbpaste`, `clip`), which
+answers, and `OSC 52` handed to the emulator, which never answers. So the
+toast says what actually happened instead of assuming — `Copied N
+characters.` when a helper took it, `Sent N characters over OSC 52 — the
+terminal may ignore it.` when none did. Some emulators parse that sequence
+and drop it on the floor (GNOME Terminal and every other VTE terminal, GNOME
+bug 795774), which is why a desktop with no helper installed also hears, once
+per session, that nothing reached the system clipboard: `sudo apt install
+wl-clipboard` on Wayland, `sudo apt install xclip` on X11. A double click
+takes the whole word under the pointer, even a one-character one, and `Ctrl+L`
+clears the pane together with the selection. `Ctrl+P → term.copy` puts the
+whole visible pane through those same two routes when there is nothing
+selected.
 
 Two rules worth remembering:
 
@@ -401,7 +410,7 @@ sync, which full-screen programs need.
 | Reset font size | `Ctrl+0` (range 10–28, default 13) |
 | Clear the pane | `Ctrl+L` |
 | Scroll the scrollback | `Shift+PgUp` / `Shift+PgDn`, `Shift+Home` / `Shift+End` |
-| Copy what you see | palette `term.copy` (OSC 52, so it reaches the host clipboard) |
+| Copy what you see | palette `term.copy` (the same two routes as a drag) |
 | Save a log | palette `term.save_log` |
 | Toggle local echo | palette `term.echo` |
 | Cycle the Enter mode | palette `term.enter_mode` (`raw` → `cr` → `lf` → `crlf`) |

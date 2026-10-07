@@ -129,6 +129,13 @@ strings! {
     // believing the copy landed.
     MOD_CLIP_WRITE_FAILED => "The device asked to copy to this machine's clipboard; no clipboard helper is available.",
         "设备请求写入本机剪贴板，但本机没有可用的剪贴板工具。";
+    // Said once per session, right before the OSC 52 news, when *our own*
+    // copy found no helper either — the reason the text did not reach the
+    // system clipboard, and the fix. VTE-based terminals (GNOME Terminal and
+    // friends) parse `OSC 52` and do nothing with it (GNOME bug 795774), so
+    // without a helper there is no second way in.
+    MOD_COPY_NO_HELPER => "No clipboard helper here (wl-clipboard / xclip), so the system clipboard was not written.",
+        "本机没有剪贴板工具（wl-clipboard / xclip），系统剪贴板没有被写入。";
     MOD_NEED_BLE_DIAG => "Connect over BLE to read diagnostics.", "请通过 BLE 连接后再读取诊断。";
     MOD_CJK_WIDE => "CJK probe: glyphs take two columns here.",
         "CJK 探测：本终端把宽字形按 2 列绘制。";
@@ -356,6 +363,7 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         exec_expires_at: 0,
         pending_paste: None,
         clipboard_jobs: Vec::new(),
+        copy_hint_shown: false,
         broker: dialogs::TuiBroker::new(),
         agent: None,
         watch: SerialWatch::new(WatchOptions::default()),
@@ -601,7 +609,9 @@ fn on_core_event(app: &mut App, event: CoreEvent) {
                 // loop, and a helper that is not answering must not be what
                 // stops the terminal from drawing. `poll_clipboard` raises the
                 // "no helper" notice when it comes back.
-                app.clipboard_jobs.push(clipboard::spawn_write(payload));
+                app.clipboard_jobs.push(clipboard::ClipboardJob::for_device(
+                    clipboard::spawn_write(payload),
+                ));
             }
         }
         CoreEvent::Connection { state, detail } => {
@@ -909,26 +919,39 @@ fn grid_cell(app: &App, x: u16, y: u16) -> Option<(usize, usize)> {
     Some((row, usize::from(x.min(cols.saturating_sub(1)))))
 }
 
-/// Hand text to the *host* terminal's clipboard: `OSC 52` is addressed to the
-/// emulator this program runs inside, so it goes to stdout (the grid records
-/// it too, through the VT parser). Used by the palette's `term.copy` and by
-/// the selection's release.
+/// Get text out of this program, by both routes that exist.
+///
+/// `OSC 52` is addressed to the emulator we run inside, so it goes to stdout;
+/// the system clipboard is written by a helper, off the frame loop. The two
+/// are independent and neither is assumed to work: an emulator may parse the
+/// sequence and do nothing (VTE/GNOME Terminal — GNOME bug 795774), and a
+/// desktop may have no `wl-copy` / `xclip` at all. So nothing is claimed here
+/// — `poll_clipboard` reports what each route actually did, once the helper
+/// answers.
+///
+/// Used by the palette's `term.copy` and by the selection's release.
 pub fn copy_to_host(app: &mut App, text: &str) {
     let lang = app.lang();
-    let text = cap_osc52(text);
-    let payload = terminal_view::osc52_write(text.as_ref());
+    let chars = text.chars().count();
+    // The helper gets the whole selection — it is off this thread, so the
+    // stall the cap exists for cannot happen — while `OSC 52` keeps its cap,
+    // and the report carries both numbers.
+    let osc_text = cap_osc52(text);
+    let osc_chars = osc_text.chars().count();
+    let payload = terminal_view::osc52_write(osc_text.as_ref());
     use std::io::Write as _;
     let mut out = std::io::stdout();
     let outcome = out.write_all(payload.as_bytes()).and_then(|()| out.flush());
-    match outcome {
-        Ok(()) => app.toast(
-            NoticeLevel::Info,
-            tr!(t(palette::PAL_MSG_COPIED, lang), text.chars().count()),
-        ),
-        Err(err) => app.notices.push(
+    app.clipboard_jobs.push(clipboard::ClipboardJob::for_copy(
+        clipboard::spawn_write_text(text.to_string()),
+        chars,
+        outcome.is_ok().then_some(osc_chars),
+    ));
+    if let Err(err) = outcome {
+        app.notices.push(
             NoticeLevel::Error,
             tr!(t(palette::PAL_MSG_COPY_FAILED, lang), err),
-        ),
+        );
     }
 }
 
@@ -1060,19 +1083,58 @@ pub(crate) fn poll_clipboard(app: &mut App, sticky: &mut StickyMods) {
         }
     }
     let jobs = std::mem::take(&mut app.clipboard_jobs);
-    for rx in jobs {
-        match rx.try_recv() {
-            Ok(true) => {}
-            Ok(false) => {
-                let lang = app.lang();
-                app.notices.push(
-                    NoticeLevel::Warn,
-                    t(MOD_CLIP_WRITE_FAILED, lang).to_string(),
+    for job in jobs {
+        match job.rx.try_recv() {
+            Ok(true) => clipboard_answer(app, &job, true),
+            Ok(false) => clipboard_answer(app, &job, false),
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.clipboard_jobs.push(job),
+            // The worker died without answering. For a copy this program
+            // started that still has to be reported — staying quiet is the
+            // old lie again; an inbound write that vanished has no news.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if job.copy.is_some() {
+                    clipboard_answer(app, &job, false);
+                }
+            }
+        }
+    }
+}
+
+/// One clipboard worker's verdict, worded by what it was asked to do.
+///
+/// A copy **we** started is reported either way. A helper that took the text
+/// is a copy that really happened (`PAL_MSG_COPIED`, the web's
+/// `clipboard.writeText` equivalent); none taking it means the text only went
+/// to the emulator over `OSC 52`, and the emulator may parse that sequence
+/// and drop it on the floor (VTE/GNOME Terminal — GNOME bug 795774), so the
+/// toast says exactly that instead of "Copied", with the reason and the fix
+/// behind it the first time in a session.
+fn clipboard_answer(app: &mut App, job: &clipboard::ClipboardJob, took: bool) {
+    let lang = app.lang();
+    match job.copy {
+        Some(report) if took => app.toast(
+            NoticeLevel::Info,
+            tr!(t(palette::PAL_MSG_COPIED, lang), report.chars),
+        ),
+        Some(report) => {
+            if !app.copy_hint_shown {
+                app.copy_hint_shown = true;
+                app.toast(NoticeLevel::Warn, t(MOD_COPY_NO_HELPER, lang).to_string());
+            }
+            // `None` means the write to stdout failed, and that failure is
+            // already on the log by its own message — don't claim we sent it.
+            if let Some(osc) = report.osc {
+                app.toast(
+                    NoticeLevel::Info,
+                    tr!(t(palette::PAL_MSG_COPY_OSC52_ONLY, lang), osc),
                 );
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => app.clipboard_jobs.push(rx),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
+        None if !took => app.notices.push(
+            NoticeLevel::Warn,
+            t(MOD_CLIP_WRITE_FAILED, lang).to_string(),
+        ),
+        None => {}
     }
 }
 
@@ -1514,6 +1576,7 @@ pub(crate) fn test_app() -> App {
         exec_expires_at: 0,
         pending_paste: None,
         clipboard_jobs: Vec::new(),
+        copy_hint_shown: false,
         broker: self::dialogs::TuiBroker::new(),
         agent: None,
         watch: SerialWatch::new(WatchOptions::default()),
@@ -2365,12 +2428,13 @@ mod tests {
         handle_mouse(&mut app, &mut sticky, up(40, 2));
 
         assert!(!app.terminal.is_dragging(), "the release ends the gesture");
-        let (_, text) = app.notices.log.last().expect("a copy reports itself");
-        assert!(text.contains("OSC 52"), "{text}");
-        assert!(
-            text.contains('5'),
-            "gamma delta cols 6..10 = \"delta\": {text}"
-        );
+        // The text is handed to both routes at once; the words that report it
+        // wait for the helper (`poll_clipboard`), because until something
+        // answers we do not know where it landed.
+        let job = app.clipboard_jobs.last().expect("the release copies");
+        let report = job.copy.expect("…and it is this program's own copy");
+        assert_eq!(report.chars, 5, "gamma delta cols 6..10 = \"delta\"");
+        assert_eq!(report.osc, Some(5), "the same five reach the emulator too");
         assert!(
             app.terminal.selection.is_some(),
             "the block stays on screen so the user can see what was copied"
@@ -2430,8 +2494,10 @@ mod tests {
             "the flag must not outlive the release, or the next stray one \
              re-sends what is on screen"
         );
-        let (_, text) = app.notices.log.last().expect("a copy reports itself");
-        assert!(text.contains("OSC 52"), "{text}");
+        // The copy itself is queued, not announced: `poll_clipboard` says what
+        // happened once a helper answers.
+        let queued = app.clipboard_jobs.len();
+        assert_eq!(queued, 1, "the release copies what the drag covered");
 
         // Whatever the leftover would have been, it is gone: a press that
         // lands in the sidebar and drags back into the pane starts nothing.
@@ -2444,6 +2510,11 @@ mod tests {
             app.notices.log.len(),
             copies,
             "a gesture that is over cannot be stretched by the next one"
+        );
+        assert_eq!(
+            app.clipboard_jobs.len(),
+            queued,
+            "…and it cannot send a second copy either"
         );
     }
 
@@ -2581,14 +2652,119 @@ mod tests {
         assert!(capped.chars().all(|ch| ch == 'a'));
     }
 
+    /// A worker that has already answered — the way `poll_clipboard` is tested
+    /// on a machine that may or may not have a clipboard helper installed.
+    fn answered_copy(took: bool, chars: usize, osc: Option<usize>) -> clipboard::ClipboardJob {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(took);
+        clipboard::ClipboardJob::for_copy(rx, chars, osc)
+    }
+
+    fn answered_device(took: bool) -> clipboard::ClipboardJob {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(took);
+        clipboard::ClipboardJob::for_device(rx)
+    }
+
+    /// Nothing is claimed before a worker answers. The old code toasted
+    /// "Copied." the moment the bytes left stdout, which is precisely how a
+    /// VTE terminal (GNOME Terminal: GNOME bug 795774) got away with ignoring
+    /// them while the toast insisted otherwise.
     #[test]
-    fn a_copy_reports_what_it_sent() {
+    fn a_copy_queues_its_report_instead_of_claiming_one() {
         let mut app = mouse_app();
+        let before = app.notices.log.len();
 
         copy_to_host(&mut app, "héllo");
 
-        let (_, text) = app.notices.log.last().expect("one notice");
-        assert!(text.contains("OSC 52"), "{text}");
-        assert!(text.contains('5'), "five characters: {text}");
+        assert_eq!(
+            app.notices.log.len(),
+            before,
+            "no copy is reported before a helper has answered"
+        );
+        let job = app.clipboard_jobs.last().expect("a copy job is queued");
+        let report = job.copy.expect("…tagged as our own copy, not a device's");
+        assert_eq!(report.chars, 5, "five characters");
+        assert_eq!(report.osc, Some(5), "all five went out over OSC 52 too");
+    }
+
+    /// A helper that took the text is a copy that really happened — the same
+    /// thing `navigator.clipboard.writeText` resolving means on the web — and
+    /// it is reported as one.
+    #[test]
+    fn a_copy_a_helper_took_is_reported_as_a_copy() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        app.clipboard_jobs.push(answered_copy(true, 5, Some(5)));
+
+        poll_clipboard(&mut app, &mut sticky);
+
+        let (_, text) = app.notices.log.last().expect("the copy is reported");
+        assert_eq!(
+            text.as_str(),
+            tr!(t(palette::PAL_MSG_COPIED, app.lang()), 5)
+        );
+        assert!(app.clipboard_jobs.is_empty(), "the job was collected");
+    }
+
+    /// No helper on this desktop: the text went to the emulator over OSC 52
+    /// and nowhere else, so that is what the corner says — with the reason and
+    /// the fix, once per session rather than once per selection.
+    #[test]
+    fn a_copy_with_no_helper_says_it_only_went_to_the_terminal() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        app.clipboard_jobs.push(answered_copy(false, 7, Some(7)));
+
+        poll_clipboard(&mut app, &mut sticky);
+
+        let last = app.notices.log.len() - 1;
+        assert_eq!(
+            app.notices.log[last].1,
+            tr!(t(palette::PAL_MSG_COPY_OSC52_ONLY, app.lang()), 7),
+            "what really happened, not a claim"
+        );
+        assert_eq!(
+            app.notices.log[last - 1].1,
+            t(MOD_COPY_NO_HELPER, app.lang()),
+            "the reason and the fix ride along"
+        );
+        assert!(app.copy_hint_shown);
+
+        app.clipboard_jobs.push(answered_copy(false, 3, Some(3)));
+        poll_clipboard(&mut app, &mut sticky);
+        let repeats = app
+            .notices
+            .log
+            .iter()
+            .filter(|(_, text)| text.as_str() == t(MOD_COPY_NO_HELPER, app.lang()))
+            .count();
+        assert_eq!(repeats, 1, "once per session, not once per selection");
+    }
+
+    /// An inbound `OSC 52` has no "copied N characters" to give: only its
+    /// failure reaches the log, and a copy of ours never doubles as its news.
+    #[test]
+    fn an_inbound_write_reports_only_when_it_failed() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        let before = app.notices.log.len();
+
+        app.clipboard_jobs.push(answered_device(true));
+        poll_clipboard(&mut app, &mut sticky);
+        assert_eq!(
+            app.notices.log.len(),
+            before,
+            "a device copy that landed says nothing on our behalf"
+        );
+
+        app.clipboard_jobs.push(answered_device(false));
+        poll_clipboard(&mut app, &mut sticky);
+        let (_, text) = app.notices.log.last().expect("the failure is said");
+        assert_eq!(text, t(MOD_CLIP_WRITE_FAILED, app.lang()));
+        assert!(
+            !app.copy_hint_shown,
+            "the helper hint belongs to our own copies"
+        );
     }
 }

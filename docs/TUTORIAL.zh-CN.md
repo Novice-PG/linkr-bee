@@ -281,7 +281,7 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 | `Ctrl+Shift+C` | 为下一个按键启用一次性 `Ctrl` |
 | `Ctrl+Shift+A` | 为下一个按键启用一次性 `Alt` |
 | `Ctrl+Shift+V` | 把剪贴板粘贴进当前输入框（否则发给设备） |
-| 在终端里拖动 | 选中文字，松手即复制（OSC 52） |
+| 在终端里拖动 | 选中文字，松手即复制 |
 | `Enter` | 发送一行（应用回车模式） |
 | `Tab` / `Shift+Tab` | 作为 `TAB` / `CSI Z` 发送给目标 |
 | `F6`..`F12` | 原样发送给目标 |
@@ -299,10 +299,17 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 不是按键。
 
 复制和网页工具栏按钮是同一条契约，只是把按钮换成了手势：在终端里按下、拖过要复制的
-内容，松手即复制。留在屏幕上的反白就是进剪贴板的全部内容，提示里写明机制 ——
-`OSC 52`：鼠标捕获打开后，宿主终端自己的选区已经够不着，这是终端程序唯一能走的
-剪贴板通道。双击选中指针下的整个词（哪怕只有一个字符），`Ctrl+L` 清屏的同时也清掉
-选区；没有选区时，`Ctrl+P → term.copy` 把整个可见窗格送进同一条通道。
+内容，松手即复制。鼠标捕获打开后，宿主终端自己的选区已经够不着，终端程序只剩两条路，
+这里一次都走：一条是系统剪贴板，用的正是 `Ctrl+Shift+V` 读剪贴板的那套工具
+（`wl-copy`、`xclip` / `xsel`、`pbpaste`、`clip`），它会回话；另一条是把 `OSC 52`
+交给模拟器，模拟器从不回话。所以提示讲的是**实际发生了什么**，而不是想当然 —— 有
+工具接住了就是「已复制 N 个字符。」，一个都没有就是「已通过 OSC 52 把 N 个字符交给
+终端——它可能直接忽略。」。有些模拟器收到这段序列解析完就丢掉（GNOME Terminal 以及
+所有基于 VTE 的终端，GNOME bug 795774），所以在没装剪贴板工具的桌面上，一次会话里
+的第一次复制还会补上一句：系统剪贴板没有被写入 —— Wayland 上 `sudo apt install
+wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整个词（哪怕只有
+一个字符），`Ctrl+L` 清屏的同时也清掉选区；没有选区时，`Ctrl+P → term.copy` 把整个
+可见窗格送进同样这两条路。
 
 两条值得记住的规则：
 
@@ -368,7 +375,7 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 | 重置字号 | `Ctrl+0`（范围 10–28，默认 13） |
 | 清屏 | `Ctrl+L` |
 | 滚动回滚缓冲 | `Shift+PgUp` / `Shift+PgDn`、`Shift+Home` / `Shift+End` |
-| 复制可见输出 | 面板 `term.copy`（OSC 52，直达主机剪贴板） |
+| 复制可见输出 | 面板 `term.copy`（与拖动同样的两条路） |
 | 保存日志 | 面板 `term.save_log` |
 | 切换本地回显 | 面板 `term.echo` |
 | 切换回车模式 | 面板 `term.enter_mode`（`raw` → `cr` → `lf` → `crlf`） |

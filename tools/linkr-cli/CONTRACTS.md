@@ -258,8 +258,8 @@ OpenCode-style shell rendered with ratatui; feature parity with
   SGR, cursor, local echo, Enter mode, click-free keyboard input with the key
   bar equivalents (Esc/Tab/arrows/Ctrl combos — encode like
   `web/terminal_keys.js`: CSI `\x1b[A..D`, modifiers `\x1b[1;<mod>A`, etc.).
-  Toolbar actions: font size ±, autoscroll toggle, copy (OSC 52 or selection),
-  clear, save log to file.
+  Toolbar actions: font size ±, autoscroll toggle, copy (selection release
+  over the helper chain + `OSC 52`), clear, save log to file.
 - **Right/bottom panel**: assistant chat (messages, tool-call blocks,
   approval dialogs, usage line, mode picker manual/auto/full-auto, settings
   dialog, export report). Implements `ApprovalBroker` with a modal dialog.
@@ -274,8 +274,11 @@ OpenCode-style shell rendered with ratatui; feature parity with
   quit (confirm when connected), `Ctrl+Shift+K` focus assistant (web parity),
   `Ctrl+Shift+V` paste (web `pasteTerminalButton` parity: platform helpers read
   the system clipboard, and a key nothing can answer toasts like
-  `pasteUnavailable`), mouse selection (press, drag, release copies over OSC 52
-  and toasts — web `copyBtn` parity, double click takes the word), `F1` help,
+  `pasteUnavailable`), mouse selection (press, drag, release copies — the
+  platform helper writes the system clipboard and `OSC 52` hands the same text
+  to the emulator, so the toast can say what really happened instead of
+  claiming a copy — web `copyBtn` parity, double click takes the word), `F1`
+  help,
   `F2..F4` views, `Ctrl+L` clear terminal.
 - Modal dialogs: UART settings (validated by `protocol::validate`), WiFi
   (scan results, password masked), WebDAV, device info, confirmations
