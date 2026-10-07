@@ -138,6 +138,26 @@ pub struct StoredAgent {
     pub price_output: f64,
 }
 
+/// The TUI keeps its own copy of the camelCase record (same shape, same serde
+/// names) so the settings dialog can edit it without pulling in the runtime
+/// validator; this is where the two meet again.
+impl From<StoredAgent> for crate::agent::config::StoredConfig {
+    fn from(stored: StoredAgent) -> Self {
+        crate::agent::config::StoredConfig {
+            provider: stored.provider,
+            endpoint: stored.endpoint,
+            api_key: stored.api_key,
+            model: stored.model,
+            context_window: stored.context_window,
+            max_tokens: stored.max_tokens,
+            reasoning: stored.reasoning,
+            headers: stored.headers,
+            price_input: stored.price_input,
+            price_output: stored.price_output,
+        }
+    }
+}
+
 /// `dirs::config_dir()/linkr/agent.json`.
 pub fn agent_settings_path() -> PathBuf {
     let mut path = dirs::config_dir().unwrap_or_default();
@@ -816,33 +836,21 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
     lines
 }
 
-/// Runtime config for `agent::spawn`, or `None` when nothing is stored yet.
+/// Runtime config for `agent::spawn`, or `None` when nothing usable is stored.
+///
+/// The record goes through the same normalization the web applies on load
+/// (`loadAgentConfig` → `validateAgentConfig`), so a stored `0` for
+/// `maxTokens` / `contextWindow` becomes the built-in default instead of
+/// travelling to the provider as `max_tokens: 0`, which it answers with
+/// `400 Invalid max_tokens value` on every turn.
 pub fn runtime_config() -> Option<crate::agent::AgentConfig> {
-    let stored = load_stored()?;
-    if stored.endpoint.trim().is_empty() || stored.model.trim().is_empty() {
-        return None;
-    }
-    let provider = match stored.provider.as_str() {
-        "anthropic-messages" => crate::agent::Provider::AnthropicMessages,
-        "google-generative-ai" => crate::agent::Provider::GoogleGemini,
-        _ => crate::agent::Provider::OpenAiCompat,
-    };
-    Some(crate::agent::AgentConfig {
-        endpoint: stored.endpoint,
-        model: stored.model,
-        api_key: if stored.api_key.is_empty() {
-            None
-        } else {
-            Some(stored.api_key)
-        },
-        provider,
-        reasoning: stored.reasoning,
-        extra_headers: stored.headers.into_iter().collect(),
-        context_window: stored.context_window,
-        max_tokens: stored.max_tokens,
-        price_input: stored.price_input,
-        price_output: stored.price_output,
-    })
+    runtime_config_from(load_stored()?)
+}
+
+/// `runtime_config` with the record already in hand, so the normalization can
+/// be tested without reading (or clobbering) the real `agent.json`.
+fn runtime_config_from(stored: StoredAgent) -> Option<crate::agent::AgentConfig> {
+    crate::agent::config::validate_agent_config(&stored.into()).ok()
 }
 
 #[cfg(test)]
@@ -957,6 +965,42 @@ mod tests {
         }
         let back: StoredAgent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, stored);
+    }
+
+    /// The dialog stores a blank number field as `0` ("use the built-in
+    /// default", like the web form). The runtime has to turn that into the
+    /// default: a literal `max_tokens: 0` in the request body is answered with
+    /// `400 Invalid max_tokens value`, which broke every assistant turn.
+    #[test]
+    fn runtime_config_resolves_the_blank_number_fields() {
+        let state = state_with("https://api.example.com/v1/", "gpt-4o");
+        let stored = state.to_stored(Lang::En).unwrap();
+        assert_eq!(stored.context_window, 0, "a blank field stores 0");
+        assert_eq!(stored.max_tokens, 0);
+
+        let config = runtime_config_from(stored).expect("a valid record");
+        assert_eq!(
+            config.max_tokens,
+            crate::agent::config::AGENT_DEFAULT_MAX_TOKENS
+        );
+        assert_eq!(
+            config.context_window,
+            crate::agent::config::AGENT_DEFAULT_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            config.endpoint, "https://api.example.com/v1",
+            "trailing slash normalized away"
+        );
+        assert_eq!(config.reasoning, "off");
+    }
+
+    /// A record the runtime cannot use reads as "not configured" instead of
+    /// spawning a runtime that fails on the first request.
+    #[test]
+    fn runtime_config_refuses_an_endpoint_it_cannot_call() {
+        let state = state_with("https://api.example.com/v1?tenant=1", "gpt-4o");
+        let stored = state.to_stored(Lang::En).unwrap();
+        assert!(runtime_config_from(stored).is_none());
     }
 
     #[test]

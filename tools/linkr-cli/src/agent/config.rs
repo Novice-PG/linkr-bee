@@ -25,9 +25,14 @@ pub const AGENT_DEFAULT_MAX_TOKENS: u32 = 4096;
 /// The fixed part (prompt plus tool descriptions) is measured pessimistically
 /// at 3 characters per token; a window below this cannot carry a request.
 pub const AGENT_FIXED_CONTEXT_TOKENS: u32 = 8000;
-/// Spec §12.1 validation ranges.
-pub const CONTEXT_WINDOW_RANGE: (u32, u32) = (2048, 2_000_000);
-pub const MAX_TOKENS_RANGE: (u32, u32) = (1, 32_768);
+/// Validation ranges, copied from `web/agent_config.js`, where
+/// `CONTEXT_WINDOW_RANGE = [1000, 2000000]` and `MAX_TOKENS_RANGE = [1, 100000]`
+/// bound what the settings form accepts (a stored `0` is always allowed and
+/// means "use the built-in default"). AGENT_SPEC §12.1 still quotes the older
+/// 2048/32768 clamps, which no longer match the web code; keeping a narrower
+/// range here would reject a record the TUI's own dialog just wrote.
+pub const CONTEXT_WINDOW_RANGE: (u32, u32) = (1_000, 2_000_000);
+pub const MAX_TOKENS_RANGE: (u32, u32) = (1, 100_000);
 pub const REASONING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
 
 impl Provider {
@@ -111,6 +116,12 @@ impl From<&AgentConfig> for StoredConfig {
 ///
 /// Error strings are the exact ones of spec §12.1; the provider falls back to
 /// the OpenAI-compatible protocol instead of failing, like the JS normalizer.
+///
+/// A stored `0` for `contextWindow` / `maxTokens` means "use the built-in
+/// default" and is resolved here, the way the web reads it at every use site
+/// (`e.maxTokens || 4096`, `e.contextWindow || 32768`). Handing the `0` to the
+/// provider instead yields `400 Invalid max_tokens value`, which is how the
+/// blank "Max output tokens" field used to make every assistant turn fail.
 pub fn validate_agent_config(stored: &StoredConfig) -> Result<AgentConfig, String> {
     let endpoint = normalize_endpoint(&stored.endpoint)?;
     let model = stored.model.trim().to_string();
@@ -133,6 +144,16 @@ pub fn validate_agent_config(stored: &StoredConfig) -> Result<AgentConfig, Strin
             MAX_TOKENS_RANGE.0, MAX_TOKENS_RANGE.1
         ));
     }
+    let context_window = if context_window == 0 {
+        AGENT_DEFAULT_CONTEXT_WINDOW
+    } else {
+        context_window
+    };
+    let max_tokens = if max_tokens == 0 {
+        AGENT_DEFAULT_MAX_TOKENS
+    } else {
+        max_tokens
+    };
     let reasoning = stored.reasoning.clone();
     if reasoning.is_empty() {
         // "off" is the built-in default of a record without the field.
@@ -424,7 +445,12 @@ mod tests {
         }
     }
 
-    /// The five exact validation messages of spec §12.1.
+    /// The five exact validation messages. The endpoint, model and reasoning
+    /// strings are verbatim AGENT_SPEC §12.1; the two numeric ranges follow
+    /// `web/agent_config.js` (`CONTEXT_WINDOW_RANGE = [1000, 2000000]`,
+    /// `MAX_TOKENS_RANGE = [1, 100000]`), which is what the settings form
+    /// accepts — §12.1 still quotes its older 2048/32768 clamps, and a narrower
+    /// range here rejected records the TUI's own dialog had just written.
     #[test]
     fn validation_messages_are_exact() {
         let mut stored = valid();
@@ -463,24 +489,24 @@ mod tests {
         );
 
         let mut stored = valid();
-        stored.context_window = 1000;
+        stored.context_window = 999;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Context window must be a number between 2048 and 2000000."
+            "Context window must be a number between 1000 and 2000000."
         );
         stored.context_window = 2_000_001;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Context window must be a number between 2048 and 2000000."
+            "Context window must be a number between 1000 and 2000000."
         );
 
         let mut stored = valid();
         stored.max_tokens = 0; // 0 keeps the built-in default
         assert!(validate_agent_config(&stored).is_ok());
-        stored.max_tokens = 32_769;
+        stored.max_tokens = 100_001;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Max output tokens must be a number between 1 and 32768."
+            "Max output tokens must be a number between 1 and 100000."
         );
 
         let mut stored = valid();
@@ -509,6 +535,31 @@ mod tests {
         assert_eq!(config.provider, Provider::AnthropicMessages);
         assert_eq!(config.reasoning, "off");
         assert_eq!(config.api_key, None);
+    }
+
+    /// A blank "Max output tokens" (or "Context window") field is stored as `0`
+    /// — "use the built-in default", exactly what the web form does with an
+    /// empty input. Handing that `0` to the provider instead of the default
+    /// made every assistant turn fail with
+    /// `400 Invalid max_tokens value, the valid range of max_tokens is [1, 393216]`.
+    #[test]
+    fn a_stored_zero_becomes_the_builtin_default() {
+        let mut stored = valid();
+        stored.context_window = 0;
+        stored.max_tokens = 0;
+        let config = validate_agent_config(&stored).unwrap();
+        assert_eq!(config.context_window, AGENT_DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(config.max_tokens, AGENT_DEFAULT_MAX_TOKENS);
+        assert_eq!(AGENT_DEFAULT_MAX_TOKENS, 4096);
+
+        // The other end of the range: anything the settings dialog accepts
+        // (1000..100000) has to load, or the record cannot be used at all.
+        let mut stored = valid();
+        stored.context_window = 1000;
+        stored.max_tokens = 100_000;
+        let config = validate_agent_config(&stored).unwrap();
+        assert_eq!(config.context_window, 1000);
+        assert_eq!(config.max_tokens, 100_000);
     }
 
     #[test]
