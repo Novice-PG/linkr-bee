@@ -162,6 +162,25 @@ pub trait ApprovalBroker: Send + Sync + 'static {
     fn ask(&self, request: ApprovalRequest) -> oneshot::Receiver<ApprovalDecision>;
 }
 
+/// What the model is told when the user refuses a request.
+///
+/// There are two wordings and they are not interchangeable. Every tool takes
+/// the generic one (`AGENT_SPEC.md` §5.1: "The user rejected ${toolName}. Do
+/// not retry this action…"), but a change to Linkr Bee itself is asked on a
+/// card of its own — `ApprovalKind::AccessoryChange`, the
+/// "This changes Linkr Bee itself (not the target)…" card — and
+/// `WEB_UX_SPEC.md` §5 pins that card's reject error to "The user rejected
+/// this change. Do not retry unless the user asks again." (`web/
+/// accessory_control.js` → the Reject button). Answering that card with the
+/// generic sentence tells the model which tool was refused instead of that
+/// the bridge was not reconfigured, and the spec string sat here unused.
+fn rejection_message(kind: &ApprovalKind, tool_name: &str) -> String {
+    match kind {
+        ApprovalKind::AccessoryChange { .. } => executor::REJECTED_ACCESSORY.to_string(),
+        _ => executor::rejected_message(tool_name),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     MessageStart {
@@ -681,6 +700,7 @@ impl Runtime {
         kind: ApprovalKind,
         question: String,
     ) -> Result<(), String> {
+        let rejection = rejection_message(&kind, tool_name);
         let request = ApprovalRequest {
             id: self.approval_id(),
             kind,
@@ -690,7 +710,7 @@ impl Runtime {
         match tokio::time::timeout(Duration::from_millis(executor::APPROVAL_STALE_MS), rx).await {
             Err(_) | Ok(Err(_)) => Err(executor::ERR_APPROVAL_GONE.to_string()),
             Ok(Ok(ApprovalDecision::Approved)) => Ok(()),
-            Ok(Ok(ApprovalDecision::Rejected)) => Err(executor::rejected_message(tool_name)),
+            Ok(Ok(ApprovalDecision::Rejected)) => Err(rejection),
         }
     }
 
@@ -2446,6 +2466,59 @@ mod tests {
         assert_eq!(ExecMode::parse("anything"), ExecMode::Auto);
         assert_eq!(ExecMode::parse("SEMI-AUTO"), ExecMode::Auto);
         assert_eq!(ExecMode::parse("Full_Auto"), ExecMode::FullAuto);
+    }
+
+    /// Two reject wordings, two specs: the accessory card's is pinned by
+    /// `WEB_UX_SPEC.md` §5 (`web/accessory_control.js` → the Reject button),
+    /// every other approval's by `AGENT_SPEC.md` §5.1. Answering the
+    /// accessory card with the generic sentence tells the model *which tool*
+    /// was refused instead of that the bridge was not reconfigured.
+    #[test]
+    fn a_rejected_accessory_change_uses_the_accessory_wording() {
+        let web_spec =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/specs/WEB_UX_SPEC.md"))
+                .expect("WEB_UX_SPEC.md");
+        let agent_spec =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/specs/AGENT_SPEC.md"))
+                .expect("AGENT_SPEC.md");
+
+        let accessory = ApprovalKind::AccessoryChange {
+            summary: "baud 115200".to_string(),
+            command: "@u=115200".to_string(),
+        };
+        assert_eq!(
+            rejection_message(&accessory, "set_uart_config"),
+            "The user rejected this change. Do not retry unless the user asks again."
+        );
+        assert!(
+            web_spec.contains(
+                "The user rejected this change. Do not retry unless the user asks again."
+            ),
+            "the wording has to stay the one WEB_UX_SPEC §5 quotes"
+        );
+
+        let serial = ApprovalKind::SendInput {
+            payload: "reboot".to_string(),
+        };
+        assert_eq!(
+            rejection_message(&serial, "send_serial_input"),
+            executor::rejected_message("send_serial_input")
+        );
+        assert!(
+            agent_spec.contains(
+                "`The user rejected ${toolName}. Do not retry this action; ask for a different approach or stop.`"
+            ),
+            "the generic wording has to stay the one AGENT_SPEC §5.1 quotes"
+        );
+
+        let command = ApprovalKind::RunCommand {
+            command: "ls".to_string(),
+            mode: ExecMode::Auto,
+        };
+        assert_eq!(
+            rejection_message(&command, "run_shell_command"),
+            executor::rejected_message("run_shell_command")
+        );
     }
 
     #[test]
