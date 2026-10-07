@@ -346,7 +346,7 @@ impl AgentSettingsState {
 
     /// Build the record the form currently describes.
     pub fn to_stored(&self, lang: Lang) -> Result<StoredAgent, String> {
-        let endpoint = self.endpoint.text.trim().to_string();
+        let endpoint = self.endpoint.as_str().trim().to_string();
         if endpoint.is_empty() {
             return Err(t(ASST_ERR_ENDPOINT, lang).to_string());
         }
@@ -356,7 +356,7 @@ impl AgentSettingsState {
         if !allowed || authority.contains('@') {
             return Err(t(ASST_ERR_ENDPOINT, lang).to_string());
         }
-        let model = self.model.text.trim().to_string();
+        let model = self.model.as_str().trim().to_string();
         if model.is_empty() {
             return Err(t(ASST_ERR_MODEL, lang).to_string());
         }
@@ -369,22 +369,22 @@ impl AgentSettingsState {
             .map(|(id, _)| id.to_string())
             .ok_or_else(|| t(ASST_ERR_REASONING, lang).to_string())?;
         let context_window = parse_number(
-            &self.context_window.text,
+            self.context_window.as_str(),
             (1000, 2_000_000),
             t(ASST_ERR_CONTEXT_WINDOW, lang),
         )?;
         let max_tokens = parse_number(
-            &self.max_tokens.text,
+            self.max_tokens.as_str(),
             (1, 100_000),
             t(ASST_ERR_MAX_TOKENS, lang),
         )?;
-        let price_input = parse_price(&self.price_input.text, lang)?;
-        let price_output = parse_price(&self.price_output.text, lang)?;
-        let headers = parse_headers(&self.headers.text, lang)?;
+        let price_input = parse_price(self.price_input.as_str(), lang)?;
+        let price_output = parse_price(self.price_output.as_str(), lang)?;
+        let headers = parse_headers(self.headers.as_str(), lang)?;
         Ok(StoredAgent {
             provider,
             endpoint,
-            api_key: self.api_key.text.clone(),
+            api_key: self.api_key.as_str().to_string(),
             model,
             context_window,
             max_tokens,
@@ -397,7 +397,7 @@ impl AgentSettingsState {
 
     /// `endpointSecurity(...).exposesKey` for the current form value.
     pub fn exposes_key(&self) -> bool {
-        endpoint_security(&self.endpoint.text).1 && !self.api_key.text.is_empty()
+        endpoint_security(self.endpoint.as_str()).1 && !self.api_key.is_empty()
     }
 
     fn select(&mut self, next: usize) {
@@ -617,7 +617,15 @@ fn label(text: &str, selected: bool) -> Span<'static> {
 
 fn value(text: String, selected: bool, masked: bool) -> Span<'static> {
     let shown = if masked {
-        "*".repeat(text.chars().count().min(32))
+        if text.is_empty() {
+            // Nothing stored: say so instead of drawing an empty mask.
+            "–".to_string()
+        } else {
+            // Fixed width. The asterisk count used to be the key's length (up
+            // to 32), which turned the mask column into a length oracle for
+            // `~/.config/linkr/agent.json`.
+            "********".to_string()
+        }
     } else if text.is_empty() {
         "–".to_string()
     } else {
@@ -663,21 +671,21 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
     row(
         Field::Endpoint,
         t(ASST_LABEL_ENDPOINT, lang),
-        state.endpoint.text.clone(),
+        state.endpoint.as_str().to_string(),
         false,
         &mut lines,
     );
     row(
         Field::Model,
         t(ASST_LABEL_MODEL, lang),
-        state.model.text.clone(),
+        state.model.as_str().to_string(),
         false,
         &mut lines,
     );
     row(
         Field::ApiKey,
         t(ASST_LABEL_API_KEY, lang),
-        state.api_key.text.clone(),
+        state.api_key.as_str().to_string(),
         true,
         &mut lines,
     );
@@ -689,7 +697,7 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
     row(
         Field::Headers,
         headers_hint,
-        state.headers.text.clone().replace('\n', " ⏎ "),
+        state.headers.as_str().to_string().replace('\n', " ⏎ "),
         false,
         &mut lines,
     );
@@ -710,28 +718,28 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
     row(
         Field::ContextWindow,
         t(ASST_LABEL_CONTEXT, lang),
-        state.context_window.text.clone(),
+        state.context_window.as_str().to_string(),
         false,
         &mut lines,
     );
     row(
         Field::MaxTokens,
         t(ASST_LABEL_MAX_TOKENS, lang),
-        state.max_tokens.text.clone(),
+        state.max_tokens.as_str().to_string(),
         false,
         &mut lines,
     );
     row(
         Field::PriceInput,
         t(ASST_LABEL_PRICE_IN, lang),
-        state.price_input.text.clone(),
+        state.price_input.as_str().to_string(),
         false,
         &mut lines,
     );
     row(
         Field::PriceOutput,
         t(ASST_LABEL_PRICE_OUT, lang),
-        state.price_output.text.clone(),
+        state.price_output.as_str().to_string(),
         false,
         &mut lines,
     );
@@ -903,7 +911,7 @@ mod tests {
         );
         state.headers.set("bad header".to_string());
         assert_eq!(
-            parse_headers(&state.headers.text, Lang::Zh).unwrap_err(),
+            parse_headers(state.headers.as_str(), Lang::Zh).unwrap_err(),
             t(ASST_ERR_HEADERS, Lang::Zh)
         );
         state = state_with("https://api.example.com/v1", "gpt-4o");

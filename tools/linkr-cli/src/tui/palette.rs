@@ -124,6 +124,13 @@ fn view_assistant(app: &mut App) {
 }
 
 fn focus_center(app: &mut App) {
+    // The action promises the **terminal**, and focus alone is half of it:
+    // `Focus::Center` hands the keys to whatever panel the view shows. Left in
+    // the assistant view the keystrokes then land nowhere (its panel reads
+    // `Focus::Assistant`, and the terminal branch below is skipped because the
+    // view is not `Terminal`) — the keyboard went dead, so the user pressed a
+    // key, saw nothing, and assumed the TUI had hung.
+    app.set_view(View::Terminal);
     app.focus = Focus::Center;
 }
 
@@ -204,23 +211,10 @@ fn save_log(app: &mut App) {
 }
 
 fn copy_visible(app: &mut App) {
-    let lang = app.lang();
-    let text = app.terminal.visible_text();
-    // OSC 52 is addressed to the *host* terminal emulator, so it goes to
-    // stdout (the grid records it too through the VT parser).
-    let payload = super::terminal_view::osc52_write(&text);
-    use std::io::Write as _;
-    let mut out = std::io::stdout();
-    let outcome = out.write_all(payload.as_bytes()).and_then(|()| out.flush());
-    match outcome {
-        Ok(()) => app.toast(
-            NoticeLevel::Info,
-            tr!(t(PAL_MSG_COPIED, lang), text.chars().count()),
-        ),
-        Err(err) => app
-            .notices
-            .push(NoticeLevel::Error, tr!(t(PAL_MSG_COPY_FAILED, lang), err)),
-    }
+    // One exit for every `OSC 52`: the mouse selection's release (`handle_mouse`)
+    // goes through the same call, so both report the same toast and the same
+    // cap.
+    super::copy_to_host(app, &app.terminal.visible_text());
 }
 
 fn toggle_transport(app: &mut App) {
@@ -900,6 +894,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Focus the terminal" has to take you there. Setting `Focus::Center`
+    /// without moving the view left the keystrokes on the panel the view was
+    /// already showing — and on nothing at all in the assistant view, where
+    /// the panel only reads `Focus::Assistant`.
+    #[test]
+    fn focusing_the_terminal_also_takes_you_there() {
+        let mut app = crate::tui::test_app();
+        app.set_view(View::Assistant);
+        app.focus = Focus::Sidebar;
+
+        focus_center(&mut app);
+
+        assert_eq!(app.view, View::Terminal, "the action's own title");
+        assert_eq!(app.focus, Focus::Center, "…and the keys land on it");
+    }
 
     /// The gate matches the web's `agentExport` disabled state, and the body
     /// is the same Markdown `buildTaskReport` would produce for these stores.

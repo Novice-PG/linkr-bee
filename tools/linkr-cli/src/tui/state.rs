@@ -81,11 +81,22 @@ impl Focus {
 }
 
 /// Single-line (and simple multi-line) editor used by every form.
+///
+/// `text` and `cursor` are private on purpose: the caret is a **byte** index
+/// that has to stay inside `text` *and* on a `char` boundary, while
+/// `display()`, `home()` and `end()` slice straight at it. The form re-seeders
+/// assign a whole new value to a field — `seed_form()` for a `--lan` target,
+/// `aim()` for a freshly scanned BLE device, `aim_host()` for the IP WiFi just
+/// confirmed — so writing `text` directly left the caret at the end of the
+/// previous, longer value and the next frame panicked on the slice. Under
+/// `panic = "abort"` that takes the whole TUI down mid-paste (P2). Every write
+/// therefore goes through [`Self::set`]/[`Self::clear`], which move the caret
+/// with the text, and [`Self::caret`] repairs a stale one before any slice.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextField {
-    pub text: String,
+    text: String,
     /// Byte index of the caret; always on a `char` boundary.
-    pub cursor: usize,
+    cursor: usize,
 }
 
 impl TextField {
@@ -113,7 +124,28 @@ impl TextField {
         self.text.is_empty()
     }
 
+    /// The caret, forced back inside `text` and onto a `char` boundary.
+    ///
+    /// The fields being private means outside code cannot get this wrong; the
+    /// clamp is the second line of defence for everything that still can — the
+    /// tests in this module and any future `pub(crate)` shortcut. One stale
+    /// byte index would otherwise abort the process on the next frame, so the
+    /// render path never trusts `cursor` as-is.
+    fn caret(&self) -> usize {
+        let mut at = self.cursor.min(self.text.len());
+        while at > 0 && !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
+    /// Repair a stale caret before an edit that slices at it.
+    fn settle(&mut self) {
+        self.cursor = self.caret();
+    }
+
     pub fn insert_char(&mut self, c: char) {
+        self.settle();
         let mut text = std::mem::take(&mut self.text);
         text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -121,6 +153,7 @@ impl TextField {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.settle();
         let mut text = std::mem::take(&mut self.text);
         text.insert_str(self.cursor, s);
         self.cursor += s.len();
@@ -128,6 +161,7 @@ impl TextField {
     }
 
     pub fn backspace(&mut self) {
+        self.settle();
         if self.cursor == 0 {
             return;
         }
@@ -139,6 +173,7 @@ impl TextField {
     }
 
     pub fn delete(&mut self) {
+        self.settle();
         if self.cursor >= self.text.len() {
             return;
         }
@@ -161,6 +196,7 @@ impl TextField {
     }
 
     pub fn left(&mut self) {
+        self.settle();
         if self.cursor == 0 {
             return;
         }
@@ -172,6 +208,7 @@ impl TextField {
     }
 
     pub fn right(&mut self) {
+        self.settle();
         if self.cursor >= self.text.len() {
             return;
         }
@@ -183,6 +220,7 @@ impl TextField {
     }
 
     pub fn home(&mut self) {
+        self.settle();
         self.cursor = self.text[..self.cursor]
             .rfind('\n')
             .map(|i| i + 1)
@@ -190,6 +228,7 @@ impl TextField {
     }
 
     pub fn end(&mut self) {
+        self.settle();
         self.cursor = self.text[self.cursor..]
             .find('\n')
             .map(|i| self.cursor + i)
@@ -198,11 +237,12 @@ impl TextField {
 
     /// Rendered text plus caret column (maskable for passwords).
     pub fn display(&self, mask: Option<char>) -> (String, usize) {
+        let at = self.caret();
         match mask {
-            None => (self.text.clone(), self.text[..self.cursor].chars().count()),
+            None => (self.text.clone(), self.text[..at].chars().count()),
             Some(m) => {
                 let masked: String = self.text.chars().map(|_| m).collect();
-                let col = self.text[..self.cursor].chars().count();
+                let col = self.text[..at].chars().count();
                 (masked, col)
             }
         }
@@ -299,6 +339,11 @@ pub struct App {
     // Overlays.
     pub palette: Option<PaletteState>,
     pub dialog: Option<Dialog>,
+    /// What the quit confirm (`Ctrl+Q`) displaced, restored when the user
+    /// declines it. Overwriting `dialog` used to throw the open box away: an
+    /// approval's dropped sender reads to the agent as "rejected", and a
+    /// half-typed AI configuration or a scan result list was simply lost.
+    pub dialog_return: Option<Box<Dialog>>,
     pub notices: Notices,
 
     // Assistant runtime.
@@ -327,6 +372,11 @@ pub struct App {
     /// Width of the center pane. Together with `center_height` it lets the key
     /// handler compute the same scroll limit the renderer paints against.
     pub center_width: u16,
+    /// Top-left corner of the center pane in frame coordinates. The mouse
+    /// reports screen coordinates, so a press has to be put back into the
+    /// pane before it can name a grid cell.
+    pub center_x: u16,
+    pub center_y: u16,
     /// Height of the whole frame. Overlays size themselves against it, and the
     /// arrow keys need it to know how far a scrollable overlay may move.
     pub screen_height: u16,
@@ -370,23 +420,42 @@ impl App {
         self.state == ConnectionState::Connected
     }
 
-    /// Only a **live link** locks the transport choice; an attempt that is
-    /// still in flight does not.
+    /// The transport choice is pinned while a link is up **and** while an
+    /// attempt is being made — web parity: `bleModeBtn`, `lanModeBtn` and
+    /// `switchDeviceButton` are all disabled with
+    /// `connecting || state.connected` (web/app.js:1949-1950, 847, 1945).
     ///
-    /// An earlier version of this guard also locked on `pending_connect`, and
-    /// that made the transport impossible to change in practice: `--tui` boots
-    /// with a deferred connect pending for the whole `--timeout` window, so
-    /// the row sat on `（已锁定）` and every switch was refused (the reported
-    /// "cannot switch to LAN").
+    /// Pinning the attempt is what closes the dead end behind "connect, then
+    /// search": the row stayed live mid-dial, so a switch to BLE during a LAN
+    /// attempt left the form on BLE while the status line still reported the
+    /// LAN dial — and "Switch device" then only answered "Connecting…", with
+    /// no way back to a state where either worked. The row now says
+    /// `（已锁定）` for the length of the attempt instead.
     ///
-    /// The two halves have to move together: the row renders
-    /// [`Self::transport_choice`], which reports the *live* link **only while
-    /// one is up** and the stored choice otherwise. So an unlocked row always
-    /// shows the very field the toggle writes — pressing it can never be a
-    /// no-op (the reported "switch to LAN does nothing", both after a
-    /// disconnect and mid-attempt) (F1).
+    /// The cost is the one an earlier version of this guard already paid and
+    /// was reported for: `--tui` boots with a deferred connect in flight, so
+    /// the row sits on `（已锁定）` and every switch is refused for those
+    /// seconds (the reported "cannot switch to LAN"). Web reaches that state
+    /// only after a click — its restore puts the device back
+    /// (`app.js:2079`) but never calls `connect()` from `init()` — so it has
+    /// no boot window of its own; what is shared is the predicate it disables
+    /// on, `connecting || state.connected`, applied here to an attempt this
+    /// binary started by itself. The window is the *attempt*, and it is wider
+    /// than the dial behind it: LAN is `CONNECT_TIMEOUT` (15 s) plus a 5 s
+    /// handshake **per try**, and a refused dial or a bridge that hangs up is
+    /// retried three more times with a 0.7 / 1.6 / 3 s backoff
+    /// (`transport::lan::RETRY_DELAYS`, the shape measured on hardware as
+    /// G1) — roughly a minute at worst, not 15 s. (`BLE_TIMEOUT`'s 8 s is
+    /// the scan timeout; the BLE dial carries no clock of its own.) The
+    /// moment it settles — connected, failed or dropped — the row unlocks
+    /// again.
+    ///
+    /// The row and the toggle still move together: the row renders
+    /// [`Self::transport_choice`], which reports the *live* link only while one
+    /// is up and the stored choice otherwise — and during an attempt the
+    /// stored choice is the form the attempt was started from (F1).
     pub fn transport_locked(&self) -> bool {
-        self.connected()
+        self.connected() || self.state == ConnectionState::Connecting
     }
 
     /// Transport of the session in play: the link that is up, or the attempt
@@ -569,6 +638,13 @@ impl App {
     /// Send a line of text to the target, applying the Enter mode and the
     /// local-echo setting (web `sendText`).
     pub fn send_text(&mut self, text: &str) {
+        // The web key bar and the presets are disabled until `setConnected()`
+        // says so, so a keystroke with no link is inert there. Without this
+        // gate every character typed after a drop raised its own "session gone"
+        // error line, evicting real notices from the log.
+        if !self.connected() {
+            return;
+        }
         let payload = super::terminal_view::prepare_line(
             text,
             self.settings.enter_mode,
@@ -584,6 +660,9 @@ impl App {
 
     /// Send raw key bytes produced by [`super::keys::encode_key`].
     pub fn send_bytes(&mut self, bytes: Vec<u8>) {
+        if !self.connected() {
+            return;
+        }
         if let Err(err) = self.session.send_uart(bytes) {
             self.notices.push(NoticeLevel::Error, err.to_string());
         }
@@ -602,6 +681,57 @@ mod tests {
         i18n::assert_bilingual(ALL);
         assert!(ALL.len() >= 6, "views and focus carry 6 messages");
         i18n::assert_bilingual(&[("MSG_SAVE_SETTINGS", i18n::MSG_SAVE_SETTINGS)]);
+    }
+
+    /// The P2 crash at the smallest possible scale: a form re-seeder swapped
+    /// the value under a caret that still pointed past the end of the old,
+    /// longer one. The render slices at the caret **every frame**, so a stale
+    /// byte index is a guaranteed abort (`panic = "abort"`) — nothing may trust
+    /// `cursor` as-is.
+    #[test]
+    fn a_caret_left_past_the_end_of_a_shorter_value_still_renders_and_edits() {
+        let mut field = TextField::new("ws://192.0.2.9:99999/ws");
+        // What the seed paths did while `text` was public: value replaced,
+        // caret left where it was — 24 bytes into a 9-byte string.
+        field.text = "192.0.2.9".to_string();
+
+        assert_eq!(
+            field.display(None),
+            ("192.0.2.9".to_string(), 9),
+            "the caret clamps to the end of the new value"
+        );
+        // Every edit repairs the caret before it slices, so none of these panic.
+        field.home();
+        field.end();
+        field.left();
+        field.right();
+        field.backspace();
+        field.delete();
+        field.insert_char('x');
+        field.insert_str("yy");
+        assert!(field.cursor <= field.text.len());
+        assert!(field.text.is_char_boundary(field.cursor));
+    }
+
+    /// …and the same when the stale caret lands inside a multi-byte character.
+    #[test]
+    fn a_caret_inside_a_multibyte_character_walks_back_to_a_boundary() {
+        let mut field = TextField::new("中文");
+        field.text = "中文测试".to_string();
+        field.cursor = 4; // two bytes into 文, which starts at 3
+
+        assert_eq!(
+            field.display(Some('*')),
+            ("****".to_string(), 1),
+            "the caret backs up to the boundary before the character"
+        );
+        field.insert_char('!');
+        assert_eq!(
+            field.as_str(),
+            "中!文测试",
+            "the edit lands on that boundary"
+        );
+        assert_eq!(field.cursor, 4, "…and advances by the inserted char");
     }
 
     #[test]
@@ -745,27 +875,40 @@ mod tests {
         assert!(app.take_force_redraw(), "a live link change repaints");
     }
 
-    /// F1: a connect that has not landed yet locks the transport choice, not
-    /// only a finished session — flipping it mid-connect is how a BLE session
-    /// ended up labelled LAN.
+    /// Web parity: an attempt pins the transport choice exactly like a live
+    /// session does — `web/app.js:1949-1950` disables both mode buttons with
+    /// `connecting || state.connected`, and `:847/:1945` does the same for
+    /// `switchDeviceButton`. Pinning the attempt is what closes the dead end
+    /// behind "connect, then search": flipping the form mid-dial is how a BLE
+    /// session ended up labelled LAN (F1), and leaving it live stranded the
+    /// user on the BLE form with a LAN attempt running, where "Switch device"
+    /// only answered "Connecting…".
+    ///
+    /// The price is the one this guard used to pay before it was narrowed:
+    /// `--tui` boots with a deferred attempt in flight, so the row sits on
+    /// `（已锁定）` and switching is refused for that window (the reported
+    /// "cannot switch to LAN") — the same window web refuses in — bounded by
+    /// the attempt and gone the moment it settles.
     #[test]
-    fn only_a_live_link_locks_the_transport_choice() {
+    fn connecting_and_live_links_lock_the_transport_choice() {
         let mut app = crate::tui::test_app();
+
+        // The state alone says it: an attempt in flight pins the choice, with
+        // or without a receiver parked on `pending_connect`.
         app.state = ConnectionState::Connecting;
         app.pending_connect = None;
-        assert!(!app.transport_locked());
-
-        // The regression: `--tui` boots with a deferred attempt in flight, and
-        // locking on it made BLE/LAN impossible to switch for the whole
-        // timeout window.
+        assert!(app.transport_locked(), "an attempt pins the choice");
         app.pending_connect = Some(tokio::sync::oneshot::channel().1);
-        assert!(
-            !app.transport_locked(),
-            "an attempt in flight is not a link"
-        );
+        assert!(app.transport_locked());
 
+        // Settled with nothing up: the row moves again.
         app.pending_connect = None;
         app.state = ConnectionState::Disconnected;
+        assert!(!app.transport_locked());
+
+        // A failed attempt is settled too — retrying over another transport
+        // has to stay possible (`setConnecting(false)` on the web side).
+        app.state = ConnectionState::Failed;
         assert!(!app.transport_locked());
 
         app.state = ConnectionState::Connected;
@@ -800,12 +943,13 @@ mod tests {
         assert_eq!(app.live_kind(), Some(crate::transport::TransportKind::Ble));
         assert!(app.transport_locked());
 
-        // An attempt in flight pins neither: the choice is what the toggle
-        // writes, so the unlocked row always answers it — while the status
-        // line may still say what is being dialled.
+        // An attempt in flight pins the row as well (web `connecting`), while
+        // the status line may still say what is being dialled: the row renders
+        // the stored choice — the form the attempt started from — so a locked
+        // row never promises a toggle it cannot honour.
         app.state = ConnectionState::Connecting;
         assert_eq!(app.transport_choice(), TransportChoice::Lan);
         assert_eq!(app.live_kind(), Some(crate::transport::TransportKind::Ble));
-        assert!(!app.transport_locked());
+        assert!(app.transport_locked());
     }
 }

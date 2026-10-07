@@ -247,6 +247,10 @@ fn sync_lang(app: &mut App) {
 pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     let lang = app.lang();
     let net = &app.network;
+    // One row list for the whole frame: `is_sel` used to rebuild it for every
+    // row it was asked about, i.e. (10 + n) allocations per row per frame.
+    let items = entries(app);
+    let selection = app.network.selection;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::from(Span::styled(
@@ -283,39 +287,39 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         t(NET_FIELD_SSID, lang),
         &net.ssid,
         false,
-        is_sel(app, NetEntry::Ssid),
+        is_sel(&items, selection, NetEntry::Ssid),
     ));
     lines.push(field_line(
         t(NET_FIELD_PASSWORD, lang),
         &net.password,
         !net.show_password,
-        is_sel(app, NetEntry::Password),
+        is_sel(&items, selection, NetEntry::Password),
     ));
     lines.push(action_line(
         t(NET_ACT_SCAN, lang),
         scan_ok,
-        is_sel(app, NetEntry::Scan),
+        is_sel(&items, selection, NetEntry::Scan),
         pending(PendingKind::Scan),
         lang,
     ));
     lines.push(action_line(
         t(NET_ACT_CONNECT, lang),
         wifi_ok,
-        is_sel(app, NetEntry::WifiConnect),
+        is_sel(&items, selection, NetEntry::WifiConnect),
         pending(PendingKind::WifiConnect) || pending(PendingKind::WifiOff),
         lang,
     ));
     lines.push(action_line(
         t(NET_ACT_WIFI_OFF, lang),
         wifi_ok,
-        is_sel(app, NetEntry::WifiOff),
+        is_sel(&items, selection, NetEntry::WifiOff),
         pending(PendingKind::WifiOff),
         lang,
     ));
     lines.push(action_line(
         t(NET_ACT_WIFI_STATUS, lang),
         wifi_ok,
-        is_sel(app, NetEntry::WifiStatus),
+        is_sel(&items, selection, NetEntry::WifiStatus),
         pending(PendingKind::WifiStatus),
         lang,
     ));
@@ -338,7 +342,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         )));
     } else {
         for (i, result) in net.scan.iter().enumerate() {
-            let selected_here = is_sel(app, NetEntry::Result(i));
+            let selected_here = is_sel(&items, selection, NetEntry::Result(i));
             let marker = if selected_here { "▸ " } else { "  " };
             let rssi = match result.rssi {
                 Some(v) => format!("{v} dBm"),
@@ -395,26 +399,26 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         t(NET_FIELD_URL, lang),
         &net.webdav,
         false,
-        is_sel(app, NetEntry::Webdav),
+        is_sel(&items, selection, NetEntry::Webdav),
     ));
     lines.push(action_line(
         t(NET_ACT_SET, lang),
         dav_ok,
-        is_sel(app, NetEntry::WebdavSet),
+        is_sel(&items, selection, NetEntry::WebdavSet),
         pending(PendingKind::WebdavSet),
         lang,
     ));
     lines.push(action_line(
         t(NET_ACT_OFF, lang),
         dav_ok,
-        is_sel(app, NetEntry::WebdavOff),
+        is_sel(&items, selection, NetEntry::WebdavOff),
         pending(PendingKind::WebdavOff),
         lang,
     ));
     lines.push(action_line(
         t(NET_ACT_STATUS, lang),
         dav_ok,
-        is_sel(app, NetEntry::WebdavStatus),
+        is_sel(&items, selection, NetEntry::WebdavStatus),
         pending(PendingKind::WebdavStatus),
         lang,
     ));
@@ -431,8 +435,8 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn is_sel(app: &App, entry: NetEntry) -> bool {
-    entries(app).get(app.network.selection) == Some(&entry)
+fn is_sel(items: &[NetEntry], selection: usize, entry: NetEntry) -> bool {
+    items.get(selection) == Some(&entry)
 }
 
 // --- validation --------------------------------------------------------------
@@ -505,7 +509,23 @@ pub fn action(app: &mut App, entry: NetEntry) {
                 gate(app);
                 return;
             }
+            // One sweep at a time. Live `@scan result` events are only folded
+            // in while `scan_running` holds (`apply_scan_lines`), and the first
+            // scan's reply clears that flag — a second scan started meanwhile
+            // would then have every one of its results dropped and finish with
+            // an empty list.
+            if app.network.scan_running
+                || app
+                    .network
+                    .pending
+                    .iter()
+                    .any(|(kind, _)| matches!(kind, PendingKind::Scan))
+            {
+                app.network.feedback = t(NET_FEEDBACK_SCANNING, lang).to_string();
+                return;
+            }
             app.network.scan.clear();
+            app.network.selection = app.network.selection.min(clamp_limit(app));
             app.network.scan_running = true;
             app.network.feedback = t(NET_FEEDBACK_SCANNING, lang).to_string();
             start(
@@ -520,8 +540,8 @@ pub fn action(app: &mut App, entry: NetEntry) {
                 gate(app);
                 return;
             }
-            let ssid = app.network.ssid.text.clone();
-            let password = app.network.password.text.clone();
+            let ssid = app.network.ssid.as_str().to_string();
+            let password = app.network.password.as_str().to_string();
             if let Err(err) =
                 validate_ssid(&ssid, lang).and_then(|_| validate_password(&password, lang))
             {
@@ -561,7 +581,7 @@ pub fn action(app: &mut App, entry: NetEntry) {
                 gate(app);
                 return;
             }
-            let url = app.network.webdav.text.clone();
+            let url = app.network.webdav.as_str().to_string();
             if let Err(err) = validate_webdav_url(&url, lang) {
                 app.toast(NoticeLevel::Error, err);
                 return;
@@ -669,6 +689,8 @@ fn apply_scan_lines(state: &mut NetworkState, lines: &[String]) {
 pub fn on_mgmt_event(app: &mut App, lines: &[String]) {
     sync_lang(app);
     apply_scan_lines(&mut app.network, lines);
+    // Rows were just added under the selection: keep the `▸` on a real row.
+    app.network.selection = app.network.selection.min(clamp_limit(app));
 }
 
 /// Point the LAN host form at the IP the bridge just confirmed. Returns true
@@ -676,18 +698,38 @@ pub fn on_mgmt_event(app: &mut App, lines: &[String]) {
 /// change and not on every status press. Split out from the reply handler so
 /// the test can pin the copy without rewriting the developer's `tui.json`.
 fn aim_host(app: &mut App, ip: &str) -> bool {
-    let changed = app.settings.last_lan_host != ip;
-    app.sidebar.lan_host.text = ip.to_string();
-    if changed {
-        app.settings.last_lan_host = ip.to_string();
-        // Tokens are stored per host: leaving the previous host's token in
-        // the field would make the very next LAN dial authenticate against the
-        // new IP and be rejected. The sidebar does the same when the host is
-        // edited by hand.
-        let store = crate::lan_token_store::TokenStore::load();
-        super::sidebar::fill_token_from_store(app, &store);
+    // `wifi.ip` arrives verbatim from the bridge. The web copies it into the
+    // LAN host field only **when it looks like an address** — the rule
+    // `prefill_lan_host` already enforces on the other path (`mod.rs` spells
+    // it out) — and writing it unconditionally also persisted it, so a bogus
+    // or hostile reply could aim the next LAN dial anywhere.
+    if !super::diagnostics_view::looks_like_ipv4(ip) {
+        return false;
     }
-    changed
+    if app.settings.last_lan_host == ip {
+        // Nothing moved. Stomping the field anyway would throw away whatever
+        // the user is halfway through typing (a status press can land up to
+        // five seconds after they started).
+        return false;
+    }
+    app.sidebar.lan_host.set(ip.to_string());
+    app.settings.last_lan_host = ip.to_string();
+    // Tokens are stored per host: leaving the previous host's token in the
+    // field would make the very next LAN dial authenticate against the new IP
+    // and be rejected. The sidebar does the same when the host is edited by
+    // hand.
+    let store = crate::lan_token_store::TokenStore::load();
+    super::sidebar::fill_token_from_store(app, &store);
+    true
+}
+
+/// Largest row index the current list holds. The row list changes size when a
+/// scan clears it and again as results stream in, so a selection carried across
+/// either boundary points at nothing: no `▸` is drawn, Enter and typing do
+/// nothing (`items.get(...)` returns `None`) — and once the list grows back
+/// the *wrong* row activates, a scan result where WebDAV was selected.
+fn clamp_limit(app: &App) -> usize {
+    entries(app).len().saturating_sub(1)
 }
 
 fn handle_reply(
@@ -702,7 +744,10 @@ fn handle_reply(
     let reply = match outcome {
         Ok(Ok(reply)) => reply,
         Ok(Err(err)) => {
-            app.toast(NoticeLevel::Error, err);
+            // Same treatment as the reply toasts below: this text is built
+            // from the device's failure line and lands in the permanent
+            // notice log as well as on screen.
+            app.toast(NoticeLevel::Error, super::replies::redact_secrets(&err));
             app.network.feedback = t(NET_FEEDBACK_REQUEST_FAILED, lang).to_string();
             return;
         }
@@ -737,6 +782,7 @@ fn handle_reply(
                     upsert_scan(&mut app.network.scan, result);
                 }
             }
+            app.network.selection = app.network.selection.min(clamp_limit(app));
             app.network.feedback = if failed {
                 t(NET_FEEDBACK_SCAN_FAILED, lang).to_string()
             } else {
@@ -805,6 +851,7 @@ fn handle_reply(
 // --- keys --------------------------------------------------------------------
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    app.network.selection = app.network.selection.min(clamp_limit(app));
     let items = entries(app);
     let len = items.len();
     match key.code {
@@ -902,17 +949,37 @@ mod tests {
     fn a_confirmed_wifi_ip_points_the_lan_host_field_at_it() {
         let mut app = test_app();
         // What the form still holds when the radio has nothing to say yet.
-        app.sidebar.lan_host.text = "127.0.0.1".to_string();
+        app.sidebar.lan_host.set("127.0.0.1".to_string());
         app.settings.last_lan_host = "127.0.0.1".to_string();
 
         assert!(aim_host(&mut app, "192.0.2.1"));
-        assert_eq!(app.sidebar.lan_host.text, "192.0.2.1");
+        assert_eq!(app.sidebar.lan_host.as_str(), "192.0.2.1");
         assert_eq!(app.settings.last_lan_host, "192.0.2.1");
 
         // The same IP again is not a change: nothing to persist, so the
         // settings file is not rewritten on every status press.
         assert!(!aim_host(&mut app, "192.0.2.1"));
-        assert_eq!(app.sidebar.lan_host.text, "192.0.2.1");
+        assert_eq!(app.sidebar.lan_host.as_str(), "192.0.2.1");
+    }
+
+    /// P2: the same seed lands on a field that still holds a **longer** pasted
+    /// host. `aim_host` used to assign `lan_host.text` directly, leaving the
+    /// caret at the end of the old value — the next frame then sliced past the
+    /// end of the new one and the TUI aborted. It now goes through `set()`.
+    #[test]
+    fn aiming_a_short_ip_at_a_long_pasted_host_keeps_the_form_renderable() {
+        let mut app = test_app();
+        let pasted = "ws://192.0.2.9:99999/ws";
+        app.sidebar.lan_host.set(pasted);
+        app.settings.last_lan_host = pasted.to_string();
+
+        assert!(aim_host(&mut app, "192.0.2.1"));
+        assert_eq!(app.sidebar.lan_host.as_str(), "192.0.2.1");
+        // Rendered text plus caret column, exactly as the sidebar row asks.
+        assert_eq!(
+            app.sidebar.lan_host.display(None),
+            ("192.0.2.1".to_string(), 9)
+        );
     }
 
     #[test]
@@ -1161,5 +1228,92 @@ mod tests {
             rows.iter().any(|row| row.contains("My Home Network")),
             "the scan row must draw the whole SSID, drew {rows:?}"
         );
+    }
+
+    /// One sweep at a time: the first scan's reply clears `scan_running`, and
+    /// every live `@scan result` that arrives after that is dropped
+    /// (`apply_scan_lines` returns early). A second scan started in the window
+    /// therefore has all of its results swallowed and finishes with an empty
+    /// list under a "Found 0 networks." count.
+    #[test]
+    fn a_second_scan_cannot_start_while_the_first_is_running() {
+        let mut app = test_app();
+        app.info.kind = Some(crate::transport::TransportKind::Ble);
+        app.info.capabilities = MGMT_CAP_WIFI | MGMT_CAP_ASYNC_EVENTS;
+
+        action(&mut app, NetEntry::Scan);
+        assert!(app.network.scan_running, "the sweep is running");
+        assert_eq!(app.network.pending.len(), 1);
+
+        action(&mut app, NetEntry::Scan);
+        assert_eq!(
+            app.network.pending.len(),
+            1,
+            "the second sweep is refused instead of shadowing the first"
+        );
+    }
+
+    /// The row list shrinks when a scan clears it and the selection was never
+    /// clamped on that path: it then points past the end, so no `▸` is drawn
+    /// and Enter/typing do nothing until an arrow key is pressed.
+    #[test]
+    fn clearing_the_scan_list_keeps_the_selection_on_a_real_row() {
+        let mut app = test_app();
+        app.info.kind = Some(crate::transport::TransportKind::Ble);
+        app.info.capabilities = MGMT_CAP_WIFI | MGMT_CAP_ASYNC_EVENTS;
+        app.network.scan = vec![scan("One"), scan("Two")];
+        app.network.selection = entries(&app).len() - 1; // `End` on the long list
+        assert!(app.network.selection > 8, "results push the rows down");
+
+        action(&mut app, NetEntry::Scan); // clears the list
+
+        assert!(
+            app.network.selection < entries(&app).len(),
+            "selection {} points past the {} rows",
+            app.network.selection,
+            entries(&app).len()
+        );
+    }
+
+    /// `wifi.ip` comes from the bridge. The web copies it into the LAN host
+    /// field only when it looks like an address — and this value is also what
+    /// gets persisted to `tui.json`, so it must not be aimable from outside.
+    #[test]
+    fn a_bogus_wifi_ip_never_reaches_the_lan_host_field() {
+        let mut app = test_app();
+        app.sidebar.lan_host.set("172.20.10.7".to_string());
+        app.settings.last_lan_host = "172.20.10.7".to_string();
+
+        for bogus in ["", "not-an-ip", "999.1.1.1", "192.168.1.5; reboot"] {
+            assert!(!aim_host(&mut app, bogus), "{bogus:?} must be refused");
+            assert_eq!(app.sidebar.lan_host.as_str(), "172.20.10.7");
+            assert_eq!(app.settings.last_lan_host, "172.20.10.7");
+        }
+    }
+
+    /// A status press can land up to five seconds after the user started
+    /// typing a host: when the address did not change, the field is left
+    /// alone rather than rewritten under the caret.
+    #[test]
+    fn a_status_reply_leaves_a_half_typed_host_alone() {
+        let mut app = test_app();
+        app.settings.last_lan_host = "192.168.1.7".to_string();
+        app.sidebar.lan_host.set("10.0.0.5".to_string()); // the user is typing
+
+        assert!(!aim_host(&mut app, "192.168.1.7"));
+        assert_eq!(
+            app.sidebar.lan_host.as_str(),
+            "10.0.0.5",
+            "the half-typed host survives a reply that changed nothing"
+        );
+    }
+
+    fn scan(ssid: &str) -> crate::tui::replies::ScanResult {
+        crate::tui::replies::ScanResult {
+            ssid: ssid.to_string(),
+            rssi: None,
+            channel: None,
+            security: None,
+        }
     }
 }

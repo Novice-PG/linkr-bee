@@ -23,15 +23,15 @@ strings! {
     ASST_AGENT => "Agent", "助手";
     ASST_ACTIONS => "  Settings · New chat · Exit", "  设置 · 新建对话 · 退出";
     ASST_MODE_MANUAL => "Manual", "手动";
-    ASST_MODE_AUTO => "Auto · Recommended", "自动 · 推荐";
-    ASST_MODE_FULL_AUTO => "Full Auto", "全自动";
+    ASST_MODE_AUTO => "Auto · Recommended", "Auto · 推荐";
+    ASST_MODE_FULL_AUTO => "Full Auto", "Full Auto";
     ASST_MODE_MANUAL_HELP => "AI proposes commands; click Send to enter them on the target.",
-        "AI 提出命令；点击发送，在目标上执行。";
+        "AI 提出命令建议；点击发送后才会输入到被控机。";
     ASST_MODE_AUTO_HELP => "Low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode.",
-        "低风险查询在识别到的 shell 提示符下执行；其他输入需要审批。破坏性命令在任何模式下都需要审批。";
-    ASST_MODE_FULL_AUTO_HELP => "Commands run without confirmation. Recognized destructive or irreversible commands still need your approval.",
-        "命令直接执行，无需确认。识别出的破坏性或不可逆命令仍需审批。";
-    ASST_PICKER_TITLE => "Execution mode", "执行模式";
+        "识别到 Shell 提示符时自动执行低风险查询，其余输入需确认；破坏性命令在任何档位都需确认。";
+    ASST_MODE_FULL_AUTO_HELP => "Commands run without confirmation. Recognized destructive or irreversible commands — recursive/forced deletes, disk and filesystem tools, dd, flashing and bootloader tools, downloaded content piped into a shell, privilege escalation, recursive permission changes — still need your approval. Detection does not cover every operation inside scripts or indirect execution.",
+        "命令直接执行；识别出的破坏性或不可逆命令（递归/强制删除、磁盘与文件系统工具、dd、刷写与引导工具、下载内容管道进 shell、提权、递归改权限）仍需确认。该检测不覆盖脚本或间接执行中的所有操作。";
+    ASST_PICKER_TITLE => "Change execution mode", "切换执行档位";
     ASST_PICKER_HINT => "↑/↓ pick · Enter engage · Esc close",
         "↑/↓ 选择 · Enter 应用 · Esc 关闭";
     ASST_EMPTY_HINT => "Ask a question about the device; the assistant reads the serial journal.",
@@ -45,7 +45,7 @@ strings! {
         "Ctrl+Shift+N 新建对话 · Esc 返回终端 · Ctrl+Q 退出 TUI";
     ASST_NEW_CHAT_STATUS => "New chat.", "已新建对话。";
     ASST_MODE_CHANGED => "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
-        "模式已切换；对话保留。本次运行已停止，待发送输入已取消；已发送的输入无法撤回。重新提问以继续。";
+        "档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。";
     ASST_MODE_STATUS => "Mode: {}", "模式：{}";
     ASST_SET_CONFIG_HINT => "Set the AI configuration first (Ctrl+P → agent.settings).",
         "请先设置 AI 配置（Ctrl+P → agent.settings）。";
@@ -272,8 +272,10 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let width = width.max(20);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: mode button + actions.
-    let (mode_label, mode_help) = MODE_HELP[AssistantState::mode_index(app.exec_mode)];
+    // Header: mode button + actions. The caption follows the panel button of
+    // `web/agent_panel.js` (`refreshMode`): the auto mode prints `Auto` in
+    // every language, the picker keeps the longer `Auto · Recommended`.
+    let mode_help = MODE_HELP[AssistantState::mode_index(app.exec_mode)].1;
     lines.push(Line::from(vec![
         Span::styled(
             t(ASST_AGENT, lang),
@@ -283,7 +285,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         ),
         Span::styled("  ", Style::default()),
         Span::styled(
-            format!("[{}]", t(mode_label, lang)),
+            format!("[{}]", super::status::mode_text(app.exec_mode, lang)),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -534,13 +536,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') if ctrl && shift => open_settings(app),
         KeyCode::Char('n') if ctrl && shift => {
             let lang = app.lang();
+            // web `#agentNew` stops the run *before* it drops the transcript
+            // (`agent_panel.js:943-947`): without this the old reply keeps
+            // streaming into the new conversation, and `busy` going false while
+            // the runtime is still working defeats the `ASST_BUSY` guards.
+            if app.assistant.busy {
+                if let Some(agent) = &app.agent {
+                    agent.handle.stop();
+                }
+            }
             app.assistant = super::assistant_view::AssistantState::default();
             app.assistant.status = t(ASST_NEW_CHAT_STATUS, lang).to_string();
         }
         KeyCode::Enter if ctrl || alt => submit(app),
-        KeyCode::Enter => app.assistant.composer.insert_char('\n'),
+        KeyCode::Enter => {
+            // Pasted lines arrive as bare Enters (`mod.rs` → `paste_keys`), so
+            // the 4000-character cap has to cover them too — `maxlength` does
+            // on the web textarea.
+            if app.assistant.composer.as_str().chars().count() < COMPOSER_MAX {
+                app.assistant.composer.insert_char('\n');
+            }
+        }
         KeyCode::Char(c) if !ctrl => {
-            let len = app.assistant.composer.text.chars().count();
+            let len = app.assistant.composer.as_str().chars().count();
             if len < COMPOSER_MAX {
                 app.assistant.composer.insert_char(c);
             }
@@ -618,6 +636,13 @@ fn ensure_agent(app: &mut App) -> bool {
     let broker = Arc::new(app.broker.clone()) as Arc<dyn crate::agent::ApprovalBroker>;
     let session = app.session.clone();
     let bus = app.bus.clone();
+    // `agent::spawn` starts tokio tasks, and the frame loop lives outside the
+    // runtime (it only `block_on`s the frame tick in `mod.rs`): without an
+    // entered handle `tokio::spawn` panics with "there is no reactor running",
+    // which a release build turns into a SIGABRT of the whole TUI. The guard
+    // borrows the cloned `Arc`, never `app`, so `app.agent` stays assignable.
+    let rt = app.rt.clone();
+    let _guard = rt.handle().enter();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         crate::agent::spawn(config, broker, session, bus)
     }));
@@ -644,7 +669,7 @@ fn ensure_agent(app: &mut App) -> bool {
 
 /// Send the composed question (Ctrl+Enter).
 pub fn submit(app: &mut App) {
-    let question = app.assistant.composer.text.trim().to_string();
+    let question = app.assistant.composer.as_str().trim().to_string();
     if question.is_empty() || app.assistant.busy {
         return;
     }
@@ -696,7 +721,13 @@ pub fn apply_event(app: &mut App, event: AgentEvent) {
                 let text = std::mem::take(&mut app.assistant.streaming);
                 app.assistant.entries.push(Entry::Assistant(text));
             }
-            app.assistant.entries.push(Entry::ToolStart { name, args });
+            // The panel prints these arguments verbatim, and `set_wifi` carries
+            // the device password in them — the approval dialog and the
+            // `ToolEnd` result below both redact first.
+            app.assistant.entries.push(Entry::ToolStart {
+                name,
+                args: super::replies::redact_tool_args(&args),
+            });
         }
         AgentEvent::ToolEnd { name, result, ok } => {
             let result = super::replies::redact_secrets(&result);
@@ -719,7 +750,9 @@ pub fn apply_event(app: &mut App, event: AgentEvent) {
                 app.assistant.entries.push(Entry::Assistant(text));
             }
             app.assistant.busy = false;
-            app.assistant.status = reason;
+            // Same text as the toast two lines below: the status line must not
+            // be the one surface that keeps the unredacted copy.
+            app.assistant.status = super::replies::redact_secrets(&reason);
         }
         AgentEvent::Error(message) => {
             if !app.assistant.streaming.is_empty() {
@@ -727,7 +760,7 @@ pub fn apply_event(app: &mut App, event: AgentEvent) {
                 app.assistant.entries.push(Entry::Assistant(text));
             }
             app.assistant.busy = false;
-            app.assistant.status = message.clone();
+            app.assistant.status = super::replies::redact_secrets(&message);
             app.toast(NoticeLevel::Error, super::replies::redact_secrets(&message));
         }
     }
@@ -739,6 +772,7 @@ mod tests {
 
     #[test]
     fn mode_labels_and_help_match_the_spec() {
+        // Picker rows: WEB_UX_SPEC §7.2 and `web/agent_panel.js` radio list.
         assert_eq!(t(MODE_HELP[0].0, Lang::En), "Manual");
         assert_eq!(t(MODE_HELP[1].0, Lang::En), "Auto · Recommended");
         assert_eq!(t(MODE_HELP[2].0, Lang::En), "Full Auto");
@@ -746,10 +780,41 @@ mod tests {
             t(MODE_HELP[1].1, Lang::En),
             "Low-risk queries run at a recognized shell prompt; other input needs approval. Destructive commands need approval in every mode."
         );
-        // The Chinese column carries the same three modes.
+        assert_eq!(
+            t(MODE_HELP[2].1, Lang::En),
+            "Commands run without confirmation. Recognized destructive or irreversible commands — recursive/forced deletes, disk and filesystem tools, dd, flashing and bootloader tools, downloaded content piped into a shell, privilege escalation, recursive permission changes — still need your approval. Detection does not cover every operation inside scripts or indirect execution."
+        );
+        // The Chinese column carries the same three modes with the panel's own
+        // wording: the web panel leaves `Auto · 推荐` and `Full Auto` as they are.
         assert_eq!(t(MODE_HELP[0].0, Lang::Zh), "手动");
-        assert_eq!(t(MODE_HELP[1].0, Lang::Zh), "自动 · 推荐");
-        assert_eq!(t(MODE_HELP[2].0, Lang::Zh), "全自动");
+        assert_eq!(t(MODE_HELP[1].0, Lang::Zh), "Auto · 推荐");
+        assert_eq!(t(MODE_HELP[2].0, Lang::Zh), "Full Auto");
+        assert_eq!(
+            t(MODE_HELP[0].1, Lang::Zh),
+            "AI 提出命令建议；点击发送后才会输入到被控机。"
+        );
+        assert_eq!(
+            t(MODE_HELP[1].1, Lang::Zh),
+            "识别到 Shell 提示符时自动执行低风险查询，其余输入需确认；破坏性命令在任何档位都需确认。"
+        );
+        assert_eq!(
+            t(MODE_HELP[2].1, Lang::Zh),
+            "命令直接执行；识别出的破坏性或不可逆命令（递归/强制删除、磁盘与文件系统工具、dd、刷写与引导工具、下载内容管道进 shell、提权、递归改权限）仍需确认。该检测不覆盖脚本或间接执行中的所有操作。"
+        );
+        // The header caption is the panel button, not the picker row: `Auto` in
+        // every language (`web/agent_panel.js` `refreshMode`).
+        assert_eq!(
+            super::super::status::mode_text(ExecMode::Auto, Lang::En),
+            "Auto"
+        );
+        assert_eq!(
+            super::super::status::mode_text(ExecMode::Auto, Lang::Zh),
+            "Auto"
+        );
+        assert_eq!(
+            super::super::status::mode_text(ExecMode::FullAuto, Lang::Zh),
+            "Full Auto"
+        );
     }
 
     #[test]
@@ -771,13 +836,18 @@ mod tests {
         let mut app = crate::tui::test_app();
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.assistant.composer.text, "\n", "Enter inserts a newline");
+        assert_eq!(
+            app.assistant.composer.as_str(),
+            "\n",
+            "Enter inserts a newline"
+        );
 
         for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
             app.assistant.composer.clear();
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, modifiers));
             assert_eq!(
-                app.assistant.composer.text, "",
+                app.assistant.composer.as_str(),
+                "",
                 "{modifiers:?} + Enter must submit, not insert a newline"
             );
         }
@@ -868,7 +938,7 @@ mod tests {
                 "mix中文abc".repeat(30),
             ] {
                 let mut app = crate::tui::test_app();
-                app.assistant.composer.text = text.clone();
+                app.assistant.composer.set(text.clone());
                 let lines = render_lines(&app, width);
                 let row = lines
                     .iter()
@@ -901,5 +971,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tool_arguments_are_redacted_before_they_reach_the_transcript() {
+        let mut app = crate::tui::test_app();
+        apply_event(
+            &mut app,
+            AgentEvent::ToolStart {
+                name: "set_wifi".to_string(),
+                args: r#"{"action":"connect","ssid":"MyNet","password":"s3cret"}"#.to_string(),
+            },
+        );
+        let row = match app.assistant.entries.last() {
+            Some(Entry::ToolStart { name, args }) => (name.clone(), args.clone()),
+            _ => panic!("expected a tool row"),
+        };
+        assert_eq!(row.0, "set_wifi");
+        assert!(
+            !row.1.contains("s3cret"),
+            "the password reached the panel: {}",
+            row.1
+        );
+        assert!(row.1.contains("<redacted>"), "{}", row.1);
+        assert!(row.1.contains("MyNet"), "the SSID stays visible: {}", row.1);
+    }
+
+    #[test]
+    fn the_status_line_is_redacted_like_the_toast() {
+        let mut app = crate::tui::test_app();
+        let token = "0123456789abcdef0123456789abcdef";
+        apply_event(&mut app, AgentEvent::Error(format!("token={token}")));
+        assert!(
+            !app.assistant.status.contains(token),
+            "status kept the token: {}",
+            app.assistant.status
+        );
+        assert!(
+            app.assistant.status.contains("<redacted>"),
+            "{}",
+            app.assistant.status
+        );
+    }
+
+    #[test]
+    fn a_pasted_line_cannot_push_the_composer_past_its_cap() {
+        let mut app = crate::tui::test_app();
+        app.assistant.composer.set("x".repeat(COMPOSER_MAX));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.assistant.composer.as_str().chars().count(),
+            COMPOSER_MAX
+        );
     }
 }
