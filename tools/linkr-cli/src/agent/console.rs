@@ -36,10 +36,6 @@ impl ConsoleHint {
         }
     }
 
-    pub fn is_interactive(&self) -> bool {
-        INTERACTIVE_KINDS.contains(&self.kind.as_str())
-    }
-
     pub fn to_json(&self) -> Value {
         json!({
             "kind": self.kind,
@@ -172,9 +168,12 @@ mod tests {
 
     #[test]
     fn interactive_kinds_drive_the_waiting_for_field() {
-        let hint = inspect_serial_console("Password: ", 1);
-        assert!(hint.is_interactive());
-        assert!(!inspect_serial_console("root@target:~# ", 1).is_interactive());
+        // `executor.rs` gates on this same set: those are the consoles a
+        // tool has to wait on instead of answering itself.
+        let prompt = inspect_serial_console("Password: ", 1);
+        let shell = inspect_serial_console("root@target:~# ", 1);
+        assert!(INTERACTIVE_KINDS.contains(&prompt.kind.as_str()));
+        assert!(!INTERACTIVE_KINDS.contains(&shell.kind.as_str()));
         assert_eq!(INTERACTIVE_KINDS.len(), 6);
     }
 

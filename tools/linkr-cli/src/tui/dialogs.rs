@@ -47,7 +47,6 @@ strings! {
 
     // Confirmation body (`sidebar.rs` carries the reboot / disconnect texts).
     DLG_QUIT_MSG => "Quit the TUI now?", "立即退出 TUI？";
-    DLG_TITLE_QUIT => "Quit", "退出";
     DLG_QUIT_WAIT_APPROVAL => "Answer the pending request first.",
         "请先处理待确认的请求。";
     DLG_Y_CONFIRM => " confirm · ", " 确认 · ";
@@ -198,7 +197,6 @@ impl ApprovalBroker for TuiBroker {
 pub enum Dialog {
     Confirm {
         kind: ConfirmKind,
-        title: String,
         message: String,
     },
     Approval(Box<PendingApproval>),
@@ -744,11 +742,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     };
     match dialog {
-        Dialog::Confirm {
-            kind,
-            title,
-            message,
-        } => match key.code {
+        Dialog::Confirm { kind, message } => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 app.dialog_return = None;
                 confirm(app, kind);
@@ -758,13 +752,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 // displaced instead of leaving the user with nothing.
                 app.dialog = app.dialog_return.take().map(|dialog| *dialog);
             }
-            _ => {
-                app.dialog = Some(Dialog::Confirm {
-                    kind,
-                    title,
-                    message,
-                })
-            }
+            _ => app.dialog = Some(Dialog::Confirm { kind, message }),
         },
         Dialog::Approval(pending) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1015,7 +1003,6 @@ pub fn request_quit(app: &mut App) {
     if app.connected() {
         app.dialog = Some(Dialog::Confirm {
             kind: ConfirmKind::Quit,
-            title: t(DLG_TITLE_QUIT, lang).to_string(),
             message: t(DLG_QUIT_MSG, lang).to_string(),
         });
     } else {
@@ -1428,7 +1415,6 @@ mod tests {
         assert_eq!(Dialog::Notices(0).title_lang(Lang::Zh), "通知");
         let confirm = Dialog::Confirm {
             kind: ConfirmKind::Quit,
-            title: "退出".to_string(),
             message: String::new(),
         };
         assert_eq!(confirm.title(), "Confirm");

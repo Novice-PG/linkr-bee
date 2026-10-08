@@ -287,7 +287,6 @@ impl Toast {
 pub struct Notices {
     pub toasts: Vec<Toast>,
     pub log: Vec<(NoticeLevel, String)>,
-    pub dropped: usize,
 }
 
 impl Notices {
@@ -302,7 +301,6 @@ impl Notices {
         self.toasts.retain(|t| !t.expired(now));
         if self.toasts.len() >= TOAST_LIMIT {
             self.toasts.remove(0);
-            self.dropped += 1;
         }
         self.toasts.push(Toast {
             text,

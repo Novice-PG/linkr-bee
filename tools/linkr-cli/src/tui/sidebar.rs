@@ -63,10 +63,8 @@ strings! {
     MSG_TRANSPORT_LOCKED => "Finish the connection attempt, or disconnect, before switching the transport.",
         "等连接尝试结束（或断开连接）再切换传输方式。";
     MSG_SWITCH_BLE => "Switch the transport to BLE first.", "请先把传输方式切换到 BLE。";
-    CONFIRM_DISCONNECT_TITLE => "Disconnect", "断开连接";
     CONFIRM_DISCONNECT_MSG => "Disconnect from the current device now?",
         "立即断开与当前设备的连接？";
-    CONFIRM_REBOOT_TITLE => "Reboot device", "重启设备";
     CONFIRM_REBOOT_MSG => "Reboot the connected device now?", "立即重启已连接的设备？";
 }
 
@@ -560,7 +558,6 @@ fn activate(app: &mut App, entry: SideEntry) {
         SideEntry::Disconnect => {
             app.dialog = Some(Dialog::Confirm {
                 kind: ConfirmKind::Disconnect,
-                title: t(CONFIRM_DISCONNECT_TITLE, lang).to_string(),
                 message: t(CONFIRM_DISCONNECT_MSG, lang).to_string(),
             });
         }
@@ -593,7 +590,6 @@ fn activate(app: &mut App, entry: SideEntry) {
             if danger {
                 app.dialog = Some(Dialog::Confirm {
                     kind: ConfirmKind::Reboot,
-                    title: t(CONFIRM_REBOOT_TITLE, lang).to_string(),
                     message: t(CONFIRM_REBOOT_MSG, lang).to_string(),
                 });
             } else {
@@ -670,7 +666,11 @@ mod tests {
     #[test]
     fn every_sidebar_message_is_translated() {
         super::super::i18n::assert_bilingual(ALL);
-        assert!(ALL.len() >= 24, "sidebar alone carries 24 messages");
+        // Floor, not an exact count: it catches a message being dropped from
+        // the table without its partner. Two of the original 24 were dialog
+        // *titles* (`Confirm` never drew them — the frame has its own title),
+        // and they left with the field.
+        assert!(ALL.len() >= 22, "sidebar alone carries 22 messages");
     }
 
     /// First open leaves the host row empty, so it has to say what belongs
