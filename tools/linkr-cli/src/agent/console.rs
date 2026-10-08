@@ -79,8 +79,11 @@ pub fn inspect_serial_console(text: &str, latest_cursor: u64) -> ConsoleHint {
     let panic = PANIC.get_or_init(|| pattern(r"Kernel panic - not syncing:"));
 
     let tail_text: String = {
-        let sliced = if text.chars().count() > 4000 {
-            text.chars().skip(text.chars().count() - 4000).collect()
+        // One pass for the window: this runs on every send, and `text` can be
+        // the whole console — counting it twice walked the full string twice.
+        let len = text.chars().count();
+        let sliced = if len > 4000 {
+            text.chars().skip(len - 4000).collect()
         } else {
             text.to_string()
         };

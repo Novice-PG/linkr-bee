@@ -341,7 +341,9 @@ pub fn format_scan_line(device: &DiscoveredDevice) -> String {
 
 /// Sort a `--scan` listing the way the Python CLI prints it.
 pub fn sort_for_display(devices: &mut [DiscoveredDevice]) {
-    devices.sort_by_key(device_sort_key);
+    // `sort_by_cached_key`: the key clones and lowercases the name, and
+    // `sort_by_key` would rebuild it for every comparison in the sort.
+    devices.sort_by_cached_key(device_sort_key);
 }
 
 /// Scan for Linkr accessories, filtered by the Management Service UUID.

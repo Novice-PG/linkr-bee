@@ -317,6 +317,21 @@ pub fn build_page(
     }
 }
 
+/// One client for every page read, so two fetches to the same host reuse the
+/// connection instead of re-establishing it. Built exactly as before — no
+/// connect timeout of its own; the per-request timeout below still bounds the
+/// whole call.
+fn page_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(CLIENT.get_or_init(|| built))
+}
+
 fn wrap(url: &str, error: String) -> String {
     format!(
         "Unable to read {url}: {error}. Browser CORS or network policy may block access. If a target shell is available, consider curl/wget under the current execution mode."
@@ -341,9 +356,7 @@ pub async fn read_web_page(
     validate_page_args(offset, limit, find)?;
     let limit = limit as usize;
     let offset = offset as usize;
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|error| wrap(&url, error.to_string()))?;
+    let client = page_client().map_err(|error| wrap(&url, error))?;
     let request = client
         .get(&url)
         .header(reqwest::header::ACCEPT, ACCEPT_HEADER)

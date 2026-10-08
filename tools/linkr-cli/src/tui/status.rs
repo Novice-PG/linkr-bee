@@ -138,16 +138,6 @@ fn device_text(label: &str, id: Option<&str>) -> String {
 }
 
 /// Left cluster: dot, state, transport, device label/id.
-pub fn status_left(m: &StatusModel) -> String {
-    format!(
-        "{} {} · {} · {}",
-        state_dot(m.state),
-        state_text(m.state, m.lang),
-        transport_text(m.transport, m.lang),
-        device_text(&m.label, m.device_id.as_deref()),
-    )
-}
-
 /// Right cluster: counters, baud, execution mode, clock.
 pub fn status_right(m: &StatusModel) -> String {
     let baud = if m.baud > 0 {
@@ -276,41 +266,52 @@ pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16, lang: Lang
 
 /// Render the full top bar as one styled line, never wider than `width`.
 pub fn status_line(model: &StatusModel, width: u16) -> Line<'static> {
-    let left = status_left(model);
-    let right = status_right(model);
     let width = width as usize;
     if width == 0 {
         return Line::from("");
     }
-    let right_len = cols(&right);
+    // Measure the spans, not a second copy of them: this ran once per frame
+    // and used to format both clusters as strings *and* as spans before
+    // throwing the strings away (except in the cut branch, where the left
+    // cluster is flattened exactly once).
+    let right_spans = status_right_spans(model);
+    let right_len = spans_cols(&right_spans);
     if right_len >= width {
         // Not even the right cluster fits: show it truncated, alone.
-        return Line::from(truncate_spans(status_right_spans(model), width));
+        return Line::from(truncate_spans(right_spans, width));
     }
     let room = width - right_len;
-    let left_len = cols(&left);
-    let (left_text, gap, truncated) = if left_len < room {
-        (left.clone(), room - left_len, false)
+    let left_spans = status_left_spans(model);
+    let left_len = spans_cols(&left_spans);
+    let mut spans = if left_len < room {
+        let gap = room - left_len;
+        let mut spans = left_spans;
+        if gap > 0 {
+            spans.push(Span::styled(" ".repeat(gap), Style::default()));
+        }
+        spans
     } else {
         // Ellipsis truncation: the cut keeps one column for the gap.
-        let cut = clip(&left, room.saturating_sub(1));
+        let cut = clip(&spans_text(&left_spans), room.saturating_sub(1));
         let gap = room - cols(&cut);
-        (cut, gap, true)
+        let mut spans = vec![Span::styled(cut, state_dot_style(model.state))];
+        if gap > 0 {
+            spans.push(Span::styled(" ".repeat(gap), Style::default()));
+        }
+        spans
     };
-
-    let mut spans = if truncated {
-        vec![Span::styled(
-            left_text.clone(),
-            state_dot_style(model.state),
-        )]
-    } else {
-        status_left_spans(model)
-    };
-    if gap > 0 {
-        spans.push(Span::styled(" ".repeat(gap), Style::default()));
-    }
-    spans.extend(status_right_spans(model));
+    spans.extend(right_spans);
     Line::from(spans)
+}
+
+/// Display columns a span list occupies — what the bar is measured in.
+fn spans_cols(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|span| cols(&span.content)).sum()
+}
+
+/// What a span list reads as: the text the row shows, one string.
+fn spans_text(spans: &[Span<'static>]) -> String {
+    spans.iter().map(|span| span.content.as_ref()).collect()
 }
 
 /// Cut a span list down to `width` columns (used when the bar is narrow).
@@ -365,7 +366,7 @@ mod tests {
     #[test]
     fn left_cluster_is_exact() {
         assert_eq!(
-            status_left(&model()),
+            spans_text(&status_left_spans(&model())),
             "● Connected · BLE · Linkr BLE UART #aabbccdd"
         );
     }
@@ -381,7 +382,7 @@ mod tests {
     #[test]
     fn disconnected_and_zero_baud_render_placeholders() {
         let m = StatusModel::default();
-        assert_eq!(status_left(&m), "○ Disconnected · — · —");
+        assert_eq!(spans_text(&status_left_spans(&m)), "○ Disconnected · — · —");
         assert_eq!(status_right(&m), "RX 0 · TX 0 · – · Auto · 00:00:00");
         assert_eq!(state_dot(ConnectionState::Connecting), '◐');
         assert_eq!(state_dot(ConnectionState::Failed), '◆');
@@ -392,7 +393,7 @@ mod tests {
         let mut m = model();
         m.label = "aabbccddeeff0011".to_string();
         assert_eq!(
-            status_left(&m),
+            spans_text(&status_left_spans(&m)),
             "● Connected · BLE · aabbccddeeff0011 (aabbccdd)"
         );
     }

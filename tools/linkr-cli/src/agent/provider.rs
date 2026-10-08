@@ -9,6 +9,7 @@
 //! confusing failure on a user's endpoint.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -884,13 +885,27 @@ pub fn decode_body(provider: Provider, body: &str) -> Vec<StreamDelta> {
 // HTTP
 // ---------------------------------------------------------------------------
 
-/// One attempt: `maxRetries` is 0 (spec §14.3), so a failure is reported
-/// instead of repeating an expensive request.
-pub async fn send(request: &ProviderRequest) -> Result<reqwest::Response, String> {
-    let client = reqwest::Client::builder()
+/// One client for the process. Building a fresh one for every request threw
+/// away the connection pool — and with it every pooled TLS session — on every
+/// model turn; a `Client` is cheap to clone, the pool inside it is not.
+/// The connect timeout is part of the shared config, so the behaviour of a
+/// single call is unchanged.
+fn client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS))
         .build()
         .map_err(|error| error.to_string())?;
+    Ok(CLIENT.get_or_init(|| built))
+}
+
+/// One attempt: `maxRetries` is 0 (spec §14.3), so a failure is reported
+/// instead of repeating an expensive request.
+pub async fn send(request: &ProviderRequest) -> Result<reqwest::Response, String> {
+    let client = client()?;
     let mut builder = client.post(&request.url);
     for (name, value) in &request.headers {
         builder = builder.header(name, value);
