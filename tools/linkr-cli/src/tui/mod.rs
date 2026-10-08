@@ -27,6 +27,7 @@ pub mod sidebar;
 pub mod state;
 pub mod status;
 pub mod terminal_view;
+pub mod transfer_view;
 
 use std::io::stdout;
 use std::sync::Arc;
@@ -355,6 +356,7 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         diagnostics: diagnostics_view::DiagnosticsState::default(),
         network: network_view::NetworkState::new(),
         assistant: assistant_view::AssistantState::default(),
+        transfer: transfer_view::State::default(),
         palette: None,
         dialog: None,
         dialog_return: None,
@@ -486,6 +488,9 @@ fn event_loop(
         }
         dialogs::poll(&mut app);
         network_view::poll(&mut app);
+        // Time and bytes for a transfer, whatever is on screen: it types at
+        // its own pace and a view switch must not stall the link.
+        transfer_view::poll(&mut app);
         app.diagnostics.poll(app.lang());
         poll_lan_token(&mut app);
         assistant_view::poll(&mut app);
@@ -589,6 +594,15 @@ fn event_loop(
 fn on_core_event(app: &mut App, event: CoreEvent) {
     match event {
         CoreEvent::UartRx(bytes) => {
+            // While a transfer captures, the link belongs to it. A ZDATA
+            // frame is not text — painting it would garble the pane, and
+            // feeding binary to the serial watch would invent findings out
+            // of a CRC — so the grid, the watch and the pending-reply
+            // machinery are all starved until the run says otherwise.
+            if app.transfer.engine.capturing() {
+                app.transfer.engine.on_rx(&bytes);
+                return;
+            }
             let at_ms = app.started.elapsed().as_millis() as u64;
             if app.watch_ok {
                 app.watch.feed_bytes(&bytes, at_ms);
@@ -1221,13 +1235,16 @@ enum Global {
     PasteClipboard,
 }
 
-/// `F2..F5` → view (the four surfaces).
+/// `F2..F6` → view (the five surfaces). F6 is the transfer view's
+/// shortcut alias: the palette's `transfer.*` actions are its front door,
+/// and both do the same thing — open the form and run the precheck.
 fn fkey_view(n: u8) -> Option<View> {
     match n {
         2 => Some(View::Terminal),
         3 => Some(View::Diagnostics),
         4 => Some(View::Network),
         5 => Some(View::Assistant),
+        6 => Some(View::Transfer),
         _ => None,
     }
 }
@@ -1351,10 +1368,12 @@ fn route_key(
             return;
         }
         Global::View(view) => {
-            if view == View::Diagnostics {
-                open_diagnostics(app);
-            } else {
-                app.set_view(view);
+            match view {
+                View::Diagnostics => open_diagnostics(app),
+                // The precheck is the gate, so opening the view *is* asking
+                // the device whether it can transfer at all.
+                View::Transfer => transfer_view::open(app, None),
+                _ => app.set_view(view),
             }
             return;
         }
@@ -1405,6 +1424,12 @@ fn route_key(
             };
             return;
         }
+        // A transfer in flight is the one thing that must not survive the
+        // view being left: it types into the device's shell, and nobody is
+        // watching a pane that is no longer there.
+        if app.view == View::Transfer && transfer_view::escape(app) {
+            return;
+        }
         if app.focus == Focus::Assistant || app.view != View::Terminal {
             app.set_view(View::Terminal);
             return;
@@ -1428,6 +1453,10 @@ fn route_key(
     }
 
     match app.view {
+        View::Transfer => {
+            transfer_view::handle_key(app, key);
+            return;
+        }
         View::Network => {
             network_view::handle_key(app, key);
             return;
@@ -1511,7 +1540,9 @@ fn handle_diagnostics_key(app: &mut App, key: crossterm::event::KeyEvent) -> boo
 /// an unclamped value walked the pane blank, and the directions were the
 /// wrong way round before.
 fn handle_center_scroll(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
-    if app.focus != Focus::Center || !matches!(app.view, View::Diagnostics | View::Network) {
+    if app.focus != Focus::Center
+        || !matches!(app.view, View::Diagnostics | View::Network | View::Transfer)
+    {
         return false;
     }
     if key
@@ -1568,6 +1599,7 @@ pub(crate) fn test_app() -> App {
         diagnostics: self::diagnostics_view::DiagnosticsState::default(),
         network: self::network_view::NetworkState::new(),
         assistant: self::assistant_view::AssistantState::default(),
+        transfer: self::transfer_view::State::default(),
         palette: None,
         dialog: None,
         dialog_return: None,
@@ -1725,13 +1757,43 @@ mod tests {
     }
 
     #[test]
-    fn f_keys_map_to_the_four_views_plus_help() {
+    fn f_keys_map_to_the_five_views_plus_help() {
         assert_eq!(fkey_view(2), Some(View::Terminal));
         assert_eq!(fkey_view(3), Some(View::Diagnostics));
         assert_eq!(fkey_view(4), Some(View::Network));
         assert_eq!(fkey_view(5), Some(View::Assistant));
-        assert_eq!(fkey_view(1), None);
-        assert_eq!(fkey_view(6), None);
+        assert_eq!(fkey_view(6), Some(View::Transfer));
+        assert_eq!(fkey_view(1), None, "F1 is the help overlay");
+        assert_eq!(fkey_view(7), None, "F7 and up belong to the target");
+    }
+
+    /// The transfer entry point does the same thing from either door: the
+    /// view comes up and the precheck is already in flight, so a second key
+    /// press is never needed to find out whether the device can transfer.
+    #[test]
+    fn f6_opens_the_transfer_view_and_runs_the_precheck() {
+        let mut app = crate::tui::test_app();
+        assert_eq!(
+            global_key(KeyCode::F(6), KeyModifiers::NONE),
+            Global::View(View::Transfer)
+        );
+        route_key(
+            &mut app,
+            &mut StickyMods::default(),
+            crossterm::event::KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            Global::View(View::Transfer),
+        );
+        assert_eq!(app.view, View::Transfer);
+        assert!(
+            matches!(
+                app.transfer.engine.phase,
+                crate::transfer::Phase::Cmd {
+                    step: crate::transfer::Step::Probe,
+                    ..
+                }
+            ),
+            "the precheck is in flight, not waiting to be pressed"
+        );
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub fn center_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         View::Diagnostics => super::diagnostics_view::render_lines(app, width),
         View::Network => super::network_view::render_lines(app),
         View::Assistant => super::assistant_view::render_lines(app, width),
+        View::Transfer => super::transfer_view::render_lines(app, width),
     }
 }
 

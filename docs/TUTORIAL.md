@@ -17,7 +17,7 @@ shows how to switch.
 
 `linkr` is one binary with two personalities:
 
-- **The TUI** — an OpenCode-style interface with a sidebar, four switchable
+- **The TUI** — an OpenCode-style interface with a sidebar, five switchable
   views, a command palette and modal dialogs. All of it is keyboard-driven.
 - **Plain CLI mode** — same flags as the Python client, for scripts and CI:
   `linkr --scan`, `linkr --query-info --no-terminal`, `linkr --wifi …`.
@@ -27,7 +27,8 @@ shows how to switch.
 │ Connection  │                                              │
 │ ● Connected │              the active view                 │
 │ Transport   │         (F2 terminal / F3 diagnostics /      │
-│ Device      │          F4 network / F5 assistant)          │
+│ Device      │          F4 network / F5 assistant /         │
+│             │          F6 file transfer)                   │
 │             │                                              │
 │ Quick send  │                                              │
 │             ├──────────────────────────────────────────────┤
@@ -282,7 +283,7 @@ This is the whole `F1` help, in the order it is shown:
 | --- | --- |
 | `Ctrl+P` | command palette (every action, searchable) |
 | `F1` | this help |
-| `F2` `F3` `F4` `F5` | terminal · diagnostics · network · assistant views |
+| `F2` `F3` `F4` `F5` `F6` | terminal · diagnostics · network · assistant · file transfer views |
 | `Ctrl+Shift+K` | focus the assistant composer |
 | `Ctrl+Shift+M` | assistant: pick the execution mode |
 | `Ctrl+Shift+S` | assistant: AI configuration |
@@ -353,7 +354,7 @@ focus; hold `Shift` when you mean the terminal's scrollback specifically.
 
 Press `Ctrl+P` and type. The search matches action titles in **both**
 languages, plus the action id, so `view`, `视图`, `wifi` and `term.copy` all
-land. The full registry (34 actions, in order):
+land. The full registry (37 actions, in order):
 
 | Category | Actions |
 | --- | --- |
@@ -361,6 +362,7 @@ land. The full registry (34 actions, in order):
 | Focus | `focus.sidebar` · `focus.terminal` · `focus.assistant` |
 | Connection | `connect` · `disconnect` · `transport.toggle` · `uart.settings` |
 | Terminal | `term.font_bigger` · `term.font_smaller` · `term.font_reset` · `term.autoscroll` · `term.echo` · `term.enter_mode` · `term.clear` · `term.save_log` · `term.copy` |
+| Transfer | `term.transfer_send` · `term.transfer_receive` · `term.transfer_abort` |
 | Diagnostics | `diag.refresh` |
 | Network | `wifi.scan` · `wifi.status` · `webdav.status` |
 | Assistant | `agent.ask` · `agent.mode` · `agent.settings` · `agent.new_chat` · `agent.stop` · `agent.export` |
@@ -397,7 +399,7 @@ Findings appear here as they are noticed; select one and press `Enter` to see
 the evidence as a toast. If it reads *watch engine not ready*, the engine
 could not start on this host.
 
-## 9. The four views
+## 9. The five views
 
 ### F2 — Terminal
 
@@ -492,6 +494,53 @@ loopback, the dialog warns before it stores a key.
 `<config-dir>/linkr/linkr-agent-<timestamp>.md`, including the tasks and notes
 the assistant kept for this target. It says so when there is nothing to export
 rather than writing an empty file.
+
+### F6 — File transfer
+
+Move a file across the link, in either direction. The pane is a form of four
+rows; `Tab` / `Shift+Tab` (or `↑` `↓`) move between them and `Enter` activates
+the row you are on.
+
+| Row | What it holds |
+| --- | --- |
+| **Direction** | send (this host → device) or receive (device → this host). `←` `→` or `Space` flips it |
+| **On this host** | the file to send, or where the received file lands. `←` `→` move the caret |
+| **On the device** | the path on the other side: absolute, and `~/…` expands with the **device's** home directory, not this machine's |
+| **Actions** | `Check` · `Start` · `Abort` |
+
+**Check** is the precheck, and the view runs it by itself the moment it
+opens. It asks the device which of `sz`, `rz`, `dd`, `base64`, `wc`, `tr`,
+`sha256sum`/`shasum` are installed and reports the `lrzsz` version it found
+(`sz (lrzsz) 0.12.21rc`, for instance). Nothing is typed into the device
+before that answer arrives, and **Start** stays greyed out until it does.
+
+Two channels, picked from what the precheck found:
+
+- **ZMODEM** — `sz` and `rz` on this host against their twin on the device.
+  The protocol checks every frame with CRC-32 and `rz` refuses a file whose
+  length does not match its header, so there is no second checksum round
+  trip to run.
+- **`dd|base64` pager** — the same paged channel the web client and the
+  assistant already use (`target_files`), for a device with no `lrzsz` or a
+  host without it.
+
+The transfer is deliberately slow: **256 bytes every 25 ms** (about 10 KiB/s).
+A burst that outruns the link loses bytes, and a console has no retransmit to
+fall back on, so the sender paces itself instead.
+
+| Key | Action |
+| --- | --- |
+| `Enter` on **Actions** | run the selected action |
+| `Space` or `←` `→` on **Direction** | flip the direction |
+| `Esc` | abort a running transfer; otherwise back to the terminal |
+| `PgUp` / `PgDn` | page the pane |
+| palette `term.transfer_send` / `term.transfer_receive` | open the view with that direction already set |
+| palette `term.transfer_abort` | stop a run from anywhere |
+| `F6` | open the view (keeps the direction you left) |
+
+A run keeps going if you switch views — only `Esc` (which stops it first) or
+`term.transfer_abort` ends it early. `Start` refuses a destination that
+already exists, and a path that is not absolute, before a single byte moves.
 
 ## 10. LAN mode
 

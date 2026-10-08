@@ -150,9 +150,11 @@ pub fn encode_key(
         }
     }
 
-    // Function keys F6..F12 (F1..F5 are TUI bindings: help/views).
-    const FKEYS: [(u8, &str); 7] = [
-        (6, "\x1b[17~"),
+    // Function keys F7..F12. F1..F6 are TUI bindings (help, views, the
+    // transfer view), so none of them reaches the target: an F-key the
+    // interface has taken is absent from this table, and absent means
+    // `return None`.
+    const FKEYS: [(u8, &str); 6] = [
         (7, "\x1b[18~"),
         (8, "\x1b[19~"),
         (9, "\x1b[20~"),
@@ -489,16 +491,19 @@ mod tests {
     #[test]
     fn function_keys_beyond_the_tui_bindings_reach_the_target() {
         assert_eq!(
-            text(KeyCode::F(6), KeyModifiers::NONE),
-            Some("\x1b[17~".into())
+            text(KeyCode::F(7), KeyModifiers::NONE),
+            Some("\x1b[18~".into())
         );
         assert_eq!(
             text(KeyCode::F(12), KeyModifiers::NONE),
             Some("\x1b[24~".into())
         );
-        // F1..F5 are TUI bindings (help, views) and never reach the UART.
+        // F1..F6 are TUI bindings (help, views, file transfer) and never
+        // reach the UART — the transfer view's own F6 included, so a run
+        // cannot be started by a key press meant for the target shell.
         assert_eq!(enc(KeyCode::F(1), KeyModifiers::NONE), None);
         assert_eq!(enc(KeyCode::F(4), KeyModifiers::NONE), None);
+        assert_eq!(enc(KeyCode::F(6), KeyModifiers::NONE), None);
         // Mouse/unknown keys are ignored.
         assert_eq!(enc(KeyCode::Null, KeyModifiers::NONE), None);
     }

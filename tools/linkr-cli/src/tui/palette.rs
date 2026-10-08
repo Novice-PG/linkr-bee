@@ -18,6 +18,7 @@ use super::settings::TransportChoice;
 use super::sidebar::MSG_TRANSPORT_LOCKED;
 use super::state::{App, Focus, View};
 use crate::event::NoticeLevel;
+use crate::transfer::Direction;
 
 strings! {
     PAL_TITLE => " Command palette (Ctrl+P) ", " 命令面板（Ctrl+P） ";
@@ -30,6 +31,7 @@ strings! {
     PAL_CAT_DIAGNOSTICS => "Diagnostics", "诊断";
     PAL_CAT_NETWORK => "Network", "网络";
     PAL_CAT_ASSISTANT => "Assistant", "助手";
+    PAL_CAT_TRANSFER => "Transfer", "传输";
     PAL_CAT_APP => "App", "应用";
     // Views
     PAL_T_VIEW_TERMINAL => "Open terminal view", "打开终端视图";
@@ -55,6 +57,12 @@ strings! {
     PAL_T_CLEAR => "Clear the terminal", "清屏";
     PAL_T_SAVE_LOG => "Save log to file", "保存日志到文件";
     PAL_T_COPY => "Copy visible output (OSC 52)", "复制可见输出（OSC 52）";
+    // Transfer. F6 opens the view with whatever direction the form already
+    // holds; these two open it with the direction they name.
+    PAL_T_TRANSFER_SEND => "Send a file to the device", "发送文件到设备";
+    PAL_T_TRANSFER_RECV => "Get a file from the device", "从设备获取文件";
+    PAL_T_TRANSFER_ABORT => "Abort the running transfer", "中止正在进行的传输";
+    PAL_MSG_TRANSFER_IDLE => "No transfer is running.", "当前没有正在进行的传输。";
     // Diagnostics / network
     PAL_T_DIAG_REFRESH => "Refresh diagnostics (@i?)", "刷新诊断（@i?）";
     PAL_T_WIFI_SCAN => "Scan WiFi networks", "扫描 WiFi 网络";
@@ -221,6 +229,29 @@ fn copy_visible(app: &mut App) {
     // goes through the same call, so both report the same toast and the same
     // cap.
     super::copy_to_host(app, &app.terminal.visible_text());
+}
+
+/// The transfer view's front door: pick the direction, open the form and
+/// ask the device whether it can transfer at all.
+fn transfer_send(app: &mut App) {
+    super::transfer_view::open(app, Some(Direction::Send));
+}
+
+fn transfer_receive(app: &mut App) {
+    super::transfer_view::open(app, Some(Direction::Recv));
+}
+
+/// Stops a run wherever the user happens to be: the break characters go out
+/// immediately, and the view reports it when it comes back.
+fn transfer_abort(app: &mut App) {
+    if app.transfer.engine.busy() {
+        super::transfer_view::abort(app);
+    } else {
+        app.toast(
+            NoticeLevel::Info,
+            t(PAL_MSG_TRANSFER_IDLE, app.lang()).to_string(),
+        );
+    }
 }
 
 fn toggle_transport(app: &mut App) {
@@ -573,6 +604,28 @@ pub const ACTIONS: &[Action] = &[
         category: PAL_CAT_TERMINAL,
         shortcut: "",
         run: copy_visible,
+    },
+    // Transfer
+    Action {
+        id: "term.transfer_send",
+        title: PAL_T_TRANSFER_SEND,
+        category: PAL_CAT_TRANSFER,
+        shortcut: "F6",
+        run: transfer_send,
+    },
+    Action {
+        id: "term.transfer_receive",
+        title: PAL_T_TRANSFER_RECV,
+        category: PAL_CAT_TRANSFER,
+        shortcut: "F6",
+        run: transfer_receive,
+    },
+    Action {
+        id: "term.transfer_abort",
+        title: PAL_T_TRANSFER_ABORT,
+        category: PAL_CAT_TRANSFER,
+        shortcut: "",
+        run: transfer_abort,
     },
     // Diagnostics / network
     Action {
@@ -1030,6 +1083,9 @@ mod tests {
         "term.clear",
         "term.save_log",
         "term.copy",
+        "term.transfer_send",
+        "term.transfer_receive",
+        "term.transfer_abort",
         "diag.refresh",
         "wifi.scan",
         "wifi.status",

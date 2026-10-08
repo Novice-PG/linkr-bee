@@ -265,9 +265,24 @@ OpenCode-style shell rendered with ratatui; feature parity with
   dialog, export report). Implements `ApprovalBroker` with a modal dialog.
 - **Views**: switchable Terminal / Diagnostics (`@i?` parsed into the grid of
   the web panel: Firmware, Uptime, BLE access, UART Buffer, WiFi, Upload
-  Queue) / Network (WiFi scan list, connect form, WebDAV) / Assistant.
-  BLE-only controls disabled when the transport is LAN (mirror
+  Queue) / Network (WiFi scan list, connect form, WebDAV) / Assistant /
+  File transfer. BLE-only controls disabled when the transport is LAN (mirror
   `specs/WEB_UX_SPEC.md` §3.6 matrix).
+- **File transfer** (`src/transfer.rs` + `src/tui/transfer_view.rs`): a form
+  (direction · host path · device path · check/start/abort) over two
+  channels chosen by a precheck. The precheck is one typed command that
+  reports `command -v` for `sz rz dd base64 wc tr sha256sum shasum`, the
+  `lrzsz` versions and the device's `$HOME`; **nothing is typed before it
+  answered** and `Start` is disabled until it has. ZMODEM runs `sz`/`rz` on
+  the host against their twin on the device (CRC-32 per frame, `rz` checks
+  the file length, so there is deliberately no sha round trip); the fallback
+  is the `dd|base64` pager of `target_files`, byte-identical to the web
+  client's. Outbound bytes are paced `CHUNK_BYTES = 256` every
+  `CHUNK_INTERVAL = 25 ms` (≈10 KiB/s: `dist/paste_integrity.py` shows 800 B
+  survive a burst and 1600 B lose 136). While a run captures, `CoreEvent::
+  UartRx` goes to the engine instead of the grid, the serial watch and the
+  pending-reply machinery. Entry points: palette `term.transfer_send`,
+  `term.transfer_receive`, `term.transfer_abort` and the `F6` alias.
 - **Bottom status line + command palette** (`Ctrl+P`) + help overlay (`?`):
   palette lists every action (connect, set uart, scan wifi, save log, switch
   view, toggle autoscroll, switch language, ask assistant, quit...). Global keys: `Ctrl+Q`
@@ -279,7 +294,8 @@ OpenCode-style shell rendered with ratatui; feature parity with
   to the emulator, so the toast can say what really happened instead of
   claiming a copy — web `copyBtn` parity, double click takes the word), `F1`
   help,
-  `F2..F4` views, `Ctrl+L` clear terminal.
+  `F2..F6` views (F6 opens the file transfer view and re-runs its precheck;
+  the direction already on the form is kept), `Ctrl+L` clear terminal.
 - Modal dialogs: UART settings (validated by `protocol::validate`), WiFi
   (scan results, password masked), WebDAV, device info, confirmations
   (reboot preset, quit, disconnect), toasts/notice log (`CoreEvent::Notice`).

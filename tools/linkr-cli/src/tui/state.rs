@@ -19,6 +19,7 @@ use super::palette::PaletteState;
 use super::settings::{TransportChoice, TuiSettings};
 use super::sidebar::SidebarState;
 use super::terminal_view::TerminalPane;
+use super::transfer_view;
 use tokio::sync::{broadcast, oneshot};
 
 strings! {
@@ -26,11 +27,16 @@ strings! {
     VIEW_DIAGNOSTICS => "Diagnostics", "诊断";
     VIEW_NETWORK => "Network", "网络";
     VIEW_ASSISTANT => "Assistant", "助手";
+    VIEW_TRANSFER => "File transfer", "文件传输";
     FOCUS_SIDEBAR => "Sidebar", "侧栏";
     FOCUS_CENTER => "Terminal", "终端";
 }
 
-/// The four switchable surfaces (F2..F5, palette `view.*`).
+/// The five switchable surfaces (F2..F6, palette `view.*`).
+///
+/// The transfer view sits last in the cycle: it is the one surface that is
+/// *doing* something while it is open — a run keeps going whatever view is
+/// up — so it is never what a switch lands on by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum View {
@@ -39,6 +45,7 @@ pub enum View {
     Diagnostics,
     Network,
     Assistant,
+    Transfer,
 }
 
 impl View {
@@ -48,6 +55,7 @@ impl View {
             View::Diagnostics => t(VIEW_DIAGNOSTICS, lang),
             View::Network => t(VIEW_NETWORK, lang),
             View::Assistant => t(VIEW_ASSISTANT, lang),
+            View::Transfer => t(VIEW_TRANSFER, lang),
         }
     }
 
@@ -56,7 +64,8 @@ impl View {
             View::Terminal => View::Diagnostics,
             View::Diagnostics => View::Network,
             View::Network => View::Assistant,
-            View::Assistant => View::Terminal,
+            View::Assistant => View::Transfer,
+            View::Transfer => View::Terminal,
         }
     }
 }
@@ -335,6 +344,10 @@ pub struct App {
     pub diagnostics: DiagnosticsState,
     pub network: NetworkState,
     pub assistant: AssistantState,
+    /// The transfer form and its engine. Lives on `App` rather than on the
+    /// view because a run outlives the view: bytes arrive into it whatever
+    /// is on screen.
+    pub transfer: transfer_view::State,
 
     // Overlays.
     pub palette: Option<PaletteState>,
@@ -766,7 +779,7 @@ mod tests {
         // The view and focus labels are the only messages this module defines;
         // the settings save failure reuses the shared i18n table.
         i18n::assert_bilingual(ALL);
-        assert!(ALL.len() >= 6, "views and focus carry 6 messages");
+        assert!(ALL.len() >= 7, "five views plus the two focus labels");
         i18n::assert_bilingual(&[("MSG_SAVE_SETTINGS", i18n::MSG_SAVE_SETTINGS)]);
     }
 
@@ -889,6 +902,13 @@ mod tests {
         assert_eq!(View::Terminal.label(Lang::Zh), "串口终端");
         assert_eq!(View::Diagnostics.label(Lang::Zh), "诊断");
         assert_eq!(View::Network.label(Lang::Zh), "网络");
+        assert_eq!(View::Transfer.label(Lang::En), "File transfer");
+        assert_eq!(View::Transfer.label(Lang::Zh), "文件传输");
+        assert_eq!(
+            View::Assistant.next(),
+            View::Transfer,
+            "the transfer view closes the cycle"
+        );
         assert_eq!(Focus::Center.label(Lang::En), "Terminal");
         assert_eq!(Focus::Center.label(Lang::Zh), "终端");
         assert_eq!(Focus::Sidebar.label(Lang::Zh), "侧栏");
