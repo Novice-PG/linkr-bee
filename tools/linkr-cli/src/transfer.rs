@@ -765,12 +765,20 @@ impl Transfer {
                         "That file is {size} bytes; the pager tops out at {PAGER_LIMIT} bytes. Use lrzsz (ZMODEM) on the target."
                     ));
                 }
-                self.expected_sha256 = if probe.digest() {
-                    local_sha256(&self.local).unwrap_or_default()
+                // Only a digest that was really computed may be sent: an
+                // unreadable file must fail here, not travel as an empty
+                // hash that quietly turns the target's verification off.
+                // (`expected_sha256` itself comes from the plan below.)
+                let digest = if probe.digest() {
+                    local_sha256(&self.local).ok_or_else(|| {
+                        format!(
+                            "Cannot read {}: its digest could not be computed.",
+                            self.local.display()
+                        )
+                    })?
                 } else {
                     String::new()
                 };
-                let digest = self.expected_sha256.clone();
                 let mut request = UploadRequest::new(&target, size as i64);
                 request.sha256 = &digest;
                 let plan = upload_plan(request).map_err(|err| err.to_string())?;
@@ -948,9 +956,14 @@ impl Transfer {
         let Some(rest) = line.strip_prefix(MARKER) else {
             return;
         };
-        let mut parts = rest.splitn(3, ' ');
-        match parts.next() {
-            Some("go") => {
+        // The verb and the whole tail after it — never the tail cut into
+        // words: `exists` and `missing` carry a path the target quoted when
+        // it printed the marker, and a path may hold spaces. `splitn(3, ' ')`
+        // would stop at the first one and report a name the target never
+        // checked.
+        let (verb, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+        match verb {
+            "go" => {
                 if matches!(
                     self.phase,
                     Phase::Cmd {
@@ -966,20 +979,19 @@ impl Transfer {
                     };
                 }
             }
-            Some("exists") => {
-                let path = parts.next().unwrap_or("").to_string();
+            "exists" => {
                 self.fail(format!(
-                    "The target already has {path}; rename or remove it."
+                    "The target already has {tail}; rename or remove it."
                 ));
             }
-            Some("missing") => {
-                let path = parts.next().unwrap_or("").to_string();
-                self.fail(format!("The target has no file at {path}."));
+            "missing" => {
+                self.fail(format!("The target has no file at {tail}."));
             }
-            Some("rc") => {
+            "rc" => {
+                let mut args = tail.split(' ');
                 let (Some(seq), Some(code)) = (
-                    parts.next().and_then(|s| s.parse::<u32>().ok()),
-                    parts.next().and_then(|s| s.parse::<i32>().ok()),
+                    args.next().and_then(|s| s.parse::<u32>().ok()),
+                    args.next().and_then(|s| s.parse::<i32>().ok()),
                 ) else {
                     return;
                 };
@@ -1439,7 +1451,14 @@ pub fn parse_probe(text: &str) -> Probe {
                 }
             }
             Some("home") => {
-                probe.home = parts.next().unwrap_or("").trim().to_string();
+                // The whole tail is the path: a home directory may hold
+                // spaces, which the word split would cut at the first one.
+                probe.home = rest
+                    .split_once(' ')
+                    .map(|(_, tail)| tail)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             }
             _ => {}
         }
@@ -1792,6 +1811,12 @@ mod tests {
         assert_eq!(probe.sz_version, "sz (lrzsz) 0.12.21rc");
         assert_eq!(probe.rz_version, "");
         assert_eq!(probe.home, "/root");
+        // A home directory with a space in it is a path, not two words.
+        assert_eq!(
+            parse_probe("LINKR_ZM:home /home/a b\n").home,
+            "/home/a b",
+            "the home is the whole tail"
+        );
     }
 
     /// A download writes straight through, so the file it produces *is* the
@@ -1861,6 +1886,25 @@ mod tests {
         transfer.on_rx(b"LINKR_ZM:exists /tmp/linkr-zm-exists.bin\n");
         match &transfer.outcome {
             Outcome::Failed(reason) => assert!(reason.contains("already has"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // The path the target refused with arrives whole, spaces included:
+        // it quoted the path when it printed the marker, so the message has
+        // to name the file the user actually has.
+        let mut spaced = Transfer {
+            local: PathBuf::from("/etc/hostname"),
+            target: "/tmp/a b c.bin".to_string(),
+            probe: Some(probe_all("/tmp")),
+            ..Transfer::default()
+        };
+        ready(&mut spaced, true);
+        spaced.start().expect("a zmodem send starts");
+        spaced.on_rx(b"LINKR_ZM:exists /tmp/a b c.bin\n");
+        match &spaced.outcome {
+            Outcome::Failed(reason) => assert!(
+                reason.contains("/tmp/a b c.bin"),
+                "the path was cut at its first space: {reason}"
+            ),
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(transfer.proc.is_none(), "the child must be killed");
