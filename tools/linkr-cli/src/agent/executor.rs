@@ -1023,17 +1023,14 @@ pub fn check_send(
     Ok(())
 }
 
-/// Argument validation for `send_serial_input`.
-pub fn validate_input(text: &str, _append_enter: bool) -> Result<(), String> {
-    if text.is_empty() || text.chars().count() > MAX_INPUT_CHARS || !append_enter_allowed() {
+/// Argument validation for `send_serial_input` — the text half of
+/// `web/device_executor.js:228`. `appendEnter` is validated where the
+/// arguments are read, because there it can still tell "absent" from "false".
+pub fn validate_input(text: &str) -> Result<(), String> {
+    if text.is_empty() || text.chars().count() > MAX_INPUT_CHARS {
         return Err(ERR_INVALID_INPUT.to_string());
     }
     Ok(())
-}
-
-/// `appendEnter` is a required boolean in the schema; the value itself decides.
-fn append_enter_allowed() -> bool {
-    true
 }
 
 /// Command length budget for `run_shell_command`.
@@ -1744,8 +1741,8 @@ mod tests {
             ERR_CONSOLE_CHANGED
         );
         assert!(check_send(true, "a", "a", 1, 1, false).is_ok());
-        assert_eq!(validate_input("", true).unwrap_err(), ERR_INVALID_INPUT);
-        assert!(validate_input("x", true).is_ok());
+        assert_eq!(validate_input("").unwrap_err(), ERR_INVALID_INPUT);
+        assert!(validate_input("x").is_ok());
         assert_eq!(validate_command("").unwrap_err(), ERR_INVALID_INPUT);
         assert_eq!(
             validate_command(&"c".repeat(MAX_COMMAND_CHARS + 1)).unwrap_err(),

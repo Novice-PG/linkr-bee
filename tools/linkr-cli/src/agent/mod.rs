@@ -32,7 +32,7 @@ pub mod web;
 pub use config::{clear_config, load_config, save_config};
 pub use report::{build_report, ReportDownload, ReportInput, ReportRecord};
 
-use crate::event::{ConnectionState, CoreEvent};
+use crate::event::CoreEvent;
 use crate::journal::SerialJournal;
 use crate::session::{CoreBus, SessionHandle};
 use crate::transport::TransportKind;
@@ -343,10 +343,9 @@ pub fn spawn(
     let deadline = Arc::new(AtomicU64::new(0));
 
     let journal = Arc::new(StdMutex::new(SerialJournal::new()));
-    let watch = Arc::new(StdMutex::new(SerialWatch::new(WatchOptions::default())));
     let records = Arc::new(StdMutex::new(ExecutionStore::new()));
 
-    spawn_feed(bus, journal.clone(), watch.clone());
+    spawn_feed(bus, journal.clone());
     tokio::spawn(watch_full_auto(
         deadline.clone(),
         mode.clone(),
@@ -372,7 +371,6 @@ pub fn spawn(
         stop_tx,
         stop_rx,
         journal,
-        watch,
         records,
         mode,
         history: Vec::new(),
@@ -420,35 +418,20 @@ pub(crate) fn store_path(name: &str) -> std::path::PathBuf {
 /// guard is held and applied to the store after it is released.
 type ObservedTools = Option<(Vec<(String, bool)>, u64, String, String)>;
 
-/// Feed the assistant journal and watch from the shared bus. UART bytes are
-/// duplicated per subscriber on purpose: the assistant keeps its own bounded
-/// window so a tool call never competes with the terminal for scrollback.
-fn spawn_feed(
-    bus: CoreBus,
-    journal: Arc<StdMutex<SerialJournal>>,
-    watch: Arc<StdMutex<SerialWatch>>,
-) {
+/// Feed the assistant journal from the shared bus. UART bytes are duplicated
+/// per subscriber on purpose: the assistant keeps its own bounded window so a
+/// tool call never competes with the terminal for scrollback. The terminal's
+/// findings come from the TUI's own watcher (`mod.rs`, fed on the same
+/// events), so there is nothing here to feed a second one — `watch_serial_output`
+/// builds a windowed watcher of its own for exactly the window it reports.
+fn spawn_feed(bus: CoreBus, journal: Arc<StdMutex<SerialJournal>>) {
     tokio::spawn(async move {
         let mut rx = bus.subscribe();
         while let Ok(event) = rx.recv().await {
-            match event {
-                CoreEvent::UartRx(bytes) => {
-                    if let Ok(mut log) = journal.lock() {
-                        log.append_bytes(&bytes);
-                    }
-                    if let Ok(mut watcher) = watch.lock() {
-                        watcher.feed_bytes(&bytes, now_ms());
-                    }
+            if let CoreEvent::UartRx(bytes) = event {
+                if let Ok(mut log) = journal.lock() {
+                    log.append_bytes(&bytes);
                 }
-                CoreEvent::Connection {
-                    state: ConnectionState::Disconnected,
-                    ..
-                } => {
-                    if let Ok(mut watcher) = watch.lock() {
-                        watcher.clear();
-                    }
-                }
-                _ => {}
             }
         }
     });
@@ -558,7 +541,6 @@ struct Runtime {
     stop_tx: watch::Sender<bool>,
     stop_rx: watch::Receiver<bool>,
     journal: Arc<StdMutex<SerialJournal>>,
-    watch: Arc<StdMutex<SerialWatch>>,
     records: Arc<StdMutex<ExecutionStore>>,
     mode: Arc<AtomicU8>,
     history: Vec<Message>,
@@ -1095,7 +1077,7 @@ impl Runtime {
         if tracked {
             validate_command(&command)?;
         } else {
-            validate_input(&command, append_enter)?;
+            validate_input(&command)?;
         }
         self.refresh_console();
         let console_kind = self.console_kind.clone();
@@ -1132,15 +1114,14 @@ impl Runtime {
         if !info.connected {
             return Err(executor::ERR_DISCONNECTED.to_string());
         }
-        let status_revision = self.input_revision;
-        executor::check_send(
-            true,
-            &self.session_key,
-            &self.session_key,
-            status_revision,
-            status_revision,
-            false,
-        )?;
+        // Snapshot what the user is about to approve, exactly what the web
+        // record carries when it is built (`device_executor.js`: `sessionId`,
+        // `inputRevision`, `console`). The guard runs *after* the answer —
+        // that wait is the whole point of it: a reconnect, a console change or
+        // another input while the dialog sat open must not ride along.
+        let proposed_session = self.session_key.clone();
+        let proposed_revision = self.input_revision;
+        let proposed_console = console_kind.clone();
 
         let kind = if tracked {
             ApprovalKind::RunCommand {
@@ -1164,6 +1145,18 @@ impl Runtime {
         if needed {
             self.ask_approval(tool, kind, payload.clone()).await?;
         }
+        // `device_executor.js` calls `check(record)` again once the user has
+        // approved, against status read *now*. The console hint is re-read
+        // here because nothing else refreshes it while the dialog was open.
+        self.refresh_console();
+        executor::check_send(
+            self.session.info().connected,
+            &self.session_key,
+            &proposed_session,
+            self.input_revision,
+            proposed_revision,
+            self.console_kind != proposed_console,
+        )?;
 
         let log_start = self.latest_cursor();
         let id = {
@@ -1681,11 +1674,14 @@ impl Runtime {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        // `appendEnter` is a required boolean (`web/device_executor.js:228`
+        // rejects `typeof args.appendEnter !== "boolean"`): a missing one is
+        // the same error as an empty text, not a silent "no newline".
         let append_enter = args
             .get("appendEnter")
             .and_then(Value::as_bool)
-            .unwrap_or(true);
-        validate_input(&text, append_enter)?;
+            .ok_or_else(|| executor::ERR_INVALID_INPUT.to_string())?;
+        validate_input(&text)?;
         let value = self
             .serial_send(
                 "send_serial_input",
@@ -1987,7 +1983,12 @@ impl Runtime {
             None => Value::Null,
         };
         json!({
-            "sessionId": self.input_revision,
+            // Records (returned below, and what `ExecutionRecord.session_id`
+            // holds) identify a session by `session_key`; the status has to
+            // use the same value or a client filtering one against the other
+            // can never match. `inputRevision` is the input counter and is
+            // reported next to it.
+            "sessionId": self.session_key.clone(),
             "connected": info.connected,
             "inputPending": self.input_pending,
             "inputRevision": self.input_revision,
@@ -2044,6 +2045,11 @@ impl Runtime {
             })
             .unwrap_or_default();
 
+        // This window gets its own watcher: it is the one carrying the user's
+        // patterns, and the shared watcher is already fed line for line by
+        // `spawn_feed` from the bus. Feeding that one too would count every
+        // line twice and would still never match a user pattern — the local
+        // watcher was built for it and then never used.
         let mut watcher = SerialWatch::new(WatchOptions {
             max_findings: 20,
             boot_threshold: crate::watch::DEFAULT_BOOT_LOOP_THRESHOLD,
@@ -2062,11 +2068,7 @@ impl Runtime {
             }
             let page = self.read_page(Some(cursor), 4000);
             if !page.text.is_empty() {
-                let mut guard = self
-                    .watch
-                    .lock()
-                    .map_err(|_| executor::ERR_RECORD_UNAVAILABLE.to_string())?;
-                guard.feed_text(&page.text, now_ms());
+                watcher.feed_text(&page.text, now_ms());
                 cursor = page.cursor.max(cursor);
             }
             if self.session_key_now() != self.session_key {
@@ -2076,14 +2078,9 @@ impl Runtime {
         }
 
         // The panel contract wants `matches`, `checkedLines` and the two
-        // cursor bounds over what the shared watcher collected for this window.
-        let guard = self
-            .watch
-            .lock()
-            .map_err(|_| executor::ERR_RECORD_UNAVAILABLE.to_string())?;
-        let findings: Vec<Finding> = guard.findings().to_vec();
-        let checked = guard.lines_seen();
-        drop(guard);
+        // cursor bounds over what this window scanned.
+        let findings: Vec<Finding> = watcher.findings().to_vec();
+        let checked = watcher.lines_seen();
 
         let mut matches = Vec::new();
         let mut first: Option<u64> = None;
@@ -2274,14 +2271,19 @@ impl Runtime {
     ) -> Result<String, String> {
         self.check_session().await?;
         if needs_approval {
-            let summary = accessory::accessory_change_summary(&command, false);
+            // The summary is shown to the user, so it is built from the
+            // *redacted* command: a WebDAV URL may carry `user:secret@host`,
+            // and `@d=` is exactly the form that does. The card would have
+            // leaked what its own command field was hiding.
+            let redacted = accessory::redact_command(&command);
+            let summary = accessory::accessory_change_summary(&redacted, false);
             self.ask_approval(
                 tool,
                 ApprovalKind::AccessoryChange {
                     summary,
-                    command: accessory::redact_command(&command),
+                    command: redacted.clone(),
                 },
-                accessory::redact_command(&command),
+                redacted,
             )
             .await?;
         }
@@ -2790,7 +2792,6 @@ mod tests {
             stop_tx,
             stop_rx,
             journal: Arc::new(StdMutex::new(SerialJournal::new())),
-            watch: Arc::new(StdMutex::new(SerialWatch::new(WatchOptions::default()))),
             records: Arc::new(StdMutex::new(ExecutionStore::new())),
             mode: Arc::new(AtomicU8::new(ExecMode::Auto.ordinal())),
             history: Vec::new(),
@@ -2837,6 +2838,48 @@ mod tests {
             let _ = tx.send(ApprovalDecision::Approved);
             rx
         }
+    }
+
+    /// A console that changed *while the approval dialog was open* is not the
+    /// console the user approved. `device_executor.js` calls `check(record)`
+    /// after the answer for exactly that reason; the port used to call it
+    /// before, with each value handed to both sides, so it could never fail —
+    /// a reboot behind the dialog would have sailed through.
+    #[tokio::test]
+    async fn a_console_that_changed_while_the_dialog_was_open_is_refused() {
+        struct ChangeConsole {
+            journal: Arc<StdMutex<SerialJournal>>,
+        }
+
+        impl ApprovalBroker for ChangeConsole {
+            fn ask(&self, _request: ApprovalRequest) -> oneshot::Receiver<ApprovalDecision> {
+                // The target comes up at a prompt while the user reads.
+                if let Ok(mut log) = self.journal.lock() {
+                    log.append_bytes(b"root@target:~# ");
+                }
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(ApprovalDecision::Approved);
+                rx
+            }
+        }
+
+        let mut rt = bare_runtime();
+        rt.session = SessionHandle::test_connected();
+        rt.session_key = rt.session_key_now();
+        let journal = rt.journal.clone();
+        rt.broker = Arc::new(ChangeConsole { journal });
+
+        let error = rt
+            .serial_send(
+                "send_serial_input",
+                "reboot".to_string(),
+                true,
+                false,
+                RecordHints::default(),
+            )
+            .await
+            .expect_err("the dialog's window is the guard's window");
+        assert_eq!(error, executor::ERR_CONSOLE_CHANGED);
     }
 
     /// `SessionHandle::test_detached` is `#[cfg(test)]`; the helper above
