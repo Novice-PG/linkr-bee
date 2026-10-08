@@ -160,6 +160,21 @@ impl SessionHandle {
     pub fn test_detached() -> Self {
         SessionHandle::detached(CoreBus::new())
     }
+
+    /// The same handle with the link reported up: the agent's send path opens
+    /// on `info().connected`, so a test that has to reach the approval window
+    /// — and the guard that runs when the answer arrives — needs a session
+    /// that says yes first.
+    #[allow(dead_code)]
+    pub fn test_connected() -> Self {
+        let handle = SessionHandle::detached(CoreBus::new());
+        {
+            let mut info = handle.info.lock().expect("session info poisoned");
+            info.connected = true;
+            info.label = "test-device".to_string();
+        }
+        handle
+    }
 }
 
 /// Broadcast bus carrying `CoreEvent`s to every subscriber.
