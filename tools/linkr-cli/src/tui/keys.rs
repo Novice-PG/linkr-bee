@@ -207,55 +207,18 @@ fn alt_prefixed(seq: &str, alt: bool) -> Vec<u8> {
     bytes
 }
 
-/// Apply the `--enter` translation before sending a line. Uses the shared
-/// `protocol::validate::translate_enter`; the local fallback (identical to
-/// `web/app.js::normalizeEnter`) keeps the TUI alive while that workstream
-/// code is still landing.
+/// Apply the `--enter` translation before sending a line: the shared
+/// `protocol::validate::translate_enter`, the port of
+/// `web/app.js::normalizeEnter`. There used to be a second copy of that
+/// translation here behind a `catch_unwind`, left over from while the shared
+/// one was landing — and under the release profile's `panic = "abort"` a
+/// panic never reached it anyway, so the fallback could not have run in a
+/// built binary.
 pub fn translate_enter(data: &[u8], mode: EnterMode) -> Vec<u8> {
     if mode == EnterMode::Raw {
         return data.to_vec();
     }
-    let mode_str = mode.as_str();
-    match std::panic::catch_unwind(|| crate::protocol::validate::translate_enter(data, mode_str)) {
-        Ok(translated) => translated,
-        Err(_) => fallback_translate_enter(data, mode_str),
-    }
-}
-
-fn fallback_translate_enter(data: &[u8], mode: &str) -> Vec<u8> {
-    match mode {
-        "raw" => return data.to_vec(),
-        "cr" | "lf" | "crlf" => {}
-        _ => return data.to_vec(),
-    }
-    let mut normalized = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == b'\r' && data.get(i + 1) == Some(&b'\n') {
-            normalized.push(b'\n');
-            i += 2;
-        } else if data[i] == b'\r' || data[i] == b'\n' {
-            normalized.push(b'\n');
-            i += 1;
-        } else {
-            normalized.push(data[i]);
-            i += 1;
-        }
-    }
-    let replacement: &[u8] = match mode {
-        "cr" => b"\r",
-        "lf" => b"\n",
-        _ => b"\r\n",
-    };
-    let mut out = Vec::with_capacity(normalized.len());
-    for byte in normalized {
-        if byte == b'\n' {
-            out.extend_from_slice(replacement);
-        } else {
-            out.push(byte);
-        }
-    }
-    out
+    crate::protocol::validate::translate_enter(data, mode.as_str())
 }
 
 #[cfg(test)]
