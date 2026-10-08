@@ -107,13 +107,6 @@ pub fn encode_key(
     let alt = physical.alt || sticky.alt;
     let ctrl = physical.ctrl || sticky.ctrl;
     let modifier = modifier_param(shift, alt, ctrl);
-    let pressed = |base: StickyMods, key: StickyMods| StickyMods {
-        shift: base.shift || key.shift,
-        ctrl: base.ctrl || key.ctrl,
-        alt: base.alt || key.alt,
-    };
-    let _ = pressed;
-
     // Cursor keys (and Home/End) share the CSI 1;<mod> form.
     const CURSOR: [(KeyCode, char); 6] = [
         (KeyCode::Up, 'A'),

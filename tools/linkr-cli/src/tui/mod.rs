@@ -2035,7 +2035,6 @@ mod tests {
         let mut app = test_app();
         app.dialog = Some(Dialog::Confirm {
             kind: dialogs::ConfirmKind::Quit,
-            title: String::new(),
             message: String::new(),
         });
         let mut sticky = StickyMods::default();
@@ -2255,7 +2254,6 @@ mod tests {
         let mut app = test_app();
         app.dialog = Some(Dialog::Confirm {
             kind: dialogs::ConfirmKind::Quit,
-            title: String::new(),
             message: String::new(),
         });
         let mut sticky = StickyMods::default();
@@ -2404,7 +2402,6 @@ mod tests {
         app.focus = Focus::Center;
         app.dialog = Some(Dialog::Confirm {
             kind: dialogs::ConfirmKind::Quit,
-            title: String::new(),
             message: String::new(),
         });
         assert!(!accepts_paste(&app), "a confirmation ignores it");
@@ -2547,7 +2544,6 @@ mod tests {
         handle_mouse(&mut app, &mut sticky, drag(40, 2));
         app.dialog = Some(Dialog::Confirm {
             kind: dialogs::ConfirmKind::Quit,
-            title: String::new(),
             message: String::new(),
         });
 
@@ -2617,7 +2613,6 @@ mod tests {
         app.palette = None;
         app.dialog = Some(Dialog::Confirm {
             kind: dialogs::ConfirmKind::Quit,
-            title: String::new(),
             message: String::new(),
         });
         handle_mouse(&mut app, &mut sticky, down(36, 2));

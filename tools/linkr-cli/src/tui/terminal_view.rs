@@ -126,7 +126,6 @@ pub struct TermGrid {
     bottom_margin: u16,
     wrap_pending: bool,
     title: String,
-    bells: u32,
     alt: Option<AltScreen>,
     /// Device → host reports (DSR/DA) waiting to be written to the UART.
     pending_reports: Vec<u8>,
@@ -163,7 +162,6 @@ impl TermGrid {
             bottom_margin: rows - 1,
             wrap_pending: false,
             title: String::new(),
-            bells: 0,
             alt: None,
             pending_reports: Vec::new(),
             clipboard: None,
@@ -186,10 +184,6 @@ impl TermGrid {
 
     pub fn title(&self) -> &str {
         &self.title
-    }
-
-    pub fn bells(&self) -> u32 {
-        self.bells
     }
 
     pub fn app_cursor_keys(&self) -> bool {
@@ -827,7 +821,6 @@ impl Perform for TermGrid {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x07 => self.bells += 1,
             0x08 => {
                 self.cursor.1 = self.cursor.1.saturating_sub(1);
                 self.wrap_pending = false;

@@ -65,8 +65,6 @@ fn unreachable(url: &str) -> String {
 /// What the client must do after one text frame of the access handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeAction {
-    /// Keep listening.
-    Continue,
     /// Send this text frame (the access token).
     Send(String),
     /// The bridge accepted us; serial traffic may flow.
@@ -410,7 +408,6 @@ async fn dial_once(
                         .map_err(|_| hangup(&url, &handshake))?;
                 }
                 HandshakeAction::Ignore => crate::cli::warn(IGNORED_FRAME),
-                HandshakeAction::Continue => {}
             },
             Message::Binary(bytes) => buffered.push(bytes.to_vec()),
             Message::Close(_) => return Err(hangup(&url, &handshake)),

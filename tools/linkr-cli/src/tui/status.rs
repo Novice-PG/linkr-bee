@@ -238,32 +238,6 @@ fn clip(text: &str, width: usize) -> String {
     out
 }
 
-/// Compose `left` and `right` into one bar of `width` columns: left cluster,
-/// padding, right cluster. Overlong left clusters are truncated first.
-pub fn join_status(left: &str, right: &str, width: u16) -> String {
-    let width = width as usize;
-    if width == 0 {
-        return String::new();
-    }
-    let right_len = cols(right);
-    if right_len >= width {
-        // Not even room for the right cluster: hard-truncate it.
-        return cut_columns(right, width);
-    }
-    let room = width - right_len;
-    let left_len = cols(left);
-    let (left, gap) = if left_len < room {
-        (left.to_string(), room - left_len)
-    } else {
-        // Truncate with an ellipsis, like the web topbar overflow does; the
-        // ellipsis takes one of the two columns it frees for the gap.
-        let cut = clip(left, room.saturating_sub(1));
-        let gap = room - cols(&cut);
-        (cut, gap)
-    };
-    format!("{}{}{}", left, " ".repeat(gap), right)
-}
-
 /// Bottom status line: focus + view on the left, key hints on the right.
 ///
 /// The status cluster wins: when the hints do not fit they are truncated with
@@ -428,28 +402,6 @@ mod tests {
         assert_eq!(mode_text(ExecMode::Manual, Lang::En), "Manual");
         assert_eq!(mode_text(ExecMode::Auto, Lang::En), "Auto");
         assert_eq!(mode_text(ExecMode::FullAuto, Lang::En), "Full Auto");
-    }
-
-    #[test]
-    fn join_pads_right_cluster_to_width() {
-        let line = join_status("left", "right", 12);
-        assert_eq!(line.len(), 12);
-        assert!(line.starts_with("left"));
-        assert!(line.ends_with("right"));
-    }
-
-    #[test]
-    fn join_truncates_an_overlong_left_cluster() {
-        let line = join_status(&"x".repeat(50), "right", 20);
-        assert_eq!(line.chars().count(), 20);
-        assert!(line.contains('…'));
-        assert!(line.ends_with("right"));
-    }
-
-    #[test]
-    fn join_truncates_right_when_nothing_fits() {
-        let line = join_status("l", &"r".repeat(30), 10);
-        assert_eq!(line.chars().count(), 10);
     }
 
     #[test]

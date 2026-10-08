@@ -862,7 +862,10 @@ impl StreamAssembler {
 }
 
 /// Split a streamed body into events and deltas in one pass, for callers that
-/// hold the raw bytes (tests, and the HTTP reader below).
+/// hold the raw bytes in one piece. The live path feeds the same two pieces
+/// chunk by chunk as they arrive (`Runtime::stream`), so this is the tests'
+/// way in — the HTTP reader itself never calls it.
+#[cfg(test)]
 pub fn decode_body(provider: Provider, body: &str) -> Vec<StreamDelta> {
     let mut decoder = SseDecoder::new();
     let mut assembler = StreamAssembler::new(provider);
