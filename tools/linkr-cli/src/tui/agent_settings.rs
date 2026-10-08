@@ -179,16 +179,21 @@ pub fn endpoint_security(endpoint: &str) -> (bool, bool) {
         Some(pair) => pair,
         None => return (false, false),
     };
-    let host = rest
+    let authority = rest
         .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
         .rsplit('@')
         .next()
-        .unwrap_or("")
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let host = host.split(':').next().unwrap_or("");
+        .unwrap_or("");
+    // `url.hostname` in the port: no port, and an IPv6 literal arrives with
+    // its brackets stripped. Trimming the brackets *then* cutting at the
+    // first `:` turned `[::1]:8080` into an empty host — and an empty host is
+    // not loopback, so a plain `http://[::1]` asked for the key.
+    let host = match authority.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or(inner),
+        None => authority.split(':').next().unwrap_or(""),
+    };
     let loopback = host == "localhost"
         || host == "::1"
         || host.ends_with(".localhost")
@@ -1026,6 +1031,12 @@ mod tests {
     fn plaintext_detection_matches_endpoint_security() {
         assert_eq!(endpoint_security("http://127.0.0.1:8080"), (true, false));
         assert_eq!(endpoint_security("http://localhost/v1"), (true, false));
+        // `url.hostname` drops the port *and* the brackets, so `::1` has to
+        // survive as a host: it is loopback, and loopback never asks for a
+        // key. Without the bracket handling it parsed to "" — which is not
+        // loopback, and did ask.
+        assert_eq!(endpoint_security("http://[::1]:8080/v1"), (true, false));
+        assert_eq!(endpoint_security("http://[2001:db8::1]/v1"), (true, true));
         assert_eq!(endpoint_security("http://api.example.com"), (true, true));
         assert_eq!(endpoint_security("https://api.example.com"), (false, false));
         assert_eq!(endpoint_security("not a url"), (false, false));

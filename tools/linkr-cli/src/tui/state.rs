@@ -729,11 +729,7 @@ impl App {
         if !self.connected() {
             return;
         }
-        let payload = super::terminal_view::prepare_line(
-            text,
-            self.settings.enter_mode,
-            self.settings.local_echo,
-        );
+        let payload = super::terminal_view::prepare_line(text, self.settings.enter_mode);
         if self.settings.local_echo {
             self.terminal.feed(&payload);
         }

@@ -1506,12 +1506,11 @@ impl TerminalPane {
     }
 }
 
-/// Apply the Enter-mode translation to a line about to be sent, then echo it
-/// into the grid when local echo is on (web `sendText`).
-pub fn prepare_line(text: &str, mode: EnterMode, local_echo: bool) -> Vec<u8> {
-    let payload = super::keys::translate_enter(text.as_bytes(), mode);
-    let _ = local_echo;
-    payload
+/// Apply the Enter-mode translation to a line about to be sent (web
+/// `sendText`). The caller echoes the payload into the grid when local echo
+/// is on — that is where the grid lives, [`super::state::App::send_text`].
+pub fn prepare_line(text: &str, mode: EnterMode) -> Vec<u8> {
+    super::keys::translate_enter(text.as_bytes(), mode)
 }
 
 #[cfg(test)]
@@ -1931,10 +1930,12 @@ mod tests {
         assert_eq!(osc52_write("hi"), "\x1b]52;c;aGk=\x07");
     }
 
+    /// The payload only: echoing it into the grid is the caller's job
+    /// (`App::send_text`), which is where the grid lives.
     #[test]
-    fn prepare_line_translates_enter_and_echoes_raw_text() {
-        assert_eq!(prepare_line("help\n", EnterMode::Raw, true), b"help\n");
-        assert_eq!(prepare_line("help\n", EnterMode::Crlf, false), b"help\r\n");
+    fn prepare_line_translates_enter() {
+        assert_eq!(prepare_line("help\n", EnterMode::Raw), b"help\n");
+        assert_eq!(prepare_line("help\n", EnterMode::Crlf), b"help\r\n");
     }
 
     // --- mouse selection (P8) ---------------------------------------------
