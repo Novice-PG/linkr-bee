@@ -381,6 +381,7 @@ mod tests {
             View::Diagnostics,
             View::Network,
             View::Assistant,
+            View::Transfer,
         ] {
             let json = serde_json::to_string(&view).unwrap();
             assert_eq!(serde_json::from_str::<View>(&json).unwrap(), view);

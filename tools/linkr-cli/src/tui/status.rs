@@ -18,8 +18,8 @@ use crate::transport::TransportKind;
 
 strings! {
     ST_FAILED => "Failed", "连接失败";
-    ST_HINTS => "Ctrl+P palette · F1 help · F2-F5 views · Ctrl+Q quit",
-        "Ctrl+P 面板 · F1 帮助 · F2-F5 视图 · Ctrl+Q 退出";
+    ST_HINTS => "Ctrl+P palette · F1 help · F2-F6 views · Ctrl+Q quit",
+        "Ctrl+P 面板 · F1 帮助 · F2-F6 视图 · Ctrl+Q 退出";
 }
 
 /// Everything the status bar renders, already detached from the session so the

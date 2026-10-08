@@ -499,7 +499,10 @@ powershell -ExecutionPolicy Bypass -File tools\build_terminal.ps1 -Bundle
 目录即可强制重新解包。`python3 tools/build_terminal_bundle.py --exe linkr.exe`
 可从任意可执行文件重新生成，`tests/test_terminal_bundle.py` 覆盖这个生成器。
 
-TUI 把 Web 端的四个界面放在 `F2`–`F5`（终端、诊断、网络、助手），`F1` 是帮助、
+TUI 把 Web 端的四个界面放在 `F2`–`F5`（终端、诊断、网络、助手），又用 `F6` 加了第五个
+界面：文件传输。它在往设备里输入第一条命令之前先探测 `lrzsz` 并报出版本，用本机与设备
+各自的 `sz`/`rz` 跑 ZMODEM；任一端没有 lrzsz 就退回 `target_files` 的 `dd|base64`
+分页通道 —— 按 256 字节 / 25 毫秒控速，链路扛不住突发流量也不会丢文件。`F1` 是帮助、
 `Ctrl+P` 是命令面板、`Ctrl+L` 清屏、`Ctrl+Q` 退出，`Ctrl+Shift+R` / `+C` /
 `+A` 用于锁定 Shift / Ctrl / Alt，替代 Web 端的按键条。`--tui`（或 `linkr tui`）
 连上后直接进入 TUI，`--yes` 让助手自行批准命令。

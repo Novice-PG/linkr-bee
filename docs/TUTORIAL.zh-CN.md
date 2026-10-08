@@ -14,7 +14,7 @@
 
 `linkr` 是一个二进制文件，两种用法：
 
-- **TUI** —— OpenCode 风格的界面：侧栏、四个可切换视图、命令面板和模态对话框，
+- **TUI** —— OpenCode 风格的界面：侧栏、五个可切换视图、命令面板和模态对话框，
   全部键盘操作。
 - **普通 CLI 模式** —— 与 Python 客户端相同的参数，给脚本和 CI 用：
   `linkr --scan`、`linkr --query-info --no-terminal`、`linkr --wifi …`。
@@ -24,7 +24,8 @@
 │ 连接        │                                              │
 │ ● 已连接    │              当前视图                        │
 │ 传输方式    │         （F2 终端 / F3 诊断 /                │
-│ 设备        │          F4 网络 / F5 助手）                 │
+│ 设备        │          F4 网络 / F5 助手 /                 │
+│             │          F6 文件传输）                       │
 │             │                                              │
 │ 快捷发送    │                                              │
 │             ├──────────────────────────────────────────────┤
@@ -263,7 +264,7 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 | --- | --- |
 | `Ctrl+P` | 命令面板（全部动作，可搜索） |
 | `F1` | 本帮助 |
-| `F2` `F3` `F4` `F5` | 终端 · 诊断 · 网络 · 助手视图 |
+| `F2` `F3` `F4` `F5` `F6` | 终端 · 诊断 · 网络 · 助手 · 文件传输视图 |
 | `Ctrl+Shift+K` | 聚焦助手输入框 |
 | `Ctrl+Shift+M` | 助手：选择执行模式 |
 | `Ctrl+Shift+S` | 助手：AI 配置 |
@@ -324,7 +325,7 @@ wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整�
 ## 7. 命令面板
 
 按 `Ctrl+P` 再输入。搜索同时匹配**中英文**动作标题以及动作 id，所以
-`view`、`视图`、`wifi`、`term.copy` 都能命中。完整注册表（34 个动作，按序）：
+`view`、`视图`、`wifi`、`term.copy` 都能命中。完整注册表（37 个动作，按序）：
 
 | 分类 | 动作 |
 | --- | --- |
@@ -332,6 +333,7 @@ wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整�
 | Focus | `focus.sidebar` · `focus.terminal` · `focus.assistant` |
 | Connection | `connect` · `disconnect` · `transport.toggle` · `uart.settings` |
 | Terminal | `term.font_bigger` · `term.font_smaller` · `term.font_reset` · `term.autoscroll` · `term.echo` · `term.enter_mode` · `term.clear` · `term.save_log` · `term.copy` |
+| Transfer | `term.transfer_send` · `term.transfer_receive` · `term.transfer_abort` |
 | Diagnostics | `diag.refresh` |
 | Network | `wifi.scan` · `wifi.status` · `webdav.status` |
 | Assistant | `agent.ask` · `agent.mode` · `agent.settings` · `agent.new_chat` · `agent.stop` · `agent.export` |
@@ -363,7 +365,7 @@ wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整�
 选中后按 `Enter`，证据会以气泡提示展示。如果显示 *监控引擎未就绪*，
 说明引擎在这台机器上没能启动。
 
-## 9. 四个视图
+## 9. 五个视图
 
 ### F2 —— 终端
 
@@ -448,6 +450,46 @@ API 密钥、协议（OpenAI 兼容、Anthropic、Google AI）、推理力度、
 `Ctrl+P` → **导出报告**会把排查结论写成 Markdown，保存到
 `<配置目录>/linkr/linkr-agent-<时间戳>.md`，包含助手为这台目标机记录的任务与
 笔记。没有可导出的内容时它会明说，而不是写一个空文件。
+
+### F6 —— 文件传输
+
+让文件在链路两头来回移动。这一屏是一张四行的表单：`Tab` / `Shift+Tab`（或 `↑` `↓`）
+在行间移动，`Enter` 执行当前行的动作。
+
+| 行 | 放什么 |
+| --- | --- |
+| **方向** | 发送（本机 → 设备）或接收（设备 → 本机）。`←` `→` 或 `空格` 切换 |
+| **本机路径** | 要发送的文件，或接收下来的落点。`←` `→` 移动光标 |
+| **设备路径** | 另一端的路径：必须是绝对路径，`~/…` 按**设备**的家目录展开，不是本机的 |
+| **操作** | `检测` · `开始` · `中止` |
+
+**检测**是预检，视图一打开就会自己跑一次：它问设备装了 `sz`、`rz`、`dd`、
+`base64`、`wc`、`tr`、`sha256sum`/`shasum` 中的哪几个，并报出查到的 `lrzsz`
+版本（例如 `sz (lrzsz) 0.12.21rc`）。在答案回来之前不会往设备里输入任何东西，
+**开始**在此之前也一直是灰的。
+
+两条通道，由预检结果决定：
+
+- **ZMODEM** —— 本机的 `sz`/`rz` 对上设备里的同款。协议本身逐帧 CRC-32 校验，
+  `rz` 还会核对文件长度，所以不需要再跑一遍摘要往返。
+- **`dd|base64` 分页通道** —— 网页端和助手已经在用的那条（`target_files`），
+  任一端没有 `lrzsz` 时就走它。
+
+传输故意放慢：**每 25 毫秒 256 字节**（约 10 KiB/s）。突发流量会把链路上的字节
+冲掉，而串口控制台没有重传可用，所以由发送端自己控速。
+
+| 按键 | 动作 |
+| --- | --- |
+| **操作**行上的 `Enter` | 执行选中的动作 |
+| **方向**行上的 `空格` 或 `←` `→` | 切换方向 |
+| `Esc` | 中止进行中的传输；否则返回终端 |
+| `PgUp` / `PgDn` | 翻动本窗格 |
+| 命令面板 `term.transfer_send` / `term.transfer_receive` | 打开视图并选好方向 |
+| 命令面板 `term.transfer_abort` | 在任意界面中止传输 |
+| `F6` | 打开视图（保留上次的方向） |
+
+切换到别的视图传输也会继续 —— 只有 `Esc`（先中止再退出）或 `term.transfer_abort`
+会提前结束。`开始` 在移动任何一个字节之前就会拒绝已存在的目标文件和非绝对路径。
 
 ## 10. 局域网模式
 

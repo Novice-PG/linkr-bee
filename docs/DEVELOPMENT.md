@@ -610,8 +610,13 @@ tools/build_terminal_bundle.py --exe linkr.exe` regenerates it from any
 executable, and `tests/test_terminal_bundle.py` covers the generator.
 
 The TUI keeps the four web surfaces behind `F2`–`F5` (terminal, diagnostics,
-network, assistant), with `F1` for help, `Ctrl+P` for the command palette,
-`Ctrl+L` to clear the terminal, `Ctrl+Q` to quit, and
+network, assistant) and adds a fifth behind `F6`: the file transfer view. It
+probes the device for `lrzsz` (and prints the version it found) before a
+single command is typed into it, runs ZMODEM over `sz`/`rz` against the
+device's own copy, and falls back to the `dd|base64` pager of `target_files`
+when either side has no lrzsz — paced at 256 B / 25 ms so a link that drops
+burst bytes never loses a file. `F1` is help, `Ctrl+P` for the command
+palette, `Ctrl+L` to clear the terminal, `Ctrl+Q` to quit, and
 `Ctrl+Shift+R` / `+C` / `+A` to latch Shift / Ctrl / Alt in place of the web
 key bar. `--tui` (or `linkr tui`) hands a fresh session to it, `--yes` lets the
 assistant approve its own commands.

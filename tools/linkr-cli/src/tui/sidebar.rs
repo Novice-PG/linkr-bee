@@ -153,6 +153,7 @@ pub fn entries(app: &App) -> Vec<SideEntry> {
         View::Diagnostics,
         View::Network,
         View::Assistant,
+        View::Transfer,
     ] {
         list.push(SideEntry::Nav(view));
     }
@@ -321,6 +322,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         View::Diagnostics,
         View::Network,
         View::Assistant,
+        View::Transfer,
     ] {
         item!(SideEntry::Nav(view), view.label(lang), nav_style);
     }
@@ -614,6 +616,7 @@ fn activate(app: &mut App, entry: SideEntry) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::i18n::Lang;
     use super::super::test_app;
     use super::*;
     use crate::event::ConnectionState;
@@ -709,21 +712,28 @@ mod tests {
         let mut app = crate::tui::test_app();
         let lang = app.lang();
 
-        // The section links (CONTRACTS.md section 5) are on screen.
-        for view in [
-            View::Terminal,
-            View::Diagnostics,
-            View::Network,
-            View::Assistant,
-        ] {
-            let label = view.label(lang);
-            assert!(
-                render_lines(&app)
-                    .iter()
-                    .any(|line| line.spans.iter().any(|span| span.content.contains(label))),
-                "the sidebar must draw the {label} section link"
-            );
+        // The section links (CONTRACTS.md section 5) are on screen — in both
+        // languages: the gauge walks this list in one run only, so a link
+        // that fits in English and gets clipped in Chinese would pass it.
+        for lang in [lang, Lang::Zh] {
+            app.settings.lang = lang;
+            for view in [
+                View::Terminal,
+                View::Diagnostics,
+                View::Network,
+                View::Assistant,
+                View::Transfer,
+            ] {
+                let label = view.label(lang);
+                assert!(
+                    render_lines(&app)
+                        .iter()
+                        .any(|line| line.spans.iter().any(|span| span.content.contains(label))),
+                    "the {lang:?} sidebar must draw the {label} section link"
+                );
+            }
         }
+        app.settings.lang = lang;
 
         let items = entries(&app);
         let mut previous = 0;

@@ -96,6 +96,8 @@ strings! {
     DLG_HELP_DIAG => "Diagnostics view (@i?)", "诊断视图（@i?）";
     DLG_HELP_NETWORK => "Network view (WiFi / WebDAV)", "网络视图（WiFi / WebDAV）";
     DLG_HELP_ASSISTANT => "Assistant view", "助手视图";
+    DLG_HELP_TRANSFER => "Transfer view (precheck, then send / receive)",
+        "传输视图（先预检，再发送 / 接收）";
     DLG_HELP_FOCUS_COMPOSER => "Focus the assistant composer", "聚焦助手输入框";
     DLG_HELP_MODE => "Assistant: pick the execution mode", "助手：选择执行模式";
     DLG_HELP_CONFIG => "Assistant: AI configuration", "助手：AI 配置";
@@ -649,13 +651,14 @@ fn approval_lines(
 /// F1 overlay. Mirrors the global keys of CONTRACTS.md section 5.
 fn help_lines(width: u16, lang: Lang) -> Vec<Line<'static>> {
     struct Row(&'static str, Entry);
-    const ROWS: [Row; 28] = [
+    const ROWS: [Row; 29] = [
         Row("Ctrl+P", DLG_HELP_PALETTE),
         Row("F1", DLG_HELP_THIS),
         Row("F2", DLG_HELP_TERMINAL),
         Row("F3", DLG_HELP_DIAG),
         Row("F4", DLG_HELP_NETWORK),
         Row("F5", DLG_HELP_ASSISTANT),
+        Row("F6", DLG_HELP_TRANSFER),
         Row("Ctrl+Shift+K", DLG_HELP_FOCUS_COMPOSER),
         Row("Ctrl+Shift+M", DLG_HELP_MODE),
         Row("Ctrl+Shift+S", DLG_HELP_CONFIG),
@@ -675,7 +678,7 @@ fn help_lines(width: u16, lang: Lang) -> Vec<Line<'static>> {
         Row("Ctrl+Shift+V", DLG_HELP_PASTE),
         Row("Enter", DLG_HELP_ENTER),
         Row("Tab / Shift+Tab", DLG_HELP_TAB),
-        Row("F6..F12", DLG_HELP_FKEYS),
+        Row("F7..F12", DLG_HELP_FKEYS),
         Row("Ctrl+P → term.*", DLG_HELP_TERM_ACTIONS),
         Row("Ctrl+P → app.*", DLG_HELP_APP_ACTIONS),
     ];
@@ -1127,6 +1130,7 @@ mod tests {
             "F3",
             "F4",
             "F5",
+            "F6",
             "Ctrl+Shift+K",
             "Ctrl+Shift+M",
             "Ctrl+Shift+S",

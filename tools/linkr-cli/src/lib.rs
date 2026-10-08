@@ -14,6 +14,7 @@ pub mod session;
 pub mod target_files;
 pub mod target_verify;
 pub mod term;
+pub mod transfer;
 pub mod transport;
 pub mod tui;
 pub mod watch;
