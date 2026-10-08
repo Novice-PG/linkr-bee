@@ -323,18 +323,6 @@ pub fn parse_scan_line(line: &str) -> Option<ScanResult> {
     })
 }
 
-/// Redact secrets for display (`redactCommand`/`redactSecrets` in the web
-/// client): `@w=`/`@d=` payloads and 32-hex tokens never reach the screen.
-pub fn redact_command(cmd: &str) -> String {
-    if cmd.starts_with("@w=") {
-        return "@w=<redacted>".to_string();
-    }
-    if cmd.starts_with("@d=") {
-        return "@d=<redacted>".to_string();
-    }
-    cmd.to_string()
-}
-
 pub fn redact_secrets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for (i, line) in text.lines().enumerate() {
@@ -558,12 +546,6 @@ mod tests {
 
     #[test]
     fn redaction_matches_the_web_client() {
-        assert_eq!(redact_command("@w=ssid,secret"), "@w=<redacted>");
-        assert_eq!(
-            redact_command("@d=http://user:pass@host/d"),
-            "@d=<redacted>"
-        );
-        assert_eq!(redact_command("@u?"), "@u?");
         let token = "0123456789abcdef0123456789abcdef";
         let redacted = redact_secrets(&format!("OK ws=up token={token}"));
         assert_eq!(redacted, "OK ws=up token=<redacted>");

@@ -12,7 +12,7 @@ use crate::event::{ConnectionState, CoreEvent, NoticeLevel, RequestId};
 use crate::protocol::mgmt::{
     MGMT_CAP_ASYNC_EVENTS, MGMT_CAP_WEBDAV, MGMT_CAP_WIFI, MGMT_RESPONSE_TIMEOUT_SECS,
 };
-use crate::protocol::validate::python_repr_bytes;
+use crate::protocol::validate::{python_repr_bytes, to_hex};
 use crate::protocol::{MgmtCore, MgmtError, MgmtReply, TerminalGeometrySync, UartCodec};
 use crate::transport::{Transport, TransportChannel, TransportEvent, TransportKind};
 
@@ -262,10 +262,6 @@ pub(crate) fn parse_baud_line(line: &str) -> Option<u64> {
         }
     }
     None
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------

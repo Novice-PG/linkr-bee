@@ -34,6 +34,9 @@ pub use report::{build_report, ReportDownload, ReportInput, ReportRecord};
 
 use crate::event::CoreEvent;
 use crate::journal::SerialJournal;
+// One clock for the whole crate: the journal owns the wall time and every
+// other module (`agent`, its memory stores, the TUI) reads the same one.
+pub(crate) use crate::journal::now_ms;
 use crate::session::{CoreBus, SessionHandle};
 use crate::transport::TransportKind;
 use crate::watch::{Finding, SerialWatch, WatchOptions};
@@ -435,13 +438,6 @@ fn spawn_feed(bus: CoreBus, journal: Arc<StdMutex<SerialJournal>>) {
             }
         }
     });
-}
-
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// How often the unattended window is checked. The window itself is a

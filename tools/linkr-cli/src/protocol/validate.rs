@@ -25,6 +25,12 @@ const UART_FLOW_CONTROL: [(&str, &str); 5] = [
     ("hw", "rtscts"),
 ];
 
+/// Lowercase hex of a byte slice — device ids and any other fixed-width
+/// id that is shown or compared as text.
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Pick the quote CPython's `repr()` uses: `'` unless the text contains a
 /// single quote and no double quote, in which case `"` (then the inner quote
 /// is backslash-escaped — the `b'...'`/`\'` shorthand of PYTHON_CLI_SPEC

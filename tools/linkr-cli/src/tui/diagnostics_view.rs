@@ -268,30 +268,12 @@ fn row_line(label: &str, value: &str, width: u16) -> Line<'static> {
     let label = format!("{label:<label_width$}");
     // 2 columns for the `│ ` separator.
     let value_width = (width as usize).saturating_sub(label_width + 2);
-    let value = clip(value, value_width);
+    let value = super::dialogs::clip_columns(value, value_width);
     Line::from(vec![
         Span::styled(label, Style::default().fg(Color::Cyan)),
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
-}
-
-fn clip(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-        if used + w > width.saturating_sub(1) {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
 }
 
 /// Header + the six-row grid + status, mirroring WEB_UX_SPEC section 5.2.
