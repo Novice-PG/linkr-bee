@@ -39,10 +39,17 @@ strings! {
     ASST_SPEAKER_YOU => "you › ", "你 › ";
     ASST_SPEAKER_AI => "ai › ", "AI › ";
     ASST_COMPOSER_HINT => "Describe the problem", "描述问题";
-    ASST_KEYS_LINE_1 => "Enter newline · Ctrl/Alt+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S settings",
-        "Enter 换行 · Ctrl/Alt+Enter 发送 · Ctrl+Shift+M 模式 · Ctrl+Shift+S 设置";
+    ASST_KEYS_LINE_1 => "Enter newline · Alt+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S settings",
+        "Enter 换行 · Alt+Enter 发送 · Ctrl+Shift+M 模式 · Ctrl+Shift+S 设置";
     ASST_KEYS_LINE_2 => "Ctrl+Shift+N new chat · Esc exit to the terminal · Ctrl+Q quit the TUI",
         "Ctrl+Shift+N 新建对话 · Esc 返回终端 · Ctrl+Q 退出 TUI";
+    // Said once, at the moment a chord the user expected to send lands as a
+    // line break instead. `Ctrl+Enter` is byte-identical to `Enter` on any
+    // terminal without the kitty keyboard protocol (GNOME Terminal / VTE —
+    // vte#2601), so no handler here could ever see it; naming the chord that
+    // every terminal *can* transmit is the honest answer.
+    ASST_SEND_HINT => "Alt+Enter sends · Ctrl+Enter is plain Enter without the kitty protocol",
+        "Alt+Enter 发送 · 没有 kitty 键盘协议时 Ctrl+Enter 就是普通 Enter";
     ASST_NEW_CHAT_STATUS => "New chat.", "已新建对话。";
     ASST_MODE_CHANGED => "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
         "档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。";
@@ -594,6 +601,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if app.assistant.composer.as_str().chars().count() < COMPOSER_MAX {
                 app.assistant.composer.insert_char('\n');
             }
+            // With text waiting, a line break is also what `Ctrl+Enter` looks
+            // like on a terminal that cannot encode it (GNOME Terminal / VTE:
+            // the kitty keyboard protocol, vte#2601) — and no handler can tell
+            // that apart from a deliberate Enter. Say once, at the moment it
+            // happens, which chord does reach us.
+            if !app.send_hint_shown && !app.assistant.composer.as_str().trim().is_empty() {
+                app.send_hint_shown = true;
+                let lang = app.lang();
+                app.toast(NoticeLevel::Warn, t(ASST_SEND_HINT, lang).to_string());
+            }
         }
         KeyCode::Char(c) if !ctrl => {
             let len = app.assistant.composer.as_str().chars().count();
@@ -737,7 +754,8 @@ fn ensure_agent(app: &mut App) -> bool {
     }
 }
 
-/// Send the composed question (Ctrl+Enter).
+/// Send the composed question — `Alt+Enter`, the chord every terminal can
+/// transmit, and `Ctrl+Enter` too where the terminal reports the real one.
 pub fn submit(app: &mut App) {
     let question = app.assistant.composer.as_str().trim().to_string();
     if question.is_empty() || app.assistant.busy {
@@ -1032,6 +1050,53 @@ mod tests {
                 "{modifiers:?} + Enter must submit, not insert a newline"
             );
         }
+    }
+
+    /// A line break while text waits is also what `Ctrl+Enter` looks like on a
+    /// terminal that cannot encode it (VTE sends the same byte as `Enter`, and
+    /// vte#2601 has not shipped the kitty keyboard protocol), so the first one
+    /// names the chord that does reach us — once per session, and never for an
+    /// empty box where there was nothing to send.
+    #[test]
+    fn a_newline_with_text_says_what_actually_sends() {
+        fn said(app: &App, lang: Lang) -> usize {
+            app.notices
+                .log
+                .iter()
+                .filter(|(_, text)| text.as_str() == t(ASST_SEND_HINT, lang))
+                .count()
+        }
+
+        let mut app = crate::tui::test_app();
+        let lang = app.lang();
+        app.assistant.composer.set("hi".to_string());
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.assistant.composer.as_str(),
+            "hi\n",
+            "Enter is still a newline"
+        );
+        assert_eq!(said(&app, lang), 1, "the chord is named the first time");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            said(&app, lang),
+            1,
+            "once per session, not once per newline"
+        );
+
+        let mut empty = crate::tui::test_app();
+        handle_key(
+            &mut empty,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            said(&empty, lang),
+            0,
+            "an empty composer had nothing to send"
+        );
+        assert!(!empty.send_hint_shown);
     }
 
     #[test]

@@ -288,7 +288,7 @@ This is the whole `F1` help, in the order it is shown:
 | `Ctrl+Shift+M` | assistant: pick the execution mode |
 | `Ctrl+Shift+S` | assistant: AI configuration |
 | `Ctrl+Shift+N` | assistant: start a new chat |
-| `Ctrl+Enter` or `Alt+Enter` | assistant: send the message |
+| `Alt+Enter` | assistant: send the message (`Ctrl+Enter` too, where the terminal can tell them apart) |
 | `↑` `↓` in sidebar | move the selection, `Enter` activates it |
 | Quick send | sidebar → `help` / `version` / `uname` / `df` / `reboot` |
 | `Ctrl+L` | clear the terminal pane |
@@ -456,16 +456,19 @@ The whole screen is BLE-only — a LAN transport has no management channel.
 | Key | Action |
 | --- | --- |
 | `Ctrl+Shift+K` | focus the composer |
-| `Ctrl+Enter` / `Alt+Enter` | send |
+| `Alt+Enter` | send |
 | `Ctrl+Shift+M` | pick the execution mode |
 | `Ctrl+Shift+S` | AI configuration |
 | `Ctrl+Shift+N` | new chat |
 | `Esc` | back to the terminal |
 
-`Ctrl+Enter` is only a distinct key in terminals that speak the kitty keyboard
-protocol — the TUI enables it on entry when the terminal supports it. Where it
-cannot be encoded (GNOME Terminal, for instance), use `Alt+Enter`: both chords
-send.
+`Alt+Enter` sends everywhere: it is one escape byte plus the Enter byte, which
+every terminal forwards. `Ctrl+Enter` is only a distinct key in terminals that
+speak the kitty keyboard protocol — the TUI enables it on entry when the
+terminal supports it, and there both chords send. Where the terminal cannot
+encode it (GNOME Terminal / VTE), `Ctrl+Enter` arrives as a plain `Enter` and
+inserts a line instead; the first time that happens with text in the box, the
+TUI says so once and names `Alt+Enter`.
 
 There is no dedicated stop key: `Ctrl+P` → **Stop the running turn**
 (`agent.stop`) cancels the current run, and so does switching the execution
