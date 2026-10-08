@@ -338,25 +338,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
 // --- rendering ---------------------------------------------------------------
 
-/// Cut to `width` display columns, marking the cut with `…`.
-fn clip(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-        if used + w > width.saturating_sub(1) {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
-}
-
 /// `▸ label ┆ value`, with the label padded in display columns (Chinese is
 /// two columns per glyph, and a shifted value column reads as a wrong value).
 fn row(marker: bool, label: &str, value: String, width: u16, style: Style) -> Line<'static> {
@@ -373,7 +354,7 @@ fn row(marker: bool, label: &str, value: String, width: u16, style: Style) -> Li
             Style::default().fg(Color::Cyan),
         ),
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(clip(&value, value_width), style),
+        Span::styled(super::dialogs::clip_columns(&value, value_width), style),
     ])
 }
 
@@ -489,7 +470,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if !app.connected() {
         lines.push(Line::from(Span::styled(
-            clip(t(XFER_NO_LINK, lang), width as usize),
+            super::dialogs::clip_columns(t(XFER_NO_LINK, lang), width as usize),
             Style::default().fg(Color::LightYellow),
         )));
         lines.push(Line::from(""));
@@ -615,7 +596,10 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(hint(&clip(t(XFER_KEYS, lang), width as usize)));
+    lines.push(hint(&super::dialogs::clip_columns(
+        t(XFER_KEYS, lang),
+        width as usize,
+    )));
     lines
 }
 

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 use super::context::Message;
+use crate::journal::now_ms;
 
 pub const TASK_LIMIT: usize = 20;
 pub const NOTE_LIMIT: usize = 12;
@@ -102,13 +103,6 @@ pub struct Task {
     pub plan: Vec<TaskStep>,
     #[serde(default)]
     pub executions: Vec<TaskExecution>,
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 pub struct TaskStore {

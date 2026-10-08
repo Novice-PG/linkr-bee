@@ -15,7 +15,7 @@ use uuid::{uuid, Uuid};
 
 use super::{DiscoveredDevice, EventHub, ProtocolInfo, ReliableState, Transport};
 use crate::protocol::mgmt::{MGMT_API_MAJOR, MGMT_CAP_DEVICE_ID, MGMT_CAP_RELIABLE_UART};
-use crate::protocol::validate::{match_device, normalize_name_prefix};
+use crate::protocol::validate::{match_device, normalize_name_prefix, to_hex};
 
 /// Primary advertisement UUID of the Management Service — scans filter on it,
 /// never on the name (docs/LINKR_BLE_API.zh-CN.md section 2).
@@ -371,10 +371,6 @@ fn find_characteristic(peripheral: &Peripheral, uuid: Uuid) -> Option<Characteri
 
 fn missing(uuid: Uuid) -> anyhow::Error {
     anyhow::anyhow!("device is missing GATT characteristic {uuid}")
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// `configure_ble_write_size` from PYTHON_CLI_SPEC section 5.2. btleplug does
