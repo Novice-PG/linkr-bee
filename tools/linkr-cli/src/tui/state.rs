@@ -384,6 +384,12 @@ pub struct App {
     /// On a machine without `wl-copy` / `xclip` every selection copy would
     /// repeat it otherwise.
     pub copy_hint_shown: bool,
+    /// The "Alt+Enter is what sends" hint has already been said this session.
+    /// `Ctrl+Enter` and `Enter` are the same byte on terminals without the
+    /// kitty keyboard protocol (GNOME Terminal / VTE: vte#2601), so the first
+    /// Enter that lands as a line break while there is text to send is also
+    /// the first time the user finds out their chord did nothing.
+    pub send_hint_shown: bool,
 
     // Serial watch (findings shown in the sidebar).
     pub watch: SerialWatch,

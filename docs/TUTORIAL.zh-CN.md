@@ -269,7 +269,7 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 | `Ctrl+Shift+M` | 助手：选择执行模式 |
 | `Ctrl+Shift+S` | 助手：AI 配置 |
 | `Ctrl+Shift+N` | 助手：新建对话 |
-| `Ctrl+Enter` 或 `Alt+Enter` | 助手：发送消息 |
+| `Alt+Enter` | 助手：发送消息（终端能区分时 `Ctrl+Enter` 也行） |
 | 侧栏中的 `↑` `↓` | 移动选中项，`Enter` 确认 |
 | 快捷发送 | 侧栏 → `help` / `version` / `uname` / `df` / `reboot` |
 | `Ctrl+L` | 清屏终端窗格 |
@@ -418,14 +418,17 @@ wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整�
 | 按键 | 动作 |
 | --- | --- |
 | `Ctrl+Shift+K` | 聚焦输入框 |
-| `Ctrl+Enter` / `Alt+Enter` | 发送 |
+| `Alt+Enter` | 发送 |
 | `Ctrl+Shift+M` | 选择执行模式 |
 | `Ctrl+Shift+S` | AI 配置 |
 | `Ctrl+Shift+N` | 新建对话 |
 | `Esc` | 返回终端 |
 
-`Ctrl+Enter` 只有在支持 kitty 键盘协议的终端里才是独立按键 —— 进入 TUI 时会自动启用该协议；
-终端无法编码它时（例如 GNOME Terminal），用 `Alt+Enter`：两种按键都是发送。
+`Alt+Enter` 在任何终端都能发送：它只是一个转义字节加 Enter 字节，任何终端都会转发。
+`Ctrl+Enter` 只有在支持 kitty 键盘协议的终端里才是独立按键 —— 进入 TUI 时会自动启用该协议，
+在那样的终端里两种按键都是发送。终端无法编码它时（例如 GNOME Terminal / VTE），
+`Ctrl+Enter` 会以普通 `Enter` 到达、插入一行；输入框里有内容时第一次这样，
+TUI 会提示一次并点名 `Alt+Enter`。
 
 没有专门的停止按键：`Ctrl+P` → **停止当前回合**（`agent.stop`）会取消本次运行，
 切换执行模式或退出也会。停止无法撤回已经发出的输入 ——
