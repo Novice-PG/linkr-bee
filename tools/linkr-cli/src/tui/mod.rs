@@ -1018,6 +1018,15 @@ fn paste(app: &mut App, sticky: &mut StickyMods, text: &str) {
         }
         return;
     }
+    // A transfer owns the link while it runs — the mirror of the inbound gate
+    // in [`on_core_event`]. Keystrokes *into a field* are already handled
+    // above and never reach the link, but the pane's own path types straight
+    // into a stream the peer is reading as ZMODEM frames; one character there
+    // is protocol data, not text. Echo is dropped with the send so the pane
+    // cannot show a paste that never went out.
+    if app.transfer.engine.capturing() {
+        return;
+    }
     let plain = translate_enter(text.as_bytes(), app.settings.enter_mode);
     if app.settings.local_echo {
         app.terminal.feed(&plain);
@@ -1183,7 +1192,10 @@ fn field_has_focus(app: &App) -> bool {
     }
     match app.focus {
         Focus::Sidebar | Focus::Assistant => true,
-        Focus::Center => app.view == View::Network,
+        // The transfer form's two path rows are single-line fields with a
+        // caret in them — a paste that is refused there has nowhere else to
+        // go, and a 60-character path is exactly what a paste is for.
+        Focus::Center => matches!(app.view, View::Network | View::Transfer),
     }
 }
 
@@ -1493,7 +1505,13 @@ fn route_key(
 
     // Terminal pane: scrollback first, then byte encoding.
     if app.view == View::Terminal {
+        // Scrolling stays live — reading the pane costs the link nothing —
+        // but encoding stops here for the same reason the paste path does:
+        // the bytes a transfer is moving are the link's, not the console's.
         if handle_scroll_key(app, key) {
+            return;
+        }
+        if app.transfer.engine.capturing() {
             return;
         }
         if let Some(bytes) = encode_key(
