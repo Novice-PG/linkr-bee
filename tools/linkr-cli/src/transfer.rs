@@ -1827,6 +1827,33 @@ mod tests {
         }
     }
 
+    /// A payload the test writes itself, under a name no other run will take.
+    ///
+    /// `local` only has to *exist* — `sz` opens it — but it has to exist on
+    /// every machine the suite runs on, and `/etc/hostname` exists on Linux
+    /// and nowhere else. That was seven failures on macOS, each one the test
+    /// asking the machine for a file rather than making one.
+    ///
+    /// It sits in its own directory on purpose. `rz` writes under the *sender's*
+    /// file name inside the target's directory, so a fixture left next to the
+    /// target would put the file being sent and the file `rz` is about to
+    /// write at the same path — an upload set to overwrite its own source,
+    /// which no fixture should be able to arrange.
+    fn fixture_file() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+        let dir = std::env::temp_dir().join(format!("linkr-zm-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory for this run's fixtures");
+        let path = dir.join(format!(
+            "payload-{}.bin",
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"linkr zmodem fixture payload").expect("the fixture itself");
+        path
+    }
+
     fn ready(transfer: &mut Transfer, host_zmodem: bool) {
         transfer.host = HostTools {
             sz: host_zmodem,
@@ -1842,9 +1869,10 @@ mod tests {
     /// The probe is faked everywhere else — a test picks a channel without
     /// asking the machine anything. Only the child is real in the handful of
     /// tests that need one, and a child that cannot be spawned says nothing
-    /// about what those tests check. CI installs no `lrzsz`, and a Windows
-    /// runner has no such package to install at all, so they stand down there
-    /// rather than fail for the machine's sake.
+    /// about what those tests check. CI installs `lrzsz` so these run there,
+    /// but a Windows runner has no such package to install at all, and a
+    /// laptop need not have one either: they stand down rather than fail for
+    /// the machine's sake.
     fn lrzsz_installed() -> bool {
         std::process::Command::new("sz")
             .arg("--version")
@@ -2127,7 +2155,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "relative/path".to_string(),
             ..Transfer::default()
         };
@@ -2339,7 +2367,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-stall.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2387,7 +2415,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-exists.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2409,7 +2437,7 @@ mod tests {
         // it quoted the path when it printed the marker, so the message has
         // to name the file the user actually has.
         let mut spaced = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/a b c.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2437,7 +2465,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-abort.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2579,7 +2607,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-paste.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2624,7 +2652,7 @@ mod tests {
             return;
         }
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-xon.bin".to_string(),
             probe: Some(probe_all("/tmp")),
             ..Transfer::default()
@@ -2660,7 +2688,7 @@ mod tests {
         );
 
         let mut transfer = Transfer {
-            local: PathBuf::from("/etc/hostname"),
+            local: fixture_file(),
             target: "/tmp/linkr-zm-rc.bin".to_string(),
             ..Transfer::default()
         };
