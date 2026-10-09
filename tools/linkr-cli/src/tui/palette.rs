@@ -38,6 +38,7 @@ strings! {
     PAL_T_VIEW_DIAGNOSTICS => "Open diagnostics view", "打开诊断视图";
     PAL_T_VIEW_NETWORK => "Open network view", "打开网络视图";
     PAL_T_VIEW_ASSISTANT => "Open assistant view", "打开助手视图";
+    PAL_T_VIEW_TRANSFER => "Open file transfer view", "打开文件传输视图";
     // Focus
     PAL_T_FOCUS_SIDEBAR => "Focus the sidebar", "聚焦侧栏";
     PAL_T_FOCUS_TERMINAL => "Focus the terminal", "聚焦终端";
@@ -139,6 +140,15 @@ fn view_network(app: &mut App) {
 
 fn view_assistant(app: &mut App) {
     app.set_view(View::Assistant);
+}
+
+/// `view.transfer` — the fifth view, and the one the other four had left out
+/// of the View category. The `term.transfer_*` actions below all *do*
+/// something to a transfer (pick a direction, abort one); opening the form
+/// with its direction as it was left is what `F6` does, and the palette
+/// promised the same five surfaces the function keys offer.
+fn view_transfer(app: &mut App) {
+    super::transfer_view::open(app, None);
 }
 
 fn focus_center(app: &mut App) {
@@ -524,6 +534,13 @@ pub const ACTIONS: &[Action] = &[
         category: PAL_CAT_VIEW,
         shortcut: "F5",
         run: view_assistant,
+    },
+    Action {
+        id: "view.transfer",
+        title: PAL_T_VIEW_TRANSFER,
+        category: PAL_CAT_VIEW,
+        shortcut: "F6",
+        run: view_transfer,
     },
     // Focus
     Action {
@@ -1140,6 +1157,7 @@ mod tests {
         "view.diagnostics",
         "view.network",
         "view.assistant",
+        "view.transfer",
         "focus.sidebar",
         "focus.terminal",
         "focus.assistant",

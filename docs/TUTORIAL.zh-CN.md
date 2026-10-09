@@ -325,11 +325,11 @@ wl-clipboard`，X11 上 `sudo apt install xclip`。双击选中指针下的整�
 ## 7. 命令面板
 
 按 `Ctrl+P` 再输入。搜索同时匹配**中英文**动作标题以及动作 id，所以
-`view`、`视图`、`wifi`、`term.copy` 都能命中。完整注册表（37 个动作，按序）：
+`view`、`视图`、`wifi`、`term.copy` 都能命中。完整注册表（38 个动作，按序）：
 
 | 分类 | 动作 |
 | --- | --- |
-| View | `view.terminal` · `view.diagnostics` · `view.network` · `view.assistant` |
+| View | `view.terminal` · `view.diagnostics` · `view.network` · `view.assistant` · `view.transfer` |
 | Focus | `focus.sidebar` · `focus.terminal` · `focus.assistant` |
 | Connection | `connect` · `disconnect` · `transport.toggle` · `uart.settings` |
 | Terminal | `term.font_bigger` · `term.font_smaller` · `term.font_reset` · `term.autoscroll` · `term.echo` · `term.enter_mode` · `term.clear` · `term.save_log` · `term.copy` |
