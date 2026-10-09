@@ -354,11 +354,11 @@ focus; hold `Shift` when you mean the terminal's scrollback specifically.
 
 Press `Ctrl+P` and type. The search matches action titles in **both**
 languages, plus the action id, so `view`, `视图`, `wifi` and `term.copy` all
-land. The full registry (37 actions, in order):
+land. The full registry (38 actions, in order):
 
 | Category | Actions |
 | --- | --- |
-| View | `view.terminal` · `view.diagnostics` · `view.network` · `view.assistant` |
+| View | `view.terminal` · `view.diagnostics` · `view.network` · `view.assistant` · `view.transfer` |
 | Focus | `focus.sidebar` · `focus.terminal` · `focus.assistant` |
 | Connection | `connect` · `disconnect` · `transport.toggle` · `uart.settings` |
 | Terminal | `term.font_bigger` · `term.font_smaller` · `term.font_reset` · `term.autoscroll` · `term.echo` · `term.enter_mode` · `term.clear` · `term.save_log` · `term.copy` |
