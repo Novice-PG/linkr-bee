@@ -439,6 +439,93 @@ fn is_sel(items: &[NetEntry], selection: usize, entry: NetEntry) -> bool {
     items.get(selection) == Some(&entry)
 }
 
+/// Screen line the selected row's `▸` is drawn on.
+///
+/// The frame is the only thing that knows where a row lands: the lines between
+/// rows come and go with the two status blocks, so both directions below ask
+/// the renderer rather than trying to re-derive the layout — the same lookup
+/// `the_cursor_walks_the_rows_top_to_bottom` uses.
+fn selection_line(app: &App) -> Option<usize> {
+    render_lines(app)
+        .iter()
+        .position(|line| line.spans.first().map(|span| span.content.as_ref()) == Some("▸ "))
+}
+
+/// Bring the window to the selected row.
+///
+/// The network view is the one center pane that has both a scroll and a
+/// cursor, and neither used to account for the other: ↑/↓/Tab/Home/End moved
+/// the cursor through `entries()` while `center_scroll` only ever changed on
+/// PageUp/PageDown, so a long scan list walked the `▸` off the bottom of the
+/// pane and the next keypress moved a row nobody could see.
+pub fn follow_selection(app: &mut App) {
+    if let Some(line) = selection_line(app) {
+        follow_line(app, line);
+    }
+}
+
+/// Whether the selected row is on screen right now.
+pub fn selection_visible(app: &App) -> bool {
+    let Some(line) = selection_line(app) else {
+        return false;
+    };
+    let top = app.center_scroll as usize;
+    line >= top && line < top + app.center_height.max(1) as usize
+}
+
+/// Bring the selected row to the window that just moved.
+///
+/// The entries are drawn in [`entries`] order, so the row nearest the top of
+/// the window names the selection. When the window has gone past every row —
+/// only the feedback and the key hint live down there — there is nothing to
+/// follow, and the window goes back to the cursor instead of leaving it
+/// stranded off screen.
+pub fn follow_scroll(app: &mut App) {
+    if selection_visible(app) {
+        return;
+    }
+    let rows = app.center_height.max(1) as usize;
+    let top = app.center_scroll as usize;
+    let len = entries(app).len();
+    if len == 0 {
+        return;
+    }
+    let saved = app.network.selection;
+    let mut best: Option<usize> = None;
+    let mut best_line = usize::MAX;
+    for candidate in 0..len {
+        app.network.selection = candidate;
+        if let Some(line) = selection_line(app) {
+            if line >= top && line < top + rows && line < best_line {
+                best_line = line;
+                best = Some(candidate);
+            }
+        }
+    }
+    match best {
+        Some(found) => app.network.selection = found,
+        None => {
+            app.network.selection = saved;
+            follow_selection(app);
+        }
+    }
+}
+
+/// `center_scroll` so `line` is one of the `rows` visible ones, moving the
+/// window by as little as it takes.
+fn follow_line(app: &mut App, line: usize) {
+    let rows = app.center_height.max(1) as usize;
+    let top = app.center_scroll as usize;
+    let target = if line < top {
+        line
+    } else if line >= top + rows {
+        line + 1 - rows
+    } else {
+        return;
+    };
+    app.center_scroll = u16::try_from(target).unwrap_or(u16::MAX);
+}
+
 // --- validation --------------------------------------------------------------
 
 pub fn validate_ssid(ssid: &str, lang: Lang) -> Result<(), String> {
@@ -1110,6 +1197,78 @@ mod tests {
         assert_eq!(
             validate_webdav_url("ftp://host", Lang::Zh).unwrap_err(),
             "WebDAV URL 必须以 http:// 或 https:// 开头。"
+        );
+    }
+
+    /// A scan list taller than the pane is the case the two mechanisms exist
+    /// for: `center_scroll` and `network.selection` were written by different
+    /// keys and neither read the other, so the `▸` could sit entirely outside
+    /// the window the frame was showing.
+    fn long_list(height: u16) -> App {
+        let mut app = crate::tui::test_app();
+        app.network.scan = (0..12).map(|i| scan(&format!("Net{i:02}"))).collect();
+        app.center_height = height;
+        app.center_scroll = 0;
+        assert!(
+            render_lines(&app).len() > height as usize * 2,
+            "list outgrows the pane"
+        );
+        app
+    }
+
+    /// The cursor walked off the bottom: the window comes to it.
+    #[test]
+    fn a_cursor_that_would_leave_the_pane_drags_the_window_with_it() {
+        let mut app = long_list(6);
+        app.network.selection = entries(&app).len() - 1;
+        assert!(!selection_visible(&app), "starts off screen");
+
+        follow_selection(&mut app);
+
+        assert!(
+            selection_visible(&app),
+            "scroll {} shows the row the cursor is on",
+            app.center_scroll
+        );
+    }
+
+    /// PageUp/PageDown only ever wrote `center_scroll`, so the row the cursor
+    /// named stayed where the window had left it.
+    #[test]
+    fn a_window_scrolled_away_takes_the_cursor_with_it() {
+        let mut app = long_list(6);
+        app.network.selection = 0;
+        app.center_scroll = 6;
+        assert!(!selection_visible(&app), "the cursor is above the window");
+
+        follow_scroll(&mut app);
+
+        assert!(
+            selection_visible(&app),
+            "selection {} scroll {}",
+            app.network.selection,
+            app.center_scroll
+        );
+    }
+
+    /// Below the last row there is nothing to follow — just the feedback line
+    /// and the key hint — so the window goes back to the cursor rather than
+    /// leaving it stranded.
+    #[test]
+    fn a_window_past_every_row_comes_back_to_the_cursor() {
+        let mut app = long_list(2);
+        let lines = render_lines(&app).len();
+        app.center_scroll = (lines - 2) as u16;
+        app.network.selection = 0;
+        assert!(!selection_visible(&app), "the window shows the tail only");
+
+        follow_scroll(&mut app);
+
+        assert_eq!(app.network.selection, 0, "nothing to follow, nothing moves");
+        assert!(
+            selection_visible(&app),
+            "scroll {} shows the row the cursor is on",
+            app.center_scroll
         );
     }
 

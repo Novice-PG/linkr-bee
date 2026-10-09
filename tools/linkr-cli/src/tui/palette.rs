@@ -53,6 +53,8 @@ strings! {
     PAL_T_FONT_RESET => "Reset font size", "重置字号";
     PAL_T_AUTOSCROLL => "Toggle autoscroll", "切换自动滚动";
     PAL_T_ECHO => "Toggle local echo", "切换本地回显";
+    PAL_T_DEBUG_IO => "Toggle debug I/O", "切换调试 I/O";
+    PAL_T_CHUNK => "BLE write chunk size", "BLE 写入分块大小";
     PAL_T_ENTER_MODE => "Cycle Enter mode", "循环切换回车模式";
     PAL_T_CLEAR => "Clear the terminal", "清屏";
     PAL_T_SAVE_LOG => "Save log to file", "保存日志到文件";
@@ -77,12 +79,14 @@ strings! {
     PAL_T_EXPORT => "Export report", "导出报告";
     // App
     PAL_T_HELP => "Keyboard help", "键盘帮助";
+    PAL_T_CHEAT => "Cheat sheet", "速查参考";
     PAL_T_NOTICES => "Notice log", "通知记录";
     PAL_T_LANGUAGE => "Switch language", "切换界面语言";
     PAL_MSG_LANGUAGE => "Interface language: {}", "界面语言：{}";
     PAL_T_QUIT => "Quit the TUI", "退出 TUI";
     // Toasts and notices raised by the actions below
     PAL_MSG_ENTER_MODE => "Enter mode: {}", "回车模式：{}";
+    PAL_MSG_DEBUG_IO => "Debug I/O: {}", "调试 I/O：{}";
     PAL_MSG_SAVED_LOG => "Saved {} bytes to {}", "已保存 {} 字节到 {}";
     PAL_MSG_SAVE_FAILED => "Save failed: {}", "保存失败：{}";
     // The two outcomes of a copy are told apart by who confirmed it: a
@@ -195,6 +199,23 @@ fn toggle_echo(app: &mut App) {
     persist(app);
 }
 
+/// `#debugInput` of `web/index.html`: the frames crossing the link are printed
+/// into the terminal so an I/O problem can be watched as it happens. It takes
+/// effect on the connect that reads it, which is when it is wanted — you turn
+/// it on and then dial, and the handshake comes out.
+fn toggle_debug_io(app: &mut App) {
+    app.settings.debug_io = !app.settings.debug_io;
+    persist(app);
+    let lang = app.lang();
+    app.toast(
+        NoticeLevel::Info,
+        tr!(
+            t(PAL_MSG_DEBUG_IO, lang),
+            if app.settings.debug_io { "on" } else { "off" }
+        ),
+    );
+}
+
 fn cycle_enter(app: &mut App) {
     app.settings.enter_mode = app.settings.enter_mode.next();
     persist(app);
@@ -274,11 +295,18 @@ fn connect(app: &mut App) {
 }
 
 fn disconnect(app: &mut App) {
+    // Same order as the confirm dialog: stop a run in flight first, while the
+    // break characters can still reach the target.
+    super::transfer_view::abort_if_busy(app);
     app.session.disconnect();
 }
 
 fn open_uart(app: &mut App) {
     super::dialogs::open_uart(app);
+}
+
+fn open_chunk(app: &mut App) {
+    super::dialogs::open_chunk(app);
 }
 
 fn refresh_diagnostics(app: &mut App) {
@@ -420,6 +448,13 @@ fn export_report(app: &mut App) {
 
 fn show_help(app: &mut App) {
     app.dialog = Some(super::dialogs::Dialog::Help(0));
+}
+
+/// The web's Cheat Sheet card: the four groups of `#cheatList`, reachable the
+/// same way the help is, because "a screen you can copy from" is a reference
+/// and not a view you live in.
+fn show_cheat(app: &mut App) {
+    super::dialogs::open_cheat(app);
 }
 
 fn show_notices(app: &mut App) {
@@ -578,6 +613,20 @@ pub const ACTIONS: &[Action] = &[
         run: toggle_echo,
     },
     Action {
+        id: "term.debug_io",
+        title: PAL_T_DEBUG_IO,
+        category: PAL_CAT_TERMINAL,
+        shortcut: "",
+        run: toggle_debug_io,
+    },
+    Action {
+        id: "term.chunk_size",
+        title: PAL_T_CHUNK,
+        category: PAL_CAT_TERMINAL,
+        shortcut: "",
+        run: open_chunk,
+    },
+    Action {
         id: "term.enter_mode",
         title: PAL_T_ENTER_MODE,
         category: PAL_CAT_TERMINAL,
@@ -706,6 +755,13 @@ pub const ACTIONS: &[Action] = &[
         category: PAL_CAT_APP,
         shortcut: "F1",
         run: show_help,
+    },
+    Action {
+        id: "app.cheat_sheet",
+        title: PAL_T_CHEAT,
+        category: PAL_CAT_APP,
+        shortcut: "",
+        run: show_cheat,
     },
     Action {
         id: "app.notices",
@@ -961,6 +1017,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 mod tests {
     use super::*;
 
+    /// The palette's `disconnect` is the same exit as the sidebar's ask, so it
+    /// carries the same stop: hanging up on a live `rz`/`sz` leaves an orphan
+    /// on the target with the console, and nothing after this can free it.
+    #[test]
+    fn the_palette_disconnect_stops_a_transfer_in_flight() {
+        let mut app = crate::tui::test_app();
+        app.transfer.engine.phase = crate::transfer::Phase::Run {
+            at: std::time::Instant::now(),
+        };
+        assert!(app.transfer.engine.busy());
+
+        disconnect(&mut app);
+
+        assert!(!app.transfer.engine.busy());
+        assert_eq!(app.transfer.engine.detail(), "Aborted.");
+    }
+
     /// `reset()` of `web/device_executor.js`: a new conversation ends the
     /// unattended execution window. Manual and Auto stay where they are.
     #[test]
@@ -1079,6 +1152,11 @@ mod tests {
         "term.font_reset",
         "term.autoscroll",
         "term.echo",
+        // `linkr-debug` is one of the keys WEB_UX_SPEC §9.1 makes a Rust TUI
+        // mirror, so it needs an action, and §5 puts every action here.
+        "term.debug_io",
+        // Same §9.1 table: `linkr-chunk`, the number behind `--ble-write-size`.
+        "term.chunk_size",
         "term.enter_mode",
         "term.clear",
         "term.save_log",
@@ -1097,6 +1175,7 @@ mod tests {
         "agent.stop",
         "agent.export",
         "app.help",
+        "app.cheat_sheet",
         "app.notices",
         "app.language",
         "app.quit",
@@ -1106,6 +1185,72 @@ mod tests {
     fn registry_is_complete_and_ordered() {
         let ids: Vec<&str> = ACTIONS.iter().map(|action| action.id).collect();
         assert_eq!(ids, CANONICAL, "palette registry drifted from the contract");
+    }
+
+    /// `linkr-debug` (WEB_UX_SPEC §9.1) is reachable the way its neighbours
+    /// are — right beside `term.echo` — and it flips the very field
+    /// `connect::dial_options` reads, which is what makes it a switch instead
+    /// of a settings-file edit.
+    #[test]
+    fn the_debug_io_action_flips_the_switch_a_dial_reads() {
+        let index = ACTIONS
+            .iter()
+            .position(|action| action.id == "term.debug_io")
+            .expect("every action lives in the palette");
+        let mut app = crate::tui::test_app();
+        assert!(
+            !app.settings.debug_io,
+            "off the way the web checkbox starts"
+        );
+
+        (ACTIONS[index].run)(&mut app);
+        assert!(app.settings.debug_io, "flipped on");
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|toast| toast.text.ends_with("on")),
+            "the state is reported: {:?}",
+            app.notices.toasts.last().map(|toast| toast.text.as_str())
+        );
+
+        (ACTIONS[index].run)(&mut app);
+        assert!(!app.settings.debug_io, "and back off again");
+    }
+
+    /// `linkr-chunk` holds a number you type rather than a state you cycle,
+    /// so its action opens the box — which is where `#chunkInput` sits in the
+    /// web's Terminal Settings, one row from the Debug I/O check.
+    #[test]
+    fn the_chunk_size_action_opens_the_number_box() {
+        let index = ACTIONS
+            .iter()
+            .position(|action| action.id == "term.chunk_size")
+            .expect("every action lives in the palette");
+        let mut app = crate::tui::test_app();
+
+        (ACTIONS[index].run)(&mut app);
+
+        let dialog = app.dialog.as_ref().expect("the box opens");
+        assert_eq!(dialog.title(), "BLE write chunk");
+        assert_eq!(dialog.title_lang(Lang::Zh), "BLE 写入分块");
+    }
+
+    /// The cheat sheet is a reference screen, so it is reachable the way the
+    /// help is: one palette action, no matter which view is in front.
+    #[test]
+    fn the_cheat_sheet_action_opens_the_card() {
+        let index = ACTIONS
+            .iter()
+            .position(|action| action.id == "app.cheat_sheet")
+            .expect("every action lives in the palette");
+        let mut app = crate::tui::test_app();
+
+        (ACTIONS[index].run)(&mut app);
+
+        let dialog = app.dialog.as_ref().expect("the card opens");
+        assert_eq!(dialog.title(), "Cheat Sheet");
+        assert_eq!(dialog.title_lang(Lang::Zh), "速查参考");
     }
 
     /// The window must stay full while the selection moves: the old

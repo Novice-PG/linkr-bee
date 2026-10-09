@@ -17,6 +17,10 @@ pub const DEFAULT_FONT_SIZE: u8 = 13;
 pub const MIN_FONT_SIZE: u8 = 10;
 pub const MAX_FONT_SIZE: u8 = 28;
 
+/// Upper end of `linkr-chunk` (`WEB_UX_SPEC` §9.1 `1`–`244`), the same number
+/// `--ble-write-size` accepts.
+pub const MAX_BLE_WRITE_SIZE: usize = 244;
+
 // This file carries no interface text: `label()` answers with the `BLE` /
 // `LAN` and `Raw` / `CR` / `LF` / `CRLF` identifiers the parity suites
 // compare byte for byte, `TuiSettings` only persists itself, and the
@@ -117,6 +121,15 @@ pub struct TuiSettings {
     pub enter_mode: EnterMode,
     /// `linkr-echo`.
     pub local_echo: bool,
+    /// `linkr-debug` (`#debugInput`): print the raw frames that cross the link
+    /// into the terminal — the one switch for seeing `UART TX`/`RX` while an
+    /// I/O problem is being chased (WEB_UX_SPEC §9.1).
+    pub debug_io: bool,
+    /// `linkr-chunk` (`#chunkInput`): bytes per BLE write. `0` is the TUI's
+    /// "auto", which is what `--ble-write-size` already means — the negotiated
+    /// MTU minus 3, clamped 20..=244, so the plain 23-byte default lands on
+    /// exactly the web's `20`.
+    pub ble_write_size: usize,
     /// `linkr-transport`.
     pub transport: TransportChoice,
     /// `linkr-ws-host`.
@@ -142,6 +155,8 @@ impl Default for TuiSettings {
             font_size: DEFAULT_FONT_SIZE,
             enter_mode: EnterMode::Raw,
             local_echo: false,
+            debug_io: false,
+            ble_write_size: 0,
             transport: TransportChoice::Ble,
             last_lan_host: String::new(),
             last_ble_address: String::new(),
@@ -157,6 +172,7 @@ impl TuiSettings {
     /// (font zoom 10..=28, LAN host trimmed).
     pub fn normalized(mut self) -> Self {
         self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        self.ble_write_size = self.ble_write_size.min(MAX_BLE_WRITE_SIZE);
         self.last_lan_host = self.last_lan_host.trim().to_string();
         self.last_ble_address = self.last_ble_address.trim().to_string();
         self
@@ -300,6 +316,8 @@ mod tests {
             font_size: 17,
             enter_mode: EnterMode::Crlf,
             local_echo: true,
+            debug_io: true,
+            ble_write_size: 64,
             transport: TransportChoice::Lan,
             last_lan_host: "192.168.1.50".to_string(),
             last_ble_address: "EE:C7:42:34:48:CF".to_string(),
@@ -333,6 +351,47 @@ mod tests {
         .to_json();
         assert!(json.contains("\"lang\": \"zh\""), "{json}");
         assert_eq!(TuiSettings::from_json(&json).lang, Lang::Zh);
+    }
+
+    /// `linkr-debug` (WEB_UX_SPEC §9.1) persists like its neighbours: off
+    /// unless it was turned on, and an old file that never heard of the key
+    /// stays off.
+    #[test]
+    fn debug_io_is_off_unless_it_was_turned_on() {
+        assert!(!TuiSettings::default().debug_io);
+        assert!(!TuiSettings::from_json(r#"{"font_size":20}"#).debug_io);
+        let json = TuiSettings {
+            debug_io: true,
+            ..TuiSettings::default()
+        }
+        .to_json();
+        assert!(json.contains("\"debug_io\": true"), "{json}");
+        assert!(TuiSettings::from_json(&json).debug_io);
+    }
+
+    /// `linkr-chunk` starts on "auto" (0), keeps a value the way the web
+    /// keeps `localStorage["linkr-chunk"]`, and a file that says a number the
+    /// input can never hold comes back clamped rather than rejected.
+    #[test]
+    fn chunk_size_is_auto_unless_it_was_set() {
+        assert_eq!(TuiSettings::default().ble_write_size, 0);
+        assert_eq!(
+            TuiSettings::from_json(r#"{"font_size":20}"#).ble_write_size,
+            0
+        );
+
+        let json = TuiSettings {
+            ble_write_size: 180,
+            ..TuiSettings::default()
+        }
+        .to_json();
+        assert!(json.contains("\"ble_write_size\": 180"), "{json}");
+        assert_eq!(TuiSettings::from_json(&json).ble_write_size, 180);
+
+        assert_eq!(
+            TuiSettings::from_json(r#"{"ble_write_size": 4096}"#).ble_write_size,
+            MAX_BLE_WRITE_SIZE
+        );
     }
 
     #[test]

@@ -126,21 +126,21 @@ pub fn validate_agent_config(stored: &StoredConfig) -> Result<AgentConfig, Strin
     let endpoint = normalize_endpoint(&stored.endpoint)?;
     let model = stored.model.trim().to_string();
     if model.is_empty() {
-        return Err("Choose a model before chatting.".to_string());
+        return Err("Enter a model ID.".to_string());
     }
     let context_window = stored.context_window;
     if context_window != 0
         && (context_window < CONTEXT_WINDOW_RANGE.0 || context_window > CONTEXT_WINDOW_RANGE.1)
     {
         return Err(format!(
-            "Context window must be a number between {} and {}.",
+            "Context window must be 0, or an integer between {} and {}.",
             CONTEXT_WINDOW_RANGE.0, CONTEXT_WINDOW_RANGE.1
         ));
     }
     let max_tokens = stored.max_tokens;
     if max_tokens != 0 && (max_tokens < MAX_TOKENS_RANGE.0 || max_tokens > MAX_TOKENS_RANGE.1) {
         return Err(format!(
-            "Max output tokens must be a number between {} and {}.",
+            "Max output tokens must be 0, or an integer between {} and {}.",
             MAX_TOKENS_RANGE.0, MAX_TOKENS_RANGE.1
         ));
     }
@@ -158,7 +158,7 @@ pub fn validate_agent_config(stored: &StoredConfig) -> Result<AgentConfig, Strin
     if reasoning.is_empty() {
         // "off" is the built-in default of a record without the field.
     } else if !REASONING_LEVELS.contains(&reasoning.as_str()) {
-        return Err("Reasoning must be off, low, medium or high.".to_string());
+        return Err("Choose a reasoning effort.".to_string());
     }
     let mut extra_headers = Vec::new();
     if stored.headers.len() > AGENT_HEADER_LIMIT {
@@ -209,7 +209,8 @@ fn valid_header_name(name: &str) -> bool {
 /// trailing slash is normalized away so the provider adapters can append a
 /// path deterministically.
 fn normalize_endpoint(endpoint: &str) -> Result<String, String> {
-    const ERR: &str = "Enter an API endpoint before chatting.";
+    const ERR: &str =
+        "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment.";
     let url = reqwest::Url::parse(endpoint.trim()).map_err(|_| ERR.to_string())?;
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err(ERR.to_string());
@@ -445,59 +446,57 @@ mod tests {
         }
     }
 
-    /// The five exact validation messages. The endpoint, model and reasoning
-    /// strings are verbatim AGENT_SPEC §12.1; the two numeric ranges follow
-    /// `web/agent_config.js` (`CONTEXT_WINDOW_RANGE = [1000, 2000000]`,
-    /// `MAX_TOKENS_RANGE = [1, 100000]`), which is what the settings form
-    /// accepts — §12.1 still quotes its older 2048/32768 clamps, and a narrower
-    /// range here rejected records the TUI's own dialog had just written.
+    /// The exact validation messages: web's `agent_settings.js` labels for the
+    /// same throws, quoted verbatim by AGENT_SPEC §12.1 and `WEB_UX_SPEC.md:497`.
+    /// The four that also exist as `tui::agent_settings` constants are compared
+    /// against them, so this crate's two validation paths cannot drift apart.
     #[test]
     fn validation_messages_are_exact() {
         let mut stored = valid();
         stored.endpoint = "not a url".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Enter an API endpoint before chatting."
+            "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment."
         );
 
         let mut stored = valid();
         stored.endpoint = "ftp://host".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Enter an API endpoint before chatting."
+            "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment."
         );
 
         let mut stored = valid();
         stored.endpoint = "http://user:pass@host/v1".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Enter an API endpoint before chatting."
+            "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment."
         );
 
         let mut stored = valid();
         stored.endpoint = "http://host/v1?x=1".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Enter an API endpoint before chatting."
+            "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment."
         );
 
         let mut stored = valid();
         stored.model = "   ".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Choose a model before chatting."
+            "Enter a model ID."
         );
 
         let mut stored = valid();
         stored.context_window = 999;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Context window must be a number between 1000 and 2000000."
+            "Context window must be 0, or an integer between 1000 and 2000000."
         );
         stored.context_window = 2_000_001;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Context window must be a number between 1000 and 2000000."
+            "Context window must be 0, or an integer between 1000 and 2000000."
         );
 
         let mut stored = valid();
@@ -506,15 +505,43 @@ mod tests {
         stored.max_tokens = 100_001;
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Max output tokens must be a number between 1 and 100000."
+            "Max output tokens must be 0, or an integer between 1 and 100000."
         );
 
         let mut stored = valid();
         stored.reasoning = "turbo".into();
         assert_eq!(
             validate_agent_config(&stored).unwrap_err(),
-            "Reasoning must be off, low, medium or high."
+            "Choose a reasoning effort."
         );
+    }
+
+    /// The stored-record path and the TUI dialog are two validations of one
+    /// record: a value the dialog accepts must never be rejected on load.
+    #[test]
+    fn stored_record_errors_match_the_settings_dialog() {
+        use crate::tui::agent_settings::{
+            ERR_CONTEXT_WINDOW, ERR_ENDPOINT, ERR_MAX_TOKENS, ERR_MODEL,
+        };
+
+        let mut stored = valid();
+        stored.endpoint = "not a url".into();
+        assert_eq!(validate_agent_config(&stored).unwrap_err(), ERR_ENDPOINT);
+
+        let mut stored = valid();
+        stored.model = String::new();
+        assert_eq!(validate_agent_config(&stored).unwrap_err(), ERR_MODEL);
+
+        let mut stored = valid();
+        stored.context_window = 999;
+        assert_eq!(
+            validate_agent_config(&stored).unwrap_err(),
+            ERR_CONTEXT_WINDOW
+        );
+
+        let mut stored = valid();
+        stored.max_tokens = 100_001;
+        assert_eq!(validate_agent_config(&stored).unwrap_err(), ERR_MAX_TOKENS);
     }
 
     #[test]

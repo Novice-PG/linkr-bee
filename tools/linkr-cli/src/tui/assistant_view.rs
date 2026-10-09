@@ -39,8 +39,8 @@ strings! {
     ASST_SPEAKER_YOU => "you › ", "你 › ";
     ASST_SPEAKER_AI => "ai › ", "AI › ";
     ASST_COMPOSER_HINT => "Describe the problem", "描述问题";
-    ASST_KEYS_LINE_1 => "Enter newline · Alt+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S settings",
-        "Enter 换行 · Alt+Enter 发送 · Ctrl+Shift+M 模式 · Ctrl+Shift+S 设置";
+    ASST_KEYS_LINE_1 => "Enter newline · Alt+Enter send · Ctrl+Shift+M mode · Ctrl+Shift+S config · Ctrl+Shift+Y copy",
+        "Enter 换行 · Alt+Enter 发送 · Ctrl+Shift+M 模式 · Ctrl+Shift+S 配置 · Ctrl+Shift+Y 复制";
     ASST_KEYS_LINE_2 => "Ctrl+Shift+N new chat · Esc exit to the terminal · Ctrl+Q quit the TUI",
         "Ctrl+Shift+N 新建对话 · Esc 返回终端 · Ctrl+Q 退出 TUI";
     // Said once, at the moment a chord the user expected to send lands as a
@@ -54,6 +54,10 @@ strings! {
     ASST_MODE_CHANGED => "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue.",
         "档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。";
     ASST_MODE_STATUS => "Mode: {}", "模式：{}";
+    // Said by `Ctrl+Shift+Y` when the transcript holds no assistant reply
+    // yet — a key with nothing to give back has to say so rather than look
+    // like it did nothing.
+    ASST_NO_REPLY_TO_COPY => "No assistant reply to copy yet.", "还没有可复制的回答。";
     ASST_FULL_AUTO_EXPIRED => "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
         "Full Auto 已到时并回退到 Auto，后续命令需要确认。";
     ASST_FULL_AUTO_RECONNECTED => "Device reconnected; execution mode changed from Full Auto to Auto. Low-risk queries still run automatically; other commands follow the current approval rules.",
@@ -70,6 +74,11 @@ strings! {
         "本次对话 tokens {} · ↑{} ↓{}";
     ASST_USAGE_COST => " · Estimated cost ~{}", " · 预估成本 ~{}";
     ASST_USAGE_NO_PRICES => " · Prices not set", " · 未设置价格";
+    ASST_PLAN_ASSESSMENT => "Progress recorded by AI; verify against execution logs", "AI 记录的进度，请结合执行日志核实";
+    ASST_PLAN_PENDING => "Pending", "待执行";
+    ASST_PLAN_IN_PROGRESS => "In progress", "进行中";
+    ASST_PLAN_COMPLETED => "Completed", "已完成";
+    ASST_PLAN_BLOCKED => "Blocked", "受阻";
 }
 
 /// Help text of the three modes (WEB_UX_SPEC section 7.2): label and help in
@@ -528,6 +537,43 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// `Ctrl+Shift+Y`: hand the newest assistant reply to the system clipboard.
+///
+/// The web puts a "Copy code" button on every rendered code block
+/// (`web/agent_markdown.js:37-45`, copying `pre.textContent`). A
+/// keyboard-driven panel has no per-block cursor to point such a button at,
+/// so the unit here is the whole reply: what a reader usually wants out of an
+/// answer is the command inside it, and a whole reply still pastes cleanly
+/// where a code block would have.
+///
+/// The half-written reply of a turn still running is deliberately *not*
+/// offered — it is not in `entries` yet, and copying a fragment of an answer
+/// that is still being corrected would put something on the clipboard the
+/// screen never settled on.
+///
+/// Both exit routes `copy_to_host` uses are tried and neither is assumed to
+/// work: `OSC 52` may be parsed and dropped by the emulator, and the desktop
+/// may have no clipboard helper at all. So nothing is claimed here — the
+/// toast is whatever `poll_clipboard` reports once the helper answers.
+fn copy_last_reply(app: &mut App) {
+    let reply = app
+        .assistant
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Entry::Assistant(text) if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        });
+    match reply {
+        Some(text) => super::copy_to_host(app, &text),
+        None => app.toast(
+            NoticeLevel::Error,
+            t(ASST_NO_REPLY_TO_COPY, app.lang()).to_string(),
+        ),
+    }
+}
+
 // --- keys --------------------------------------------------------------------
 
 /// Keys of the Assistant view / focused composer.
@@ -579,6 +625,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.assistant.picker_sel = AssistantState::mode_index(app.exec_mode);
         }
         KeyCode::Char('s') if ctrl && shift => open_settings(app),
+        // `Ctrl+Shift+C` cannot carry this: the global table already spends it
+        // on `ArmCtrl`, and every letter it could have taken is taken by the
+        // one-shot modifier latches. `Y` is free and is the universal "yank".
+        KeyCode::Char('y') if ctrl && shift => copy_last_reply(app),
         KeyCode::Char('n') if ctrl && shift => {
             let lang = app.lang();
             // web `#agentNew` stops the run *before* it drops the transcript
@@ -804,6 +854,64 @@ pub fn poll(app: &mut App) {
     }
 }
 
+/// The `labels` of web's `formatPlan`, with the raw status as its own
+/// fallback — an unknown status prints as itself rather than as a blank.
+fn plan_status_label(status: &str, lang: Lang) -> &str {
+    match status {
+        "pending" => t(ASST_PLAN_PENDING, lang),
+        "in_progress" => t(ASST_PLAN_IN_PROGRESS, lang),
+        "completed" => t(ASST_PLAN_COMPLETED, lang),
+        "blocked" => t(ASST_PLAN_BLOCKED, lang),
+        other => other,
+    }
+}
+
+/// `formatPlan` of `web/agent_panel.js:484`, as the line the transcript shows.
+///
+/// `update_task_plan` answers in JSON, and `ToolEnd` clips its result to one
+/// line, so the plan arrived as `{"steps":[{"title":"Read the log","` — nobody
+/// can act on that. The panel prints the plan itself, headed by the
+/// "recorded by AI" warning that stops it reading as permission to execute
+/// (`AGENT_SPEC` §5: plans are assistant assessments, never authorization).
+///
+/// `None` for anything that is not a plan — an error payload, a result clipped
+/// before it arrived, a future schema — so the raw text goes up unchanged
+/// instead of being swallowed.
+fn format_plan(name: &str, result: &str, lang: Lang) -> Option<String> {
+    if name != "update_task_plan" {
+        return None;
+    }
+    let steps = serde_json::from_str::<serde_json::Value>(result)
+        .ok()?
+        .get("steps")?
+        .as_array()?
+        .clone();
+    if steps.is_empty() {
+        return None;
+    }
+    let mut body = String::new();
+    for (index, step) in steps.iter().enumerate() {
+        let field = |key: &str| step.get(key).and_then(|value| value.as_str()).unwrap_or("");
+        if index > 0 {
+            body.push('\n');
+        }
+        body.push_str(&format!(
+            "{}. [{}] {}",
+            index + 1,
+            plan_status_label(field("status"), lang),
+            field("title"),
+        ));
+        body.push('\n');
+        body.push_str(field("verification"));
+        let next = field("nextAction");
+        if !next.is_empty() {
+            body.push_str("\n→ ");
+            body.push_str(next);
+        }
+    }
+    Some(format!("{}\n{}", t(ASST_PLAN_ASSESSMENT, lang), body))
+}
+
 /// Fold one [`AgentEvent`] into the panel.
 pub fn apply_event(app: &mut App, event: AgentEvent) {
     match event {
@@ -827,10 +935,21 @@ pub fn apply_event(app: &mut App, event: AgentEvent) {
             });
         }
         AgentEvent::ToolEnd { name, result, ok } => {
-            let result = super::replies::redact_secrets(&result);
-            app.assistant
-                .entries
-                .push(Entry::ToolEnd { name, result, ok });
+            // The plan tool answers in JSON, and the transcript prints the
+            // plan itself (`formatPlan` of `web/agent_panel.js:484`): a clipped
+            // `{"steps":[{"title":…` tells nobody what the plan is. Redaction
+            // runs on the text that is actually shown.
+            let rendered = if ok {
+                format_plan(&name, &result, app.lang())
+            } else {
+                None
+            };
+            let rendered = super::replies::redact_secrets(&rendered.unwrap_or(result));
+            app.assistant.entries.push(Entry::ToolEnd {
+                name,
+                result: rendered,
+                ok,
+            });
         }
         AgentEvent::Usage {
             input,
@@ -1269,5 +1388,258 @@ mod tests {
             app.assistant.composer.as_str().chars().count(),
             COMPOSER_MAX
         );
+    }
+
+    /// `formatPlan` of `web/agent_panel.js:484`, line for line: the header
+    /// that keeps a plan from reading as permission, the numbered steps with
+    /// web's own status labels, and the verification and next-action lines web
+    /// prints under each one — blank verification line included, because that
+    /// is what the panel produces and the transcript is not entitled to
+    /// tidy it up.
+    #[test]
+    fn a_task_plan_is_rendered_as_a_plan_and_not_as_json() {
+        let payload = r#"{"steps":[
+            {"title":"Read the serial log","status":"in_progress","verification":"","nextAction":"Look for the reset reason"},
+            {"title":"Reboot the target","status":"pending","verification":"","nextAction":""},
+            {"title":"Confirm the LED","status":"completed","verification":"LED steady green after 2 s","nextAction":""},
+            {"title":"Flash the bootloader","status":"blocked","verification":"","nextAction":"Ask before touching the bootloader"}
+        ]}"#;
+
+        let plan = format_plan("update_task_plan", payload, Lang::En).expect("a plan");
+        assert_eq!(
+            plan,
+            concat!(
+                "Progress recorded by AI; verify against execution logs\n",
+                "1. [In progress] Read the serial log\n",
+                "\n",
+                "→ Look for the reset reason\n",
+                "2. [Pending] Reboot the target\n",
+                "\n",
+                "3. [Completed] Confirm the LED\n",
+                "LED steady green after 2 s\n",
+                "4. [Blocked] Flash the bootloader\n",
+                "\n",
+                "→ Ask before touching the bootloader",
+            )
+        );
+    }
+
+    /// The header and the four labels are `agent_panel.js`'s `planAssessment`
+    /// and `labels`, in the language the panel is showing.
+    #[test]
+    fn the_plan_speaks_the_panel_language() {
+        let payload = r#"{"steps":[{"title":"读日志","status":"blocked","verification":"见下","nextAction":"先问一句"}]}"#;
+
+        let zh = format_plan("update_task_plan", payload, Lang::Zh).expect("a plan");
+        assert_eq!(
+            zh,
+            "AI 记录的进度，请结合执行日志核实\n1. [受阻] 读日志\n见下\n→ 先问一句"
+        );
+        assert_eq!(
+            t(ASST_PLAN_ASSESSMENT, Lang::En),
+            "Progress recorded by AI; verify against execution logs"
+        );
+        assert_eq!(t(ASST_PLAN_PENDING, Lang::En), "Pending");
+        assert_eq!(t(ASST_PLAN_IN_PROGRESS, Lang::En), "In progress");
+        assert_eq!(t(ASST_PLAN_COMPLETED, Lang::En), "Completed");
+        assert_eq!(t(ASST_PLAN_BLOCKED, Lang::En), "Blocked");
+        assert_eq!(t(ASST_PLAN_PENDING, Lang::Zh), "待执行");
+        assert_eq!(t(ASST_PLAN_BLOCKED, Lang::Zh), "受阻");
+    }
+
+    /// Everything that is not a plan goes up exactly as it arrived — the raw
+    /// text is the fallback, not a blank line.
+    #[test]
+    fn anything_that_is_not_a_plan_keeps_its_raw_text() {
+        let others = [
+            (
+                "read_serial_log",
+                r#"{"steps":[{"title":"x","status":"pending"}]}"#,
+            ),
+            ("update_task_plan", "not json at all"),
+            ("update_task_plan", r#"{"steps":[]}"#),
+            ("update_task_plan", r#"{"steps":"not an array"}"#),
+            ("update_task_plan", r#"{"nope":[]}"#),
+        ];
+        for (name, payload) in others {
+            assert!(
+                format_plan(name, payload, Lang::En).is_none(),
+                "{name} / {payload} was turned into something"
+            );
+        }
+    }
+
+    /// A rejected plan call must show its reason, not an empty plan: the
+    /// panel prints the raw result when `ok` is false.
+    #[test]
+    fn a_failed_plan_call_reports_its_reason_rather_than_a_plan() {
+        let mut app = crate::tui::test_app();
+        apply_event(
+            &mut app,
+            AgentEvent::ToolEnd {
+                name: "update_task_plan".to_string(),
+                result: "A plan needs 1 to 8 steps.".to_string(),
+                ok: false,
+            },
+        );
+        match app.assistant.entries.last() {
+            Some(Entry::ToolEnd { result, ok, .. }) => {
+                assert!(!ok);
+                assert_eq!(result, "A plan needs 1 to 8 steps.");
+            }
+            _ => panic!("expected a tool row"),
+        }
+    }
+
+    /// What the transcript ends up holding: the plan, still redacted.
+    #[test]
+    fn a_finished_plan_call_lands_as_the_plan_in_the_transcript() {
+        let mut app = crate::tui::test_app();
+        apply_event(
+            &mut app,
+            AgentEvent::ToolEnd {
+                name: "update_task_plan".to_string(),
+                result: r#"{"steps":[{"title":"Read the log","status":"pending","verification":"","nextAction":"token=0123456789abcdef0123456789abcdef"}]}"#.to_string(),
+                ok: true,
+            },
+        );
+        let text = match app.assistant.entries.last() {
+            Some(Entry::ToolEnd { name, result, ok }) => {
+                assert_eq!(name, "update_task_plan");
+                assert!(ok);
+                result.clone()
+            }
+            _ => panic!("expected a tool row"),
+        };
+        assert!(
+            text.starts_with("Progress recorded by AI"),
+            "the header is missing: {text}"
+        );
+        assert!(!text.starts_with('{'), "the JSON reached the panel: {text}");
+        assert!(!text.contains("0123456789abcdef"), "unredacted: {text}");
+        assert!(text.contains("<redacted>"), "{text}");
+    }
+
+    /// The panel had no way out at all: the web puts a "Copy code" button on
+    /// every rendered code block (`web/agent_markdown.js:37-45`) and the TUI
+    /// had nothing equivalent. `Ctrl+Shift+Y` is the whole reply, and it must
+    /// be the *newest* one — a stale answer from an earlier turn sitting on
+    /// the clipboard while a newer one is on screen is worse than no copy.
+    #[test]
+    fn ctrl_shift_y_copies_the_newest_assistant_reply() {
+        let mut app = super::super::test_app();
+        app.assistant.entries.push(Entry::User("why?".into()));
+        app.assistant
+            .entries
+            .push(Entry::Assistant("first reply".into()));
+        app.assistant
+            .entries
+            .push(Entry::System("system note".into()));
+        app.assistant
+            .entries
+            .push(Entry::Assistant("second reply, longer".into()));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+
+        assert_eq!(app.clipboard_jobs.len(), 1, "exactly one copy was queued");
+        let report = app.clipboard_jobs[0]
+            .copy
+            .as_ref()
+            .expect("a copy reports what actually left the program");
+        assert_eq!(
+            report.chars,
+            "second reply, longer".chars().count(),
+            "the newest reply went out, not the one from the earlier turn"
+        );
+        assert!(
+            report.osc.is_some(),
+            "…and it also went to the emulator over OSC 52"
+        );
+        assert!(
+            app.notices.toasts.is_empty(),
+            "a copy that happened is reported by the worker, not claimed here"
+        );
+    }
+
+    /// A reply still streaming is not offered: it is not in the transcript
+    /// yet, and half of an answer that is still being corrected is not
+    /// something to put on the clipboard.
+    #[test]
+    fn a_running_reply_is_not_copied() {
+        let mut app = super::super::test_app();
+        app.assistant.streaming = "half an ans".into();
+        app.assistant.busy = true;
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(app.clipboard_jobs.is_empty(), "nothing was copied");
+        assert_eq!(app.notices.toasts.len(), 1, "…and the key said so");
+    }
+
+    /// Only `Assistant` rows are content. A question, a tool call and a system
+    /// note are all things the *user* already saw typed — none of them is an
+    /// answer worth handing back out.
+    #[test]
+    fn only_an_assistant_reply_is_copied() {
+        let mut app = super::super::test_app();
+        app.assistant
+            .entries
+            .push(Entry::User("what is 2+2".into()));
+        app.assistant.entries.push(Entry::ToolStart {
+            name: "shell".into(),
+            args: "uptime".into(),
+        });
+        app.assistant.entries.push(Entry::ToolEnd {
+            name: "shell".into(),
+            result: "up 3 days".into(),
+            ok: true,
+        });
+        app.assistant
+            .entries
+            .push(Entry::System("mode changed".into()));
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(app.clipboard_jobs.is_empty());
+        assert_eq!(app.notices.toasts.len(), 1);
+    }
+
+    /// An empty reply is not content either: a blank row is what a turn that
+    /// produced nothing leaves behind.
+    #[test]
+    fn a_blank_reply_is_not_offered() {
+        let mut app = super::super::test_app();
+        app.assistant.entries.push(Entry::Assistant("   \n".into()));
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(app.clipboard_jobs.is_empty());
+        assert_eq!(app.notices.toasts.len(), 1);
+    }
+
+    /// A binding nobody can discover is not a binding. The footer line is the
+    /// panel's own key legend, in both languages.
+    #[test]
+    fn the_copy_key_is_on_the_keys_line() {
+        assert!(t(ASST_KEYS_LINE_1, Lang::En).contains("Ctrl+Shift+Y copy"));
+        assert!(t(ASST_KEYS_LINE_1, Lang::Zh).contains("Ctrl+Shift+Y 复制"));
     }
 }
