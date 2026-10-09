@@ -139,12 +139,18 @@ jobs:
       # binary links against, and the matching libc is what lets the smoke test
       # actually execute a foreign binary (armv7 gets that for free: its runner
       # is arm64, whose kernel runs armhf binaries directly).
+      #
+      # lrzsz is what `cargo test` *runs*: the handful of transfer tests that
+      # need a real child spawn the machine's own `sz`. Without the package
+      # they stand down instead of failing, which on a Windows runner is the
+      # only thing they can do — there is no lrzsz to install there — but on
+      # Linux it would be a silent hole in the suite.
       - name: Install the Linux system libraries
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y libdbus-1-dev pkg-config lrzsz
           case "${{ matrix.target }}" in
             i686-unknown-linux-gnu)
               sudo dpkg --add-architecture i386
