@@ -338,14 +338,52 @@ pub fn load_config() -> Option<AgentConfig> {
     load_config_from(&dir)
 }
 
+/// Write a file that holds a secret, at `0600`.
+///
+/// This is the one way this crate writes a secret to disk — `agent.json` in
+/// both of the places that write it, so a plaintext API key is never one
+/// `fs::write` away from the umask default. Under `umask 022` that default is
+/// `0644`, and every account the key names becomes readable to any local user
+/// who can reach the directory; measured on the file this replaces.
+///
+/// `OpenOptions::mode` alone would not do it: the mode only applies when the
+/// file is *created*, so a copy already sitting there at `0644` — from an
+/// older build, or from this very function before it tightened them — would
+/// keep that mode forever. Hence the `set_permissions` after the open, which
+/// runs on the file handle rather than the path: an existing wide file is
+/// narrowed in the same write that refreshes its contents.
+///
+/// Parent directories are made on demand, as `fs::write` never did and every
+/// caller was doing by hand.
+pub fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())
+}
+
 /// Validate and persist. A successful return is the normalized config whose
 /// prices travel with it so the settings form and the runtime cannot disagree.
 pub fn save_config_to(dir: &Path, config: &AgentConfig) -> Result<AgentConfig, String> {
     let normalized = validate_agent_config(&StoredConfig::from(config))?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(&StoredConfig::from(&normalized))
         .map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("agent.json"), text).map_err(|e| e.to_string())?;
+    write_secret_file(&dir.join("agent.json"), &text).map_err(|e| e.to_string())?;
     Ok(normalized)
 }
 
@@ -671,6 +709,43 @@ mod tests {
         clear_config_from(&dir).unwrap();
         assert!(load_config_from(&dir).is_none());
         clear_config_from(&dir).unwrap(); // idempotent
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `agent.json` carries the plaintext `apiKey`, so it is written at
+    /// `0600` rather than at whatever the umask hands a plain `fs::write`
+    /// (`0644` under the usual `022` — any local account can then read the
+    /// key). The second half is the case a `mode` on creation misses: a copy
+    /// already at `0644` has to come out of the next save narrowed, or it
+    /// stays world-readable for as long as the file exists.
+    ///
+    /// Unix only: this is a question about Unix file modes.
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_config_is_private_and_an_existing_wide_file_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("secret");
+        let path = dir.join("agent.json");
+        let config = validate_agent_config(&valid()).expect("valid");
+        let mode = || std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+
+        save_config_to(&dir, &config).expect("first save");
+        assert_eq!(
+            mode(),
+            0o600,
+            "a new agent.json must not be readable by other accounts"
+        );
+
+        // What the plain `fs::write` this replaces would have left behind.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        save_config_to(&dir, &config).expect("second save");
+        assert_eq!(
+            mode(),
+            0o600,
+            "an agent.json already at 0644 has to be tightened, not preserved"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
