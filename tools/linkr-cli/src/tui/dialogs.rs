@@ -31,6 +31,7 @@ strings! {
     DLG_TITLE_CONFIRM => "Confirm", "确认";
     DLG_TITLE_APPROVAL => "Assistant approval", "助手审批";
     DLG_TITLE_UART => "UART settings", "UART 设置";
+    DLG_TITLE_CHUNK => "BLE write chunk", "BLE 写入分块";
     DLG_TITLE_SETTINGS => "AI configuration", "AI 配置";
     DLG_TITLE_HELP => "Keyboard help", "键盘帮助";
     DLG_TITLE_NOTICES => "Notices", "通知";
@@ -80,6 +81,32 @@ strings! {
     DLG_UART_CLOSED => "disconnected before the UART reply", "UART 应答前连接已断开";
     DLG_UART_NEED_BLE => "Connect over BLE to change the bridge UART.",
         "请先通过 BLE 连接再修改桥接 UART。";
+
+    // Chunk size dialog (`linkr-chunk`, WEB_UX_SPEC section 9.1). The range
+    // is the CLI's own `--ble-write-size` one, widened at the bottom by 0 =
+    // "ask the link what it can take" — the web's `20` is what that answer
+    // usually is.
+    DLG_CHUNK_PROMPT => "Bytes per BLE write (0–244, 0 = auto)",
+        "每次 BLE 写入的字节数（0–244，0 ＝ 自动）";
+    DLG_CHUNK_KEYS => "Enter save · Esc close", "Enter 保存 · Esc 关闭";
+    DLG_CHUNK_RANGE => "BLE write size must be between 0 and 244 (0 = auto)",
+        "BLE 写入分块必须在 0–244 之间（0 ＝ 自动）";
+    DLG_CHUNK_SAVED => "BLE write chunk size: {}", "BLE 写入分块大小：{}";
+
+    // Cheat Sheet card (WEB_UX_SPEC section 4): the title, the summary of the
+    // open `<details>`, the four group titles, the tip and the key line. The
+    // groups and the tip are the web's own strings; the key line replaces
+    // "click a command" with what a terminal actually offers.
+    DLG_TITLE_CHEAT => "Cheat Sheet", "速查参考";
+    DLG_CHEAT_LINUX => "Linux Commands", "Linux 命令";
+    DLG_CHEAT_GRP_FILES => "Files & Dirs", "文件与目录";
+    DLG_CHEAT_GRP_SYS => "System", "系统信息";
+    DLG_CHEAT_GRP_NET => "Network", "网络";
+    DLG_CHEAT_GRP_PERM => "Permissions & Processes", "权限与进程";
+    DLG_CHEAT_HINT => "Tip: the highlighted command is sent when you press Enter.",
+        "提示：按 Enter 发送高亮的命令。";
+    DLG_CHEAT_KEYS => "↑↓ choose · Enter send · Esc close",
+        "↑↓ 选择 · Enter 发送 · Esc 关闭";
 
     // Notice log.
     DLG_NO_NOTICES => "No notices yet.", "暂无通知。";
@@ -206,6 +233,23 @@ pub enum Dialog {
         error: Option<String>,
         reply: Option<oneshot::Receiver<Result<crate::protocol::MgmtReply, String>>>,
     },
+    /// `linkr-chunk`: one number, typed. Unlike [`Dialog::Uart`] it needs no
+    /// link to open — the value is read at the next dial, so it can be set
+    /// while disconnected, which is when somebody usually discovers they need
+    /// to change it.
+    Chunk {
+        field: TextField,
+        error: Option<String>,
+    },
+    /// The web's `#cheatList`: four groups of Linux commands with a cursor
+    /// over them and Enter to send. `selected` walks the commands only (the
+    /// group titles are headings, not rows); `scroll` is the body offset the
+    /// painter applies, kept in step with the cursor so a short terminal
+    /// still shows the line it is pointing at.
+    Cheat {
+        selected: usize,
+        scroll: u16,
+    },
     Settings(AgentSettingsState),
     /// Scroll offset of the body: the help is longer than a short terminal
     /// can show, so the overlay scrolls instead of clipping the tail off.
@@ -233,6 +277,8 @@ impl Dialog {
             Dialog::Confirm { .. } => t(DLG_TITLE_CONFIRM, lang),
             Dialog::Approval(_) => t(DLG_TITLE_APPROVAL, lang),
             Dialog::Uart { .. } => t(DLG_TITLE_UART, lang),
+            Dialog::Chunk { .. } => t(DLG_TITLE_CHUNK, lang),
+            Dialog::Cheat { .. } => t(DLG_TITLE_CHEAT, lang),
             Dialog::Settings(_) => t(DLG_TITLE_SETTINGS, lang),
             Dialog::Help(_) => t(DLG_TITLE_HELP, lang),
             Dialog::Notices(_) => t(DLG_TITLE_NOTICES, lang),
@@ -244,6 +290,7 @@ impl Dialog {
     pub fn scroll_offset(&self) -> u16 {
         match self {
             Dialog::Help(scroll) | Dialog::Notices(scroll) => *scroll,
+            Dialog::Cheat { scroll, .. } => *scroll,
             _ => 0,
         }
     }
@@ -374,6 +421,206 @@ pub fn clip_columns(text: &str, budget: usize) -> String {
     out
 }
 
+/// Body of the two single-field boxes: prompt, `> ` field, an optional error
+/// in red, an optional status in green, then the key hint. The UART box and
+/// the chunk box are this same shape, so they share one renderer — a colour
+/// or spacing tweak then reaches both instead of leaving them to drift apart.
+fn field_lines(
+    prompt: Entry,
+    field: &TextField,
+    error: &Option<String>,
+    status: &Option<String>,
+    keys: Entry,
+    width: u16,
+    lang: Lang,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(t(prompt, lang)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                field.as_str().to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    if let Some(error) = error {
+        lines.extend(wrap_line(error, width).into_iter().map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| span.style(Style::default().fg(Color::Red)))
+                    .collect::<Vec<_>>(),
+            )
+        }));
+    }
+    if let Some(status) = status {
+        lines.extend(wrap_line(status, width).into_iter().map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| span.style(Style::default().fg(Color::LightGreen)))
+                    .collect::<Vec<_>>(),
+            )
+        }));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        t(keys, lang),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
+/// One row of the web's `#cheatList`: the literal command and its en/zh
+/// description (`web/app.js:863` `CHEATS`).
+///
+/// The commands go out **verbatim, placeholders included** — `cd <dir>` is
+/// sent as `cd <dir>`, because that is what the web's click handler does with
+/// `data-cmd` (`web/app.js:3537`). Mirroring the string beats "fixing" it:
+/// the two clients must not disagree about what a chip sends.
+const CHEAT_GROUPS: &[(Entry, &[(&str, Entry)])] = &[
+    (
+        DLG_CHEAT_GRP_FILES,
+        &[
+            ("ls -l", ["List in long format", "详细列表"]),
+            ("cd <dir>", ["Change directory", "切换目录"]),
+            ("pwd", ["Print working directory", "显示当前路径"]),
+            ("mkdir <dir>", ["Make directory", "创建目录"]),
+            ("cp -r a b", ["Copy recursively", "递归复制"]),
+            ("mv a b", ["Move / rename", "移动或重命名"]),
+            ("rm -rf <dir>", ["Force remove", "强制删除"]),
+            ("cat <file>", ["Show file content", "查看文件内容"]),
+            ("grep \"x\" <f>", ["Search text", "搜索文本"]),
+            ("find . -name \"*.c\"", ["Find files", "查找文件"]),
+        ],
+    ),
+    (
+        DLG_CHEAT_GRP_SYS,
+        &[
+            ("uname -a", ["Kernel info", "内核信息"]),
+            ("df -h", ["Disk usage", "磁盘使用"]),
+            ("free -h", ["Memory usage", "内存使用"]),
+            ("top", ["Process monitor", "进程监控"]),
+            ("uptime", ["System uptime", "运行时长"]),
+        ],
+    ),
+    (
+        DLG_CHEAT_GRP_NET,
+        &[
+            ("ip a", ["Network interfaces", "网络接口"]),
+            ("ping <host>", ["Ping a host", "连通测试"]),
+            ("ssh u@host", ["Remote login", "远程登录"]),
+            ("scp a u@h:", ["Secure copy", "安全拷贝"]),
+            ("curl -I <url>", ["Fetch headers", "请求响应头"]),
+        ],
+    ),
+    (
+        DLG_CHEAT_GRP_PERM,
+        &[
+            ("chmod 755 <f>", ["Change mode", "修改权限"]),
+            ("chown u:g <f>", ["Change owner", "修改属主"]),
+            ("ps aux", ["List processes", "进程列表"]),
+            ("kill -9 <pid>", ["Kill process", "终止进程"]),
+            ("sudo <cmd>", ["Run as root", "提权执行"]),
+        ],
+    ),
+];
+
+/// How many commands the cursor can point at (the group titles are headings).
+fn cheat_count() -> usize {
+    CHEAT_GROUPS.iter().map(|(_, items)| items.len()).sum()
+}
+
+/// The `index`th command, or `None` past the end.
+fn cheat_command(index: usize) -> Option<&'static str> {
+    CHEAT_GROUPS
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .map(|(cmd, _)| *cmd)
+        .nth(index)
+}
+
+/// Body line the `selected` command is painted on. The key handler moves the
+/// scroll from this number, so it has to be the same arithmetic the renderer
+/// uses or the cursor walks off the visible window.
+fn cheat_line_of(selected: usize) -> usize {
+    let mut line = 2; // "Linux Commands" summary, then a blank
+    let mut index = 0;
+    for (_, items) in CHEAT_GROUPS {
+        if selected < index + items.len() {
+            return line + 1 + (selected - index);
+        }
+        line += 1 + items.len() + 1; // group title, its items, trailing blank
+        index += items.len();
+    }
+    line
+}
+
+/// Body of the cheat sheet: the open `<details>` summary, then every group and
+/// every command, with `▸` on the one the cursor is on.
+fn cheat_lines(selected: usize, width: u16, lang: Lang) -> Vec<Line<'static>> {
+    // Two columns: the command, then the description. The command column is
+    // as wide as the widest command but never eats the room the descriptions
+    // need, so the second column starts at the same place in every group.
+    let widest = CHEAT_GROUPS
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .map(|(cmd, _)| cmd.chars().count())
+        .max()
+        .unwrap_or(0);
+    let cmd_col = widest.min((width as usize).saturating_sub(24).max(8));
+    let word = Style::default().add_modifier(Modifier::BOLD);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            t(DLG_CHEAT_LINUX, lang),
+            word.fg(Color::Yellow),
+        )),
+        Line::from(""),
+    ];
+    let mut index = 0;
+    for (group, items) in CHEAT_GROUPS {
+        lines.push(Line::from(Span::styled(
+            t(*group, lang),
+            word.fg(Color::Cyan),
+        )));
+        for (cmd, desc) in items.iter() {
+            let here = index == selected;
+            index += 1;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if here { "▸ " } else { "  " },
+                    Style::default().fg(if here { Color::Green } else { Color::DarkGray }),
+                ),
+                Span::styled(
+                    format!("{cmd:<cmd_col$}"),
+                    Style::default().fg(if here { Color::White } else { Color::Gray }),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    desc[usize::from(lang == Lang::Zh)],
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        t(DLG_CHEAT_HINT, lang),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        t(DLG_CHEAT_KEYS, lang),
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
 /// Body lines of the open dialog. `width` is the inner width available.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let lang = app.lang();
@@ -408,48 +655,25 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             status,
             error,
             ..
-        } => {
-            let mut lines = vec![
-                Line::from(t(DLG_UART_PROMPT, lang)),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Cyan)),
-                    Span::styled(
-                        field.as_str().to_string(),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(""),
-            ];
-            if let Some(error) = error {
-                lines.extend(wrap_line(error, width).into_iter().map(|line| {
-                    Line::from(
-                        line.spans
-                            .into_iter()
-                            .map(|span| span.style(Style::default().fg(Color::Red)))
-                            .collect::<Vec<_>>(),
-                    )
-                }));
-            }
-            if let Some(status) = status {
-                lines.extend(wrap_line(status, width).into_iter().map(|line| {
-                    Line::from(
-                        line.spans
-                            .into_iter()
-                            .map(|span| span.style(Style::default().fg(Color::LightGreen)))
-                            .collect::<Vec<_>>(),
-                    )
-                }));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                t(DLG_UART_KEYS, lang),
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines
-        }
+        } => field_lines(
+            DLG_UART_PROMPT,
+            field,
+            error,
+            status,
+            DLG_UART_KEYS,
+            width,
+            lang,
+        ),
+        Dialog::Chunk { field, error } => field_lines(
+            DLG_CHUNK_PROMPT,
+            field,
+            error,
+            &None,
+            DLG_CHUNK_KEYS,
+            width,
+            lang,
+        ),
+        Dialog::Cheat { selected, .. } => cheat_lines(*selected, width, lang),
         Dialog::Settings(state) => super::agent_settings::render_lines(state, width, lang),
         Dialog::Devices {
             items,
@@ -738,6 +962,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    // The cheat sheet is a list with a cursor, not a wall of text: ↑↓ move
+    // the cursor and the body scrolls to keep it on screen, Enter sends the
+    // highlighted command, Esc closes.
+    if matches!(app.dialog, Some(Dialog::Cheat { .. })) {
+        cheat_edit(app, key);
+        return;
+    }
     let Some(dialog) = app.dialog.take() else {
         return;
     };
@@ -820,7 +1051,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Route a key to the editable dialog (UART settings, AI configuration).
+/// Route a key to the editable dialog (UART settings, chunk size, AI
+/// configuration).
 fn dialog_edit(app: &mut App, key: KeyEvent) {
     if key.code == KeyCode::Esc {
         app.dialog = None;
@@ -830,7 +1062,151 @@ fn dialog_edit(app: &mut App, key: KeyEvent) {
         super::agent_settings::handle_key(app, key);
         return;
     }
+    if matches!(app.dialog, Some(Dialog::Chunk { .. })) {
+        chunk_edit(app, key);
+        return;
+    }
     uart_edit(app, key);
+}
+
+/// Edit and save `linkr-chunk`. Only digits ever reach the field, so the one
+/// thing left to object to is a number the input's own range forbids.
+fn chunk_edit(app: &mut App, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let apply = matches!(key.code, KeyCode::Enter) || (ctrl && key.code == KeyCode::Char('s'));
+    if !apply {
+        let Some(Dialog::Chunk { field, error }) = &mut app.dialog else {
+            return;
+        };
+        *error = None;
+        match key.code {
+            KeyCode::Char(c) if !ctrl && c.is_ascii_digit() => field.insert_char(c),
+            KeyCode::Backspace => field.backspace(),
+            KeyCode::Delete => field.delete(),
+            KeyCode::Left => field.left(),
+            KeyCode::Right => field.right(),
+            KeyCode::Home => field.home(),
+            KeyCode::End => field.end(),
+            _ => {}
+        }
+        return;
+    }
+
+    let lang = app.lang();
+    let raw = match &app.dialog {
+        Some(Dialog::Chunk { field, .. }) => field.as_str().trim().to_string(),
+        _ => return,
+    };
+    // The field only ever holds digits, so `None` is the empty box and the
+    // `filter` is the top of the input's own range.
+    let Some(size) = raw
+        .parse::<usize>()
+        .ok()
+        .filter(|size| *size <= super::settings::MAX_BLE_WRITE_SIZE)
+    else {
+        if let Some(Dialog::Chunk { error, .. }) = &mut app.dialog {
+            *error = Some(t(DLG_CHUNK_RANGE, lang).to_string());
+        }
+        return;
+    };
+
+    app.settings.ble_write_size = size;
+    let saved = super::settings::save(&app.settings);
+    app.dialog = None;
+    if let Err(err) = saved {
+        app.toast(
+            NoticeLevel::Warn,
+            tr!(t(super::i18n::MSG_SAVE_SETTINGS, lang), err),
+        );
+        return;
+    }
+    app.toast(NoticeLevel::Info, tr!(t(DLG_CHUNK_SAVED, lang), size));
+}
+
+/// Open the chunk-size box with the value currently in force. No link is
+/// needed: `connect::dial_options` reads the field at the next dial.
+pub fn open_chunk(app: &mut App) {
+    app.dialog = Some(Dialog::Chunk {
+        field: TextField::new(app.settings.ble_write_size.to_string()),
+        error: None,
+    });
+}
+
+/// Open the cheat sheet on its first command.
+pub fn open_cheat(app: &mut App) {
+    app.dialog = Some(Dialog::Cheat {
+        selected: 0,
+        scroll: 0,
+    });
+}
+
+/// Keys of the cheat sheet: a cursor over the commands, Enter to send.
+fn cheat_edit(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Esc {
+        app.dialog = None;
+        return;
+    }
+    let total = cheat_count();
+    if total == 0 {
+        return;
+    }
+    let last = total - 1;
+
+    if key.code == KeyCode::Enter {
+        let selected = match app.dialog.as_ref() {
+            Some(Dialog::Cheat { selected, .. }) => *selected,
+            _ => return,
+        };
+        let Some(cmd) = cheat_command(selected) else {
+            return;
+        };
+        let lang = app.lang();
+        // The web's chips are `disabled` until `setConnected()`, so a press
+        // with no link has to answer here: running the command into
+        // `send_text`'s gate would report nothing at all (the presets make the
+        // same point in `sidebar.rs`).
+        if !app.connected() {
+            app.toast(NoticeLevel::Warn, t(DLG_NOT_SENT, lang).to_string());
+            return;
+        }
+        // `data-cmd` verbatim, placeholders included, and the sheet stays open
+        // so several commands can go out in a row — clicking twice in the web
+        // does the same.
+        app.send_text(&format!("{cmd}\n"));
+        return;
+    }
+
+    let lang = app.lang();
+    let next = match app.dialog.as_ref() {
+        Some(Dialog::Cheat { selected, .. }) => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => (*selected + 1).min(last),
+            KeyCode::PageUp => selected.saturating_sub(10),
+            KeyCode::PageDown => (*selected + 10).min(last),
+            KeyCode::Home => 0,
+            KeyCode::End => last,
+            _ => return,
+        },
+        _ => return,
+    };
+
+    // Move the body so the line the cursor points at is inside the window
+    // `draw_dialog` is about to paint — `scroll_limit` is that window's exact
+    // mirror, so the scroll the keys pick is the one the painter applies.
+    let lines = cheat_lines(next, DIALOG_WIDTH, lang).len();
+    let limit = scroll_limit(app.screen_height, lines);
+    let viewport = (lines as u16).saturating_sub(limit);
+    let target = cheat_line_of(next) as u16;
+    let Some(Dialog::Cheat { selected, scroll }) = &mut app.dialog else {
+        return;
+    };
+    *selected = next;
+    if target < *scroll {
+        *scroll = target;
+    } else if target + 1 > *scroll + viewport {
+        *scroll = (target + 1).saturating_sub(viewport);
+    }
+    *scroll = (*scroll).min(limit);
 }
 
 fn uart_edit(app: &mut App, key: KeyEvent) {
@@ -970,8 +1346,16 @@ pub fn confirm(app: &mut App, kind: ConfirmKind) {
             }
             app.send_text("reboot\n")
         }
-        ConfirmKind::Disconnect => app.session.disconnect(),
-        ConfirmKind::Quit => app.quit = true,
+        ConfirmKind::Disconnect => {
+            // The break characters have to leave before the link does; after
+            // it, `send_bytes` drops them and the target keeps running.
+            super::transfer_view::abort_if_busy(app);
+            app.session.disconnect()
+        }
+        ConfirmKind::Quit => {
+            super::transfer_view::abort_if_busy(app);
+            app.quit = true
+        }
     }
 }
 
@@ -1356,6 +1740,67 @@ mod tests {
         assert_eq!(toast.text, t(DLG_NOT_SENT, app.lang()));
     }
 
+    /// Quit used to set `app.quit` and hand the transport straight to teardown,
+    /// which hung up on a live `rz`/`sz`: the target was left with an orphan
+    /// holding its console, and from the next screen nothing could free it.
+    /// The break characters therefore go out while the link is still up.
+    #[test]
+    fn confirming_the_quit_ask_stops_a_transfer_in_flight() {
+        let mut app = crate::tui::test_app();
+        app.transfer.engine.phase = crate::transfer::Phase::Run {
+            at: std::time::Instant::now(),
+        };
+        assert!(app.transfer.engine.busy());
+
+        confirm(&mut app, ConfirmKind::Quit);
+
+        assert!(app.quit, "the quit still happens");
+        assert!(
+            !app.transfer.engine.busy(),
+            "the run is stopped first: {:?}",
+            app.transfer.engine.outcome
+        );
+        assert_eq!(
+            app.transfer.message,
+            t(super::super::transfer_view::XFER_ABORTED, app.lang()).to_string()
+        );
+    }
+
+    /// Disconnect is the same exit by another door (the sidebar's ask), so it
+    /// takes the same stop: the two control characters are the only thing that
+    /// can still reach the target after this.
+    #[test]
+    fn confirming_the_disconnect_ask_stops_a_transfer_in_flight() {
+        let mut app = crate::tui::test_app();
+        app.transfer.engine.phase = crate::transfer::Phase::Run {
+            at: std::time::Instant::now(),
+        };
+
+        confirm(&mut app, ConfirmKind::Disconnect);
+
+        assert!(!app.transfer.engine.busy());
+        assert_eq!(
+            app.transfer.engine.detail(),
+            "Aborted.",
+            "the same reason Esc leaves behind"
+        );
+    }
+
+    /// The gate both exits share: an engine with nothing running must not come
+    /// away wearing an abort it never had.
+    #[test]
+    fn an_idle_transfer_is_left_alone_on_the_way_out() {
+        let mut app = crate::tui::test_app();
+        let detail = app.transfer.engine.detail();
+
+        confirm(&mut app, ConfirmKind::Quit);
+        assert_eq!(app.transfer.engine.detail(), detail);
+
+        confirm(&mut app, ConfirmKind::Disconnect);
+        assert_eq!(app.transfer.engine.detail(), detail);
+        assert!(app.transfer.message.is_empty());
+    }
+
     #[test]
     fn every_dlg_message_is_translated() {
         super::super::i18n::assert_bilingual(ALL);
@@ -1404,6 +1849,276 @@ mod tests {
                 "{first}"
             );
         }
+    }
+
+    /// `linkr-chunk` typed and saved: the number reaches the settings a dial
+    /// reads and the box closes. It opens with no link, because the value is
+    /// only spent at the next connect — which is when somebody finds out they
+    /// needed a different one.
+    #[test]
+    fn the_chunk_box_saves_a_number_into_the_settings() {
+        let mut app = crate::tui::test_app();
+        // The UART box refuses to open without a link (`open_uart`); this one
+        // must not, and that difference is the point.
+        app.state = crate::event::ConnectionState::Disconnected;
+        assert!(!app.connected(), "the premise: no link is needed");
+
+        open_chunk(&mut app);
+        assert_eq!(
+            app.dialog.as_ref().map(Dialog::title),
+            Some("BLE write chunk")
+        );
+        let Some(Dialog::Chunk { field, error }) = app.dialog.as_ref() else {
+            panic!("the chunk box opened");
+        };
+        assert_eq!(field.as_str(), "0", "it starts on auto");
+        assert!(error.is_none());
+
+        for c in ['1', '8', '0'] {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dialog.is_none(), "Enter saves and closes");
+        assert_eq!(app.settings.ble_write_size, 180);
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|toast| toast.text.ends_with("180")),
+            "the new value is reported: {:?}",
+            app.notices.toasts.last().map(|toast| toast.text.as_str())
+        );
+    }
+
+    /// The range is the input's own (`0`–`244`): a longer number is refused
+    /// *in* the box, leaving what was saved alone.
+    #[test]
+    fn the_chunk_box_refuses_a_number_the_input_cannot_hold() {
+        let mut app = crate::tui::test_app();
+        app.settings.ble_write_size = 64;
+        open_chunk(&mut app);
+
+        for _ in 0..2 {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            );
+        }
+        for c in "3000".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::Chunk { error, .. }) = app.dialog.as_ref() else {
+            panic!("the box stays open to show why");
+        };
+        assert_eq!(error.as_deref(), Some(t(DLG_CHUNK_RANGE, Lang::En)));
+        assert_eq!(app.settings.ble_write_size, 64, "nothing was saved");
+
+        // Esc closes without touching the setting either.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.settings.ble_write_size, 64);
+    }
+
+    /// The card's contents are the web's, in the web's order: `#cheatList`
+    /// as `web/app.js:863` builds it and WEB_UX_SPEC section 4 lists it. The
+    /// descriptions are not in the `strings!` table (they are table data, not
+    /// interface text), so this is where the missing-translation guard lives.
+    #[test]
+    fn the_cheat_sheet_lists_the_web_commands_in_order() {
+        let groups: Vec<&str> = CHEAT_GROUPS.iter().map(|(g, _)| t(*g, Lang::En)).collect();
+        assert_eq!(
+            groups,
+            [
+                "Files & Dirs",
+                "System",
+                "Network",
+                "Permissions & Processes"
+            ]
+        );
+        assert_eq!(
+            CHEAT_GROUPS
+                .iter()
+                .map(|(_, items)| items.len())
+                .collect::<Vec<_>>(),
+            [10, 5, 5, 5],
+            "four groups, twenty-five commands"
+        );
+        assert_eq!(cheat_count(), 25);
+
+        let commands: Vec<&str> = CHEAT_GROUPS
+            .iter()
+            .flat_map(|(_, items)| items.iter())
+            .map(|(cmd, _)| *cmd)
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "ls -l",
+                "cd <dir>",
+                "pwd",
+                "mkdir <dir>",
+                "cp -r a b",
+                "mv a b",
+                "rm -rf <dir>",
+                "cat <file>",
+                "grep \"x\" <f>",
+                "find . -name \"*.c\"",
+                "uname -a",
+                "df -h",
+                "free -h",
+                "top",
+                "uptime",
+                "ip a",
+                "ping <host>",
+                "ssh u@host",
+                "scp a u@h:",
+                "curl -I <url>",
+                "chmod 755 <f>",
+                "chown u:g <f>",
+                "ps aux",
+                "kill -9 <pid>",
+                "sudo <cmd>",
+            ]
+        );
+
+        assert_eq!(cheat_command(0), Some("ls -l"));
+        assert_eq!(cheat_command(24), Some("sudo <cmd>"));
+        assert_eq!(
+            cheat_command(25),
+            None,
+            "the cursor cannot point past the end"
+        );
+
+        for (_, items) in CHEAT_GROUPS.iter() {
+            for (cmd, desc) in items.iter() {
+                assert!(!desc[0].trim().is_empty(), "{cmd}: empty english");
+                assert!(!desc[1].trim().is_empty(), "{cmd}: empty chinese");
+                assert_ne!(desc[0], desc[1], "{cmd} was never translated");
+            }
+        }
+    }
+
+    /// Enter sends the highlighted command and leaves the sheet up, so a run
+    /// of commands can go out one after another (clicking twice in the web
+    /// does the same). The command is sent verbatim, `cd <dir>` and all.
+    #[test]
+    fn the_cheat_sheet_sends_the_highlighted_command_and_stays_open() {
+        let mut app = crate::tui::test_app();
+        app.settings.local_echo = true;
+        open_cheat(&mut app);
+
+        for _ in 0..2 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.dialog.as_ref().map(|dialog| dialog.title()),
+            Some("Cheat Sheet")
+        );
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            app.terminal.visible_text().contains("pwd"),
+            "the third command of the first group went out: {:?}",
+            app.terminal.visible_text()
+        );
+        assert!(
+            app.dialog.is_some(),
+            "the sheet stays open, unlike a one-shot prompt"
+        );
+        assert!(
+            !app.notices
+                .toasts
+                .iter()
+                .any(|toast| toast.text == t(DLG_NOT_SENT, Lang::En)),
+            "it went out, so nothing refused it: {:?}",
+            app.notices.toasts
+        );
+    }
+
+    /// The web's chips are `disabled` until `setConnected()`; ours are only
+    /// dimmed, so a press with no link has to *say* so instead of running
+    /// into `send_text`'s silent gate.
+    #[test]
+    fn the_cheat_sheet_says_so_when_there_is_no_link() {
+        let mut app = crate::tui::test_app();
+        app.settings.local_echo = true;
+        app.state = crate::event::ConnectionState::Disconnected;
+        open_cheat(&mut app);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let toast = app.notices.toasts.last().expect("it explains itself");
+        assert_eq!(toast.text, t(DLG_NOT_SENT, Lang::En));
+        assert!(
+            !app.terminal.visible_text().contains("ls -l"),
+            "nothing was sent"
+        );
+        assert!(app.dialog.is_some(), "the sheet stays up to be read");
+    }
+
+    /// On a terminal too short for the whole card the body scrolls with the
+    /// cursor: the line it points at is inside the window `draw_dialog` will
+    /// paint, at the bottom of the list and back at the top.
+    #[test]
+    fn the_cheat_sheet_keeps_the_cursor_line_on_screen() {
+        let mut app = crate::tui::test_app();
+        app.screen_height = 16;
+        open_cheat(&mut app);
+
+        for _ in 0..25 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let Some(Dialog::Cheat { selected, scroll }) = app.dialog.as_ref() else {
+            panic!("the sheet is open");
+        };
+        assert_eq!(*selected, 24, "the cursor stops on the last command");
+        let lines = cheat_lines(*selected, DIALOG_WIDTH, Lang::En).len();
+        let limit = scroll_limit(app.screen_height, lines);
+        let viewport = (lines as u16).saturating_sub(limit);
+        let target = cheat_line_of(*selected) as u16;
+        assert!(
+            *scroll <= target && target < *scroll + viewport,
+            "line {target} fell outside the window {scroll}..+{viewport}"
+        );
+        assert_eq!(
+            *scroll + viewport - 1,
+            target,
+            "the last command sits at the bottom of a window that short"
+        );
+
+        for _ in 0..40 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        let Some(Dialog::Cheat { selected, scroll }) = app.dialog.as_ref() else {
+            panic!("the sheet is open");
+        };
+        assert_eq!(*selected, 0, "the cursor runs back to the first command");
+        let target = cheat_line_of(*selected) as u16;
+        assert!(
+            *scroll <= target,
+            "the first command must be in view, scroll {scroll}, line {target}"
+        );
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(
+            app.dialog
+                .as_ref()
+                .map(|dialog| matches!(dialog, Dialog::Cheat { selected: 24, .. })),
+            Some(true),
+            "End jumps to the last command"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Esc closes the sheet");
     }
 
     #[test]

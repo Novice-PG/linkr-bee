@@ -71,6 +71,9 @@ pub struct SessionInfo {
 enum SessionCommand {
     Uart {
         bytes: Vec<u8>,
+        /// Terminal input latches the geometry sync's input line
+        /// (web `enqueueBytes` `trackPending`); transport answers must not.
+        track_input: bool,
     },
     Mgmt {
         cmd: String,
@@ -113,7 +116,24 @@ impl SessionHandle {
     /// session when the transport supports it; raw for LAN).
     pub fn send_uart(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
         self.tx
-            .send(SessionCommand::Uart { bytes })
+            .send(SessionCommand::Uart {
+                bytes,
+                track_input: true,
+            })
+            .map_err(|_| anyhow::anyhow!("session gone"))?;
+        Ok(())
+    }
+
+    /// Queue the terminal's own answers to the device (`DSR`/`CPR`). These are
+    /// not a line the user is typing, so unlike [`Self::send_uart`] they leave
+    /// the geometry sync's input line alone (web sends them with
+    /// `trackPending: false`).
+    pub fn send_reply(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
+        self.tx
+            .send(SessionCommand::Uart {
+                bytes,
+                track_input: false,
+            })
             .map_err(|_| anyhow::anyhow!("session gone"))?;
         Ok(())
     }
@@ -300,6 +320,15 @@ struct SessionTask {
     write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// Sleeps until the geometry machine's debounce expires; `None` (nothing due)
+/// parks forever so the select only ever wakes on a real deadline.
+async fn geometry_due(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 impl SessionTask {
     async fn run(
         mut self,
@@ -331,6 +360,17 @@ impl SessionTask {
                         return;
                     }
                 },
+                // The size sync's debounce is wall-clock, and an idle console
+                // sends no further RX to wake this loop: without this arm the
+                // first push would wait for bytes that never arrive (web arms
+                // `setTimeout(…, 180)` for the same reason).
+                () = geometry_due(
+                    self.geometry
+                        .as_ref()
+                        .and_then(TerminalGeometrySync::deadline),
+                ) => {
+                    self.geometry_tick().await;
+                }
             }
         }
     }
@@ -338,13 +378,26 @@ impl SessionTask {
     /// Returns `false` when the task must stop.
     async fn handle_command(&mut self, command: SessionCommand) -> bool {
         match command {
-            SessionCommand::Uart { bytes } => {
+            SessionCommand::Uart { bytes, track_input } => {
                 // Typed input invalidates the idle prompt we resize from
-                // (Python `send_payload`).
+                // (Python `send_payload`), and an unterminated line holds the
+                // `stty` back: written between two keystrokes it would split
+                // the command the user is still typing.
                 if let Some(geometry) = &mut self.geometry {
-                    geometry.mark_busy();
+                    if track_input {
+                        geometry.mark_input(&bytes);
+                    } else {
+                        geometry.mark_busy();
+                    }
                 }
                 if let Err(error) = self.write_uart(&bytes).await {
+                    if track_input {
+                        if let Some(geometry) = &mut self.geometry {
+                            // A partial write leaves the line's contents
+                            // unknown, so it stays pending until a terminator.
+                            geometry.latch_input();
+                        }
+                    }
                     self.bus.publish(CoreEvent::Notice {
                         level: NoticeLevel::Error,
                         text: error.to_string(),
@@ -1272,6 +1325,81 @@ mod tests {
         assert!(text.contains("stty rows "), "{text}");
         assert!(text.contains(" cols "), "{text}");
         assert!(text.ends_with(">/dev/null 2>&1\r"), "{text}");
+        mock.session.disconnect();
+    }
+
+    /// The replay-tail race: the user starts typing, and a trailing `…~$ `
+    /// arrives behind those keystrokes (the journal replay, a late prompt).
+    /// Firing there splits the command, so the sync has to wait for a line the
+    /// shell has actually taken.
+    #[tokio::test]
+    async fn the_geometry_sync_never_lands_inside_a_typed_line() {
+        let mock = spawn_mock(TransportKind::Ble, 0, true);
+        let prompt = |mock: &Mock| {
+            mock.hub.publish(TransportEvent::Data {
+                channel: TransportChannel::NusTx,
+                bytes: b"$ ".to_vec(),
+            })
+        };
+        let stty_sent = || -> bool {
+            // The `stty` line leaves as one reliable-UART frame split into
+            // 20-byte ATT chunks, so `stty rows` spans the header.
+            let joined: Vec<u8> = frames(&mock)
+                .iter()
+                .flat_map(|(_, frame)| frame.iter().copied())
+                .collect();
+            joined
+                .windows(b"stty rows".len())
+                .any(|window| window == b"stty rows")
+        };
+
+        // Typing first, prompt second: the open line wins.
+        mock.session
+            .send_uart(b"echo ZMQ".to_vec())
+            .expect("queued");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        prompt(&mock);
+        tokio::time::sleep(Duration::from_millis(400)).await; // well past the debounce
+        assert!(
+            !stty_sent(),
+            "the stty was typed into a line that is still open"
+        );
+
+        // Terminating the line reopens the gate; the next prompt fires there.
+        mock.session.send_uart(b"\r".to_vec()).expect("queued");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        prompt(&mock);
+        assert!(wait_for(stty_sent).await, "no stty after the line closed");
+        mock.session.disconnect();
+    }
+
+    /// A `DSR`/`CPR` answer is not terminal input: it must leave the input
+    /// line closed, or one reply to the device would stall the size push until
+    /// the next Enter (web sends replies with `trackPending: false`).
+    #[tokio::test]
+    async fn a_transport_reply_does_not_hold_the_size_sync_back() {
+        let mock = spawn_mock(TransportKind::Ble, 0, true);
+        mock.session
+            .send_reply(b"\x1b[40;1R".to_vec())
+            .expect("queued");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        mock.hub.publish(TransportEvent::Data {
+            channel: TransportChannel::NusTx,
+            bytes: b"$ ".to_vec(),
+        });
+        assert!(
+            wait_for(|| {
+                let joined: Vec<u8> = frames(&mock)
+                    .iter()
+                    .flat_map(|(_, frame)| frame.iter().copied())
+                    .collect();
+                joined
+                    .windows(b"stty rows".len())
+                    .any(|window| window == b"stty rows")
+            })
+            .await,
+            "one answer to the device stalled the size sync"
+        );
         mock.session.disconnect();
     }
 

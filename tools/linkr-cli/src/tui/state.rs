@@ -762,8 +762,13 @@ impl App {
     /// arrived from the device. Dropping the reply leaves the program that
     /// asked waiting for an answer it will never get — the gate is about typed
     /// keys, not about a protocol response to a message we already consumed.
+    ///
+    /// Routed as an untracked send for the same reason (web passes
+    /// `trackPending: false`): an answer must never latch the input line the
+    /// geometry sync waits on, or one `CPR` reply would stall the size push
+    /// until the next Enter.
     pub fn send_reply(&mut self, bytes: Vec<u8>) {
-        if let Err(err) = self.session.send_uart(bytes) {
+        if let Err(err) = self.session.send_reply(bytes) {
             self.notices.push(NoticeLevel::Error, err.to_string());
         }
     }

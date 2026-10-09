@@ -447,6 +447,16 @@ fn event_loop(
     //    never delays (and never prevents) the interface coming up, and its
     //    `linkr: …` chatter lands in the notice log above.
     if let Some(pending) = pending {
+        // `--debug-io` is a request for *this run*: the persisted setting is
+        // what every connect reads, so the flag seeds it here and the sidebar's
+        // Connect dials with the same answer instead of dropping back to off.
+        // Not written out — a flag must not rewrite the config file.
+        app.settings.debug_io |= pending.opts.debug_io;
+        // `--ble-write-size` likewise: 0 is "auto", so only a real override
+        // displaces what the settings hold.
+        if pending.opts.ble_write_size > 0 {
+            app.settings.ble_write_size = pending.opts.ble_write_size;
+        }
         connect::begin_cli(&mut app, pending.opts, pending.setup);
     }
 
@@ -583,6 +593,10 @@ fn event_loop(
     if let Some(agent) = app.agent.take() {
         agent.handle.stop();
     }
+    // Belt and braces for every way the loop was left — the quit dialog sets
+    // `app.quit` from several places, and a `break` on I/O failure sets none:
+    // stop a run in flight while the transport is still up, then hang up.
+    transfer_view::abort_if_busy(&mut app);
     if app.info.connected || app.state == ConnectionState::Connected {
         app.session.disconnect();
         let rt = app.rt.clone();
@@ -1159,7 +1173,10 @@ fn clipboard_answer(app: &mut App, job: &clipboard::ClipboardJob, took: bool) {
 /// pasting into it has to be inert rather than guessed at.
 fn field_has_focus(app: &App) -> bool {
     if let Some(dialog) = app.dialog.as_ref() {
-        return matches!(dialog, Dialog::Uart { .. } | Dialog::Settings(_));
+        return matches!(
+            dialog,
+            Dialog::Uart { .. } | Dialog::Chunk { .. } | Dialog::Settings(_)
+        );
     }
     if app.palette.is_some() {
         return true;
@@ -1460,6 +1477,10 @@ fn route_key(
         }
         View::Network => {
             network_view::handle_key(app, key);
+            // Whatever moved the selection moves the window with it, or the
+            // cursor walks off the pane and the next keypress moves a row
+            // nobody can see.
+            network_view::follow_selection(app);
             return;
         }
         View::Diagnostics => {
@@ -1560,6 +1581,11 @@ fn handle_center_scroll(app: &mut App, key: crossterm::event::KeyEvent) -> bool 
         _ => return false,
     };
     app.center_scroll = layout::page_scroll(app.center_scroll, limit, step, up);
+    // The window moved, and this view is the one whose rows can be selected:
+    // the cursor goes with it.
+    if app.view == View::Network {
+        network_view::follow_scroll(app);
+    }
     true
 }
 
@@ -2116,6 +2142,49 @@ mod tests {
                 .is_some_and(|t| t.text.contains("released")),
             "released is reported: {:?}",
             app.notices.toasts.last()
+        );
+    }
+
+    /// The reconciliation itself is `network_view::follow_selection` /
+    /// `follow_scroll`; what makes it happen is these two one-line calls — the
+    /// dispatch after the view's own key handling, and `handle_center_scroll`
+    /// after it moves the window. A one-line call is exactly what gets lost, so
+    /// the keys are what this pins, not the helpers.
+    #[test]
+    fn the_network_pane_keeps_the_selected_row_where_the_keys_put_it() {
+        let mut app = test_app();
+        app.view = View::Network;
+        app.focus = Focus::Center;
+        app.center_height = 6;
+        app.network.scan = (0..12)
+            .map(|i| crate::tui::replies::ScanResult {
+                ssid: format!("Net{i:02}"),
+                rssi: None,
+                channel: None,
+                security: None,
+            })
+            .collect();
+        let mut sticky = StickyMods::default();
+
+        for _ in 0..64 {
+            handle_key(
+                &mut app,
+                &mut sticky,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            );
+        }
+        assert!(
+            network_view::selection_visible(&app),
+            "walking to the last row dragged the window along; scroll {}",
+            app.center_scroll
+        );
+
+        handle_center_scroll(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(
+            network_view::selection_visible(&app),
+            "a page key carries the cursor with it; scroll {} selection {}",
+            app.center_scroll,
+            app.network.selection
         );
     }
 

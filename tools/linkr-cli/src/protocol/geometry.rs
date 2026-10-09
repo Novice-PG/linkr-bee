@@ -1,14 +1,26 @@
 //! Terminal geometry sync: port of `TerminalGeometrySync` and friends.
 //! The emitted command must stay byte-identical to web/terminal_geometry.js:
 //! `stty rows {rows} cols {cols} >/dev/null 2>&1\r`.
+//!
+//! Two gates keep the command off a line the console is busy with, both lifted
+//! from the web client (`scheduleTerminalGeometrySync` in web/app.js), which
+//! WEB_UX_SPEC 3.7 states as: "180 ms debounce, only with an idle shell prompt
+//! visible". Without them the `stty` lands between two keystrokes of a command
+//! the user is still typing — the shell executes the fragments, and the
+//! remainder runs as a command of its own.
 
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
 pub const MIN_DIMENSION: u32 = 2;
 pub const MAX_DIMENSION: u32 = 1000;
 pub const GEOMETRY_LINE_BUFFER: usize = 1024;
+/// WEB_UX_SPEC 3.7: the sync waits this long after an idle prompt before it
+/// writes, and re-checks the prompt, the input line and the geometry when the
+/// timer fires (web: `setTimeout(…, 180)`).
+pub const GEOMETRY_DEBOUNCE_MS: u64 = 180;
 
 /// Clamp rows/cols the way the web client does
 /// (`clampDimension`: non-finite falls back to the minimum, then the value is
@@ -51,6 +63,20 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
         || re(r"^\[[^\]]+\]$", &BRACKET).is_match(prefix)
 }
 
+/// The last local send closed its line, i.e. it carried a terminator.
+///
+/// Mirror of web `inputLeavesPendingLine` (web/agent_execution_policy.js):
+/// every byte overwrites the flag, so only a CR, LF or `^C` that arrives *last*
+/// closes the line — backspace, cursor movement and plain text all leave the
+/// line's contents unknown, which is what holds the sync off a half-typed
+/// command.
+fn input_leaves_pending_line(bytes: &[u8], mut pending: bool) -> bool {
+    for byte in bytes {
+        pending = !matches!(*byte, b'\n' | b'\r' | 0x03);
+    }
+    pending
+}
+
 /// Tell the target its terminal size, but only at an idle shell prompt.
 ///
 /// The UART carries a live console, so an stty line sent while a command owns
@@ -63,6 +89,14 @@ pub struct TerminalGeometrySync {
     synced: String,
     in_flight: String,
     prompt_visible: bool,
+    /// The user's input line is still open: the last tracked local send had no
+    /// CR/LF/^C (web `serialInputPending`). A prompt observed while this is set
+    /// — the journal replay's trailing `…~$ ` behind a few keystrokes, say —
+    /// must not re-arm the sync.
+    input_pending: bool,
+    /// When the prompt was last seen idle; the command is due once this is
+    /// [`GEOMETRY_DEBOUNCE_MS`] old.
+    armed_at: Option<Instant>,
     line: String,
 }
 
@@ -76,6 +110,8 @@ impl TerminalGeometrySync {
             synced: String::new(),
             in_flight: String::new(),
             prompt_visible: false,
+            input_pending: false,
+            armed_at: None,
             line: String::new(),
         }
     }
@@ -92,10 +128,27 @@ impl TerminalGeometrySync {
         &self.key
     }
 
-    /// Called on every local send: the prompt is no longer idle.
+    /// Called on every local send: the prompt is no longer idle
+    /// (PYTHON_CLI_SPEC 7: `mark_busy(): prompt_visible = false; line = ""`).
     pub fn mark_busy(&mut self) {
         self.prompt_visible = false;
         self.line.clear();
+        self.armed_at = None;
+    }
+
+    /// Terminal input: latch the line open as well (web `enqueueBytes(…,
+    /// {trackPending: true})`), so nothing goes out until the shell has taken
+    /// the line and printed a fresh prompt.
+    pub fn mark_input(&mut self, bytes: &[u8]) {
+        self.input_pending = input_leaves_pending_line(bytes, self.input_pending);
+        self.mark_busy();
+    }
+
+    /// A send that failed mid-line leaves the line's contents unknown: web
+    /// latches `serialInputPending` in `enqueueBytes`'s catch for the same
+    /// reason, so the sync waits for a terminator instead of guessing.
+    pub fn latch_input(&mut self) {
+        self.input_pending = true;
     }
 
     /// Called with every received payload (UTF-8 lossy text).
@@ -111,16 +164,43 @@ impl TerminalGeometrySync {
                 self.line.drain(..first);
             }
         }
-        self.prompt_visible = looks_like_shell_prompt(&self.line);
+        let visible = looks_like_shell_prompt(&self.line);
+        self.prompt_visible = visible;
+        // Every idle prompt (re)starts the debounce: web re-arms its 180 ms
+        // timer on each parse, so a prompt that is immediately superseded by
+        // output never reaches the wire.
+        self.armed_at = visible.then(Instant::now);
+    }
+
+    /// Whether a command is queued but not yet due.
+    fn armed(&self) -> bool {
+        self.prompt_visible
+            && !self.input_pending
+            && self.key != self.synced
+            && self.key != self.in_flight
+    }
+
+    /// When [`Self::take_pending_command`] first becomes due, so the session
+    /// can arm a timer: an idle console sends no further RX, and without a
+    /// timer the first size push would wait for bytes that never come.
+    pub fn deadline(&self) -> Option<Instant> {
+        if !self.armed() {
+            return None;
+        }
+        Some(self.armed_at? + Duration::from_millis(GEOMETRY_DEBOUNCE_MS))
     }
 
     /// Returns the stty command when a new, idle, unsynced geometry is due.
     pub fn take_pending_command(&mut self) -> Option<String> {
-        if !self.prompt_visible || self.key == self.synced || self.key == self.in_flight {
+        if !self.armed() {
+            return None;
+        }
+        if self.armed_at?.elapsed() < Duration::from_millis(GEOMETRY_DEBOUNCE_MS) {
             return None;
         }
         self.in_flight = self.key.clone();
         self.prompt_visible = false;
+        self.armed_at = None;
         Some(terminal_geometry_command(self.cols, self.rows))
     }
 
@@ -136,6 +216,13 @@ impl TerminalGeometrySync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The debounce runs on wall time (web `setTimeout(…, 180)`), so a test
+    /// that wants the command has to let it elapse first.
+    fn due(sync: &mut TerminalGeometrySync) -> Option<String> {
+        std::thread::sleep(Duration::from_millis(GEOMETRY_DEBOUNCE_MS + 10));
+        sync.take_pending_command()
+    }
 
     // ---- TerminalGeometryTests ------------------------------------------
 
@@ -214,8 +301,11 @@ mod tests {
         assert_eq!(sync.take_pending_command(), None);
 
         sync.observe("root@target:~$ ");
+        // WEB_UX_SPEC 3.7: 180 ms debounce — the tick that saw the prompt
+        // must not write anything.
+        assert_eq!(sync.take_pending_command(), None);
         assert_eq!(
-            sync.take_pending_command().as_deref(),
+            due(&mut sync).as_deref(),
             Some("stty rows 24 cols 80 >/dev/null 2>&1\r")
         );
         // In flight: a second prompt must not queue a duplicate.
@@ -229,7 +319,7 @@ mod tests {
     fn geometry_sync_resends_after_a_resize() {
         let mut sync = TerminalGeometrySync::new(80, 24);
         sync.observe("root@target:~$ ");
-        sync.take_pending_command();
+        due(&mut sync);
         sync.confirm_sent();
 
         sync.set_size(120, 40);
@@ -237,7 +327,7 @@ mod tests {
         assert_eq!(sync.take_pending_command(), None);
         sync.observe("root@target:~$ ");
         assert_eq!(
-            sync.take_pending_command().as_deref(),
+            due(&mut sync).as_deref(),
             Some("stty rows 40 cols 120 >/dev/null 2>&1\r")
         );
     }
@@ -248,16 +338,17 @@ mod tests {
         sync.observe("root@target:~$ ");
         sync.mark_busy();
         assert_eq!(sync.take_pending_command(), None);
+        assert_eq!(sync.deadline(), None, "an unobserved prompt arms no timer");
     }
 
     #[test]
     fn geometry_sync_retries_after_a_failed_send() {
         let mut sync = TerminalGeometrySync::new(80, 24);
         sync.observe("root@target:~$ ");
-        sync.take_pending_command();
+        due(&mut sync);
         sync.abort_sent();
         sync.observe("root@target:~$ ");
-        assert!(sync.take_pending_command().is_some());
+        assert!(due(&mut sync).is_some());
     }
 
     #[test]
@@ -273,7 +364,7 @@ mod tests {
         sync.observe("$ ");
         assert!(looks_like_shell_prompt(&sync.line));
         assert_eq!(
-            sync.take_pending_command().as_deref(),
+            due(&mut sync).as_deref(),
             Some("stty rows 24 cols 80 >/dev/null 2>&1\r")
         );
 
@@ -292,5 +383,100 @@ mod tests {
         sync.observe(&long);
         assert_eq!(sync.line.chars().count(), GEOMETRY_LINE_BUFFER);
         assert!(sync.line.is_char_boundary(sync.line.len()));
+    }
+
+    // ---- WEB_UX_SPEC 3.7: 180 ms debounce + idle input line ---------------
+
+    #[test]
+    fn geometry_sync_debounces_before_writing() {
+        let mut sync = TerminalGeometrySync::new(80, 24);
+        sync.observe("root@target:~$ ");
+        // The tick that saw the prompt only arms the timer; nothing is due
+        // until `GEOMETRY_DEBOUNCE_MS` has passed (web: `setTimeout(…, 180)`).
+        assert_eq!(sync.take_pending_command(), None);
+        let deadline = sync
+            .deadline()
+            .expect("an idle prompt arms the session timer");
+        assert!(
+            deadline > Instant::now(),
+            "the deadline must sit in the future"
+        );
+        assert!(due(&mut sync).is_some());
+    }
+
+    #[test]
+    fn geometry_sync_stays_off_while_the_input_line_is_open() {
+        // The race this covers: the journal replay's trailing `…~$ ` arrives
+        // behind keystrokes the user has already sent. The prompt is real, but
+        // the line is not idle — writing the `stty` there splits the command
+        // and the shell executes both halves as separate commands.
+        let mut sync = TerminalGeometrySync::new(80, 24);
+        sync.mark_input(b"echo ZMQ");
+        assert!(sync.input_pending, "a line without a terminator is open");
+
+        sync.observe("kickpi@kickpi-k2b:~$ ");
+        std::thread::sleep(Duration::from_millis(GEOMETRY_DEBOUNCE_MS + 10));
+        assert_eq!(
+            sync.take_pending_command(),
+            None,
+            "an open input line must hold the sync back"
+        );
+        assert_eq!(
+            sync.deadline(),
+            None,
+            "an open input line must not arm the timer"
+        );
+
+        // Terminating the line reopens the gate: once the shell prints a fresh
+        // prompt behind it, the sync goes out there and only there.
+        sync.mark_input(b"\r");
+        assert!(!sync.input_pending, "CR closes the line");
+        sync.observe("kickpi@kickpi-k2b:~$ ");
+        assert!(due(&mut sync).is_some());
+    }
+
+    #[test]
+    fn a_partially_delivered_line_latches_the_sync() {
+        let mut sync = TerminalGeometrySync::new(80, 24);
+        sync.mark_input(b"uname -a\r");
+        assert!(!sync.input_pending);
+        sync.latch_input();
+        sync.observe("root@target:~$ ");
+        assert_eq!(sync.deadline(), None);
+        assert_eq!(sync.take_pending_command(), None);
+    }
+
+    #[test]
+    fn answers_to_the_device_never_latch_the_line() {
+        // A `DSR`/`CPR` reply is not terminal input (web sends it with
+        // `trackPending: false`): it must leave the line closed, or a single
+        // answer would hold the size sync back until the next Enter.
+        let mut sync = TerminalGeometrySync::new(80, 24);
+        sync.mark_input(b"echo hi\r");
+        sync.mark_busy(); // what a transport reply does
+        assert!(!sync.input_pending);
+        sync.observe("root@target:~$ ");
+        assert!(sync.deadline().is_some());
+        assert!(due(&mut sync).is_some());
+    }
+
+    #[test]
+    fn the_pending_line_rule_matches_the_web_client() {
+        assert!(input_leaves_pending_line(b"echo hi", false));
+        assert!(!input_leaves_pending_line(b"\r", true));
+        // Only the last byte decides; backspace and cursor movement leave the
+        // line's contents unknown, so they keep it pending.
+        assert!(input_leaves_pending_line(b"ab\x7f", false));
+        assert!(input_leaves_pending_line(b"ab\x1b[C", false));
+        assert!(!input_leaves_pending_line(b"ab\x03", false));
+        assert!(input_leaves_pending_line(b"", true), "no send, no change");
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../web/agent_execution_policy.js");
+        let web = std::fs::read_to_string(path).expect("read agent_execution_policy.js");
+        assert!(
+            web.contains("pending = byte !== 10 && byte !== 13 && byte !== 3"),
+            "web inputLeavesPendingLine changed its terminator rule"
+        );
     }
 }

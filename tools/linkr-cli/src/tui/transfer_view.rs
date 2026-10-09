@@ -235,6 +235,21 @@ pub fn escape(app: &mut App) -> bool {
     false
 }
 
+/// Stop a run before the link or the process goes away.
+///
+/// Quit and disconnect used to hang up on a running `rz`/`sz`: the target was
+/// left with an orphan holding its console, and a pane that had gone could no
+/// longer send the break characters that would free it. So the two control
+/// characters go out while the transport is still up, ahead of
+/// `session.disconnect()` — the same stop [`escape`] takes, reached from the
+/// exits instead of from the keyboard. Gated on [`Transfer::busy`] so an idle
+/// engine does not repaint an untouched view as "Transfer aborted."
+pub fn abort_if_busy(app: &mut App) {
+    if app.transfer.engine.busy() {
+        abort(app);
+    }
+}
+
 // --- frame loop --------------------------------------------------------------
 
 /// Time, then bytes. Called every iteration of the event loop, whatever view
@@ -607,6 +622,29 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 mod tests {
     use super::super::test_app;
     use super::*;
+    use std::time::Instant;
+
+    /// The stop the exits take. Two things must hold at once: a run in flight
+    /// ends up stopped, and an idle engine is not painted as aborted on the
+    /// way out of the program.
+    #[test]
+    fn stopping_on_the_way_out_only_touches_a_run_in_flight() {
+        let mut idle = test_app();
+        let detail = idle.transfer.engine.detail();
+        abort_if_busy(&mut idle);
+        assert_eq!(idle.transfer.engine.detail(), detail);
+        assert!(idle.transfer.message.is_empty());
+
+        let mut running = test_app();
+        running.transfer.engine.phase = Phase::Run { at: Instant::now() };
+        abort_if_busy(&mut running);
+        assert!(!running.transfer.engine.busy());
+        assert_eq!(running.transfer.engine.detail(), "Aborted.");
+        assert_eq!(
+            running.transfer.message,
+            t(XFER_ABORTED, running.lang()).to_string()
+        );
+    }
 
     /// The messages are the interface: both languages, and none of them a
     /// copy of the other.

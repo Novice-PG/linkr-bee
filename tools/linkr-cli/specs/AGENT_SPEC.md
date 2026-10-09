@@ -930,24 +930,30 @@ validateAgentConfig(config) -> normalized
 ```
 Fields: `{provider, endpoint, apiKey, model, systemPrompt?, contextWindow, maxTokens, headers, reasoning, temperature?, pricing}`.
 
-Normalization rules:
+Normalization rules (each `throw` below is rendered by the settings form, §12.3):
 * `provider` must be one of `AGENT_PROVIDER_IDS` (`openai-completions | anthropic-messages | google-generative-ai`), else `"openai-completions"`.
-* `endpoint` must be a valid `http(s)` URL, else `""` → the run fails with `Enter an API endpoint before chatting.`
-* `model` non-empty, else `Choose a model before chatting.`
-* `contextWindow` default `AGENT_DEFAULT_CONTEXT_WINDOW = 32768`, clamped `[2048, 2000000]`.
-* `maxTokens` default `AGENT_DEFAULT_MAX_TOKENS = 4096`, clamped `[1, 32768]`.
-* `reasoning` ∈ `"off" | "low" | "medium" | "high"`, default `"off"`.
-* `headers` object of strings.
+* `endpoint` must parse as an `http(s)` URL with no username, password, query or fragment, else it throws `endpoint`. There is no `""` fallback: `loadAgentConfig` turns any throw into `null`, so a bad record reads as "no configuration saved".
+* `model` must be a non-blank string after `trim()`, else it throws `model`.
+* `contextWindow` default `AGENT_DEFAULT_CONTEXT_WINDOW = 32768`, clamped `[1000, 2000000]`.
+* `maxTokens` default `AGENT_DEFAULT_MAX_TOKENS = 4096`, clamped `[1, 100000]`.
+* `0` means "use the built-in default" in both numeric fields: it is accepted unclamped (the bounds only apply when `value !== 0`) and resolved at every use site (`contextWindow || 32768`, `maxTokens || 4096`, §4/§8).
+* `reasoning` ∈ `"off" | "low" | "medium" | "high"`, default `"off"`, else it throws `reasoning`.
+* `headers` object of strings, at most **8** entries, names `^[A-Za-z0-9-]{1,64}$`, values ≤ 256 chars with no control characters, else it throws `headers`.
 * `apiKey` optional — request uses `apiKey: config.apiKey || "keyless"` (§1.2).
 
-Validation error messages (exact):
+Validation error messages (exact — the `agent_settings.js` labels that render the throws above; same list as `WEB_UX_SPEC.md:497`):
 ```
-Enter an API endpoint before chatting.
-Choose a model before chatting.
-Context window must be a number between 2048 and 2000000.
-Max output tokens must be a number between 1 and 32768.
-Reasoning must be off, low, medium or high.
+Enter an HTTP(S) API base URL without credentials, query parameters or a fragment.
+Enter a model ID.
+Choose an API protocol.
+Choose a reasoning effort.
+Context window must be 0, or an integer between 1000 and 2000000.
+Max output tokens must be 0, or an integer between 1 and 100000.
+Invalid headers: use one `Name: value` per line, with names limited to letters, digits and hyphens.
 ```
+The pricing editor's own message (§12.3) is `Prices must be numbers between 0 and 100000.`
+
+Asking with no saved configuration fails no run in web: the submit handler opens the settings dialog and returns, so web never prints a message here. The TUI instead fails the run with its own `Enter an API endpoint before chatting.` / `Choose a model before chatting.` (`agent/mod.rs`) — TUI-only strings, absent from `web/` and `mobile/`.
 
 ### 12.2 Storage
 

@@ -73,15 +73,25 @@ pub fn start(app: &mut App) -> Result<(), String> {
         let store = crate::lan_token_store::TokenStore::load();
         super::sidebar::fill_token_from_store(app, &store);
     }
-    let opts = SessionOptions {
-        transport: spec(app)?,
-        ble_write_size: 0,
-        log_file: None,
-        debug_io: false,
-        geometry: false,
-    };
+    let opts = dial_options(app)?;
     begin(app, opts, SessionSetup::default());
     Ok(())
+}
+
+/// What a dial from this form starts with.
+///
+/// Split out of [`start`] because the switches it carries are the ones a
+/// reconnect has to keep: this literal used to rebuild them from nothing, so
+/// `--debug-io` (and now the palette's toggle) survived exactly one connect and
+/// then went quiet.
+fn dial_options(app: &App) -> Result<SessionOptions, String> {
+    Ok(SessionOptions {
+        transport: spec(app)?,
+        ble_write_size: app.settings.ble_write_size,
+        log_file: None,
+        debug_io: app.settings.debug_io,
+        geometry: false,
+    })
 }
 
 /// The target the form describes, or the reason it is not dialable yet (pure:
@@ -603,6 +613,37 @@ mod tests {
             .last()
             .expect("the refusal explains itself");
         assert_eq!(toast.text, t(CONN_CONNECTING, app.lang()));
+    }
+
+    /// The switches a reconnect dials with are the ones the settings hold.
+    /// This literal used to be built from nothing, so `--debug-io` and the
+    /// palette's controls both survived exactly one connect and then went
+    /// quiet — which is the whole of "no switch for Debug I/O / chunk size".
+    #[test]
+    fn a_dial_carries_the_persisted_switches() {
+        let mut app = test_app();
+        app.state = ConnectionState::Disconnected;
+        app.settings.transport = TransportChoice::Lan;
+        app.sidebar.lan_host.set("192.168.0.104".to_string());
+
+        let options = dial_options(&app).expect("a dialable LAN form");
+        assert!(
+            !options.debug_io,
+            "off by default, the way the web checkbox starts"
+        );
+        assert_eq!(
+            options.ble_write_size, 0,
+            "0 is `--ble-write-size`'s auto: a plain 23-byte MTU comes out at the web's 20"
+        );
+
+        app.settings.debug_io = true;
+        app.settings.ble_write_size = 180;
+        let options = dial_options(&app).expect("a dialable LAN form");
+        assert!(options.debug_io, "the next connect has to see the switch");
+        assert_eq!(
+            options.ble_write_size, 180,
+            "and the chunk size the dialog saved"
+        );
     }
 
     /// `begin` reports the state immediately; the outcome only ever lands

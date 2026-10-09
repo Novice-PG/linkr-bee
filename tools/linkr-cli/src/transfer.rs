@@ -71,13 +71,43 @@ pub const CHUNK_INTERVAL: Duration = Duration::from_millis(25);
 /// 45 s still covers a target that is busy.
 const STEP_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Hard ceiling on one ZMODEM run, so a wedged peer cannot pin the view open
-/// for the rest of the session.
-const RUN_TIMEOUT: Duration = Duration::from_secs(1800);
+/// A run that has not moved a single byte for this long is wedged, not slow.
+///
+/// This is the check a ceiling could never be: it can say so *while* the
+/// transfer is still on screen, instead of one verdict at the end for the
+/// whole run. The byte counter only stops growing when the peer has genuinely
+/// stopped — `sz` blocks once its pipe fills because the target has stopped
+/// acknowledging, and `rz` blocks because nothing arrives — so "no byte has
+/// crossed the link for ninety seconds" is the condition a stalled ZMODEM
+/// transfer actually has, at any file size.
+const STALL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Absolute ceiling on one ZMODEM run, far above [`STALL_TIMEOUT`], so even a
+/// peer that trickles one byte short of a stall cannot pin the view open for
+/// the rest of the session.
+///
+/// The original 1800 s was a ceiling on the *transfer* rather than on a
+/// wedge. Measured end to end the link does about 2 KiB/s — 512 KiB took
+/// 316 s on a Bee, with every ATT write waiting out its own round trip — so
+/// that budget covered roughly 3.5 MiB and then cut the transfer off while
+/// all of its bytes were still arriving. [`STALL_TIMEOUT`] is what bounds a
+/// wedged run now; this only bounds an absurd one.
+const RUN_TIMEOUT: Duration = Duration::from_secs(7200);
 
 /// After the host's process exits, how long to keep watching for the target's
-/// own `rc` line before deciding it is not coming.
-const SETTLE: Duration = Duration::from_millis(1500);
+/// own `rc` line before falling back on the host's clean exit.
+///
+/// It is the launch step's own budget rather than a grace period, because the
+/// gap is not idle time: while the target is still *inside* `rz` that shell
+/// reads stdin in raw mode, so anything typed at it is eaten as ZMODEM data —
+/// no echo, no execution. The gap was measured on the Bee at **12.8 s** and
+/// again at **56.0 s**, both times because the sender's `OO` never reached the
+/// receiver (see `pump`). 1.5 s called that `Sent`; the round-trip's receive
+/// command was then typed straight into the busy console and the run died on
+/// the step timeout. The report is the only thing that proves the console is
+/// back, so it gets the whole budget to arrive — and only after it does the
+/// host's clean exit stand in for a target that never spoke.
+const SETTLE: Duration = STEP_TIMEOUT;
 
 /// Cap on captured command output kept for parsing: the pager's largest page
 /// plus its markers, with room to spare. Past this the target is talking to
@@ -250,8 +280,71 @@ fn launch_send(source: &str) -> Result<String, String> {
 
 /// Wrap a body so it reports its own exit status under this step's sequence
 /// number. The result is one line, and it never *begins* with [`MARKER`].
+///
+/// The report opens a line of its own, and it has to: what precedes it is not
+/// blank. Once `rz`/`sz` has held the port, the target's last byte before the
+/// report is the end of a ZMODEM frame (`\x8a`) and **not** a newline, so a
+/// bare `printf '…rc…'` would land glued to `**\x18B…`. [`Transfer::on_marker`]
+/// only reads a marker at position zero — that is what keeps the target's own
+/// echo from answering — so the report would go unread, `launch_rc` would stay
+/// `None`, and the run would end on the [`SETTLE`] fallback instead of on the
+/// target's word. Measured: the Bee's `rc` arrived glued, 12.8 s late.
 fn wrap(seq: u32, body: &str) -> String {
-    format!("{body}; printf '{MARKER}rc {seq} %s\\n' \"$?\"")
+    format!("{body}; printf '\\n{MARKER}rc {seq} %s\\n' \"$?\"")
+}
+
+/// Drop the control noise a console prints around a line, leaving what the
+/// line actually says: escape sequences anywhere, then the control characters
+/// and blanks sitting in front of it.
+///
+/// [`Transfer::on_marker`] matches `MARKER` at the *start* of a line, which
+/// is what keeps the target's own echo from answering — the echoed command
+/// carries `MARKER` inside its `printf '…'`, but never at position zero
+/// (see the `no_command_begins_with_the_marker` test). A shell prefixes the line too:
+/// bash switches bracketed paste off (`\e[?2004l`) the instant it executes
+/// one, so the **first** line of every command's output arrives glued to
+/// that escape. `go` is the launch's first and only word before `rz` takes
+/// the port, so without this the run never leaves `Cmd`, dies on the step
+/// timeout, and `rz` waits forever for bytes that are never sent.
+fn strip_console_noise(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameter and intermediate bytes, then one final byte.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: runs until BEL or a string terminator (`ESC \`).
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // ESC intermediates (a byte in 0x20..=0x2F) are followed by the
+            // final byte; anything else was the two-byte form already.
+            Some(c) if ('\u{20}'..='\u{2f}').contains(&c) => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    out.trim_start_matches(|c: char| c.is_control() || c.is_whitespace())
+        .to_string()
 }
 
 /// Why a step was typed; decides what its captured output is parsed as.
@@ -394,6 +487,12 @@ impl HostProc {
         if bytes.is_empty() {
             return;
         }
+        // The field's contract is "bytes handed to the link (a send) or taken
+        // from it (a receive)", but only the sending half ever counted. A
+        // download therefore sat at `0 B` for its whole run — and, worse,
+        // left [`Transfer`] nothing to tell a transfer that is still moving
+        // from one whose peer has gone quiet.
+        self.moved += bytes.len() as u64;
         self.in_pending.push_back(bytes.to_vec());
         self.flush();
     }
@@ -511,6 +610,13 @@ pub struct Transfer {
     pub outcome: Outcome,
     /// Bytes moved, for the progress line.
     pub moved: u64,
+    /// When a byte last crossed the link in either direction. `None` outside
+    /// a run, where there is nothing to be wedged.
+    ///
+    /// It is what [`STALL_TIMEOUT`] is measured against, and what makes a
+    /// stalled transfer reportable *while* it is still on screen rather than
+    /// only at the end of a hard ceiling.
+    pub last_progress: Option<Instant>,
     /// Total, when the direction makes it known.
     pub total: Option<u64>,
     /// The host child's diagnostic stream, for the status line.
@@ -552,6 +658,7 @@ impl Default for Transfer {
             phase: Phase::Idle,
             outcome: Outcome::Idle,
             moved: 0,
+            last_progress: None,
             total: None,
             status: String::new(),
             queue: VecDeque::new(),
@@ -890,9 +997,22 @@ impl Transfer {
             .map_err(|err| err.to_string())
     }
 
-    /// Bytes for the link this tick: what we are typing first, then — and only
-    /// while the child owns the line — the child's own stream. One chunk per
-    /// interval, whatever either of them produced.
+    /// Bytes for the link this tick: what we are typing first, then — while the
+    /// child still has a claim on the line, which outlives the phase change —
+    /// the child's own stream. One chunk per interval, whatever either of them
+    /// produced.
+    ///
+    /// [`Phase::Settle`] counts, and the difference is the protocol itself.
+    /// `sz` writes `OO` and exits in the same breath; the frame loop reads
+    /// *time* before *bytes*, so by the time `pump` runs, `poll` has already
+    /// reaped the exit and the phase is no longer `Run`. Gating the child on
+    /// `Run` alone therefore left `OO` sitting in the pipe for good — the
+    /// receiver then waits for a frame that never arrives. Measured on the
+    /// Bee: `rz` held the console **56.0 s** for an `OO` the host had already
+    /// dropped, the run ended on the [`SETTLE`] fallback, and the next
+    /// transfer typed straight into a shell `rz` still owned. Locally the same
+    /// code passes, because `sz`'s exit is not reaped within the ~0.4 ms that
+    /// separates `08` from `OO`.
     pub fn pump(&mut self, now: Instant) -> Option<Vec<u8>> {
         if let Some(next) = self.next_at {
             if now < next {
@@ -906,7 +1026,7 @@ impl Transfer {
                 out.push(self.queue.pop_front().expect("bounded by take"));
             }
             Some(out)
-        } else if matches!(self.phase, Phase::Run { .. }) {
+        } else if matches!(self.phase, Phase::Run { .. } | Phase::Settle { .. }) {
             self.proc.as_mut()?.pump()
         } else {
             None
@@ -942,6 +1062,14 @@ impl Transfer {
 
     /// Pop the next complete line out of the rolling buffer, dropping the `\r`
     /// a console adds. An incomplete line is kept, never guessed at.
+    ///
+    /// A line is decoded lossily, not rejected. Once `rz`/`sz` has had the
+    /// port the line in front of the report is a ZMODEM frame, and it ends
+    /// `\x8a` — not UTF-8. Rejecting it would return `None`, end [`on_rx`]'s
+    /// scan loop, and strand every line still buffered behind it; on the Bee
+    /// the `rc` that follows a frame is the last `\n` the shell prints before
+    /// a newline-less prompt, so it would never be read at all. The marker it
+    /// carries is ASCII and survives.
     fn take_scan_line(&mut self) -> Option<String> {
         let end = self.scan.iter().position(|b| *b == b'\n')?;
         let mut line = self.scan.drain(..=end).collect::<Vec<u8>>();
@@ -949,11 +1077,13 @@ impl Transfer {
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        String::from_utf8(line).ok()
+        Some(String::from_utf8_lossy(&line).into_owned())
     }
 
+    /// Read one line the target printed as an answer, if it is one.
     fn on_marker(&mut self, line: &str) {
-        let Some(rest) = line.strip_prefix(MARKER) else {
+        let cleaned = strip_console_noise(line);
+        let Some(rest) = cleaned.strip_prefix(MARKER) else {
             return;
         };
         // The verb and the whole tail after it — never the tail cut into
@@ -974,6 +1104,10 @@ impl Transfer {
                     // The command has been typed in full — nothing of it is
                     // left to send, and only the child owns the link now.
                     self.queue.clear();
+                    // The stall budget starts here, not at the first byte: a
+                    // run that never sees one must still be able to report
+                    // itself wedged rather than wait out the ceiling.
+                    self.last_progress = Some(Instant::now());
                     self.phase = Phase::Run {
                         at: Instant::now() + RUN_TIMEOUT,
                     };
@@ -1203,7 +1337,14 @@ impl Transfer {
                     return;
                 };
                 self.status = status;
+                // A byte that crossed the link is the only proof the peer is
+                // still there, so note the moment before the counter is
+                // overwritten — the comparison *is* the check.
+                let progressed = moved != self.moved;
                 self.moved = moved;
+                if progressed {
+                    self.last_progress = Some(now);
+                }
                 match code {
                     Some(0) => {
                         self.phase = Phase::Settle {
@@ -1215,6 +1356,21 @@ impl Transfer {
                         "lrzsz on this host exited {other}. {}",
                         self.status.trim()
                     )),
+                    // No byte for long enough and the peer is wedged, not
+                    // slow. A ceiling could only have said this once, at the
+                    // end, and about the whole run at once: `sz` stops
+                    // producing when the target stops acknowledging, and `rz`
+                    // stops when nothing arrives, so a stalled transfer has
+                    // nothing crossing the link to point at — at any size.
+                    None if self
+                        .last_progress
+                        .is_some_and(|since| now.duration_since(since) >= STALL_TIMEOUT) =>
+                    {
+                        self.fail(format!(
+                            "The transfer stalled: nothing crossed the link for {}s.",
+                            STALL_TIMEOUT.as_secs()
+                        ));
+                    }
                     None if now >= at => {
                         self.stop_host();
                         self.fail("The transfer timed out.".to_string());
@@ -1230,9 +1386,10 @@ impl Transfer {
                 }
                 self.maybe_finish();
                 if matches!(self.phase, Phase::Settle { .. }) && now >= until {
-                    // The target never reported. The host's clean exit is the
-                    // best evidence there is, and saying so beats stalling —
-                    // but it is reported as what it is.
+                    // The target never reported, not even within the budget
+                    // the launch step gets. The host's clean exit is the best
+                    // evidence there is, and saying so beats stalling — but it
+                    // is reported as what it is: the target never spoke.
                     self.finish_ok();
                 }
             }
@@ -1342,6 +1499,38 @@ impl Transfer {
         }
     }
 
+    /// Where a receive has the target's own file name on its way to the one
+    /// the form asked for.
+    ///
+    /// `rz` writes under the *sender's* name, beside the destination, and this
+    /// module renames it once the bytes are in ([`Transfer::finish_ok`]). The
+    /// form refuses to start a receive while that path is already taken — it
+    /// must not clobber a file it did not write — which makes a file found
+    /// there *after* a run has begun the run's own, every time. See
+    /// [`Transfer::sweep_staged`].
+    fn staged_sibling(&self) -> Option<PathBuf> {
+        if self.direction != Direction::Recv {
+            return None;
+        }
+        let name = Path::new(&self.target).file_name()?;
+        let sibling = self.local.parent().unwrap_or(Path::new(".")).join(name);
+        (sibling != self.local).then_some(sibling)
+    }
+
+    /// Take back what an unfinished receive left on the disk, so the next one
+    /// finds that path free. One aborted download used to block every download
+    /// after it: a link drop left a 0-byte `linkr-zm-probe.bin` beside the
+    /// destination, and the two runs that followed never started their receive
+    /// at all — the form refused them before a byte moved and the target's
+    /// console saw nothing.
+    fn sweep_staged(&mut self) {
+        if let Some(staged) = self.staged_sibling() {
+            if staged.exists() {
+                let _ = std::fs::remove_file(&staged);
+            }
+        }
+    }
+
     fn stop_host(&mut self) {
         if let Some(mut proc) = self.proc.take() {
             proc.kill();
@@ -1350,6 +1539,7 @@ impl Transfer {
 
     fn fail(&mut self, reason: String) {
         self.stop_host();
+        self.sweep_staged();
         self.queue.clear();
         self.steps.clear();
         self.download = None;
@@ -1360,6 +1550,7 @@ impl Transfer {
     /// Drop everything, keeping the form. Also what a reconnect does.
     pub fn reset(&mut self) {
         self.stop_host();
+        self.sweep_staged();
         self.queue.clear();
         self.steps.clear();
         self.cap.clear();
@@ -1369,6 +1560,7 @@ impl Transfer {
         self.launch_rc = None;
         self.download = None;
         self.moved = 0;
+        self.last_progress = None;
         self.status.clear();
         self.outcome = Outcome::Idle;
         self.phase = Phase::Idle;
@@ -1865,6 +2057,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// [`STALL_TIMEOUT`] bounds a wedged run; [`RUN_TIMEOUT`] only bounds an
+    /// absurd one.
+    ///
+    /// One ceiling was doing both jobs, and doing the wrong one: 1800 s
+    /// measured from the start of the run cut off every transfer past about
+    /// 3.5 MiB on a link that does about 2 KiB/s, while all of its bytes were
+    /// still arriving. "No byte has crossed the link for ninety seconds" is
+    /// the condition a stalled transfer actually has, at any file size, and
+    /// unlike a ceiling it can be found *while* the transfer is on screen.
+    #[test]
+    fn a_wedged_run_is_found_while_it_still_runs_and_a_moving_one_is_not() {
+        let mut transfer = Transfer {
+            local: PathBuf::from("/etc/hostname"),
+            target: "/tmp/linkr-zm-stall.bin".to_string(),
+            probe: Some(probe_all("/tmp")),
+            ..Transfer::default()
+        };
+        ready(&mut transfer, true);
+        transfer.start().expect("a zmodem send starts");
+        transfer.on_rx(b"LINKR_ZM:go\n");
+        assert!(
+            matches!(transfer.phase, Phase::Run { .. }),
+            "{:?}",
+            transfer.phase
+        );
+
+        // The link is still moving bytes, so there is nothing to report —
+        // however long the run has been going.
+        transfer.proc.as_mut().expect("the host half").moved = 4096;
+        transfer.moved = 0;
+        transfer.poll(Instant::now());
+        assert!(
+            matches!(transfer.phase, Phase::Run { .. }),
+            "a run whose bytes are still arriving is not wedged"
+        );
+
+        // The peer goes quiet for the whole stall budget. The finding is made
+        // now — while the transfer is still on screen — instead of at the end
+        // of a ceiling that could only ever have been a guess at the size.
+        transfer.poll(Instant::now() + STALL_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(
+            transfer.outcome,
+            Outcome::Failed(format!(
+                "The transfer stalled: nothing crossed the link for {}s.",
+                STALL_TIMEOUT.as_secs()
+            )),
+            "a run that stopped moving bytes must say so on its own terms"
+        );
+
+        let _ = transfer.abort();
+    }
+
     /// An existing destination stops an upload before a byte moves: the guard
     /// is the target's own `exists` line, not a guess made on this side.
     #[test]
@@ -1932,6 +2176,219 @@ mod tests {
             "the child must not outlive the run"
         );
         assert!(!transfer.busy(), "the view must be free again");
+    }
+
+    /// A console switches bracketed paste off (`\e[?2004l`) the instant it
+    /// executes a line, so the **first** line of the output arrives glued to
+    /// that escape — and `go` is the launch's first and only line before `rz`
+    /// takes the port. Matching a bare line start never sees it: the run sits
+    /// in `Cmd` until the step timeout while `rz` waits for bytes nobody
+    /// sends. The echo, meanwhile, must still not answer.
+    #[test]
+    fn a_shell_escape_before_the_first_line_does_not_hide_go() {
+        let mut transfer = Transfer {
+            local: PathBuf::from("/etc/hostname"),
+            target: "/tmp/linkr-zm-paste.bin".to_string(),
+            probe: Some(probe_all("/tmp")),
+            ..Transfer::default()
+        };
+        ready(&mut transfer, true);
+        transfer.start().expect("a zmodem send starts");
+
+        // The echoed launch line, escape included — carries MARKER, but only
+        // inside its printf, so it is not an answer.
+        transfer.on_rx(
+            b"\x1b[?2004hkickpi@k2b:~$ if [ -e '/tmp/x' ]; then printf 'LINKR_ZM:go\\n'; fi\r\n",
+        );
+        assert!(
+            matches!(
+                transfer.phase,
+                Phase::Cmd {
+                    step: Step::Launch,
+                    ..
+                }
+            ),
+            "the echo must not answer: {:?}",
+            transfer.phase
+        );
+
+        // The target's real first line, with the shell's escape in front.
+        transfer.on_rx(b"\x1b[?2004l\rLINKR_ZM:go\r\n**\x18B0100000063f694\r");
+        assert!(
+            matches!(transfer.phase, Phase::Run { .. }),
+            "go was hidden: {:?}",
+            transfer.phase
+        );
+        assert_eq!(transfer.abort(), b"\x03\x03");
+        assert!(transfer.proc.is_none(), "the child must be killed");
+        assert!(!transfer.busy(), "the view must be free again");
+    }
+
+    /// `lrzsz` hands back the flow control it was given, so an XON lands on
+    /// the very line that carries the next answer.
+    #[test]
+    fn a_control_character_glued_to_a_marker_does_not_hide_it() {
+        let mut transfer = Transfer {
+            local: PathBuf::from("/etc/hostname"),
+            target: "/tmp/linkr-zm-xon.bin".to_string(),
+            probe: Some(probe_all("/tmp")),
+            ..Transfer::default()
+        };
+        ready(&mut transfer, true);
+        transfer.start().expect("a zmodem send starts");
+        transfer.on_rx(b"\x11\x13LINKR_ZM:go\r\n");
+        assert!(
+            matches!(transfer.phase, Phase::Run { .. }),
+            "go was hidden: {:?}",
+            transfer.phase
+        );
+        assert_eq!(transfer.abort(), b"\x03\x03");
+        assert!(!transfer.busy(), "the view must be free again");
+    }
+
+    /// Once `rz` has held the port, the target's last byte before its report
+    /// is the end of a ZMODEM frame — `\x8a`, and **not** a newline. Read raw,
+    /// `printf '…rc…'` would land glued to `**\x18B…`, and [`Transfer::on_marker`],
+    /// which only reads a marker at position zero, would never see it:
+    /// `launch_rc` stays `None` and the run ends on the [`SETTLE`] fallback
+    /// rather than on the target's word. That is what let a second transfer
+    /// type its launch command into a console the first one's `rz` still
+    /// owned — the bytes were swallowed whole, with no echo, and the run died
+    /// on the step timeout.
+    #[test]
+    fn the_report_after_a_zmodem_frame_is_still_read() {
+        // What the target is told to print: the report opens its own line.
+        let wrapped = wrap(1, "sz -e -O -q -- /tmp/linkr-zm-probe.bin");
+        assert!(
+            wrapped.contains(&format!("printf '\\n{MARKER}rc 1 ")),
+            "the report must open a line of its own: {wrapped}"
+        );
+
+        let mut transfer = Transfer {
+            local: PathBuf::from("/etc/hostname"),
+            target: "/tmp/linkr-zm-rc.bin".to_string(),
+            ..Transfer::default()
+        };
+        transfer.phase = Phase::Run {
+            at: Instant::now() + RUN_TIMEOUT,
+        };
+        // The step `start()` would have handed the launch command.
+        transfer.seq = 1;
+        // What the Bee actually printed, byte for byte: the frame, then the
+        // report on the line that `wrap` made it start.
+        transfer.on_rx(b"**\x18B0900000000a87c\r\x8a\nLINKR_ZM:rc 1 0\n");
+        assert_eq!(
+            transfer.launch_rc,
+            Some(0),
+            "the target's own word went unread"
+        );
+        assert!(!transfer.busy(), "the report ends the run");
+        match &transfer.outcome {
+            Outcome::Ok(text) => assert!(text.contains("Sent"), "{text}"),
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    /// The gap between "the host is done" and "the target says so" is not a
+    /// rounding error. On the Bee it measured **12.8 s** and then **56.0 s**,
+    /// and for all of it that shell is inside `rz` and swallows every byte
+    /// typed at it. A budget below that calls the gap `Sent` and hands the
+    /// console to the next transfer too early.
+    #[test]
+    fn the_settle_budget_covers_the_lag_the_target_actually_had() {
+        assert!(
+            SETTLE > Duration::from_secs(12),
+            "the Bee reported after 12.8 s; {SETTLE:?} would call that gap Sent"
+        );
+    }
+
+    /// `sz` writes `OO` and exits in the same breath, and the frame loop reads
+    /// time before bytes: `poll` reaps the exit and moves the run on, *then*
+    /// `pump` decides whether the child may still speak. Gating the child on
+    /// [`Phase::Run`] alone threw that `OO` away, so the receiver waited for a
+    /// frame that never came — on the Bee, `rz` held the console for **56.0 s**
+    /// over it. Locally the same code passes, because `sz`'s exit is not
+    /// reaped in the ~0.4 ms between `08` and `OO`.
+    #[test]
+    fn the_childs_last_output_is_still_pumped_once_the_run_settles() {
+        let mut transfer = Transfer {
+            local: std::env::temp_dir().join("linkr-pump-settle.bin"),
+            target: "/tmp/linkr-zm-pump.bin".to_string(),
+            probe: Some(probe_all("/tmp")),
+            direction: Direction::Recv,
+            ..Transfer::default()
+        };
+        ready(&mut transfer, true);
+        transfer.start().expect("the host half starts");
+
+        // The frame loop's order, frozen: `poll` has reaped the child and
+        // moved the run on, nothing is queued for typing, and the child's
+        // output has not been drained yet.
+        transfer.queue.clear();
+        transfer.phase = Phase::Settle {
+            until: Instant::now() + STEP_TIMEOUT,
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got = None;
+        while Instant::now() < deadline {
+            if let Some(bytes) = transfer.pump(Instant::now()) {
+                got = Some(bytes);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let got = got
+            .expect("the child's pending output must still reach the link after the run settles");
+        assert!(!got.is_empty(), "the child spoke before it was paused");
+
+        let _ = transfer.abort();
+    }
+
+    /// An unfinished receive takes its half-written file with it.
+    ///
+    /// `rz` lands the *sender's* file name beside the destination and this
+    /// module renames it once the bytes are in; the form refuses to start a
+    /// receive while that path is taken, so anything found there **after** a
+    /// run has begun is that run's own. Leaving it behind turned one aborted
+    /// download into a standing refusal: a dropped link left a 0-byte
+    /// `linkr-zm-probe.bin`, and the next two round trips never started their
+    /// receive at all — the target's console was never told to send anything.
+    #[test]
+    fn an_aborted_receive_sweeps_the_file_it_was_writing() {
+        let dir = std::env::temp_dir().join("linkr-sweep-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory to receive into");
+        let staged = dir.join("incoming.bin");
+        std::fs::write(&staged, b"half a download").expect("the staged file");
+
+        let mut transfer = Transfer {
+            local: dir.join("out.bin"),
+            target: "/tmp/incoming.bin".to_string(),
+            direction: Direction::Recv,
+            ..Transfer::default()
+        };
+        transfer.fail("The link dropped.".to_string());
+
+        assert!(
+            !staged.exists(),
+            "an aborted receive must sweep {}",
+            staged.display()
+        );
+
+        // When the sender's name *is* the name asked for there is nothing to
+        // sweep, and nothing here may ever delete the destination.
+        std::fs::write(&staged, b"mine").expect("the destination");
+        let mut transfer = Transfer {
+            local: staged.clone(),
+            target: "/tmp/incoming.bin".to_string(),
+            direction: Direction::Recv,
+            ..Transfer::default()
+        };
+        transfer.fail("The link dropped.".to_string());
+        assert!(staged.exists(), "the destination is never swept");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole feature, end to end, with a real `sh` standing in for the
