@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 use crate::agent::{AgentEvent, AgentHandle, ExecMode};
 use crate::event::{ConnectionState, NoticeLevel};
@@ -255,6 +256,16 @@ impl TextField {
                 (masked, col)
             }
         }
+    }
+
+    /// Display columns from the start of the text to the caret.
+    ///
+    /// A renderer parks the terminal's cursor here instead of drawing a cell of
+    /// its own — a cell would push a full-width row past its pane and wrap it
+    /// onto the line below — and a cursor is placed in columns, not in
+    /// characters: a Chinese glyph in a path takes two.
+    pub fn caret_column(&self) -> usize {
+        UnicodeWidthStr::width(&self.text[..self.caret()])
     }
 }
 
@@ -689,6 +700,21 @@ impl App {
 
     /// Current view switch helper used by the palette and F-keys.
     pub fn set_view(&mut self, view: View) {
+        // A run owns the link while it captures, and the console behind F2 is
+        // the one surface whose keys go straight onto the wire — so the surface
+        // stays shut for the duration rather than letting a keystroke become
+        // protocol data. The pane is also deliberately starved of inbound
+        // bytes, so behind that door there would be nothing new to look at
+        // either. Every route to the console comes through here: the F-keys
+        // and the palette's `view.terminal` alike.
+        if view == View::Terminal && self.transfer.engine.capturing() {
+            let lang = self.lang();
+            self.toast(
+                NoticeLevel::Warn,
+                t(transfer_view::XFER_CONSOLE_LOCKED, lang).to_string(),
+            );
+            return;
+        }
         if self.settings.active_view != view {
             self.settings.active_view = view;
             if let Err(err) = super::settings::save(&self.settings) {
