@@ -284,17 +284,26 @@ pub fn probe_command() -> String {
 ///   behind us when capture starts.
 /// * `2>/dev/null` keeps `rz`'s progress chatter out of the link, where it
 ///   would be fed straight to `sz`'s stdin.
-/// * the guard refuses to clobber an existing destination *before* any byte
-///   moves, instead of discovering it afterwards.
+/// * the guard refuses to clobber an existing file *before* any byte moves,
+///   instead of discovering it afterwards — and it has to check **both** paths.
+///   `rz -y` writes under the *sender's* file name, so a rename puts two files
+///   at risk: the one the form asked for, and the one the sender's name already
+///   occupies in that directory. Checking only the first let `rz` overwrite the
+///   second and then carry the result over the top of it, so an unrelated
+///   `original.bin` was lost to an upload nobody named it in.
 /// * `sz` puts the sender's file name in the ZFILE header, which is `local`'s
 ///   name; when the form asked for a different one, a single `mv` inside the
-///   same command settles it. Not a digest — a name.
+///   same command settles it. Not a digest — a name. `mv -n`, never `-f`: the
+///   rename must not become the very clobber the guard just refused, and since
+///   `mv -n` exits 0 whether or not it moved anything, the `[ ! -e ]` behind it
+///   is what reports a refusal (the received bytes stay under the sender's
+///   name, intact, and the step fails rather than losing them).
 fn launch_recv(dest: &str, dir: &str, written: &str) -> Result<String, String> {
     let dest_q = quote_shell(dest).map_err(|err| err.to_string())?;
     let dir_q = quote_shell(dir).map_err(|err| err.to_string())?;
     let written_q = quote_shell(written).map_err(|err| err.to_string())?;
     Ok(format!(
-        "if [ -e {dest_q} ]; then printf '{MARKER}exists %s\\n' {dest_q}; false; else printf '{MARKER}go\\n'; (cd {dir_q} && rz -e -O -y 2>/dev/null) && {{ [ {written_q} = {dest_q} ] || mv -f {written_q} {dest_q}; }}; fi"
+        "if [ -e {dest_q} ]; then printf '{MARKER}exists %s\\n' {dest_q}; false; elif [ {written_q} != {dest_q} ] && [ -e {written_q} ]; then printf '{MARKER}exists %s\\n' {written_q}; false; else printf '{MARKER}go\\n'; (cd {dir_q} && rz -e -O -y 2>/dev/null) && {{ [ {written_q} = {dest_q} ] || {{ mv -n {written_q} {dest_q} && [ ! -e {written_q} ]; }}; }}; fi"
     ))
 }
 
@@ -1886,6 +1895,94 @@ mod tests {
                 "the wrapped command must carry its sequence: {wrapped}"
             );
         }
+    }
+
+    /// The guard has to name **both** files: `rz -y` writes under the sender's
+    /// file name, so a rename puts the destination and the sender's name in the
+    /// same directory at risk. Guarding only the destination let `rz` overwrite
+    /// an unrelated file and then carry the result away over the top of it.
+    #[test]
+    fn the_upload_guard_names_both_paths() {
+        let command = launch_recv("/tmp/new.bin", "/tmp", "/tmp/original.bin").expect("launch");
+        let before_go = command
+            .split(&format!("{MARKER}go"))
+            .next()
+            .expect("the command opens with its guard");
+        assert!(
+            before_go.contains("[ -e '/tmp/new.bin' ]"),
+            "the destination must be refused before anything moves: {command}"
+        );
+        assert!(
+            before_go.contains("[ -e '/tmp/original.bin' ]"),
+            "the sender's name must be refused too, before anything moves: {command}"
+        );
+        assert!(
+            !command.contains("mv -f"),
+            "the rename must not become the clobber the guard refused: {command}"
+        );
+        assert!(
+            command.contains("mv -n"),
+            "the rename must be no-clobber: {command}"
+        );
+    }
+
+    /// The same thing, run: a stand-in for `rz` that writes the sender's file
+    /// name exactly as `lrzsz` does, so the upload must refuse to start and a
+    /// bystander file nobody named in the upload survives. No `lrzsz` and no
+    /// link needed — this is the review's reproduction, as a test.
+    ///
+    /// Unix only: it needs `sh` and `mv -n`.
+    #[cfg(unix)]
+    #[test]
+    fn an_upload_refuses_rather_than_destroy_a_bystander() {
+        let dir = std::env::temp_dir().join(format!("linkr-recv-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let bystander = dir.join("original.bin");
+        let dest = dir.join("new.bin");
+        std::fs::write(&bystander, b"precious").expect("seed the bystander");
+
+        let mock = dir.join("mock-bin");
+        std::fs::create_dir_all(&mock).expect("mock bin");
+        let rz = mock.join("rz");
+        std::fs::write(&rz, "#!/bin/sh\nprintf received > original.bin\n").expect("mock rz");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&rz, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+
+        let command = launch_recv(
+            dest.to_str().expect("dest is utf8"),
+            dir.to_str().expect("dir is utf8"),
+            bystander.to_str().expect("written is utf8"),
+        )
+        .expect("launch");
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    mock.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .status()
+            .expect("sh runs");
+
+        assert!(!status.success(), "the upload must be refused: {command}");
+        assert!(
+            !dest.exists(),
+            "nothing may be written when the upload is refused: {command}"
+        );
+        assert_eq!(
+            std::fs::read(&bystander).expect("the bystander must still be there"),
+            b"precious",
+            "an upload nobody named this file in must not destroy it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An answer to a command that is not the one in flight never closes the
