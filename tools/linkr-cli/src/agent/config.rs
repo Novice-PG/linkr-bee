@@ -237,6 +237,39 @@ pub struct EndpointSecurity {
     pub exposes_key: bool,
 }
 
+/// Is this host one whose traffic never leaves the machine?
+///
+/// A test of *shape*, not of prefix. The predicate this mirrors — `/^127\./`
+/// in `web/agent_config.js` — matches `127.example.com`, which is a public
+/// domain that then reads as loopback, and loopback is the whole reason a
+/// plaintext `apiKey` is sent without asking about it. Four octets of 0-255
+/// or it is not an address at all; a name that merely begins `127.` is the
+/// remote host it says it is, and is treated as one.
+///
+/// Nothing here resolves a name, deliberately. The function this mirrors is
+/// synchronous inside a browser, where DNS cannot be asked in the first
+/// place, so resolving would put the two out of step by construction — and
+/// it would trade a check with a fixed answer for one whose answer depends on
+/// whoever replies to the lookup, on a path that decides whether a secret
+/// travels in the clear. The syntactic rule's worst case is a host that
+/// really does land on 127.0.0.1 but is spelled as a name: it is asked for
+/// consent it did not need. That is the side to be wrong on.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host == "::1" || host.ends_with(".localhost") {
+        return true;
+    }
+    let octets: Option<[u8; 4]> = host
+        .split('.')
+        .map(|part| part.parse::<u8>().ok())
+        .collect::<Option<Vec<u8>>>()
+        .and_then(|values| match values.as_slice() {
+            [a, b, c, d] => Some([*a, *b, *c, *d]),
+            _ => None,
+        });
+    matches!(octets, Some([127, ..]))
+}
+
 pub fn endpoint_security(endpoint: &str) -> EndpointSecurity {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return EndpointSecurity::default();
@@ -245,12 +278,8 @@ pub fn endpoint_security(endpoint: &str) -> EndpointSecurity {
         .host_str()
         .unwrap_or("")
         .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_lowercase();
-    let loopback = host == "localhost"
-        || host == "::1"
-        || host.ends_with(".localhost")
-        || host.starts_with("127.");
+        .trim_end_matches(']');
+    let loopback = is_loopback_host(host);
     let plaintext = url.scheme() == "http";
     EndpointSecurity {
         plaintext,
@@ -662,6 +691,93 @@ mod tests {
             }
         );
         assert_eq!(endpoint_security("not a url"), EndpointSecurity::default());
+    }
+
+    /// The prefix test this replaced was `/^127\./`, and loopback is the one
+    /// thing standing between a plaintext `apiKey` and being posted to a host
+    /// nobody vouched for: a name that begins `127.` was read as an address
+    /// in 127.0.0.0/8, so `http://127.example.com/v1` was waved through
+    /// without ever being asked. Four octets or nothing.
+    #[test]
+    fn a_name_beginning_with_127_is_not_loopback() {
+        for name in [
+            "127.example.com",
+            "127.0.0.1.example.com",
+            "127.1",
+            "127.0.0.999",
+        ] {
+            assert!(
+                !is_loopback_host(name),
+                "{name} is a name, not an address in 127.0.0.0/8"
+            );
+        }
+
+        for address in ["127.0.0.1", "127.9.9.9", "127.255.255.254"] {
+            assert!(is_loopback_host(address), "{address} is loopback");
+        }
+
+        for name in ["localhost", "ollama.localhost", "::1"] {
+            assert!(is_loopback_host(name), "{name} never leaves the machine");
+        }
+
+        for remote in ["api.example.com", "192.168.1.9", "10.0.0.1", ""] {
+            assert!(!is_loopback_host(remote), "{remote} is a remote host");
+        }
+    }
+
+    /// The consequence, at the level that decides whether consent is asked:
+    /// the endpoint that used to be treated as loopback now carries its key
+    /// in the clear across the network unless the reader says otherwise.
+    #[test]
+    fn a_remote_host_dressed_as_127_asks_before_it_sends_the_key() {
+        assert_eq!(
+            endpoint_security("http://127.example.com/v1"),
+            EndpointSecurity {
+                plaintext: true,
+                loopback: false,
+                exposes_key: true
+            }
+        );
+        // ...while every host the reader of this file already trusted still
+        // gets past without a question, `web/agent_config.js`'s matrix for
+        // `endpointSecurity` included.
+        assert_eq!(
+            endpoint_security("http://127.9.9.9/v1"),
+            EndpointSecurity {
+                plaintext: true,
+                loopback: true,
+                exposes_key: false
+            }
+        );
+    }
+
+    /// This crate carries two copies of the same predicate: the one above
+    /// parses with `reqwest::Url`, the settings dialog splits the string the
+    /// way `url.hostname` hands it over. They parse differently and must not
+    /// be free to disagree about loopback — that is how the prefix test got
+    /// to be wrong in two places at once.
+    #[test]
+    fn both_endpoint_security_copies_agree() {
+        for endpoint in [
+            "http://127.0.0.1:8080/v1",
+            "http://127.9.9.9/v1",
+            "http://127.example.com/v1",
+            "http://localhost:11434/v1",
+            "http://ollama.localhost/v1",
+            "http://[::1]:8080/v1",
+            "http://api.example.com",
+            "https://api.example.com",
+            "http://192.168.1.9:8080/v1",
+            "not a url",
+        ] {
+            let here = endpoint_security(endpoint);
+            let there = crate::tui::agent_settings::endpoint_security(endpoint);
+            assert_eq!(
+                (here.plaintext, here.exposes_key),
+                there,
+                "the two copies disagree about {endpoint}"
+            );
+        }
     }
 
     #[test]
