@@ -9,12 +9,14 @@
 //! literals stay reachable as `ERR_*` / `SAVED` / `BUSY` … for parity callers.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
+
+use crate::agent::config::write_secret_file;
 
 use super::i18n::{strings, t, Entry, Lang};
 use super::state::{App, TextField};
@@ -162,14 +164,21 @@ pub fn load_stored() -> Option<StoredAgent> {
     serde_json::from_str::<StoredAgent>(&text).ok()
 }
 
+/// Save the record the dialog holds. Written through the crate's one secret
+/// writer, not `fs::write`: the file holds a plaintext `apiKey`, and `fs::write`
+/// would leave it at the umask default of `0644` — readable to any local user
+/// who can reach `config_dir()`.
 fn write_stored(stored: &StoredAgent, lang: Lang) -> Result<(), String> {
+    write_stored_to(&agent_settings_path(), stored, lang)
+}
+
+/// The same write at a path the caller names, so the permissions can be
+/// asserted somewhere other than the real configuration directory — a test
+/// that wrote there would be rewriting the reader's own key.
+fn write_stored_to(path: &Path, stored: &StoredAgent, lang: Lang) -> Result<(), String> {
     let failed = || t(ASST_SAVE_ERROR, lang).to_string();
-    let path = agent_settings_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| failed())?;
-    }
     let json = serde_json::to_string_pretty(stored).map_err(|_| failed())?;
-    std::fs::write(&path, json).map_err(|_| failed())
+    write_secret_file(path, &json).map_err(|_| failed())
 }
 
 /// Endpoint security mirror of `endpointSecurity()` in `agent_config.js`.
@@ -851,6 +860,48 @@ fn runtime_config_from(stored: StoredAgent) -> Option<crate::agent::AgentConfig>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dialog's record is the one holding the plaintext `apiKey`, so it is
+    /// the one that must not sit at the umask default of `0644` where any
+    /// local account can read it. Created private, and — the part `mode` at
+    /// creation cannot do — an existing wide copy is narrowed rather than
+    /// refreshed at whatever mode it already had.
+    ///
+    /// Unix only: `0644` versus `0600` is a Unix question, and a Windows
+    /// file has no such mode to be wrong about.
+    #[cfg(unix)]
+    #[test]
+    fn the_stored_record_is_private_and_an_existing_wide_file_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("linkr-agent-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("agent.json");
+        let mode = || std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+
+        let stored = StoredAgent {
+            api_key: "sk-a-plaintext-key".into(),
+            ..StoredAgent::default()
+        };
+        write_stored_to(&path, &stored, Lang::En).expect("first save");
+        assert_eq!(
+            mode(),
+            0o600,
+            "a new agent.json must not be readable by other accounts"
+        );
+
+        // What the plain `fs::write` this replaces would have left behind.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        write_stored_to(&path, &stored, Lang::En).expect("second save");
+        assert_eq!(
+            mode(),
+            0o600,
+            "an agent.json already at 0644 has to be tightened, not preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn state_with(endpoint: &str, model: &str) -> AgentSettingsState {
         let mut state = AgentSettingsState::default();
