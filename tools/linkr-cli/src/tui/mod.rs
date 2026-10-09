@@ -156,6 +156,10 @@ pub struct TuiContext {
     /// up. `None` when the process already holds a live session, so `--tui`
     /// with queries/loopback keeps connecting first.
     pub pending: Option<PendingConnect>,
+    /// `--local-echo`: show what is typed in the pane before it goes out.
+    /// A request for *this run*, the same kind of thing `--debug-io` is —
+    /// seeded into the settings, never written out by the flag itself.
+    pub local_echo: bool,
 }
 
 /// The deferred connect handed over by `cli::drive`.
@@ -425,12 +429,18 @@ fn event_loop(
         session,
         bus,
         pending,
+        local_echo,
     } = ctx;
     let mut app = build_app(rt, session, bus);
     if let Some(entry) = cjk_notice(probe) {
         app.toast(NoticeLevel::Info, t(entry, app.lang()).to_string());
     }
     app.terminal.set_autoscroll(app.settings.autoscroll);
+    // `--local-echo` is a request for *this run*, the way `--debug-io` is:
+    // the pane shows what was typed because the link is slow to answer (or
+    // the far end never echoes back at all). It seeds the setting and is not
+    // written out by the flag itself — a flag must not rewrite the config.
+    app.settings.local_echo |= local_echo;
     let mut core = app.bus.subscribe();
     let mut sticky = StickyMods::default();
     let mut io_budget = IoBudget::default();

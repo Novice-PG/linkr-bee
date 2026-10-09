@@ -1133,6 +1133,7 @@ async fn drive_connected(
             session,
             bus,
             pending,
+            local_echo: cli.local_echo,
         });
     }
     terminal_loop(session, events, validated, cli).await
