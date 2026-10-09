@@ -45,6 +45,35 @@
  * already have. UART is good for that much, so the bytes were not a rate
  * problem and reconfiguring would only reset the ring and throw away good
  * data.
+ *
+ * What 2% cannot catch is a line that reads *low* in every window forever.
+ * A framed byte holds the line low for at most its start bit plus eight zero
+ * data bits — the stop bit is always high and cuts it short — so a low run is
+ * never longer than nine bit-times, and the two polarities only reach the
+ * decision together when they timed the same run. A window with no
+ * single-bit run anywhere in it therefore reports our own rate divided by
+ * some k in 2..9, with nothing to tell that from a peer that really slowed
+ * down. Measured: 0xCC at 115200 (runs of two and three bits) computes
+ * 115200 x 11111 / (1389 x 16) = 57596, snaps to 57600, and agrees with
+ * itself across windows — so "two windows agree" proves only that the pattern
+ * is stable, not that the rate moved. Reconfiguring on it reaches 57600 by
+ * *guessing*, and the line never said 57600: the pulse width belongs to RXD,
+ * not to our divisor, so the port then reads 57600 forever and stays wrong.
+ * That is a working link broken by a binary file.
+ *
+ * So the port keeps a memory of having been measured against the line. The
+ * first reading within 2% of our own marks the link as verified, and from
+ * then on a reading that is our own rate divided by k (2..9) is refused and
+ * logged instead of obeyed — it is the one shape a missing single-bit run can
+ * produce, and the one direction it can produce it in. Readings at or above
+ * our rate still move the port, because no absent single-bit run can ever
+ * read high: that is the direction the Kconfig's 1500000 / 921600 / 1000000
+ * SBC consoles come from, and it stays open. A peer that slows to a rate in
+ * that set *after* the link is up is refused with the artifact; the two cannot
+ * be told apart from one pulse width, and holding a link that works is the
+ * cheaper of the mistakes. Verification is dropped by every reconfiguration,
+ * so a guess that turns out wrong can still be undone — the rollback the
+ * two-window rule depends on.
  */
 
 #include "uart_autobaud.h"
@@ -63,6 +92,14 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #define AUTOBAUD_CONFIRM	2	  /* agreeing windows before touching it */
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
 #define AUTOBAUD_REFUSED_MAX	6	  /* disagreeing windows before saying so */
+/*
+ * The longest run a framed byte can leave on the line: a start bit plus eight
+ * zero data bits, cut short by a stop bit that is always high. Both
+ * polarities have to have timed the same run to reach the decision at all
+ * (autobaud_apart), so this is also the ceiling on how far a stream with no
+ * single-bit run can push the reading: current / k, k in 2..9.
+ */
+#define AUTOBAUD_MAX_FACTOR	9
 /*
  * lowpulse and highpulse both hold the shortest run of their own polarity, so
  * on any line carrying one-bit runs they land on the same number of source
@@ -100,6 +137,13 @@ static uint32_t autobaud_cooldown_until;
 static uint32_t autobaud_warned_at;
 static uint8_t autobaud_confirm;		  /* windows agreeing on it */
 static uint8_t autobaud_refused;
+/*
+ * The line has been read within 2% of what the port is set to, so we know the
+ * two agree. Set by a match, dropped by every reconfiguration — a port we
+ * just changed has not been measured at its new rate yet, and a guess that
+ * came out wrong has to stay correctable.
+ */
+static bool autobaud_verified;
 
 static uart_dev_t *autobaud_hw(void)
 {
@@ -145,6 +189,30 @@ static uint32_t autobaud_snap(uint32_t measured)
 		}
 	}
 	return measured;
+}
+
+/*
+ * True when `rate` is our own rate seen through a window whose shortest run
+ * was not one bit long — that is, current / k for some k in
+ * 2..9, inside the tolerance the port itself is held to.
+ *
+ * Meaningful only while the line is verified against the port: then a reading
+ * below ours *has* to come from a missing single-bit run, because that is the
+ * only thing that makes a matching line read low, and this is the shape it
+ * reads low in. A reading that is none of these is not something a missing
+ * run can produce, so if it repeats the line really did move.
+ */
+static bool autobaud_reads_like_a_missing_bit(uint32_t rate, uint32_t current)
+{
+	for (uint32_t k = 2; k <= AUTOBAUD_MAX_FACTOR; k++) {
+		uint32_t expect = current / k;
+		uint32_t delta = rate > expect ? rate - expect : expect - rate;
+
+		if (expect != 0 && delta * 100u <= expect * AUTOBAUD_TOLERANCE_PCT) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void autobaud_arm(uart_dev_t *hw)
@@ -239,7 +307,35 @@ static void autobaud_tick(struct k_work *work)
 	hi = old_baud + old_baud / 100u * AUTOBAUD_TOLERANCE_PCT;
 
 	if (measured >= lo && measured <= hi) {
+		/*
+		 * The line and the port agree. That is the reading a link which
+		 * is working hands back, and it is the evidence that makes the
+		 * readings *below* ours worth disbelieving afterwards.
+		 */
+		autobaud_verified = true;
 		autobaud_forget(); /* we already match the line */
+		return;
+	}
+
+	/*
+	 * Verified, and low by a whole factor of ourselves: the shape of a
+	 * stream with no single-bit run in it, not of a peer that moved — see
+	 * the file header for the measurement behind that. Following it would
+	 * take the port to a rate the line never carried, and it could not be
+	 * put back: the pulse width that produced this number belongs to RXD
+	 * rather than to our divisor, so the port would read the same wrong
+	 * answer in every window after the change and nothing would ever
+	 * disagree with it again.
+	 */
+	if (autobaud_verified && autobaud_reads_like_a_missing_bit(next, old_baud)) {
+		autobaud_forget();
+		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
+			autobaud_warned_at = now;
+			LOG_WRN("UART autobaud: line reads %u every window while "
+				"the port is %u — that is our own rate over a run "
+				"longer than one bit, holding %u",
+				next, old_baud, old_baud);
+		}
 		return;
 	}
 
@@ -260,6 +356,9 @@ static void autobaud_tick(struct k_work *work)
 	}
 
 	autobaud_forget();
+	/* Nothing has measured the port at the rate it just moved to, so a
+	 * wrong guess stays correctable — see autobaud_verified. */
+	autobaud_verified = false;
 	autobaud_cooldown_until = now + AUTOBAUD_COOLDOWN_MS;
 
 	/* Reading the divider back is what proves the change reached the
@@ -274,6 +373,10 @@ static void autobaud_tick(struct k_work *work)
 void linkr_uart_autobaud_init(uintptr_t reg_addr)
 {
 	autobaud_reg = reg_addr;
+	/* Nothing has matched the port yet, so the first reading is free to
+	 * move it — including downwards, which is the one direction a verified
+	 * port refuses. */
+	autobaud_verified = false;
 	/* Relative to now, so the wrap-safe comparison in the tick stays
 	 * valid however long the board has already been up. */
 	autobaud_cooldown_until = k_uptime_get_32();
