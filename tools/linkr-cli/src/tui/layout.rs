@@ -4,6 +4,7 @@
 //! Everything here renders from the state in [`super::state::App`]; no side
 //! effects, so the geometry maths is easy to follow.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -269,6 +270,148 @@ fn clip_line(line: Line<'static>, budget: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// How many physical rows `line` occupies once `.wrap()` has broken it to
+/// `width` display columns — the sidebar's text column, separator included in
+/// the pane but not in `width`.
+///
+/// Chinese sidebar rows carry no spaces to break at, so the emulator fills
+/// every row to the last column and the count is the ceiling of the width —
+/// which is what this returns. It is the *lower* bound for text that does
+/// break at spaces (a word cannot straddle a row), so a pane that fits this
+/// count may still drop its last row: one row, at the bottom, which is the
+/// same row the ellipsis would have taken anyway.
+fn wrapped_rows(line: &Line<'_>, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let cells = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+    cells.div_ceil(width).max(1)
+}
+
+/// The pane row and column the caret of the field being edited occupies.
+///
+/// A view reports its caret as `(line index, column)` in the body
+/// [`center_lines`] returns, and this turns that into a screen position. Two
+/// corrections are needed: the scroll offset the paragraph is drawn with, and
+/// the paragraph's own wrapping — a line wider than the pane occupies more
+/// than one row, so the rows above the caret are counted exactly the way the
+/// sidebar counts them ([`wrapped_rows`]).
+///
+/// The caret is *reported* and then handed to the terminal's cursor rather
+/// than painted as a reversed cell. A cell of its own would push a full-width
+/// row one column past the pane and wrap it onto the line below, and a cursor
+/// blinks — which is most of what makes one recognisable as a cursor.
+fn center_caret(
+    app: &App,
+    lines: &[Line<'static>],
+    width: u16,
+    offset: u16,
+    center: Rect,
+) -> Option<(u16, u16)> {
+    let (index, column) = match app.view {
+        View::Transfer => super::transfer_view::render_lines_at(app, width).1?,
+        View::Network => super::network_view::render_lines_at(app).1?,
+        _ => return None,
+    };
+    if index >= lines.len() {
+        return None;
+    }
+    let above: u16 = lines[..index]
+        .iter()
+        .map(|line| wrapped_rows(line, width))
+        .sum();
+    let row = above.saturating_sub(offset);
+    if row >= center.height {
+        return None;
+    }
+    // A column at or past the pane's width would park the cursor one cell
+    // beyond the last one, which every terminal wraps to the next line —
+    // the cursor then appears somewhere the text is not. The last cell
+    // inside the pane is the closest honest answer.
+    let column = u16::try_from(column)
+        .unwrap_or(u16::MAX)
+        .min(center.width.saturating_sub(1));
+    Some((row, column))
+}
+
+/// Symbols conhost paints two columns wide while the layout counted one — so
+/// each of them shoves the rest of the row a column right, and a full status
+/// line runs off the end of its pane and lands in the sidebar. Columns as
+/// measured on a cp936 console, beside what unicode-width (and therefore this
+/// layout) counts for the same glyph:
+///
+/// ```text
+/// original  conhost  counted   substitute  conhost  counted
+///    · U+00B7    2       1      ∙ U+2219     1       1
+///    … U+2026    2       1      ⋯ U+22EF     1       1
+///    ↑ U+2191    2       1      ▴ U+25B4     1       1
+///    ↓ U+2193    2       1      ▾ U+25BE     1       1
+///    ← U+2190    2       1      ◂ U+25C2     1       1
+///    → U+2192    2       1      ▸ U+25B8     1       1
+///    – U+2013    2       1      -  U+002D    1       1
+///    — U+2014    2       1      -  U+002D    1       1
+///    ● U+25CF    2       1      • U+2022     1       1
+///    ○ U+25CB    2       1      ◦ U+25E6     1       1
+///    ◐ U+25D0    2       1      ◒ U+25D2     1       1
+///    ◆ U+25C6    2       1      ▪ U+25AA     1       1
+/// ```
+///
+/// Every substitute is safe on both counts: conhost paints it one column wide
+/// *and* unicode-width counts it one, so the layout moves nowhere — on Windows
+/// or anywhere else. (Turning on a CJK width table was ruled out for the
+/// opposite reason: conhost draws `│ ─ ┆` one column wide, where a CJK table
+/// counts two and would break every separator on screen.)
+///
+/// Conhost exists only on Windows, so the pass is gated with `cfg!` rather
+/// than `cfg`: on other platforms the branch folds to a constant, and the
+/// function still compiles, is still exercised by its test, and still costs
+/// nothing.
+const NARROW_WIDE: &[(&str, &str)] = &[
+    ("·", "∙"),
+    ("…", "⋯"),
+    ("↑", "▴"),
+    ("↓", "▾"),
+    ("←", "◂"),
+    ("→", "▸"),
+    ("–", "-"),
+    ("—", "-"),
+    ("●", "•"),
+    ("○", "◦"),
+    ("◐", "◒"),
+    ("◆", "▪"),
+];
+
+/// Rewrite every cell conhost would paint one column too wide — see
+/// [`NARROW_WIDE`] for the measurements. Runs over the finished frame,
+/// overlays included, so nothing the palette or a dialog draws escapes it.
+fn narrow_wide_symbols(buffer: &mut Buffer) {
+    let area = buffer.area;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let Some(cell) = buffer.cell_mut((x, y)) else {
+                continue;
+            };
+            // Every symbol in the table is multi-byte, so the common case —
+            // a screen full of ASCII — is one length check and out.
+            if cell.symbol().len() < 2 {
+                continue;
+            }
+            let narrow = NARROW_WIDE
+                .iter()
+                .find(|(wide, _)| *wide == cell.symbol())
+                .map(|(_, narrow)| *narrow);
+            if let Some(narrow) = narrow {
+                cell.set_symbol(narrow);
+            }
+        }
+    }
+}
+
 /// Render the whole frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -286,18 +429,40 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Sidebar.
     if let Some(rect) = sidebar {
-        // Rows are cut to the pane. The sidebar has no scroll of its own and
-        // its height is fixed, so a row wider than the column — the 32-star
-        // token mask (43 columns with its label, 45 in 中文) or the 59-column
-        // empty-host hint — used to wrap under `.wrap()` into extra physical
-        // lines and push the Quick-send and Watch sections out of view.
-        let lines: Vec<Line<'static>> = super::sidebar::render_lines(app)
-            .into_iter()
-            .map(|line| clip_line(line, rect.width.saturating_sub(1)))
-            .collect();
+        // Two ways to lose a row, and they used to be a choice: a row wider
+        // than the column either wraps — the sidebar has no scroll and a
+        // fixed height, so the extra physical lines push Quick-send and Watch
+        // out of view — or it is cut to an ellipsis and the text is simply
+        // gone. So the pane decides: wrap while the wrapped height still
+        // fits, and cut only what no longer fits. The 32-star token mask (44
+        // columns with its label, 46 in 中文) and the 46-column LAN-token hint
+        // wrap on a window with room, and a short one keeps the sections it
+        // can still show.
+        let budget = rect.width.saturating_sub(1);
+        let rendered = super::sidebar::render_lines(app);
+        let rows: u16 = rendered.iter().map(|line| wrapped_rows(line, budget)).sum();
+        let lines: Vec<Line<'static>> = if rows <= rect.height {
+            rendered
+        } else {
+            rendered
+                .into_iter()
+                .map(|line| clip_line(line, budget))
+                .collect()
+        };
+        // The text column stops one short of the pane: the last column is the
+        // separator's, and a wrapped row that ran into it would overwrite the
+        // rule. Wrapping inside this pane also makes `.wrap()` break where
+        // `wrapped_rows` counted, so the two never disagree about how tall the
+        // sidebar just became.
+        let text = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: budget,
+            height: rect.height,
+        };
         frame.render_widget(
             ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
-            rect,
+            text,
         );
         // Column separator.
         let separator = Rect {
@@ -321,12 +486,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let offset = app
         .center_scroll
         .min(scroll_limit(lines.len(), center.height));
+    // Measured before the paragraph takes `lines`: the caret's row depends on
+    // the same wrapping the paragraph is about to apply.
+    let caret = center_caret(app, &lines, center.width, offset, center);
     frame.render_widget(
         ratatui::widgets::Paragraph::new(lines)
             .scroll((offset, 0))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         center,
     );
+    if let Some((row, column)) = caret {
+        frame.set_cursor_position((center.x + column, center.y + row));
+    }
 
     // Bottom status line.
     let lang = app.lang();
@@ -352,6 +523,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_palette(frame, app, area);
     } else if app.dialog.is_some() {
         draw_dialog(frame, app, area);
+    }
+
+    // Last, after every overlay has had its turn: the substitution is a
+    // whole-buffer rewrite, and anything drawn after it would be missed.
+    if cfg!(windows) {
+        narrow_wide_symbols(frame.buffer_mut());
     }
 }
 
@@ -846,6 +1023,37 @@ mod tests {
             reversed(&lines[0]),
             vec![" "],
             "a click that never moved is the caret, not a selection"
+        );
+    }
+
+    /// What keeps a status line from running into the sidebar on a console
+    /// that counts these glyphs two columns wide. Both halves matter: the
+    /// wide glyphs must go, and the ASCII a screen is mostly made of must
+    /// stay exactly where it was — a substitution that drifted would be a
+    /// new misalignment rather than the old one.
+    #[test]
+    fn wide_symbols_are_swapped_for_ones_conhost_draws_narrow() {
+        let last = NARROW_WIDE.len() as u16;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, last + 1, 1));
+        for (i, (wide, _)) in NARROW_WIDE.iter().enumerate() {
+            buffer[(i as u16, 0)].set_symbol(wide);
+        }
+        // A glyph nobody asked about, standing beside them.
+        buffer[(last, 0)].set_symbol("A");
+
+        narrow_wide_symbols(&mut buffer);
+
+        for (i, (wide, narrow)) in NARROW_WIDE.iter().enumerate() {
+            assert_eq!(
+                buffer[(i as u16, 0)].symbol(),
+                *narrow,
+                "{wide} must be drawn as {narrow}"
+            );
+        }
+        assert_eq!(
+            buffer[(last, 0)].symbol(),
+            "A",
+            "everything outside the table stays put"
         );
     }
 }
