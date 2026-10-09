@@ -109,6 +109,35 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(7200);
 /// host's clean exit stand in for a target that never spoke.
 const SETTLE: Duration = STEP_TIMEOUT;
 
+/// The ZMODEM cancel, exactly as lrzsz itself puts it on the wire: ten CAN
+/// (0x18) followed by ten backspaces (0x08).
+///
+/// `^C` alone cannot stop a peer that is *inside* a transfer. The receiver
+/// has its terminal in raw mode with `ISIG` off, so the break characters
+/// arrive as ordinary data, get swallowed as protocol bytes, and the target
+/// carries on holding its console until our own stall timeout gives up on it
+/// — which is the "I stopped, but the board never left zmodem" this exists to
+/// fix.
+///
+/// The backspaces come with the CANs because the same bytes are also the
+/// courteous thing to send when the peer is *not* in a transfer: they scrub
+/// whatever the abandoned run had typed into its command line before `^C`
+/// arrives to clear the rest.
+///
+/// Measured against lrzsz 0.12.21, both halves wired through a throttled
+/// relay with the cancel injected three seconds into a live transfer: this
+/// sequence ends the session in **both** directions — into a receiver it
+/// cancels and the sender follows it out; into a sender it cancels and the
+/// receiver follows. `exit 128` on both sides, 2 of 2 trials each. The same
+/// bytes do *not* land reliably on a receiver that is still idle waiting for
+/// a sender, which is a different read path — so the sequence is only ever
+/// sent when a session is genuinely on the wire (see
+/// [`Transfer::peer_cancel`]).
+const ZMODEM_CANCEL: &[u8] = &[
+    0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, //
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+];
+
 /// Cap on captured command output kept for parsing: the pager's largest page
 /// plus its markers, with room to spare. Past this the target is talking to
 /// itself, not answering us.
@@ -635,6 +664,18 @@ pub struct Transfer {
     scan: Vec<u8>,
     /// The ZMODEM child, while one is running.
     proc: Option<HostProc>,
+    /// Bytes this engine wants on the wire right now, ahead of everything the
+    /// pacing queue holds: the cancel that tells a peer already inside a
+    /// transfer to let go of its console. `poll` hands it out, the transfer
+    /// view sends it.
+    ///
+    /// [`fail`] is where it is set, because failing a run is the one thing
+    /// every dead end shares — a stall, a launch that never answered, a link
+    /// that went, the person pressing abort. Before this, the cancel only went
+    /// out on the keyboard path, and a transfer that died on its own left the
+    /// target sitting in `rz` for good, holding the console every later
+    /// command would have to get past.
+    pending_out: Vec<u8>,
     /// The `rc` the target reported for the launch command, once it does.
     launch_rc: Option<i32>,
     /// State of a pager download in progress.
@@ -668,6 +709,7 @@ impl Default for Transfer {
             cap: Vec::new(),
             scan: Vec::new(),
             proc: None,
+            pending_out: Vec::new(),
             launch_rc: None,
             download: None,
             expected_sha256: String::new(),
@@ -728,6 +770,10 @@ impl Transfer {
         };
         self.validate(&probe)?;
         self.reset();
+        // A cancel owed to a peer that is no longer there is not owed to the
+        // one this run is about to talk to: it would land in the middle of the
+        // launch command and read as protocol noise.
+        self.pending_out.clear();
         self.total = match self.direction {
             Direction::Send => std::fs::metadata(&self.local).ok().map(|m| m.len()),
             Direction::Recv => None,
@@ -995,6 +1041,18 @@ impl Transfer {
             .map_err(|err| format!("read: {err}"))?;
         upload_chunk_command(&temp, index, offset, bytes, &encode_base64(&buf), fresh)
             .map_err(|err| err.to_string())
+    }
+
+    /// Bytes [`fail`] wants on the wire *now*, ahead of the pacing queue —
+    /// the cancel that frees a target left inside a transfer. Taken once and
+    /// cleared, so a frame loop that runs every tick cannot send it twice.
+    ///
+    /// The caller puts the two break characters behind it: the cancel is what
+    /// reaches a peer already inside a transfer, where the console is raw and
+    /// `^C` is data; the break behind it clears the line once that peer is
+    /// back at a shell.
+    pub fn take_pending_out(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_out)
     }
 
     /// Bytes for the link this tick: what we are typing first, then — while the
@@ -1537,7 +1595,12 @@ impl Transfer {
         }
     }
 
+    /// The single way a run dies. Every dead end lands here — a stall, a
+    /// launch that never answered, a link that went, the person pressing
+    /// abort — so this is where the target is told to let go, whatever it
+    /// was doing. The phase is read first: everything below wipes it.
     fn fail(&mut self, reason: String) {
+        let cancel = self.peer_cancel();
         self.stop_host();
         self.sweep_staged();
         self.queue.clear();
@@ -1545,6 +1608,7 @@ impl Transfer {
         self.download = None;
         self.phase = Phase::Done;
         self.outcome = Outcome::Failed(reason);
+        self.pending_out = cancel;
     }
 
     /// Drop everything, keeping the form. Also what a reconnect does.
@@ -1564,6 +1628,32 @@ impl Transfer {
         self.status.clear();
         self.outcome = Outcome::Idle;
         self.phase = Phase::Idle;
+    }
+
+    /// What the *target* has to hear when a run is abandoned, read while the
+    /// run is still on the record: [`Transfer::abort`] replaces the phase this
+    /// has to look at.
+    ///
+    /// [`Transfer::abort`] returns the two break characters, which are right
+    /// for a peer still sitting at a shell — `^C` interrupts whatever is
+    /// being typed — and wrong for one already inside a transfer, where the
+    /// terminal is raw and the break is data (see [`ZMODEM_CANCEL`]). Both go
+    /// out together, cancel first: the cancel reaches a receiver mid-transfer,
+    /// and the `^C` behind it reaches the shell afterwards and clears the line
+    /// the backspaces did not.
+    ///
+    /// Empty when there is no ZMODEM session to cancel — nothing running, or
+    /// a `dd|base64` pager run, where the break alone is the whole answer.
+    pub fn peer_cancel(&self) -> Vec<u8> {
+        let in_session = matches!(
+            self.phase,
+            Phase::Cmd { .. } | Phase::Run { .. } | Phase::Settle { .. }
+        ) && self.channel == Channel::Zmodem;
+        if in_session {
+            ZMODEM_CANCEL.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Stop whatever is running: kill the host child and return the two
@@ -1658,6 +1748,35 @@ pub fn parse_probe(text: &str) -> Probe {
     probe
 }
 
+/// `~/x` on *this* machine expands with this machine's home.
+///
+/// The local side of a transfer runs here, so a path typed into "on this
+/// host" has to be resolved here: `self.local.is_file()` against a literal
+/// `~/Documents/...` is always false, and the precheck then answers "No such
+/// local file" for a file that is right there. The target side is a different
+/// computer and goes through [`Transfer::expand`] with the home the probe
+/// reported instead — the two never share a home.
+///
+/// Only a bare `~` and a leading `~/` expand; `~user` is left alone, exactly
+/// like the target's. With no home known the path stays as written so the
+/// "must be absolute" check turns it into an error rather than a wrong file.
+pub fn expand_host_home(path: &str) -> PathBuf {
+    let Some(home) = dirs::home_dir() else {
+        return PathBuf::from(path);
+    };
+    let home = home.to_string_lossy().trim_end_matches('/').to_string();
+    if home.is_empty() {
+        return PathBuf::from(path);
+    }
+    if path == "~" {
+        return PathBuf::from(home);
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(format!("{home}/{rest}")),
+        None => PathBuf::from(path),
+    }
+}
+
 /// sha256 of a local file, for the pager's `complete` step — which refuses to
 /// move the part file unless size *and* digest match on the target. The
 /// ZMODEM path never calls it: CRC-32 per frame plus `rz`'s length check
@@ -1707,6 +1826,23 @@ mod tests {
             rz_version: String::new(),
         };
         transfer.phase = Phase::Ready;
+    }
+
+    /// Whether this machine can run a *real* zmodem child.
+    ///
+    /// The probe is faked everywhere else — a test picks a channel without
+    /// asking the machine anything. Only the child is real in the handful of
+    /// tests that need one, and a child that cannot be spawned says nothing
+    /// about what those tests check. CI installs no `lrzsz`, and a Windows
+    /// runner has no such package to install at all, so they stand down there
+    /// rather than fail for the machine's sake.
+    fn lrzsz_installed() -> bool {
+        std::process::Command::new("sz")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
     }
 
     /// The probe is the gate: it must ask about every tool either channel
@@ -1890,6 +2026,9 @@ mod tests {
     /// directory nobody chose.
     #[test]
     fn the_form_gates_on_the_probe_and_on_absolute_paths() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "relative/path".to_string(),
@@ -1977,6 +2116,37 @@ mod tests {
         // With no home known the path stays as written, so the "must be
         // absolute" check turns it into an error instead of a wrong file.
         assert_eq!(transfer.expand("~/x", ""), "~/x");
+    }
+
+    /// The *host's* `~` expands with this machine's home, the same way the
+    /// target's expands with the probe's. Without it a `~/Documents/x` typed
+    /// into the form fails `is_file()` and the precheck answers "No such
+    /// local file" for a file that is right there.
+    #[test]
+    fn a_tilde_on_this_side_expands_with_this_machines_home() {
+        assert_eq!(
+            expand_host_home("/abs/x"),
+            PathBuf::from("/abs/x"),
+            "an absolute path is left alone"
+        );
+        assert_eq!(
+            expand_host_home("relative/x"),
+            PathBuf::from("relative/x"),
+            "so is a relative one — only `~` is special"
+        );
+        if let Some(home) = dirs::home_dir() {
+            let home = home.to_string_lossy().trim_end_matches('/').to_string();
+            assert_eq!(
+                expand_host_home("~/Documents/x"),
+                PathBuf::from(format!("{home}/Documents/x"))
+            );
+            assert_eq!(expand_host_home("~"), PathBuf::from(home));
+            assert_eq!(
+                expand_host_home("~user/x"),
+                PathBuf::from("~user/x"),
+                "`~user` is not ours to resolve"
+            );
+        }
     }
 
     /// The probe parser reads exactly what the probe prints, including a tool
@@ -2068,6 +2238,9 @@ mod tests {
     /// unlike a ceiling it can be found *while* the transfer is on screen.
     #[test]
     fn a_wedged_run_is_found_while_it_still_runs_and_a_moving_one_is_not() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "/tmp/linkr-zm-stall.bin".to_string(),
@@ -2113,6 +2286,9 @@ mod tests {
     /// is the target's own `exists` line, not a guess made on this side.
     #[test]
     fn an_existing_target_file_stops_the_run_before_any_bytes_move() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "/tmp/linkr-zm-exists.bin".to_string(),
@@ -2160,6 +2336,9 @@ mod tests {
     /// stopped must not wait its turn in the queue.
     #[test]
     fn an_abort_kills_the_child_and_returns_an_unpaced_break() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "/tmp/linkr-zm-abort.bin".to_string(),
@@ -2178,6 +2357,119 @@ mod tests {
         assert!(!transfer.busy(), "the view must be free again");
     }
 
+    /// Every way a run dies lands in `fail`, so that is where the target is
+    /// told to let go — including the paths nobody pressed a key for: a
+    /// stalled link, a launch that never answered, a timeout. Before this the
+    /// cancel went out only on the keyboard path, and a transfer that died on
+    /// its own left the target sitting in `rz` for good, holding the console
+    /// every later command would have to get past.
+    #[test]
+    fn every_dead_end_leaves_the_cancel_behind_for_the_frame_loop() {
+        let mut running = Transfer {
+            channel: Channel::Zmodem,
+            phase: Phase::Run {
+                at: Instant::now() + RUN_TIMEOUT,
+            },
+            ..Transfer::default()
+        };
+
+        running.fail("The transfer stalled.".to_string());
+        assert_eq!(
+            running.take_pending_out(),
+            ZMODEM_CANCEL,
+            "a stalled run owes the target a cancel it never sent"
+        );
+        assert!(
+            running.take_pending_out().is_empty(),
+            "taken once — the frame loop runs every tick and would resend it"
+        );
+
+        // The common death is the link going first, in which case there was
+        // nowhere to send it. `reset` is what a reconnect runs, and it keeps
+        // the debt: the peer that was left holding its console is still
+        // holding it, and the next connection is the first chance to say
+        // otherwise.
+        running.phase = Phase::Run {
+            at: Instant::now() + RUN_TIMEOUT,
+        };
+        running.fail("The link went away with the run on it.".to_string());
+        running.reset();
+        assert_eq!(
+            running.take_pending_out(),
+            ZMODEM_CANCEL,
+            "a peer orphaned by a dropped link is owed the cancel on the way back"
+        );
+
+        let mut typing = Transfer {
+            channel: Channel::Zmodem,
+            phase: Phase::Cmd {
+                step: Step::Launch,
+                seq: 0,
+                at: Instant::now(),
+            },
+            ..Transfer::default()
+        };
+        typing.fail("The link went.".to_string());
+        assert_eq!(typing.take_pending_out(), ZMODEM_CANCEL);
+
+        let mut idle = Transfer::default();
+        idle.fail("The target never answered.".to_string());
+        assert!(
+            idle.take_pending_out().is_empty(),
+            "a run that never reached the target's console owes it nothing"
+        );
+    }
+
+    /// A peer inside a transfer has its console in raw mode and cannot hear
+    /// `^C`, so a live ZMODEM run also sends the protocol's own cancel. A run
+    /// that is not a ZMODEM session — nothing running, or a `dd|base64` pager
+    /// — hears only the break, and the cancel's shape is lrzsz's own.
+    #[test]
+    fn the_cancel_goes_out_only_when_there_is_a_session_to_cancel() {
+        let mut transfer = Transfer {
+            channel: Channel::Zmodem,
+            ..Transfer::default()
+        };
+
+        transfer.phase = Phase::Cmd {
+            step: Step::Launch,
+            seq: 0,
+            at: Instant::now(),
+        };
+        assert_eq!(
+            transfer.peer_cancel(),
+            ZMODEM_CANCEL,
+            "a launch command being typed is already a session: the target may have started rz"
+        );
+
+        transfer.phase = Phase::Run {
+            at: Instant::now() + RUN_TIMEOUT,
+        };
+        assert_eq!(transfer.peer_cancel(), ZMODEM_CANCEL);
+
+        transfer.phase = Phase::Settle {
+            until: Instant::now() + SETTLE,
+        };
+        assert_eq!(transfer.peer_cancel(), ZMODEM_CANCEL);
+
+        transfer.channel = Channel::Pager;
+        assert!(
+            transfer.peer_cancel().is_empty(),
+            "a dd|base64 pager has no ZMODEM to cancel"
+        );
+
+        transfer.channel = Channel::Zmodem;
+        transfer.phase = Phase::Idle;
+        assert!(
+            transfer.peer_cancel().is_empty(),
+            "nothing is running, so there is nobody to tell"
+        );
+
+        // Ten CAN then ten backspaces — the byte string lrzsz sends itself.
+        assert_eq!(&ZMODEM_CANCEL[..10], &[0x18; 10], "the cancel proper");
+        assert_eq!(&ZMODEM_CANCEL[10..], &[0x08; 10], "its backspaces");
+    }
+
     /// A console switches bracketed paste off (`\e[?2004l`) the instant it
     /// executes a line, so the **first** line of the output arrives glued to
     /// that escape — and `go` is the launch's first and only line before `rz`
@@ -2186,6 +2478,9 @@ mod tests {
     /// sends. The echo, meanwhile, must still not answer.
     #[test]
     fn a_shell_escape_before_the_first_line_does_not_hide_go() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "/tmp/linkr-zm-paste.bin".to_string(),
@@ -2228,6 +2523,9 @@ mod tests {
     /// the very line that carries the next answer.
     #[test]
     fn a_control_character_glued_to_a_marker_does_not_hide_it() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: PathBuf::from("/etc/hostname"),
             target: "/tmp/linkr-zm-xon.bin".to_string(),
@@ -2311,6 +2609,9 @@ mod tests {
     /// reaped in the ~0.4 ms between `08` and `OO`.
     #[test]
     fn the_childs_last_output_is_still_pumped_once_the_run_settles() {
+        if !lrzsz_installed() {
+            return;
+        }
         let mut transfer = Transfer {
             local: std::env::temp_dir().join("linkr-pump-settle.bin"),
             target: "/tmp/linkr-zm-pump.bin".to_string(),
