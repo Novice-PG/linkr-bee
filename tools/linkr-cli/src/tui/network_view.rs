@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::oneshot;
+use unicode_width::UnicodeWidthStr;
 
 use super::i18n::{strings, t, tr, Lang, MSG_SAVE_SETTINGS};
 use super::replies::{
@@ -173,7 +174,18 @@ pub fn entries(app: &App) -> Vec<NetEntry> {
     list
 }
 
-fn field_line(label: &str, field: &TextField, mask: bool, selected: bool) -> Line<'static> {
+/// Columns the row marker occupies, before the label.
+const MARKER_COLUMNS: usize = 2;
+
+/// One field row, and — when that row is the one being edited — where its
+/// caret lands inside the line: the marker, `label `, then the caret's own
+/// column in the text.
+fn field_line(
+    label: &str,
+    field: &TextField,
+    mask: bool,
+    selected: bool,
+) -> (Line<'static>, Option<usize>) {
     let (text, _) = field.display(if mask { Some('*') } else { None });
     let marker = if selected { "▸ " } else { "  " };
     let style = if selected {
@@ -188,11 +200,35 @@ fn field_line(label: &str, field: &TextField, mask: bool, selected: bool) -> Lin
     } else {
         text
     };
-    Line::from(vec![
-        Span::styled(marker.to_string(), Style::default().fg(Color::Yellow)),
-        Span::styled(format!("{label} "), Style::default().fg(Color::Cyan)),
-        Span::styled(value, style),
-    ])
+    // An empty field draws a dash in the text's place, so a caret at column
+    // zero sits *on* that dash rather than in front of nothing.
+    let caret =
+        selected.then(|| MARKER_COLUMNS + UnicodeWidthStr::width(label) + 1 + field.caret_column());
+    (
+        Line::from(vec![
+            Span::styled(marker.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{label} "), Style::default().fg(Color::Cyan)),
+            Span::styled(value, style),
+        ]),
+        caret,
+    )
+}
+
+/// Push a field row and remember where its caret sits: the line index is the
+/// row's own position, read before it is pushed so it cannot drift.
+fn push_field(
+    lines: &mut Vec<Line<'static>>,
+    caret: &mut Option<(usize, usize)>,
+    label: &str,
+    field: &TextField,
+    mask: bool,
+    selected: bool,
+) {
+    let (line, column) = field_line(label, field, mask, selected);
+    if let Some(column) = column {
+        *caret = Some((lines.len(), column));
+    }
+    lines.push(line);
 }
 
 fn action_line(
@@ -245,6 +281,16 @@ fn sync_lang(app: &mut App) {
 
 /// Body of the Network view (rendered in the center pane).
 pub fn render_lines(app: &App) -> Vec<Line<'static>> {
+    render_lines_at(app).0
+}
+
+/// The body, plus where the caret of the field being edited sits in it: the
+/// index of that line, and the caret's column inside that line.
+///
+/// Reported rather than drawn — [`super::layout::center_caret`] turns it into
+/// the terminal's cursor, because a caret cell of the field's own would push
+/// a full-width row one column past the pane and wrap it onto the line below.
+pub fn render_lines_at(app: &App) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let lang = app.lang();
     let net = &app.network;
     // One row list for the whole frame: `is_sel` used to rebuild it for every
@@ -252,6 +298,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     let items = entries(app);
     let selection = app.network.selection;
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut caret: Option<(usize, usize)> = None;
 
     lines.push(Line::from(Span::styled(
         "WiFi",
@@ -283,18 +330,22 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     let scan_ok = net.can_wifi_scan(app);
     let pending = |kind: PendingKind| net.pending.iter().any(|(k, _)| *k == kind);
 
-    lines.push(field_line(
+    push_field(
+        &mut lines,
+        &mut caret,
         t(NET_FIELD_SSID, lang),
         &net.ssid,
         false,
         is_sel(&items, selection, NetEntry::Ssid),
-    ));
-    lines.push(field_line(
+    );
+    push_field(
+        &mut lines,
+        &mut caret,
         t(NET_FIELD_PASSWORD, lang),
         &net.password,
         !net.show_password,
         is_sel(&items, selection, NetEntry::Password),
-    ));
+    );
     lines.push(action_line(
         t(NET_ACT_SCAN, lang),
         scan_ok,
@@ -395,12 +446,14 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         )));
     }
     let dav_ok = net.can_webdav(app);
-    lines.push(field_line(
+    push_field(
+        &mut lines,
+        &mut caret,
         t(NET_FIELD_URL, lang),
         &net.webdav,
         false,
         is_sel(&items, selection, NetEntry::Webdav),
-    ));
+    );
     lines.push(action_line(
         t(NET_ACT_SET, lang),
         dav_ok,
@@ -432,7 +485,7 @@ pub fn render_lines(app: &App) -> Vec<Line<'static>> {
         t(NET_KEYS_HINT, lang),
         Style::default().fg(Color::DarkGray),
     )));
-    lines
+    (lines, caret)
 }
 
 fn is_sel(items: &[NetEntry], selection: usize, entry: NetEntry) -> bool {
