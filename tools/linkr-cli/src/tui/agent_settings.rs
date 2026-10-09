@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::config::write_secret_file;
+use crate::agent::config::{is_loopback_host, write_secret_file};
 
 use super::i18n::{strings, t, Entry, Lang};
 use super::state::{App, TextField};
@@ -182,6 +182,11 @@ fn write_stored_to(path: &Path, stored: &StoredAgent, lang: Lang) -> Result<(), 
 }
 
 /// Endpoint security mirror of `endpointSecurity()` in `agent_config.js`.
+///
+/// The loopback half comes from [`is_loopback_host`], shared with the other
+/// copy of this predicate in this crate: the two parse the URL differently
+/// (a hand-split string here, `reqwest::Url` there) and must not be free to
+/// disagree about what a loopback host is.
 pub fn endpoint_security(endpoint: &str) -> (bool, bool) {
     let lowered = endpoint.trim().to_ascii_lowercase();
     let (scheme, rest) = match lowered.split_once("://") {
@@ -203,10 +208,7 @@ pub fn endpoint_security(endpoint: &str) -> (bool, bool) {
         Some(inner) => inner.split(']').next().unwrap_or(inner),
         None => authority.split(':').next().unwrap_or(""),
     };
-    let loopback = host == "localhost"
-        || host == "::1"
-        || host.ends_with(".localhost")
-        || host.starts_with("127.");
+    let loopback = is_loopback_host(host);
     let plaintext = scheme == "http";
     (plaintext, plaintext && !loopback)
 }
@@ -901,6 +903,31 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The consent this dialog's save path skips. The prefix rule —
+    /// `/^127\./`, mirrored here from `agent_config.js` — read `127.example.com`
+    /// as a loopback address, and loopback is exactly the condition under
+    /// which a plaintext `apiKey` is written without asking. A name is not an
+    /// address, whatever its first label happens to be.
+    #[test]
+    fn a_remote_host_named_127_is_not_treated_as_loopback() {
+        // Plaintext, and therefore exposed: the save must ask.
+        assert_eq!(
+            endpoint_security("http://127.example.com/v1"),
+            (true, true),
+            "a remote host dressed as 127 still needs consent"
+        );
+        // The address the rule was written for keeps its exemption.
+        assert_eq!(
+            endpoint_security("http://127.9.9.9/v1"),
+            (true, false),
+            "an address in 127.0.0.0/8 still never leaves the machine"
+        );
+        assert_eq!(
+            endpoint_security("http://ollama.localhost/v1"),
+            (true, false)
+        );
     }
 
     fn state_with(endpoint: &str, model: &str) -> AgentSettingsState {
