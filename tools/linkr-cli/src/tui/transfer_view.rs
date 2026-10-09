@@ -13,7 +13,6 @@
 //! same way the transport's `detail` line is data — the labels around them,
 //! every action and every state this view invents, go through [`strings!`].
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -59,6 +58,10 @@ strings! {
     XFER_PROBE_FIRST => "Run the precheck first: nothing transfers without it.",
         "请先运行预检：没有结果就不开始传输。";
     XFER_ABORTED => "Transfer aborted.", "传输已中止。";
+    XFER_CONSOLE_LOCKED =>
+        "Transferring — the console is locked until this run ends.",
+        "传输进行中——控制台在本次运行结束前已锁定。";
+    XFER_NOT_FINISHED => "still running", "尚未结束";
     XFER_KEYS => "Tab move · Enter activate · Esc back · PgUp/PgDn scroll",
         "Tab 移动 · Enter 确认 · Esc 返回 · PgUp/PgDn 滚动";
 }
@@ -147,7 +150,10 @@ pub struct State {
 impl State {
     /// Form → engine, right before an action reads the fields.
     fn sync(&mut self) {
-        self.engine.local = PathBuf::from(self.local.as_str());
+        // A path typed as `~/x` means *this* machine's home, and the engine's
+        // `is_file()` sees the raw string otherwise — which reports "No such
+        // local file" for a file that is right there.
+        self.engine.local = crate::transfer::expand_host_home(self.local.as_str());
         self.engine.target = self.target.as_str().to_string();
     }
 }
@@ -166,9 +172,6 @@ pub fn open(app: &mut App, direction: Option<Direction>) {
     }
     app.set_view(View::Transfer);
     app.transfer.message.clear();
-    // Two `--version` spawns, about 5 ms, once per open — the host half of
-    // the same precondition the device is about to be asked about.
-    app.transfer.engine.host = HostTools::detect();
     if !app.connected() {
         app.transfer.message = t(XFER_NO_LINK, app.lang()).to_string();
         return;
@@ -177,11 +180,21 @@ pub fn open(app: &mut App, direction: Option<Direction>) {
 }
 
 /// Run the precheck (`Act::Check`).
+///
+/// The host's own half of the precondition is run *here*, not in `open()`:
+/// the settings restore straight into this view (`active_view`) and the
+/// palette's `transfer.*` actions reach it too, and neither passes through
+/// `open()`. Left there, `host` still held `HostTools::default()`, so the
+/// precheck read "no lrzsz on this host" with `sz` and `rz` installed — and
+/// `start()`, which picks the channel off the same field, silently took the
+/// pager for a target that has lrzsz.
 fn check(app: &mut App) {
     if !app.connected() {
         app.transfer.message = t(XFER_NO_LINK, app.lang()).to_string();
         return;
     }
+    // Two `--version` spawns, about 5 ms, once per press.
+    app.transfer.engine.host = HostTools::detect();
     app.transfer
         .engine
         .set_enter(super::keys::translate_enter(b"\r", app.settings.enter_mode));
@@ -220,7 +233,20 @@ fn start(app: &mut App) {
 /// is the same stop from anywhere in the TUI.
 pub fn abort(app: &mut App) {
     let break_bytes = app.transfer.engine.abort();
-    app.send_bytes(break_bytes);
+    // Cancel first, break second: the cancel is what reaches a peer already
+    // inside a transfer, where the console is raw and `^C` is just data; the
+    // break behind it is what clears the line when that peer is not — or is
+    // only part-way through the command this run typed at it.
+    //
+    // Taken only while the link is up. A run that dies with the link already
+    // gone has nowhere to send this yet, and the peer it left behind is still
+    // holding its console: the cancel stays queued for the next connection,
+    // which is exactly the moment that peer can hear it.
+    if app.connected() {
+        let mut out = app.transfer.engine.take_pending_out();
+        out.extend_from_slice(&break_bytes);
+        app.send_bytes(out);
+    }
     app.transfer.message = t(XFER_ABORTED, app.lang()).to_string();
 }
 
@@ -258,6 +284,28 @@ pub fn poll(app: &mut App) {
     let enter = super::keys::translate_enter(b"\r", app.settings.enter_mode);
     app.transfer.engine.set_enter(enter);
     app.transfer.engine.poll(Instant::now());
+    // Whatever killed the run — a stall, a launch that never answered, the
+    // link going, the person pressing abort — `fail` queued the cancel that
+    // tells the target to let go of its console, and this is where it goes
+    // out. Cancel first, break second: a target still inside the transfer
+    // can only hear the cancel, and one back at a shell has the line the
+    // backspaces left cleared by the break behind it. A run stopped from the
+    // keyboard drains the same queue itself, so nothing here is sent twice.
+    //
+    // Only while the link is up. A run that died with the link already gone
+    // cannot reach the peer it orphaned, so the cancel stays queued rather
+    // than being thrown away: reconnecting walks straight back into that
+    // peer's console, and the first thing this pane sends is the thing it
+    // could not send then. `start` clears it — a new run is not the run that
+    // owes anyone a cancel.
+    if app.connected() {
+        let pending = app.transfer.engine.take_pending_out();
+        if !pending.is_empty() {
+            let mut bytes = pending;
+            bytes.extend_from_slice(b"\x03\x03");
+            app.send_bytes(bytes);
+        }
+    }
     // A link that dropped mid-run would otherwise leave `pump` feeding bytes
     // into `send_bytes`, which drops them silently: the run would sit there
     // until its timeout with a progress line that never moves.
@@ -355,8 +403,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
 /// `▸ label ┆ value`, with the label padded in display columns (Chinese is
 /// two columns per glyph, and a shifted value column reads as a wrong value).
+/// Columns the form's label column is padded to, so the value column starts in
+/// the same place whether the label is `Local path` or `本机路径`.
+const LABEL_WIDTH: usize = 16;
+/// Where a form row's value starts: the marker and its space, the label column,
+/// then the rule and its space.
+const VALUE_COLUMN: usize = LABEL_WIDTH + 4;
+
 fn row(marker: bool, label: &str, value: String, width: u16, style: Style) -> Line<'static> {
-    const LABEL_WIDTH: usize = 16;
     let pad = LABEL_WIDTH.saturating_sub(UnicodeWidthStr::width(label));
     let value_width = (width as usize).saturating_sub(LABEL_WIDTH + 4);
     Line::from(vec![
@@ -445,7 +499,18 @@ fn progress(app: &App) -> String {
             let total_text = crate::target_files::format_bytes(total as i64)
                 .unwrap_or_else(|_| format!("{total} B"));
             let percent = ((engine.moved as f64 / total as f64) * 100.0).min(100.0) as usize;
-            format!("{moved} / {total_text} · {percent}%")
+            let mut line = format!("{moved} / {total_text} · {percent}%");
+            // A share that has reached its whole is not a finished run: the
+            // host's process still has to exit, the window after it still has
+            // to close, and a link that retransmits carries bytes past the
+            // size of the file long before either happens. Left silent, 100%
+            // reads as "done" — and the next press of Start is answered with
+            // "a transfer is already running", which then looks like the bug
+            // it is not.
+            if percent >= 100 && engine.busy() {
+                line.push_str(&format!(" · {}", t(XFER_NOT_FINISHED, app.lang())));
+            }
+            line
         }
         _ => moved,
     }
@@ -479,9 +544,21 @@ fn status(app: &App, lang: Lang) -> String {
 
 /// Header, form, verdict block, key hint — the whole pane.
 pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    render_lines_at(app, width).0
+}
+
+/// The body, plus where the caret of the path field being edited sits in it:
+/// the index of that line, and the caret's column inside that line.
+///
+/// The caret is reported rather than drawn into a cell. A cell of its own would
+/// push a full-width row past the pane and wrap it onto the line below, while
+/// the terminal's own cursor — parked here by the renderer — can sit on a column
+/// the buffer already holds.
+pub fn render_lines_at(app: &App, width: u16) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     let lang = app.lang();
     let state = &app.transfer;
     let mut lines = vec![header(t(XFER_HEADER, lang)), Line::from("")];
+    let mut caret: Option<(usize, usize)> = None;
 
     if !app.connected() {
         lines.push(Line::from(Span::styled(
@@ -502,6 +579,9 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         width,
         Style::default().fg(Color::White),
     ));
+    if state.row == Row::Local {
+        caret = Some((lines.len(), VALUE_COLUMN + state.local.caret_column()));
+    }
     lines.push(row(
         state.row == Row::Local,
         t(XFER_LOCAL, lang),
@@ -509,6 +589,9 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         width,
         Style::default().fg(Color::White),
     ));
+    if state.row == Row::Target {
+        caret = Some((lines.len(), VALUE_COLUMN + state.target.caret_column()));
+    }
     lines.push(row(
         state.row == Row::Target,
         t(XFER_TARGET, lang),
@@ -615,7 +698,7 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         t(XFER_KEYS, lang),
         width as usize,
     )));
-    lines
+    (lines, caret)
 }
 
 #[cfg(test)]
@@ -643,6 +726,53 @@ mod tests {
         assert_eq!(
             running.transfer.message,
             t(XFER_ABORTED, running.lang()).to_string()
+        );
+    }
+
+    /// The console is the one surface whose keys go straight onto the link,
+    /// so a run in flight shuts it — and only it. Everything else stays
+    /// reachable: a stuck transfer is exactly when you need another view, and
+    /// the pane behind the door would be starved of inbound bytes anyway.
+    #[test]
+    fn the_console_is_locked_while_a_run_owns_the_link() {
+        let mut app = test_app();
+        app.set_view(View::Network);
+        assert_eq!(app.view, View::Network);
+        app.set_view(View::Terminal);
+        assert_eq!(app.view, View::Terminal, "no run: the console stays open");
+
+        app.transfer.engine.phase = Phase::Run { at: Instant::now() };
+        app.set_view(View::Network);
+        assert_eq!(app.view, View::Network, "other views stay reachable");
+        app.set_view(View::Terminal);
+        assert_eq!(app.view, View::Network, "a run in flight keeps it shut");
+    }
+
+    /// A share that has reached its whole still is not a finished run, and
+    /// the line has to say so. Left silent, 100% reads as "done" while the
+    /// engine refuses the next Start with "already running" — which then
+    /// looks like the bug it is not.
+    #[test]
+    fn a_full_share_that_is_still_running_says_so() {
+        let mut app = test_app();
+        // A link that retransmitted: more bytes crossed than the file holds.
+        app.transfer.engine.total = Some(1_000);
+        app.transfer.engine.moved = 1_500;
+
+        app.transfer.engine.phase = Phase::Run { at: Instant::now() };
+        let running = progress(&app);
+        assert!(running.contains("100%"), "{running}");
+        assert!(
+            running.contains(t(XFER_NOT_FINISHED, app.lang())),
+            "{running}"
+        );
+
+        app.transfer.engine.phase = Phase::Done;
+        let done = progress(&app);
+        assert!(done.contains("100%"), "{done}");
+        assert!(
+            !done.contains(t(XFER_NOT_FINISHED, app.lang())),
+            "a finished run must not claim otherwise: {done}"
         );
     }
 
@@ -829,6 +959,31 @@ mod tests {
         );
         open(&mut offline, Some(Direction::Recv));
         assert_eq!(offline.transfer.message, t(XFER_NO_LINK, Lang::En));
+    }
+
+    /// The settings restore straight into this view, and nothing on that path
+    /// calls `open()` — so the precheck must do the host's own `--version`
+    /// half by itself. Run there alone it reported "no lrzsz on this host"
+    /// with `sz` and `rz` installed, and `start()` picks its channel off the
+    /// same field: ZMODEM was never offered to a host that had it.
+    #[test]
+    fn the_precheck_counts_this_hosts_lrzsz_without_opening_the_view() {
+        if !HostTools::detect().zmodem() {
+            // No lrzsz on this machine: nothing to detect, and the assertions
+            // below would only be comparing default with default.
+            return;
+        }
+        let mut app = test_app();
+        app.transfer.engine.host = HostTools::default();
+        check(&mut app);
+        assert!(
+            app.transfer.engine.host.zmodem(),
+            "the check, not the opener, ran the host probe"
+        );
+        assert_eq!(
+            app.transfer.engine.host.sz_version,
+            HostTools::detect().sz_version
+        );
     }
 
     /// Opening from the palette picks the direction, and F6 keeps it: the
