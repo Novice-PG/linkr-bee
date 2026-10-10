@@ -25,14 +25,14 @@ shows how to switch.
 ```text
 ┌─────────────┬──────────────────────────────────────────────┐
 │ Connection  │                                              │
-│ ● Connected │              the active view                 │
+│ * Connected │              the active view                 │
 │ Transport   │         (F2 terminal / F3 diagnostics /      │
 │ Device      │          F4 network / F5 assistant /         │
 │             │          F6 file transfer)                   │
 │             │                                              │
 │ Quick send  │                                              │
 │             ├──────────────────────────────────────────────┤
-│ Watch       │ [Focus] View · detail   Ctrl+P · F1 · Ctrl+Q │
+│ Watch       │ [Focus] View / detail   Ctrl+P / F1 / Ctrl+Q │
 └─────────────┴──────────────────────────────────────────────┘
 ```
 
