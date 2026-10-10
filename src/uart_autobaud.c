@@ -61,19 +61,32 @@
  * not to our divisor, so the port then reads 57600 forever and stays wrong.
  * That is a working link broken by a binary file.
  *
- * So the port keeps a memory of having been measured against the line. The
- * first reading within 2% of our own marks the link as verified, and from
- * then on a reading that is our own rate divided by k (2..9) is refused and
- * logged instead of obeyed — it is the one shape a missing single-bit run can
- * produce, and the one direction it can produce it in. Readings at or above
- * our rate still move the port, because no absent single-bit run can ever
- * read high: that is the direction the Kconfig's 1500000 / 921600 / 1000000
- * SBC consoles come from, and it stays open. A peer that slows to a rate in
- * that set *after* the link is up is refused with the artifact; the two cannot
- * be told apart from one pulse width, and holding a link that works is the
- * cheaper of the mistakes. Verification is dropped by every reconfiguration,
- * so a guess that turns out wrong can still be undone — the rollback the
- * two-window rule depends on.
+ * So the port keeps a memory of having been measured against the line, and it
+ * starts out remembering: the rate in Kconfig is what both ends were set to,
+ * so a reading that disagrees from the very first window is the one that has
+ * to explain itself. Every reading within 2% of our own marks the link as
+ * verified again, and while it is marked a reading that is our own rate
+ * divided by k (2..9) is refused and logged instead of obeyed — it is the one
+ * shape a missing single-bit run can produce, and the one direction it can
+ * produce it in. Readings at or above our rate still move the port, because no
+ * absent single-bit run can ever read high: that is the direction the
+ * Kconfig's 1500000 / 921600 / 1000000 SBC consoles come from, and it stays
+ * open. Verification is dropped by every reconfiguration, so a guess that
+ * turns out wrong can still be undone — the rollback the two-window rule
+ * depends on.
+ *
+ * Silence is how the refusal reopens. A peer that really did slow to a whole
+ * divisor of our own and a stream with no single-bit run in it arrive as the
+ * same number — 921600 -> 115200 and 0xCC on a 115200 line are both
+ * "current / k" — so while the link is carrying traffic no reading tells them
+ * apart, and holding the port that works is the cheaper of the mistakes. A
+ * line quiet for long enough is a link we no longer hold any evidence about:
+ * the next reading is followed whether it moved or not, and the silence rather
+ * than the pulse width is what chose. That is the re-probe the refusal needs
+ * in order to be a delay instead of a lock, and it is also the case it gives
+ * up — a quiet line that comes back carrying a stream with no single-bit run
+ * is followed too. The alternative, holding the port forever, is what made
+ * 921600 -> 115200 unreachable.
  */
 
 #include "uart_autobaud.h"
@@ -92,6 +105,17 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #define AUTOBAUD_CONFIRM	2	  /* agreeing windows before touching it */
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
 #define AUTOBAUD_REFUSED_MAX	6	  /* disagreeing windows before saying so */
+/*
+ * Consecutive windows in which the line did not toggle at all, after which the
+ * port stops being treated as measured against it: 8 x 400 ms = 3.2 s of
+ * silence. Not one window — the peer's bursts are ~200 ms apart, so a single
+ * empty window can come back empty on timing alone and would drop the
+ * protection between two bursts of the same link. Sustained quiet is the one
+ * thing that can happen *before* a peer's rate changes, which is what makes it
+ * the right signal to reopen on: long enough that a burst gap cannot reach it,
+ * short enough to cover the gap a rate change on the other end leaves.
+ */
+#define AUTOBAUD_QUIET_UNVERIFY 8
 /*
  * The longest run a framed byte can leave on the line: a start bit plus eight
  * zero data bits, cut short by a stop bit that is always high. Both
@@ -137,6 +161,8 @@ static uint32_t autobaud_cooldown_until;
 static uint32_t autobaud_warned_at;
 static uint8_t autobaud_confirm;		  /* windows agreeing on it */
 static uint8_t autobaud_refused;
+/* Windows in a row with nothing to time; see AUTOBAUD_QUIET_UNVERIFY. */
+static uint8_t autobaud_quiet;
 /*
  * The line has been read within 2% of what the port is set to, so we know the
  * two agree. Set by a match, dropped by every reconfiguration — a port we
@@ -266,9 +292,24 @@ static void autobaud_tick(struct k_work *work)
 	if (low == 0 || high == 0 || low >= AUTOBAUD_NO_PULSE ||
 	    high >= AUTOBAUD_NO_PULSE) {
 		/* Nothing to time, and nothing that says anything about the
-		 * rate — so it must not eat the refusal budget either. */
+		 * rate — so it must not eat the refusal budget either. It does
+		 * say something about the *link*: a line this quiet is no
+		 * longer one we hold any evidence about, so the port's rate
+		 * stops being treated as measured against it and the next
+		 * reading is followed again. See AUTOBAUD_QUIET_UNVERIFY. */
+		if (++autobaud_quiet >= AUTOBAUD_QUIET_UNVERIFY) {
+			autobaud_quiet = AUTOBAUD_QUIET_UNVERIFY;
+			if (autobaud_verified) {
+				autobaud_verified = false;
+				LOG_WRN("UART autobaud: line silent for %u "
+					"windows, no longer measured against "
+					"the port",
+					AUTOBAUD_QUIET_UNVERIFY);
+			}
+		}
 		return;
 	}
+	autobaud_quiet = 0;
 
 	if (autobaud_apart(low, high)) {
 		autobaud_forget();
@@ -373,10 +414,20 @@ static void autobaud_tick(struct k_work *work)
 void linkr_uart_autobaud_init(uintptr_t reg_addr)
 {
 	autobaud_reg = reg_addr;
-	/* Nothing has matched the port yet, so the first reading is free to
-	 * move it — including downwards, which is the one direction a verified
-	 * port refuses. */
-	autobaud_verified = false;
+	/*
+	 * The configured rate is the working assumption: both ends were set to
+	 * it, so the first reading that disagrees is the one that has to
+	 * explain itself. Starting out *un*verified instead made the very first
+	 * window free to move the port on a reading of our own rate over a run
+	 * longer than one bit — 0xCC arriving from reset computes 57600 from a
+	 * 115200 line, moves the port there, and then reads as a match at the
+	 * rate it just moved to, so no later window ever disagrees with the
+	 * guess and the link stays broken. Downward is still the one direction
+	 * a believed port refuses; a reading that is none of current / k is
+	 * followed here exactly as it always was.
+	 */
+	autobaud_verified = true;
+	autobaud_quiet = 0;
 	/* Relative to now, so the wrap-safe comparison in the tick stays
 	 * valid however long the board has already been up. */
 	autobaud_cooldown_until = k_uptime_get_32();

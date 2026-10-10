@@ -164,6 +164,63 @@ static void scenario_verified_other_rate(void)
 	window(pulse(115200, 1), pulse(115200, 1));
 }
 
+/* A window in which the line never toggled: both counters still hold the
+ * power-up default the register has. This is what an idle link looks like to
+ * the detector, and the only thing it can be read as. */
+static void quiet_window(void)
+{
+	fake_now_ms += 400; /* one AUTOBAUD_WINDOW_MS */
+	fake_uart.lowpulse.min_cnt = 0xFFFFFu; /* AUTOBAUD_NO_PULSE */
+	fake_uart.highpulse.min_cnt = 0xFFFFFu;
+	autobaud_tick(NULL);
+}
+
+/* Straight out of reset, before the line has ever been measured: a stream with
+ * no single-bit run arrives. 0xCC on a true 115200 line latches two bit-times
+ * on both polarities, which computes 57600 from a port configured for 115200.
+ * Moving there would be a guess, and the same pulse then reads as a match at
+ * the rate the port just moved to — so nothing afterwards ever disagrees with
+ * it. The port has to hold. */
+static void scenario_startup_binary(void)
+{
+	for (int i = 0; i < 20; i++) {
+		window(pulse(115200, 2), pulse(115200, 2));
+	}
+}
+
+/* One empty window between two bursts of the same link must not reopen the
+ * refusal: a peer's bursts are ~200 ms apart and the window is 400 ms, so an
+ * empty one arrives on timing alone. Followed by a stream with no single-bit
+ * run, which still has to be refused. */
+static void scenario_one_gap_does_not_reopen(void)
+{
+	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
+	quiet_window();
+	for (int i = 0; i < 6; i++) {
+		window(pulse(115200, 2), pulse(115200, 2));
+	}
+}
+
+/* The refusal must be a delay, not a lock. 921600 -> 115200 is a whole
+ * divisor of our own (/8), which is exactly the shape of a missing single-bit
+ * run and so refused while the link is busy — but after the line has been
+ * quiet long enough that it is no longer the link we measured, it is followed.
+ * This is the number the reviewer's own scenario produced as still refused. */
+static void scenario_quiet_then_an_integer_slowdown(void)
+{
+	configured_baud = 921600;
+	set_divider(configured_baud);
+
+	window(pulse(921600, 1), pulse(921600, 1)); /* measured, agreed */
+
+	for (int i = 0; i < 10; i++) {
+		quiet_window();
+	}
+	for (int i = 0; i < 20; i++) {
+		window(pulse(115200, 1), pulse(115200, 1));
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *scenario = argc > 1 ? argv[1] : "";
@@ -181,6 +238,12 @@ int main(int argc, char **argv)
 		scenario_verified_step_up();
 	} else if (strcmp(scenario, "verified_other_rate") == 0) {
 		scenario_verified_other_rate();
+	} else if (strcmp(scenario, "startup_binary") == 0) {
+		scenario_startup_binary();
+	} else if (strcmp(scenario, "one_gap_does_not_reopen") == 0) {
+		scenario_one_gap_does_not_reopen();
+	} else if (strcmp(scenario, "quiet_then_an_integer_slowdown") == 0) {
+		scenario_quiet_then_an_integer_slowdown();
 	} else {
 		fprintf(stderr, "unknown scenario: %s\n", scenario);
 		return 2;
@@ -189,6 +252,7 @@ int main(int argc, char **argv)
 	printf("rate=%u\n", configured_baud);
 	printf("reconfigs=%d\n", reconfigure_calls);
 	printf("last=%u\n", reconfigured_to);
+	printf("verified=%d\n", autobaud_verified ? 1 : 0);
 
 	return 0;
 }

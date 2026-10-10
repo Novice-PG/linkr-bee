@@ -111,5 +111,52 @@ class AutobaudTests(unittest.TestCase):
         self.assertEqual(result["last"], "115200")
 
 
+    def test_a_binary_stream_from_reset_does_not_move_the_port(self):
+        """The entry the existing tests never covered: nothing matched yet.
+
+        0xCC arriving on a line that really is 115200 latches two bit-times on
+        both polarities, which computes 57600 from a port configured for
+        115200. Moving there is a guess — and the same pulse then reads as a
+        match at the rate the port just moved to, so no later window ever
+        disagrees with it and the link stays broken. Twenty windows of it: the
+        configured rate is the working assumption until the line says
+        otherwise, so the port holds and `verified` stays set (which is what
+        keeps the refusal armed for every one of those windows).
+        """
+        result = self.run_scenario("startup_binary")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["verified"], "1")
+
+    def test_one_empty_window_does_not_reopen_a_refused_reading(self):
+        """A gap is not a rate change: the peer's bursts are 200 ms apart.
+
+        A single empty window can arrive on timing alone, so reopening on one
+        would drop the protection between two bursts of the very same link —
+        which is the next line in this scenario, a stream with no single-bit
+        run that still has to be refused.
+        """
+        result = self.run_scenario("one_gap_does_not_reopen")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+
+    def test_a_refused_slowdown_is_followed_once_the_line_has_been_quiet(self):
+        """The refusal is a delay, not a lock.
+
+        921600 -> 115200 is a whole divisor of our own (/8), which is exactly
+        the shape of a missing single-bit run, so while the link is busy there
+        is no reading that tells it apart from one and it is refused. After
+        the line has been quiet for longer than a burst gap it is no longer
+        the link that was measured, and the next reading is believed: the
+        silence, not the pulse width, is what reopens it. Without that this
+        direction was unreachable — 921600 and 115200 stayed as they were
+        forever.
+        """
+        result = self.run_scenario("quiet_then_an_integer_slowdown")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertEqual(result["last"], "115200")
+
+
 if __name__ == "__main__":
     unittest.main()
