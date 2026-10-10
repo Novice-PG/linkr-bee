@@ -211,14 +211,20 @@ fn invert_columns(line: &mut Line<'static>, from: usize, to: usize) {
 ///
 /// `cells_to_line` drops the trailing blanks of a row, so a caret past the
 /// last non-blank cell would sit on a cell that no longer exists: the blanks
-/// are drawn back up to it.
+/// are drawn back up to it. They are ordinary padding; only the one the caret
+/// stands on is inverted. Inverting the whole pad turned a caret at column 40
+/// of a ten-column row into a thirty-one cell bar, which is a block the eye
+/// cannot separate from the row's own blanks.
 fn mark_cursor(line: &mut Line<'static>, col: u16) {
     let col = usize::from(col);
     let width = line_width(line);
     if col >= width {
         let style = line.spans.last().map(|span| span.style).unwrap_or_default();
-        line.spans
-            .push(Span::styled(" ".repeat(col - width + 1), style.reversed()));
+        if col > width {
+            line.spans
+                .push(Span::styled(" ".repeat(col - width), style));
+        }
+        line.spans.push(Span::styled(" ", style.reversed()));
         return;
     }
     invert_columns(line, col, col + 1);
@@ -756,18 +762,58 @@ mod tests {
             text, "ab   ",
             "cols 2 and 3 are blank, the caret owns col 4"
         );
+        let reversed: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|span| {
+                span.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })
+            .map(|span| span.content.as_ref())
+            .collect();
         assert_eq!(
-            line.spans
-                .last()
-                .filter(|span| {
-                    span.style
-                        .add_modifier
-                        .contains(ratatui::style::Modifier::REVERSED)
-                })
-                .map(|span| span.content.as_ref()),
-            Some("   "),
-            "…and the whole run back there is the reversed one"
+            reversed,
+            vec![" "],
+            "the caret is the one cell it stands on, not the pad under it"
         );
+        assert!(
+            !line.spans[line.spans.len() - 2]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "the blanks it walked over are padding, not cursor"
+        );
+    }
+
+    /// A caret far past the end of a short row used to invert every blank it
+    /// had walked over, so a shell sitting at column 40 behind a ten-column
+    /// prompt drew a thirty-one cell bar — a block no one could tell from the
+    /// row's own blanks. The caret is one cell wherever it stands.
+    #[test]
+    fn a_caret_far_past_the_end_is_still_one_cell() {
+        let mut line = Line::from("$ ");
+
+        mark_cursor(&mut line, 40);
+
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text.len(), 41, "the row reaches the caret's column");
+
+        let reversed: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|span| {
+                span.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(reversed, vec![" "], "one cell, not a bar: {reversed:?}");
     }
 
     /// Splitting the run to place the caret must not lose the style the run
