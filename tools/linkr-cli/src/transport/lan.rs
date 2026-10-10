@@ -1,6 +1,7 @@
 //! LAN WebSocket bridge transport: `ws://host/ws`, token handshake and raw
 //! binary UART frames. See docs/LINKR_BLE_API.zh-CN.md section 8.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -260,6 +261,29 @@ pub async fn connect_with_timeouts(
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> anyhow::Result<Arc<dyn Transport>> {
+    connect_counting(host, token, connect_timeout, handshake_timeout, None).await
+}
+
+/// [`connect_with_timeouts`], optionally reporting how many dials it made.
+///
+/// Elapsed time cannot stand in for that count. A runner that schedules the
+/// dialing task late lets the first attempt land *after* the bridge is already
+/// listening, the connect then succeeds on its first try, and any wall-clock
+/// floor on the result calls that correct behaviour a failure — which is what
+/// the Windows jobs reported: 506 ms measured against a 700 ms backoff that
+/// never had to be waited out. Counting says how many dials happened, and
+/// waiting for the first one to finish is what turns bringing the bridge up
+/// afterwards into a sequence instead of a race.
+///
+/// `None` in ordinary use; the counter exists for tests, and on the happy path
+/// it costs one increment on a call that already crossed the network.
+async fn connect_counting(
+    host: &str,
+    token: Option<&str>,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+    dials: Option<Arc<AtomicUsize>>,
+) -> anyhow::Result<Arc<dyn Transport>> {
     if host.trim().is_empty() {
         return Err(anyhow::anyhow!(EMPTY_HOST_ERROR));
     }
@@ -268,7 +292,13 @@ pub async fn connect_with_timeouts(
 
     let mut attempt = 0usize;
     loop {
-        match dial_once(host, token, connect_timeout, handshake_timeout).await {
+        let outcome = dial_once(host, token, connect_timeout, handshake_timeout).await;
+        // Counted the moment an attempt is over, so a reader that sees a
+        // non-zero count knows the dial finished — not merely that it began.
+        if let Some(counter) = &dials {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        match outcome {
             Ok(transport) => return Ok(transport),
             Err(DialError::Fatal(err)) => return Err(err),
             Err(DialError::Transient(err)) => match RETRY_DELAYS.get(attempt) {
@@ -749,15 +779,32 @@ mod tests {
         // Refusal therefore means "busy", not "gone": a host that is gone
         // answers with a route error, which stays fatal.
         let addr = free_addr();
-        let started = tokio::time::Instant::now();
+        let dials = Arc::new(AtomicUsize::new(0));
         let dial = tokio::spawn({
             let addr = addr.clone();
-            async move { connect(&addr, None).await }
+            let dials = dials.clone();
+            async move {
+                connect_counting(&addr, None, CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT, Some(dials)).await
+            }
         });
 
-        // Attempt one lands on an empty port and backs off; the bridge comes up
-        // inside that window, so only a retry can possibly succeed.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for the first dial to come back refused, instead of for a fixed
+        // slice of wall clock. Nothing listens on `addr` yet, so this attempt
+        // cannot have succeeded; knowing it has *finished* is what makes the
+        // bind below come after it rather than race it. The old `sleep(500 ms)`
+        // lost that race on the Windows runners: the task was scheduled late,
+        // dialled a port that was already listening, came home in 506 ms and
+        // was called a failure for beating a 700 ms floor.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while dials.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first dial must be attempted, and refused");
+
+        // The bridge comes up while the retryer is inside its backoff, so only
+        // a second attempt can possibly succeed.
         let listener = TcpListener::bind(&addr).await.unwrap();
         let _server = tokio::spawn(async move {
             let mut ws = serve_once(listener).await;
@@ -773,10 +820,12 @@ mod tests {
             .unwrap()
             .expect("a refused dial must be retried until the bridge listens");
         assert_eq!(transport.kind(), TransportKind::Lan);
+        // The count is what makes this a retry test: how long a dial takes says
+        // nothing about how many of them happened.
         assert!(
-            started.elapsed() >= RETRY_DELAYS[0],
-            "success must come from a retry, not from the first dial: {:?}",
-            started.elapsed()
+            dials.load(Ordering::SeqCst) >= 2,
+            "the refused dial has to be dialled again; only {} attempt(s) were made",
+            dials.load(Ordering::SeqCst)
         );
         drop(transport);
     }

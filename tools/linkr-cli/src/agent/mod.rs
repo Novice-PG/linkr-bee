@@ -71,6 +71,12 @@ pub const ERR_SEARCH_TEXT: &str = "Provide a non-empty literal search text.";
 pub const ERR_READ_ARGS: &str = "Choose recent or after, not both.";
 /// The stop reason emitted when the panel's 15-minute timer fires.
 pub const STOP_REASON: &str = "Stopped after 15 minutes";
+/// What a turn reports when the panel's stop button ends it before it had
+/// anything to say. A stop ends *our* observation of the target; it never
+/// reaches the target's own process, which is why every way out of
+/// `agent_loop` says exactly this.
+const STOPPED_BY_USER: &str =
+    "Stopped by user. Observation of the target stopped; the device process was not affected.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -217,11 +223,57 @@ pub enum AgentEvent {
     ModeExpired,
 }
 
+/// What the panel can tell a running runtime, besides asking it a question.
+///
+/// The runtime owns its copies of the session and the config: `spawn` hands
+/// them over once and the panel has no way back in afterwards. Each variant is
+/// one thing the panel changes while the runtime keeps going, and each used to
+/// leave the runtime answering from what it was given at birth — a stale
+/// `connected` after a reconnect, an old endpoint after a settings save, and a
+/// "new conversation" that still carried the last one to the model.
+enum Command {
+    Ask(String),
+    /// The panel took a new connection, or the old one went away.
+    Session(crate::session::SessionHandle),
+    /// The panel saved or cleared the model settings.
+    Config(Option<AgentConfig>),
+    /// The panel started a new conversation.
+    ResetChat,
+    /// Test-only: give the runtime the history a test needs it to have, so
+    /// "new chat" has something to clear without a live model to talk to.
+    #[cfg(test)]
+    Seed(Vec<Message>),
+    /// Test-only: report what only the runtime can see — which session it
+    /// holds, how much history it still carries, which config it was handed.
+    #[cfg(test)]
+    Probe(std::sync::mpsc::Sender<RuntimeView>),
+}
+
+/// What `AgentHandle::view` reads back out of a runtime, for the tests that
+/// have to prove a `Command` actually landed rather than merely was queued.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct RuntimeView {
+    /// Whether the session the runtime holds reports a live link.
+    pub session_connected: bool,
+    /// Its label: a reconnect has to move the runtime onto the *new* one.
+    pub session_label: String,
+    /// `session_key == session_key_now()` — `take_session` rewrites the key,
+    /// and a key left behind makes every tool report "session moved".
+    pub session_key_matches: bool,
+    /// Messages the model would still send with the next request.
+    pub history: usize,
+    /// An execution handed to the runtime but not finished.
+    pub pending: bool,
+    /// Model the runtime would call next, `None` when it has no config.
+    pub config_model: Option<String>,
+}
+
 /// Handle used by the TUI chat panel.
 #[derive(Clone)]
 pub struct AgentHandle {
     tx: broadcast::Sender<AgentEvent>,
-    ask_tx: mpsc::Sender<String>,
+    ask_tx: mpsc::Sender<Command>,
     stop_tx: watch::Sender<bool>,
     mode: Arc<AtomicU8>,
     /// `executionModeExpiresAt` of `web/device_executor.js`: the wall-clock
@@ -239,7 +291,74 @@ impl AgentHandle {
                 .send(AgentEvent::Error(executor::ERR_QUEUE_ITEM.to_string()));
             return;
         }
-        if self.ask_tx.try_send(question).is_err() {
+        self.send(Command::Ask(question));
+    }
+
+    /// Hand the runtime the session the panel is now using.
+    ///
+    /// It holds a clone of the session it was spawned with, so after a
+    /// reconnect it went on reporting `connected` for the one that had gone —
+    /// the panel said connected while every tool that read the device read a
+    /// dead handle.
+    pub fn set_session(&self, session: crate::session::SessionHandle) {
+        self.send(Command::Session(session));
+    }
+
+    /// Hand the runtime the settings the panel just saved, or `None` when they
+    /// were cleared.
+    ///
+    /// The config is a snapshot taken at `spawn`: changing the endpoint, the
+    /// model or the API key went unused by an already-running runtime, and a
+    /// key the user had just cleared kept working from memory.
+    pub fn set_config(&self, config: Option<AgentConfig>) {
+        self.send(Command::Config(config));
+    }
+
+    /// Start a new conversation as far as the model is concerned.
+    ///
+    /// The history the model sees lives here, not in the panel: clearing the
+    /// transcript on screen while leaving this behind showed a fresh
+    /// conversation that was still carrying the old one.
+    pub fn reset_chat(&self) {
+        self.send(Command::ResetChat);
+    }
+
+    /// Test-only: hand the runtime a conversation to have had, so a test can
+    /// watch "new chat" clear it without a live model behind it.
+    #[cfg(test)]
+    pub fn seed_history(&self, lines: &[&str]) {
+        let messages = lines
+            .iter()
+            .map(|line| Message::user((*line).to_string()))
+            .collect();
+        self.send(Command::Seed(messages));
+    }
+
+    /// Test-only: read back what only the runtime can see. Queued like any
+    /// other command, so it observes the state *after* everything ahead of it.
+    ///
+    /// A `ResetChat` queued ahead of this drains whatever sits behind it —
+    /// that is what it is for — which can take the probe with it, so the probe
+    /// is simply asked again until an answer comes back.
+    #[cfg(test)]
+    pub fn view(&self) -> RuntimeView {
+        for _ in 0..30 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if self.ask_tx.try_send(Command::Probe(tx)).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            if let Ok(view) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                return view;
+            }
+        }
+        panic!("the runtime never answered a view probe");
+    }
+
+    /// Queue something for the runtime, reporting a full queue the way a
+    /// question does.
+    fn send(&self, command: Command) {
+        if self.ask_tx.try_send(command).is_err() {
             let _ = self
                 .tx
                 .send(AgentEvent::Error(executor::ERR_QUEUE_FULL.to_string()));
@@ -340,7 +459,7 @@ pub fn spawn(
     bus: crate::session::CoreBus,
 ) -> AgentHandle {
     let (tx, _) = broadcast::channel::<AgentEvent>(256);
-    let (ask_tx, ask_rx) = mpsc::channel::<String>(QUEUE_CAPACITY);
+    let (ask_tx, ask_rx) = mpsc::channel::<Command>(QUEUE_CAPACITY);
     let (stop_tx, stop_rx) = watch::channel(false);
     let mode = Arc::new(AtomicU8::new(ExecMode::Auto.ordinal()));
     let deadline = Arc::new(AtomicU64::new(0));
@@ -533,7 +652,7 @@ struct Runtime {
     broker: Arc<dyn ApprovalBroker>,
     session: SessionHandle,
     tx: broadcast::Sender<AgentEvent>,
-    ask_rx: mpsc::Receiver<String>,
+    ask_rx: mpsc::Receiver<Command>,
     stop_tx: watch::Sender<bool>,
     stop_rx: watch::Receiver<bool>,
     journal: Arc<StdMutex<SerialJournal>>,
@@ -579,7 +698,16 @@ async fn runtime_loop(mut runtime: Runtime) {
             }
             maybe = runtime.ask_rx.recv() => {
                 match maybe {
-                    Some(question) => runtime.run(question).await,
+                    Some(Command::Ask(question)) => runtime.run(question).await,
+                    Some(Command::Session(session)) => runtime.take_session(session),
+                    Some(Command::Config(config)) => runtime.config = config,
+                    Some(Command::ResetChat) => runtime.reset_chat(),
+                    #[cfg(test)]
+                    Some(Command::Seed(messages)) => runtime.history.extend(messages),
+                    #[cfg(test)]
+                    Some(Command::Probe(reply)) => {
+                        let _ = reply.send(runtime.view());
+                    }
                     None => break,
                 }
             }
@@ -692,6 +820,47 @@ impl Runtime {
         }
     }
 
+    // -- what the panel changes between turns ------------------------------
+
+    /// Take the session the panel is now using.
+    ///
+    /// A swap only lands between turns — `runtime_loop` awaits a whole run
+    /// before it reads the next command — so nothing is in flight. The state
+    /// that belonged to the old session is dropped here rather than left for
+    /// the next `run` to trip over, and the guard key is re-armed so
+    /// [`Runtime::check_session`] reads this as the panel's doing instead of
+    /// the device having moved underneath a turn.
+    fn take_session(&mut self, session: crate::session::SessionHandle) {
+        self.session = session;
+        self.session_key = self.session_key_now();
+        self.pending_execution = None;
+    }
+
+    /// Start a new conversation as far as the model is concerned.
+    ///
+    /// The panel clears its own transcript; this is the half the model reads.
+    /// Anything still queued behind this command goes too — those were asked
+    /// in the conversation that has just ended.
+    fn reset_chat(&mut self) {
+        self.history.clear();
+        self.pending_execution = None;
+        while self.ask_rx.try_recv().is_ok() {}
+    }
+
+    /// Test-only snapshot behind `AgentHandle::view`.
+    #[cfg(test)]
+    fn view(&self) -> RuntimeView {
+        let info = self.session.info();
+        RuntimeView {
+            session_connected: info.connected,
+            session_label: info.label.clone(),
+            session_key_matches: self.session_key == self.session_key_now(),
+            history: self.history.len(),
+            pending: self.pending_execution.is_some(),
+            config_model: self.config.as_ref().map(|config| config.model.clone()),
+        }
+    }
+
     // -- the run ----------------------------------------------------------
 
     async fn run(&mut self, question: String) {
@@ -787,7 +956,7 @@ impl Runtime {
                 return Ok(reason);
             }
             if self.stopped() {
-                return Ok("Stopped by user. Observation of the target stopped; the device process was not affected.".to_string());
+                return Ok(STOPPED_BY_USER.to_string());
             }
             self.turn += 1;
 
@@ -813,7 +982,16 @@ impl Runtime {
 
             let request = provider::build_request(&config, &messages, &catalogue);
             self.check_session().await?;
-            let response = provider::send(&request).await?;
+            // The dial and the reading of a failing response's body are one
+            // wait as far as the stop button is concerned, so a host that never
+            // finishes its reply cannot hold this turn open. `None` back means
+            // stop, and stop is not a failure: it reports exactly like every
+            // other way out of this loop.
+            let response =
+                match provider::send_or_stop(&request, Some(self.stop_rx.clone())).await? {
+                    Some(response) => response,
+                    None => return Ok(STOPPED_BY_USER.to_string()),
+                };
 
             self.emit(AgentEvent::MessageStart {
                 role: "assistant".to_string(),
@@ -856,7 +1034,7 @@ impl Runtime {
 
             if tool_calls.is_empty() {
                 return Ok(if stopped {
-                    "Stopped by user. Observation of the target stopped; the device process was not affected.".to_string()
+                    STOPPED_BY_USER.to_string()
                 } else {
                     stop_reason
                 });
@@ -881,10 +1059,7 @@ impl Runtime {
                     }
                 }
                 if self.stopped() {
-                    return Ok(
-                        "Stopped by user. Observation of the target stopped; the device process was not affected."
-                            .to_string(),
-                    );
+                    return Ok(STOPPED_BY_USER.to_string());
                 }
                 if let Some(reason) = self.over_budget() {
                     return Ok(reason);
@@ -2772,6 +2947,73 @@ mod tests {
         assert!(MESSAGE.starts_with("Local saving"));
         assert_eq!(MESSAGE, "Local saving is unavailable in this client.");
         let _ = spec;
+    }
+
+    /// A reconnect is not only a panel-side swap. The runtime keeps its own
+    /// clone of the session plus a key derived from it, and both went stale:
+    /// the panel said connected while every tool reading the device read the
+    /// connection that had just gone, and a key left behind fails them all
+    /// with `ERR_SESSION_MOVED`.
+    #[test]
+    fn taking_a_new_session_rewrites_the_key_and_voids_the_pending_execution() {
+        let mut rt = bare_runtime();
+        rt.session_key = rt.session_key_now();
+        assert!(
+            !rt.view().session_connected,
+            "the session it was spawned with is the detached one"
+        );
+        rt.pending_execution = Some(PendingExecution {
+            id: "exec-on-the-old-link".to_string(),
+            reviewed_round: None,
+        });
+
+        rt.take_session(SessionHandle::test_connected());
+
+        let view = rt.view();
+        assert!(
+            view.session_connected,
+            "the runtime has to read the session the panel just took"
+        );
+        assert_eq!(view.session_label, "test-device");
+        assert!(
+            view.session_key_matches,
+            "a key left behind fails every tool with ERR_SESSION_MOVED"
+        );
+        assert!(
+            !view.pending,
+            "an execution started on the link that ended cannot outlive it"
+        );
+    }
+
+    /// "New conversation" is the model's half, not the panel's: the history
+    /// it reads, an execution not yet finished, and anything asked while the
+    /// conversation was running all belong to the one that just ended.
+    #[test]
+    fn a_new_conversation_clears_the_history_the_pending_execution_and_the_queue() {
+        let mut rt = bare_runtime();
+        let (ask_tx, ask_rx) = mpsc::channel(4);
+        rt.ask_rx = ask_rx;
+        rt.history.push(Message::user("OLD-CONVERSATION-MARKER"));
+        rt.pending_execution = Some(PendingExecution {
+            id: "exec-still-running".to_string(),
+            reviewed_round: None,
+        });
+        ask_tx
+            .try_send(Command::Ask("asked in the old conversation".to_string()))
+            .expect("the queue has room");
+
+        rt.reset_chat();
+
+        let view = rt.view();
+        assert_eq!(
+            view.history, 0,
+            "the next request must not carry the old conversation"
+        );
+        assert!(!view.pending, "nor an execution belonging to it");
+        assert!(
+            rt.ask_rx.try_recv().is_err(),
+            "a question queued behind the reset was asked in the conversation that ended"
+        );
     }
 
     fn bare_runtime() -> Runtime {

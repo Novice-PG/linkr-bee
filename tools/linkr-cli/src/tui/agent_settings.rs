@@ -160,21 +160,24 @@ pub fn agent_settings_path() -> PathBuf {
 
 /// Read the stored record; a missing or broken file reads as "not configured".
 pub fn load_stored() -> Option<StoredAgent> {
-    let text = std::fs::read_to_string(agent_settings_path()).ok()?;
-    serde_json::from_str::<StoredAgent>(&text).ok()
+    load_stored_at(&agent_settings_path())
 }
 
-/// Save the record the dialog holds. Written through the crate's one secret
-/// writer, not `fs::write`: the file holds a plaintext `apiKey`, and `fs::write`
-/// would leave it at the umask default of `0644` — readable to any local user
-/// who can reach `config_dir()`.
-fn write_stored(stored: &StoredAgent, lang: Lang) -> Result<(), String> {
-    write_stored_to(&agent_settings_path(), stored, lang)
+/// The same read at a path the caller names, so a save can be followed by the
+/// config it produced without a second trip to the real configuration
+/// directory — the seam [`write_stored_to`] gives the write side.
+fn load_stored_at(path: &Path) -> Option<StoredAgent> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<StoredAgent>(&text).ok()
 }
 
 /// The same write at a path the caller names, so the permissions can be
 /// asserted somewhere other than the real configuration directory — a test
 /// that wrote there would be rewriting the reader's own key.
+///
+/// This is the crate's one secret writer, not `fs::write`: the file holds a
+/// plaintext `apiKey`, and `fs::write` would leave it at the umask default of
+/// `0644` — readable to any local user who can reach `config_dir()`.
 fn write_stored_to(path: &Path, stored: &StoredAgent, lang: Lang) -> Result<(), String> {
     let failed = || t(ASST_SAVE_ERROR, lang).to_string();
     let json = serde_json::to_string_pretty(stored).map_err(|_| failed())?;
@@ -547,6 +550,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
 /// Validate the form and persist it (plaintext consent is a second save).
 pub fn save(app: &mut App) {
+    save_to(app, &agent_settings_path());
+}
+
+/// [`save`] at a path the caller names, so the whole chain — validate, write,
+/// and push the result into a runtime that is already running — can be
+/// exercised without rewriting the reader's own key.
+fn save_to(app: &mut App, path: &Path) {
     let lang = app.lang();
     if app.assistant.busy {
         set_status(app, t(ASST_BUSY, lang), true);
@@ -579,12 +589,16 @@ pub fn save(app: &mut App) {
             return;
         }
     }
-    match write_stored(&stored, lang) {
+    match write_stored_to(path, &stored, lang) {
         Ok(()) => {
             if let Some(super::dialogs::Dialog::Settings(state)) = &mut app.dialog {
                 state.dirty = false;
                 state.confirm_pending = false;
             }
+            // The runtime holds the config it was spawned with — an endpoint,
+            // model or key changed here went unused by one already running,
+            // and `ensure_agent` never reloads because a runtime exists.
+            push_config(app, runtime_config_at(path));
             set_status(app, t(ASST_SAVED, lang), false);
             app.toast(crate::event::NoticeLevel::Info, t(ASST_SAVED, lang));
         }
@@ -592,16 +606,30 @@ pub fn save(app: &mut App) {
     }
 }
 
+/// Hand an already-running runtime the config it should be using now.
+///
+/// Both of the panel's two ways of changing it end here, because neither can
+/// reach a runtime that exists: `ensure_agent` returns the moment it sees one.
+fn push_config(app: &App, config: Option<crate::agent::AgentConfig>) {
+    if let Some(agent) = &app.agent {
+        agent.handle.set_config(config);
+    }
+}
+
 /// Forget the stored record (web `clearAgentConfig`).
 pub fn clear(app: &mut App) {
+    clear_to(app, &agent_settings_path());
+}
+
+/// [`clear`] at a path the caller names — the same seam [`save_to`] has.
+fn clear_to(app: &mut App, path: &Path) {
     let lang = app.lang();
     if app.assistant.busy {
         set_status(app, t(ASST_BUSY, lang), true);
         return;
     }
-    let path = agent_settings_path();
     let outcome = if path.exists() {
-        std::fs::remove_file(&path).map_err(|_| t(ASST_CLEAR_ERROR, lang).to_string())
+        std::fs::remove_file(path).map_err(|_| t(ASST_CLEAR_ERROR, lang).to_string())
     } else {
         Ok(())
     };
@@ -611,6 +639,10 @@ pub fn clear(app: &mut App) {
                 *state = AgentSettingsState::default();
                 state.dirty = false;
             }
+            // Same gap as a save, in the direction that matters more: the
+            // runtime is still holding the key that was just cleared, so it
+            // kept working from memory.
+            push_config(app, runtime_config_at(path));
             set_status(app, t(ASST_CLEARED, lang), false);
             app.toast(crate::event::NoticeLevel::Info, t(ASST_CLEARED, lang));
         }
@@ -850,7 +882,14 @@ pub fn render_lines(state: &AgentSettingsState, width: u16, lang: Lang) -> Vec<L
 /// travelling to the provider as `max_tokens: 0`, which it answers with
 /// `400 Invalid max_tokens value` on every turn.
 pub fn runtime_config() -> Option<crate::agent::AgentConfig> {
-    runtime_config_from(load_stored()?)
+    runtime_config_at(&agent_settings_path())
+}
+
+/// [`runtime_config`] reading a path the caller names: `save_to` and
+/// `clear_to` push what they just wrote or deleted without a second trip to
+/// the real configuration directory.
+fn runtime_config_at(path: &Path) -> Option<crate::agent::AgentConfig> {
+    runtime_config_from(load_stored_at(path)?)
 }
 
 /// `runtime_config` with the record already in hand, so the normalization can
@@ -862,6 +901,53 @@ fn runtime_config_from(stored: StoredAgent) -> Option<crate::agent::AgentConfig>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panel's two ways of changing the model settings both have to reach
+    /// a runtime that is already up: `ensure_agent` returns the moment it sees
+    /// one, so the config it holds is the one it was given at spawn. Saving a
+    /// new endpoint or key went unused by it, and a key the user had just
+    /// cleared kept working from memory.
+    ///
+    /// The record goes to a path this test names, never to the reader's own
+    /// `agent.json` — the seam `write_stored_to` already had for the write.
+    #[test]
+    fn a_saved_or_cleared_record_reaches_a_runtime_that_is_already_running() {
+        let mut app = crate::tui::test_app();
+        let handle = crate::tui::attach_agent(&mut app);
+        assert_eq!(
+            handle.view().config_model,
+            None,
+            "spawned with no config of its own"
+        );
+
+        let dir = std::env::temp_dir().join(format!("linkr-agent-push-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("agent.json");
+
+        let mut state = AgentSettingsState::default();
+        state.endpoint.set("http://127.0.0.1:39999/v1".to_string());
+        state.model.set("fresh-model".to_string());
+        app.dialog = Some(super::super::dialogs::Dialog::Settings(state));
+
+        save_to(&mut app, &path);
+
+        assert!(path.exists(), "the record went where the test pointed it");
+        assert_eq!(
+            handle.view().config_model.as_deref(),
+            Some("fresh-model"),
+            "a model saved after the runtime started has to reach it"
+        );
+
+        clear_to(&mut app, &path);
+
+        assert!(!path.exists(), "clearing removes the record");
+        assert_eq!(
+            handle.view().config_model,
+            None,
+            "a cleared key must not survive in the runtime's memory"
+        );
+    }
 
     /// The dialog's record is the one holding the plaintext `apiKey`, so it is
     /// the one that must not sit at the umask default of `0644` where any

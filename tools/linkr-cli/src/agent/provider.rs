@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::watch;
 
 use super::context::{Message, Role, ToolCall};
 use super::tools::ToolDef;
@@ -905,30 +906,115 @@ fn client() -> Result<&'static reqwest::Client, String> {
 /// One attempt: `maxRetries` is 0 (spec §14.3), so a failure is reported
 /// instead of repeating an expensive request.
 pub async fn send(request: &ProviderRequest) -> Result<reqwest::Response, String> {
+    send_within(request, Duration::from_millis(PROVIDER_TIMEOUT_MS)).await
+}
+
+/// [`send`] with its deadline spelled out, so a test can watch a stalling host
+/// be given up on without waiting out the real minute.
+///
+/// The deadline covers the *whole* call — the send **and** the reading of a
+/// failing response's body — because a host that announces a length and then
+/// withholds the bytes used to park the turn here for good: the timeout stopped
+/// at `builder.send()`, so `response.text().await` afterwards ran with no
+/// deadline of its own and nothing could reach it.
+async fn send_within(
+    request: &ProviderRequest,
+    deadline: Duration,
+) -> Result<reqwest::Response, String> {
     let client = client()?;
     let mut builder = client.post(&request.url);
     for (name, value) in &request.headers {
         builder = builder.header(name, value);
     }
     builder = builder.json(&request.body);
-    match tokio::time::timeout(Duration::from_millis(PROVIDER_TIMEOUT_MS), builder.send()).await {
-        Ok(Ok(response)) => {
-            if response.status().is_success() {
-                Ok(response)
-            } else {
-                let status = response.status().as_u16();
-                let text = response.text().await.unwrap_or_default();
-                Err(format!(
-                    "Provider request failed ({status}): {}",
-                    excerpt_error(&text)
-                ))
-            }
+
+    let attempt = async move {
+        let response = builder.send().await.map_err(|error| error.to_string())?;
+        if response.status().is_success() {
+            return Ok(response);
         }
-        Ok(Err(error)) => Err(error.to_string()),
+        let status = response.status().as_u16();
+        let body = read_error_body(response).await;
+        Err(format!(
+            "Provider request failed ({status}): {}",
+            excerpt_error(&body)
+        ))
+    };
+
+    match tokio::time::timeout(deadline, attempt).await {
+        Ok(outcome) => outcome,
         Err(_) => Err(format!(
-            "Provider request timed out after {PROVIDER_TIMEOUT_MS} ms."
+            "Provider request timed out after {} ms.",
+            deadline.as_millis()
         )),
     }
+}
+
+/// [`send`], ending the wait first if the panel's stop flag goes up.
+///
+/// `None` is the caller's signal to stop: the dial and the reading of a failing
+/// body are one future, so dropping it cancels both — a host that never
+/// finishes its reply cannot hold a turn open against someone trying to end
+/// it. Anything else is handed back unchanged, so a failure still reads as a
+/// failure and only a stop reads as a stop.
+pub async fn send_or_stop(
+    request: &ProviderRequest,
+    stop: Option<watch::Receiver<bool>>,
+) -> Result<Option<reqwest::Response>, String> {
+    let Some(stop) = stop else {
+        return send(request).await.map(Some);
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_stop(stop) => Ok(None),
+        sent = send(request) => sent.map(Some),
+    }
+}
+
+/// Resolves when the stop flag goes up — and parks forever if nothing can
+/// raise it any more.
+///
+/// `watch` only reports changes that happen *after* it is asked, so the current
+/// value is read first: a stop pressed while the provider was still dialling
+/// has to land even if the flag never changes again. A dropped sender means
+/// nobody is left to stop us, so from there the caller's own deadline is what
+/// ends the wait.
+async fn wait_for_stop(mut stop: watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow_and_update() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            std::future::pending::<()>().await;
+            return;
+        }
+    }
+}
+
+/// How much of a failing response's body is worth reading.
+///
+/// [`excerpt_error`] keeps 400 characters of it, so this is headroom rather
+/// than a limit anyone should see reach the screen. It exists for the other
+/// direction: `Response::text()` reads to the end, so an endpoint announcing a
+/// hundred kilobytes and then sending five bytes would be handed as much memory
+/// as it cared to claim. The deadline in [`send`] is what ends the wait when
+/// the rest never arrives.
+const ERROR_BODY_LIMIT: usize = 8 * 1024;
+
+/// Take at most [`ERROR_BODY_LIMIT`] of a failing response's body, stopping
+/// early rather than waiting on bytes that may never come.
+async fn read_error_body(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while body.len() < ERROR_BODY_LIMIT {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = ERROR_BODY_LIMIT - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 fn excerpt_error(text: &str) -> String {
@@ -1463,6 +1549,97 @@ mod tests {
         let posted = server.await.unwrap();
         assert!(posted.contains("POST /v1/chat/completions"));
         assert!(posted.contains("\"model\":\"test-model\""));
+    }
+
+    /// A host that answers 500, promises `content-length` bytes, sends only
+    /// `error` and then holds the connection open.
+    ///
+    /// This is the shape that parked a turn for good: the 60 s timeout stood by
+    /// watching `builder.send()` return promptly, while `response.text().await`
+    /// — outside it, and unreachable by the stop button — waited for a body the
+    /// host had announced and then withheld.
+    async fn stalling_error_host() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(_) => return,
+            };
+            let mut buf = vec![0u8; 8192];
+            let mut head = Vec::new();
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => head.extend_from_slice(&buf[..read]),
+                }
+            }
+            let response = "HTTP/1.1 500 Internal Server Error\r\n\
+                            content-type: text/plain\r\n\
+                            connection: close\r\n\
+                            content-length: 100000\r\n\r\nerror";
+            let _ = socket.write_all(response.as_bytes()).await;
+            // Nothing more will ever be said, and the connection stays open.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let _ = socket.shutdown().await;
+        });
+        addr
+    }
+
+    /// The deadline has to cover the reading of an error body, not only the
+    /// send that produced it.
+    #[tokio::test]
+    async fn a_stalling_error_body_is_given_up_on_by_the_deadline() {
+        let addr = stalling_error_host().await;
+        let mut config = config(Provider::OpenAiCompat);
+        config.endpoint = format!("http://{addr}/v1");
+        let request = openai_request(&config, &[Message::user("ping")], &[]);
+
+        // An outer ceiling of its own: if the read path ever stops honouring
+        // its deadline again this must fail rather than hang the suite.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_within(&request, Duration::from_millis(300)),
+        )
+        .await
+        .expect("the read path must honour its own deadline");
+        let error = outcome.expect_err("a stalled body must fail, not hang");
+        assert!(
+            error.contains("timed out"),
+            "the deadline should end it, got: {error}"
+        );
+    }
+
+    /// Stop has to reach the wait even though the deadline is a minute away.
+    #[tokio::test]
+    async fn stop_ends_the_wait_on_a_host_that_never_finishes() {
+        let addr = stalling_error_host().await;
+        let mut config = config(Provider::OpenAiCompat);
+        config.endpoint = format!("http://{addr}/v1");
+        let request = openai_request(&config, &[Message::user("ping")], &[]);
+
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = stop_tx.send(true);
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_or_stop(&request, Some(stop_rx)),
+        )
+        .await
+        .expect("stop must end the wait long before the deadline");
+        // A stop is not a failure: it comes back as `None`, not as an error.
+        assert!(
+            outcome
+                .expect("stopping must not report an error")
+                .is_none(),
+            "stop has to end the call rather than let it finish"
+        );
+        stopper.await.ok();
     }
 
     use crate::agent::tools::base_tools;

@@ -694,6 +694,19 @@ pub struct Transfer {
     /// The line terminator this run's commands end with, taken from the
     /// terminal's Enter mode so a transfer types exactly what a person would.
     enter: Vec<u8>,
+    /// Whether *this run* is the one that wrote the sibling named by
+    /// [`Transfer::staged_sibling`].
+    ///
+    /// `validate` refuses to start a receive while that path is taken, so a run
+    /// that got past it owns whatever the target's `rz` drops there afterwards.
+    /// A transfer that never started owns nothing at all.
+    ///
+    /// The distinction matters because [`Transfer::sweep_staged`] deletes. It
+    /// used to take "the path is occupied" for "this transfer wrote it", which
+    /// let an idle [`Transfer::probe_now`] — or a bare [`Transfer::reset`] —
+    /// remove a file the person already had under the name their receive would
+    /// have used. Found is not the same as made.
+    staged_owned: bool,
 }
 
 impl Default for Transfer {
@@ -723,6 +736,7 @@ impl Default for Transfer {
             download: None,
             expected_sha256: String::new(),
             enter: b"\r".to_vec(),
+            staged_owned: false,
         }
     }
 }
@@ -805,6 +819,13 @@ impl Transfer {
         match self.channel {
             Channel::Zmodem => self.start_zmodem(&probe)?,
             Channel::Pager => self.start_pager(&probe)?,
+        }
+        // Only a ZMODEM receive puts a file under the sender's name beside the
+        // destination. `validate` has just proven that path free, so from here
+        // on anything that appears at it is this run's own — and only now is it
+        // safe to say so, because both halves have been laid out.
+        if self.direction == Direction::Recv && self.channel == Channel::Zmodem {
+            self.staged_owned = true;
         }
         Ok(())
     }
@@ -1536,6 +1557,10 @@ impl Transfer {
                 }
             }
         }
+        // The sibling is gone — renamed to what the form asked for, or never
+        // there at all. This run therefore no longer owns that path, and the
+        // next `reset` must not delete whatever a person puts there next.
+        self.staged_owned = false;
         let summary = self.summary();
         self.stop_host();
         self.phase = Phase::Done;
@@ -1591,6 +1616,10 @@ impl Transfer {
     /// at all — the form refused them before a byte moved and the target's
     /// console saw nothing.
     fn sweep_staged(&mut self) {
+        if !self.staged_owned {
+            return;
+        }
+        self.staged_owned = false;
         if let Some(staged) = self.staged_sibling() {
             if staged.exists() {
                 let _ = std::fs::remove_file(&staged);
@@ -2788,10 +2817,15 @@ mod tests {
         let staged = dir.join("incoming.bin");
         std::fs::write(&staged, b"half a download").expect("the staged file");
 
+        // The assertion below is about a receive that was *writing* this file,
+        // so the transfer has to have started: `start` is what claims the
+        // sibling. A transfer that never got that far owns nothing and must
+        // leave whatever it finds alone — the case the next test pins down.
         let mut transfer = Transfer {
             local: dir.join("out.bin"),
             target: "/tmp/incoming.bin".to_string(),
             direction: Direction::Recv,
+            staged_owned: true,
             ..Transfer::default()
         };
         transfer.fail("The link dropped.".to_string());
@@ -2813,6 +2847,42 @@ mod tests {
         };
         transfer.fail("The link dropped.".to_string());
         assert!(staged.exists(), "the destination is never swept");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file the person already had must outlive a transfer that never ran.
+    ///
+    /// [`Transfer::staged_sibling`] takes its path from the form alone, so it
+    /// names the same place whether or not anything was ever written there.
+    /// [`Transfer::start`] refuses to begin a receive when that path is taken —
+    /// but [`Transfer::probe_now`] and a bare [`Transfer::reset`] never consult
+    /// that check, and both sweep. An idle probe was enough to delete the file.
+    #[test]
+    fn a_probe_leaves_a_file_it_never_wrote_alone() {
+        let dir = std::env::temp_dir().join("linkr-ownership-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory to receive into");
+        let mine = dir.join("original.bin");
+        std::fs::write(&mine, b"something I already had").expect("the existing file");
+
+        // The receive would land as new.bin, so its intermediate name is the
+        // one the file on disk already answers to.
+        let mut transfer = Transfer {
+            local: dir.join("new.bin"),
+            target: "/tmp/original.bin".to_string(),
+            direction: Direction::Recv,
+            ..Transfer::default()
+        };
+
+        transfer.probe_now().expect("the probe queues");
+        assert!(mine.exists(), "probe_now() swept {}", mine.display());
+
+        transfer.reset();
+        assert!(mine.exists(), "reset() swept {}", mine.display());
+
+        transfer.fail("The link dropped.".to_string());
+        assert!(mine.exists(), "fail() swept {}", mine.display());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

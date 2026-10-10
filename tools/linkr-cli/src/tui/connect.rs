@@ -366,6 +366,13 @@ pub fn poll(app: &mut App) {
 
 /// Take ownership of a freshly connected session.
 fn adopt(app: &mut App, session: SessionHandle) {
+    // The runtime holds its own clone of the session it was spawned with and
+    // nothing ever refreshed it, so after a reconnect it went on reporting
+    // `connected` for the session that had just gone away — the panel said
+    // connected while every tool reading the device read a dead handle.
+    if let Some(agent) = &app.agent {
+        agent.handle.set_session(session.clone());
+    }
     app.session = session;
     app.refresh_info();
     // The handshake is done: this is where the web asks the device for its
@@ -398,6 +405,34 @@ fn adopt(app: &mut App, session: SessionHandle) {
 mod tests {
     use super::super::test_app;
     use super::*;
+
+    /// Switch device / reconnect both end in `adopt`, and an agent that is
+    /// already up has to come along: `ensure_agent` returns the moment it sees
+    /// one, so nothing else would ever refresh it. This is the path the model
+    /// reads the device through, so a runtime left on the old handle reports
+    /// `connected=false` for a panel that says connected.
+    #[test]
+    fn adopting_a_new_connection_moves_the_agent_runtime_over_too() {
+        let mut app = test_app();
+        let handle = crate::tui::attach_agent(&mut app);
+        assert!(
+            !handle.view().session_connected,
+            "it was spawned on the session the app was holding"
+        );
+
+        adopt(&mut app, SessionHandle::test_connected());
+
+        let view = handle.view();
+        assert!(
+            view.session_connected,
+            "the runtime reads the connection the panel just took"
+        );
+        assert_eq!(view.session_label, "test-device");
+        assert!(
+            view.session_key_matches,
+            "a key left behind fails every tool with ERR_SESSION_MOVED"
+        );
+    }
 
     /// What "Switch device" has to leave behind after Enter: the address the
     /// retry path dials, and the **full** advertised name in the sidebar. The

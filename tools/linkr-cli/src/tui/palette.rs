@@ -375,6 +375,12 @@ fn new_chat(app: &mut App) {
     let status = t(PAL_MSG_NEW_CHAT, lang).to_string();
     app.assistant = super::assistant_view::AssistantState::default();
     app.assistant.status = status;
+    // The panel's transcript is only half of a conversation: the model reads
+    // the runtime's history, and leaving that behind shows a fresh chat that
+    // still carries the old one into the next request.
+    if let Some(agent) = &app.agent {
+        agent.handle.reset_chat();
+    }
 }
 
 fn stop_agent(app: &mut App) {
@@ -1033,6 +1039,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transcript on screen is only half of a conversation: the model
+    /// reads the runtime's history. Clearing one without the other showed a
+    /// fresh chat that still sent the old one with the next request.
+    #[test]
+    fn new_chat_clears_the_history_the_model_would_still_send() {
+        let mut app = crate::tui::test_app();
+        let handle = crate::tui::attach_agent(&mut app);
+        handle.seed_history(&["OLD-CONVERSATION-MARKER"]);
+        assert_eq!(
+            handle.view().history,
+            1,
+            "the seed reached the runtime the panel does not own"
+        );
+
+        new_chat(&mut app);
+
+        assert_eq!(
+            handle.view().history,
+            0,
+            "a new conversation must not carry the old one to the model"
+        );
+    }
 
     /// The palette's `disconnect` is the same exit as the sidebar's ask, so it
     /// carries the same stop: hanging up on a live `rz`/`sz` leaves an orphan
