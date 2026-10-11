@@ -249,7 +249,12 @@ static void wifi_scan_cache_update(const struct wifi_scan_result *result)
         }
     }
 
-    if (entry && result->rssi > entry->rssi) {
+    /* `INT8_MIN` is the empty-slot sentinel, so the comparison must be `>=`:
+     * with `>` a result whose own RSSI is exactly INT8_MIN would claim a slot
+     * (count already incremented above) and then skip the write, leaving an
+     * empty entry that prints a blank `@scan result` line and holds the slot
+     * for the rest of the scan. */
+    if (entry && result->rssi >= entry->rssi) {
         memcpy(entry->ssid, ssid, ssid_len + 1);
         entry->channel = result->channel;
         entry->rssi = result->rssi;

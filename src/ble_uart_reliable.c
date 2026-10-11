@@ -304,8 +304,12 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	if (!conn || !data || !len || len > LINKR_UART_RELIABLE_MAX_PAYLOAD) {
 		return -EINVAL;
 	}
-	mtu_payload = MIN((uint16_t)(bt_gatt_get_mtu(conn) - 3),
-			  (uint16_t)sizeof(fragment));
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+
+	/* Clamp before subtracting: an unexchanged MTU reads back as 0 and
+	 * `0 - 3` in uint16_t wraps to 65533, which the MIN below would then
+	 * carry into the fragment size. */
+	mtu_payload = MIN(mtu > 3 ? mtu - 3 : 1, (uint16_t)sizeof(fragment));
 	if (mtu_payload <= sizeof(*header)) {
 		return -EMSGSIZE;
 	}

@@ -1520,7 +1520,11 @@ static void ble_to_uart_thread(void)
 
 static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
-	uint16_t mtu_payload = bt_gatt_get_mtu(conn) - 3;
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+	/* An unexchanged MTU reads back as 0, and `0 - 3` in uint16_t wraps to
+	 * 65533; clamp before subtracting so the chunk size is never taken from
+	 * the wrapped value. */
+	uint16_t mtu_payload = mtu > 3 ? mtu - 3 : 1;
 	uint16_t acl_payload = CONFIG_BT_BUF_ACL_TX_SIZE > 7 ?
 			       CONFIG_BT_BUF_ACL_TX_SIZE - 7 : 1;
 
@@ -1614,6 +1618,17 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 			 */
 			return 0;
 		}
+	} else if (err == -EINVAL) {
+		/* The reliable path rejects a payload larger than its limit with
+		 * -EINVAL, and this thread retries a failed chunk in place: that
+		 * would wedge the thread for good and stop it feeding the log ring
+		 * and the LAN bridge. The chunk is already staged above, so drop
+		 * only the BLE copy and keep draining. Reachable only if
+		 * LINKR_BLE_BRIDGE_UART_RX_CHUNK is raised past 232.
+		 */
+		LOG_WRN("Dropping %u UART bytes the reliable path cannot carry",
+			len);
+		return 0;
 	} else if (err) {
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}

@@ -34,12 +34,17 @@ config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
 	default 232
-	range 20 244
+	range 20 232
 	help
 	  UART data is accumulated up to this many bytes before it is handed to
 	  Reliable UART. The default plus its 12-byte frame header fits in one
 	  ATT value when the central negotiates the production MTU of 247. It is
 	  segmented automatically when the negotiated MTU is smaller.
+
+	  Never set this above 232: Reliable UART refuses any payload larger than
+	  LINKR_UART_RELIABLE_MAX_PAYLOAD (232) with -EINVAL, and the UART-to-BLE
+	  thread retries a failed chunk in place, so a larger value would wedge
+	  that thread and stop it feeding the log ring and the LAN bridge.
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"
