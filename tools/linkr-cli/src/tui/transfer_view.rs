@@ -240,9 +240,12 @@ pub fn abort(app: &mut App) {
     //
     // Taken only while the link is up. A run that dies with the link already
     // gone has nowhere to send this yet, and the peer it left behind is still
-    // holding its console: the cancel stays queued for the next connection,
-    // which is exactly the moment that peer can hear it.
+    // holding its console: both the cancel and the break stay owed for the
+    // next connection, which is exactly the moment that peer can hear them.
+    // The break is drained here as well as sent, so the frame loop — which
+    // pays the same debt — does not put a second one on the wire.
     if app.connected() {
+        let _ = app.transfer.engine.take_stop_owed();
         let mut out = app.transfer.engine.take_pending_out();
         out.extend_from_slice(&break_bytes);
         app.send_bytes(out);
@@ -284,25 +287,36 @@ pub fn poll(app: &mut App) {
     let enter = super::keys::translate_enter(b"\r", app.settings.enter_mode);
     app.transfer.engine.set_enter(enter);
     app.transfer.engine.poll(Instant::now());
+    // A running transfer redraws its progress line in place, which is the same
+    // content churn as `apt update` (G1): arm the settle deadline so the pane
+    // is repainted once the run stops moving, even if no UART byte arrived.
+    if app.transfer.engine.busy() {
+        app.note_output_churn(Instant::now());
+    }
     // Whatever killed the run — a stall, a launch that never answered, the
-    // link going, the person pressing abort — `fail` queued the cancel that
-    // tells the target to let go of its console, and this is where it goes
-    // out. Cancel first, break second: a target still inside the transfer
-    // can only hear the cancel, and one back at a shell has the line the
-    // backspaces left cleared by the break behind it. A run stopped from the
-    // keyboard drains the same queue itself, so nothing here is sent twice.
+    // link going, the person pressing abort — `fail` queued the stop the
+    // target is owed: the protocol cancel for a ZMODEM session, and the break
+    // for either channel. Cancel first, break second: a target still inside
+    // the transfer can only hear the cancel, and one back at a shell has the
+    // line the backspaces left cleared by the break behind it. The break is a
+    // debt of its own, not merely a passenger of the cancel — a `dd|base64`
+    // pager run has no cancel at all, and still owes the break that stops the
+    // command a timeout left running. A run stopped from the keyboard drains
+    // both itself, so nothing here is sent twice.
     //
     // Only while the link is up. A run that died with the link already gone
-    // cannot reach the peer it orphaned, so the cancel stays queued rather
-    // than being thrown away: reconnecting walks straight back into that
-    // peer's console, and the first thing this pane sends is the thing it
-    // could not send then. `start` clears it — a new run is not the run that
-    // owes anyone a cancel.
+    // cannot reach the peer it orphaned, so both debts stay owed rather than
+    // being thrown away: reconnecting walks straight back into that peer's
+    // console, and the first thing this pane sends is what it could not send
+    // then. `start` clears them — a new run is not the run that owes a stop.
     if app.connected() {
         let pending = app.transfer.engine.take_pending_out();
-        if !pending.is_empty() {
+        let owed = app.transfer.engine.take_stop_owed();
+        if !pending.is_empty() || owed {
             let mut bytes = pending;
-            bytes.extend_from_slice(b"\x03\x03");
+            if owed {
+                bytes.extend_from_slice(b"\x03\x03");
+            }
             app.send_bytes(bytes);
         }
     }
@@ -359,7 +373,14 @@ fn activate(app: &mut App) {
     match ACTS.get(app.transfer.action).copied().unwrap_or(Act::Check) {
         Act::Check => check(app),
         Act::Start => start(app),
-        Act::Abort => abort(app),
+        // Abort is the one action whose handler does not re-check what the
+        // form can do: `check` and `start` each revalidate and answer with the
+        // reason, but `abort` would stop a run that is not there — repainting
+        // an untouched view as "Transfer aborted", and, worse, running `fail`
+        // over debts a dropped link is still owed. Drawn disabled, it must
+        // act disabled.
+        Act::Abort if Act::Abort.enabled(app) => abort(app),
+        Act::Abort => {}
     }
 }
 
@@ -726,6 +747,35 @@ mod tests {
         assert_eq!(
             running.transfer.message,
             t(XFER_ABORTED, running.lang()).to_string()
+        );
+    }
+
+    /// The Abort cell is drawn dimmed when there is nothing to stop, and
+    /// pressing it must do nothing. Its handler is the only one of the three
+    /// that does not revalidate — `check` and `start` each answer with the
+    /// reason — so an idle press used to run the engine's stop anyway:
+    /// repainting the pane as aborted, and running `fail` over the stop a
+    /// dropped link is still owed on reconnect.
+    #[test]
+    fn an_idle_abort_press_is_inert() {
+        let mut app = test_app();
+        app.transfer.row = Row::Actions;
+        app.transfer.action = ACTS.len() - 1; // Abort is the last entry.
+                                              // A run that died with the pane still open, owing the peer a stop the
+                                              // next connection will pay.
+        app.transfer.engine.phase = Phase::Run { at: Instant::now() };
+        let _ = app.transfer.engine.abort();
+        assert!(!app.transfer.engine.busy());
+
+        activate(&mut app);
+        assert!(
+            app.transfer.message.is_empty(),
+            "an Abort with nothing running must not repaint the pane: {}",
+            app.transfer.message
+        );
+        assert!(
+            !app.transfer.engine.take_pending_out().is_empty(),
+            "the stop the dead run owes must survive an inert Abort press"
         );
     }
 

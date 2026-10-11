@@ -8,6 +8,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
@@ -849,8 +850,15 @@ pub fn poll(app: &mut App) {
             }
         }
     }
+    let had_events = !batch.is_empty();
     for event in batch {
         apply_event(app, event);
+    }
+    if had_events {
+        // Streaming agent output rewrites transcript lines in place; the same
+        // settle deadline the UART path arms keeps that pane from ghosting
+        // (G1).
+        app.note_output_churn(Instant::now());
     }
 }
 

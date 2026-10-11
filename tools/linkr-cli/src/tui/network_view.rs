@@ -2,6 +2,8 @@
 //! `@w`/`@d` management commands with the section 3.6 capability gates
 //! (BLE-only; disabled over LAN).
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -760,6 +762,11 @@ pub fn poll(app: &mut App) {
             Err(oneshot::error::TryRecvError::Empty) => app.network.pending.push((kind, rx)),
             Err(err) => handle_reply(app, kind, Err(err)),
         }
+    }
+    if !app.network.pending.is_empty() {
+        // An outstanding request keeps rewriting the pane's status line in
+        // place; arm the same settle deadline a device write would (G1).
+        app.note_output_churn(Instant::now());
     }
 }
 

@@ -404,7 +404,7 @@ impl TermGrid {
         let top = self.top_margin;
         let bottom = self.bottom_margin;
         let (cols, rows) = (self.cols, self.rows);
-        let n = n.min(bottom - top + 1);
+        let n = n.min(bottom.saturating_sub(top) + 1);
         let full = top == 0 && bottom == rows - 1;
         let blank = self.blank();
         for _ in 0..n {
@@ -425,7 +425,7 @@ impl TermGrid {
         let top = self.top_margin;
         let bottom = self.bottom_margin;
         let (cols, rows) = (self.cols, self.rows);
-        let n = n.min(bottom - top + 1);
+        let n = n.min(bottom.saturating_sub(top) + 1);
         let full = top == 0 && bottom == rows - 1;
         let blank = self.blank();
         for _ in 0..n {

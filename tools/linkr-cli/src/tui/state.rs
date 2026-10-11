@@ -819,6 +819,11 @@ impl App {
         let payload = super::terminal_view::prepare_line(text, self.settings.enter_mode);
         if self.settings.local_echo {
             self.terminal.feed(&payload);
+            // Local echo lands in the same grid the device writes to, so it is
+            // the same F2 churn: without arming the settle deadline a typed
+            // line could keep a ghosted cell exactly like `apt update` did.
+            // The A-version only watched `CoreEvent::UartRx`.
+            self.note_output_churn(Instant::now());
         }
         if let Err(err) = self.session.send_uart(payload) {
             self.notices.push(NoticeLevel::Error, err.to_string());
@@ -1106,6 +1111,28 @@ mod tests {
 
         app.poll_settle_repaint(start + CHURN_REPAINT_MAX + CONTENT_SETTLE);
         assert!(app.take_force_redraw(), "the settled repaint still lands");
+    }
+
+    /// G1: the A-version armed the settle deadline from `CoreEvent::UartRx`
+    /// alone, but local echo lands in the same grid the device writes to, so a
+    /// typed line has to arm it too — otherwise it could ghost exactly like
+    /// `apt update` did, with no UART byte to trigger the repaint.
+    #[test]
+    fn local_echo_arms_the_settle_repaint() {
+        let mut app = crate::tui::test_app();
+        app.settings.local_echo = false;
+        app.send_text("hello");
+        assert!(
+            app.settle_repaint_at.is_none(),
+            "without echo the grid did not change"
+        );
+
+        app.settings.local_echo = true;
+        app.send_text("hello");
+        assert!(
+            app.settle_repaint_at.is_some(),
+            "local echo is the same churn as device output"
+        );
     }
 
     /// K5: the loop watches this flag, so it has to read as "open" for both

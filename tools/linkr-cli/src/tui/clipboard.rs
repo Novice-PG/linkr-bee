@@ -76,6 +76,15 @@ struct Helper {
 /// Deadline for the helpers that answer in milliseconds.
 const FAST: Duration = Duration::from_millis(350);
 
+/// Cap on what one paste may pull off a helper's standard output.
+///
+/// The reader accumulates bytes until the helper's deadline, so a helper that
+/// treats its stdout as a firehose (a wedged one, a program that never stops
+/// writing) would grow this buffer for as long as it keeps going. A clipboard
+/// is bounded by what a person could have copied, so past this the answer is
+/// already known: stop reading and let the rest go.
+const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
+
 /// The helpers this platform may have, in the order they are tried.
 fn helpers() -> Vec<Helper> {
     #[cfg(target_os = "windows")]
@@ -314,10 +323,18 @@ fn copy_out(mut stream: ChildStdout, bytes: &Mutex<Vec<u8>>, eof: &AtomicBool, s
         }
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) => bytes
-                .lock()
-                .expect("clipboard buffer")
-                .extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                let mut buffer = bytes.lock().expect("clipboard buffer");
+                let room = MAX_PASTE_BYTES.saturating_sub(buffer.len());
+                if room == 0 {
+                    break;
+                }
+                let take = read.min(room);
+                buffer.extend_from_slice(&chunk[..take]);
+                if take < read {
+                    break;
+                }
+            }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }

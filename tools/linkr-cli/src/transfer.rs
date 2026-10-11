@@ -97,17 +97,24 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(7200);
 /// After the host's process exits, how long to keep watching for the target's
 /// own `rc` line before falling back on the host's clean exit.
 ///
-/// It is the launch step's own budget rather than a grace period, because the
-/// gap is not idle time: while the target is still *inside* `rz` that shell
-/// reads stdin in raw mode, so anything typed at it is eaten as ZMODEM data —
-/// no echo, no execution. The gap was measured on the Bee at **12.8 s** and
-/// again at **56.0 s**, both times because the sender's `OO` never reached the
+/// The gap is not idle time: while the target is still *inside* `rz` that
+/// shell reads stdin in raw mode, so anything typed at it is eaten as ZMODEM
+/// data — no echo, no execution. Measured on the Bee at **12.8 s** and again
+/// at **56.0 s**, both times because the sender's `OO` never reached the
 /// receiver (see `pump`). 1.5 s called that `Sent`; the round-trip's receive
 /// command was then typed straight into the busy console and the run died on
 /// the step timeout. The report is the only thing that proves the console is
 /// back, so it gets the whole budget to arrive — and only after it does the
 /// host's clean exit stand in for a target that never spoke.
-const SETTLE: Duration = STEP_TIMEOUT;
+///
+/// It therefore has to clear the worst gap that has actually been measured,
+/// which the generic [`STEP_TIMEOUT`] (45 s) does **not**: the observed
+/// 56.0 s overruns it by eleven, and a run that gave up at 45 s would hand the
+/// console back to a shell that had not returned it yet — precisely the
+/// accident this window exists to prevent. [`STALL_TIMEOUT`] is the module's
+/// standing answer to "a peer that has stopped rather than died" (same unit,
+/// same reasoning), so the settle window borrows it whole.
+const SETTLE: Duration = STALL_TIMEOUT;
 
 /// The ZMODEM cancel, exactly as lrzsz itself puts it on the wire: ten CAN
 /// (0x18) followed by ten backspaces (0x08).
@@ -689,7 +696,22 @@ pub struct Transfer {
     /// out on the keyboard path, and a transfer that died on its own left the
     /// target sitting in `rz` for good, holding the console every later
     /// command would have to get past.
+    ///
+    /// Only the *cancel* lives here — the break that follows it is a separate
+    /// debt, [`Transfer::stop_owed`], because the two have different reasons to
+    /// exist and only one of them is a ZMODEM thing.
     pending_out: Vec<u8>,
+    /// Whether the frame loop still owes the peer the break (`^C ^C`) that frees
+    /// a console a dead run left busy.
+    ///
+    /// Taken once, like [`Transfer::pending_out`], so a frame loop that runs
+    /// every tick cannot send it twice. It is separate from the cancel because
+    /// a `dd|base64` pager run has no protocol of its own — its whole answer is
+    /// the break (see [`Transfer::peer_cancel`]) — and it is owed one the same
+    /// way whether the run died on a timeout or on a keypress. Keyed off that,
+    /// instead of off "is there a cancel", it is the difference between a pager
+    /// run that stops the target's command and one that leaves it running.
+    stop_owed: bool,
     /// The `rc` the target reported for the launch command, once it does.
     launch_rc: Option<i32>,
     /// State of a pager download in progress.
@@ -699,8 +721,8 @@ pub struct Transfer {
     /// The line terminator this run's commands end with, taken from the
     /// terminal's Enter mode so a transfer types exactly what a person would.
     enter: Vec<u8>,
-    /// Whether *this run* is the one that wrote the sibling named by
-    /// [`Transfer::staged_sibling`].
+    /// Whether *this run* is the one that wrote the path named by
+    /// [`Transfer::rz_written`].
     ///
     /// `validate` refuses to start a receive while that path is taken, so a run
     /// that got past it owns whatever the target's `rz` drops there afterwards.
@@ -737,6 +759,7 @@ impl Default for Transfer {
             scan: Vec::new(),
             proc: None,
             pending_out: Vec::new(),
+            stop_owed: false,
             launch_rc: None,
             download: None,
             expected_sha256: String::new(),
@@ -805,8 +828,10 @@ impl Transfer {
         self.reset();
         // A cancel owed to a peer that is no longer there is not owed to the
         // one this run is about to talk to: it would land in the middle of the
-        // launch command and read as protocol noise.
+        // launch command and read as protocol noise. The break behind it goes
+        // the same way — a new run is not the run that owes anyone a stop.
         self.pending_out.clear();
+        self.stop_owed = false;
         self.total = match self.direction {
             Direction::Send => std::fs::metadata(&self.local).ok().map(|m| m.len()),
             Direction::Recv => None,
@@ -862,6 +887,20 @@ impl Transfer {
                         "{} is empty; there is nothing to send.",
                         self.local.display()
                     ));
+                }
+                // The sender's *name* travels: `launch_recv` types the path
+                // `rz` will write into the target's command line. The whole
+                // protocol is one command per line, terminated by the target's
+                // Enter, so a control character in the name — a newline is
+                // legal in a Linux file name — would submit the command early
+                // and leave the rest to run as a second one. The target path
+                // is held to the same rule above.
+                if let Some(name) = self.local.file_name().and_then(|n| n.to_str()) {
+                    if name.chars().any(|c| c.is_control()) {
+                        return Err(
+                            "The local file name must not contain control characters.".to_string()
+                        );
+                    }
                 }
             }
             Direction::Recv => {
@@ -1049,7 +1088,10 @@ impl Transfer {
             },
             _ => queued.body,
         };
-        self.seq += 1;
+        // Forward only, never restarted — see [`Transfer::reset`] on why a
+        // number must not be reused. `wrapping_add` because a number that
+        // cannot repeat beats one that can panic on the day it is reached.
+        self.seq = self.seq.wrapping_add(1);
         let mut bytes = wrap(self.seq, &body).into_bytes();
         bytes.extend_from_slice(&self.enter);
         self.queue.extend(bytes);
@@ -1093,6 +1135,15 @@ impl Transfer {
     /// back at a shell.
     pub fn take_pending_out(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_out)
+    }
+
+    /// Whether [`fail`] left a break owed to the peer, taken once. The caller
+    /// puts the two break characters on the wire when it answers `true`: the
+    /// cancel reaches a peer already inside a transfer, where the console is
+    /// raw and `^C` is data, while the break frees one that is back — or never
+    /// was — at a shell. A `dd|base64` pager run owes only this half.
+    pub fn take_stop_owed(&mut self) -> bool {
+        std::mem::take(&mut self.stop_owed)
     }
 
     /// Bytes for the link this tick: what we are typing first, then — while the
@@ -1620,13 +1671,23 @@ impl Transfer {
     /// must not clobber a file it did not write — which makes a file found
     /// there *after* a run has begun the run's own, every time. See
     /// [`Transfer::sweep_staged`].
-    fn staged_sibling(&self) -> Option<PathBuf> {
+    ///
+    /// It is the path `rz` writes, and it **may be the destination itself**: a
+    /// download that keeps the sender's name — the common case, device
+    /// `/tmp/f.bin` received as local `f.bin` — has `rz` land the bytes
+    /// straight on [`Transfer::local`], with nothing to rename afterwards. An
+    /// unfinished run therefore leaves its half-written file *at* the
+    /// destination rather than beside it, and that is still what
+    /// [`Transfer::sweep_staged`] has to take back: left there, the truncated
+    /// file sits at the exact name a later, good receive would use — and the
+    /// form refuses that one for a file nobody can use, which is the same
+    /// blocked-everything-after-it symptom the sweep exists to prevent.
+    fn rz_written(&self) -> Option<PathBuf> {
         if self.direction != Direction::Recv {
             return None;
         }
         let name = Path::new(&self.target).file_name()?;
-        let sibling = self.local.parent().unwrap_or(Path::new(".")).join(name);
-        (sibling != self.local).then_some(sibling)
+        Some(self.local.parent().unwrap_or(Path::new(".")).join(name))
     }
 
     /// Take back what an unfinished receive left on the disk, so the next one
@@ -1635,12 +1696,18 @@ impl Transfer {
     /// destination, and the two runs that followed never started their receive
     /// at all — the form refused them before a byte moved and the target's
     /// console saw nothing.
+    ///
+    /// [`Transfer::staged_owned`] is the whole safety argument, and it is what
+    /// lets this delete even the destination itself when `rz` wrote there: the
+    /// claim is set by [`Transfer::start`] *after* `validate` proved the form
+    /// was free to receive into that path, so a file at [`Transfer::rz_written`]
+    /// while this run owns it was written by this run.
     fn sweep_staged(&mut self) {
         if !self.staged_owned {
             return;
         }
         self.staged_owned = false;
-        if let Some(staged) = self.staged_sibling() {
+        if let Some(staged) = self.rz_written() {
             if staged.exists() {
                 let _ = std::fs::remove_file(&staged);
             }
@@ -1658,7 +1725,17 @@ impl Transfer {
     /// abort — so this is where the target is told to let go, whatever it
     /// was doing. The phase is read first: everything below wipes it.
     fn fail(&mut self, reason: String) {
+        // Both halves of the stop the peer is owed, read before anything below
+        // wipes the phase they are decided from: the protocol cancel (a ZMODEM
+        // session only), and the break that frees a console regardless of
+        // channel. A run that never reached the target — nothing running, or a
+        // command still queued behind an idle engine — is on the wire for
+        // neither.
         let cancel = self.peer_cancel();
+        let reached_the_target = matches!(
+            self.phase,
+            Phase::Cmd { .. } | Phase::Run { .. } | Phase::Settle { .. }
+        );
         self.stop_host();
         self.sweep_staged();
         // Drop the open handle first, then delete a truncated pager receive. A
@@ -1677,10 +1754,32 @@ impl Transfer {
         self.steps.clear();
         self.phase = Phase::Done;
         self.outcome = Outcome::Failed(reason);
-        self.pending_out = cancel;
+        // A debt already outstanding is not erased by a later failure that has
+        // nothing of its own to say. A dropped link leaves the cancel waiting
+        // for the reconnect (`reset` keeps it), and stopping an engine that is
+        // already `Done` — a second press of Abort — must not throw the debt
+        // away and leave the orphaned peer holding its console for good.
+        if !cancel.is_empty() {
+            self.pending_out = cancel;
+        }
+        if reached_the_target {
+            self.stop_owed = true;
+        }
     }
 
     /// Drop everything, keeping the form. Also what a reconnect does.
+    ///
+    /// The forms of the stop owed to a peer — [`Transfer::pending_out`] and
+    /// [`Transfer::stop_owed`] — are deliberately **not** cleared here: a link
+    /// that dropped mid-run could not deliver them, and the peer it orphaned is
+    /// still holding its console, so the next connection is the first chance to
+    /// say otherwise. [`Transfer::start`] clears them, because a new run is not
+    /// the run that owes anyone a stop.
+    ///
+    /// The sequence number is not reset either. It is what tells a late `rc`
+    /// from the one in flight, and restarting it per run would let an answer
+    /// that outlived a whole run be read as the current step's — the exact
+    /// ambiguity the number exists to remove. It only ever moves forward.
     pub fn reset(&mut self) {
         self.stop_host();
         self.sweep_staged();
@@ -1688,7 +1787,6 @@ impl Transfer {
         self.steps.clear();
         self.cap.clear();
         self.scan.clear();
-        self.seq = 0;
         self.next_at = None;
         self.launch_rc = None;
         self.download = None;
@@ -2117,6 +2215,35 @@ mod tests {
         assert_eq!(probe.home, "/home/p");
     }
 
+    /// The sequence number is the whole of the "a late answer is not the
+    /// answer in flight" defence, and it only holds while a number can never be
+    /// reused. `reset` used to zero it, so every run started again at 1 — and
+    /// an `rc` that outlived a run far enough to arrive during the next one's
+    /// matching step would have been read as that step's own, which is the one
+    /// ambiguity the number exists to remove. It moves forward and never back.
+    #[test]
+    fn the_sequence_number_never_restarts_across_runs() {
+        let mut transfer = Transfer::default();
+        transfer.probe_now().expect("probe queues");
+        let first = transfer.seq;
+        assert_eq!(first, 1, "the first typed command is number one");
+
+        transfer.reset();
+        assert_eq!(
+            transfer.seq, first,
+            "reset drops the run, not the numbering"
+        );
+
+        transfer.probe_now().expect("probe queues again");
+        assert!(
+            transfer.seq > first,
+            "a new run must not offer the old run's numbers again"
+        );
+        transfer.reset();
+        transfer.probe_now().expect("and again");
+        assert!(transfer.seq > first + 1, "{:?}", transfer.seq);
+    }
+
     /// A marker split across two frames still fires: the scan buffer keeps the
     /// incomplete line rather than guessing at it.
     #[test]
@@ -2241,6 +2368,36 @@ mod tests {
         assert_eq!(transfer.channel, Channel::Zmodem, "both halves are present");
         assert!(transfer.busy(), "the launch command is in flight");
         transfer.abort();
+    }
+
+    /// The sender's *name* is typed into the target's command line too —
+    /// `launch_recv` hands `rz` the path it will write — so it is held to the
+    /// same single-line rule the target path is. A newline in a local file name
+    /// (legal on Linux) would submit the launch command early and leave its
+    /// tail to run as a second command on the target.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_name_with_a_control_character_is_refused_before_it_is_typed() {
+        let dir = std::env::temp_dir().join(format!("linkr-local-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory for the fixture");
+        let local = dir.join("evil\nname.bin");
+        std::fs::write(&local, b"payload").expect("a name with a newline is legal here");
+
+        let mut transfer = Transfer {
+            direction: Direction::Send,
+            local: local.clone(),
+            target: "/tmp/linkr-zm-name.bin".to_string(),
+            probe: Some(probe_all("/home/p")),
+            ..Transfer::default()
+        };
+        ready(&mut transfer, true);
+        let err = transfer
+            .start()
+            .expect_err("a newline in the sender's name must be refused");
+        assert!(err.contains("control characters"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// When the target has no lrzsz the run falls back to the pager instead
@@ -2605,6 +2762,64 @@ mod tests {
         );
     }
 
+    /// The break is a debt of its own, not a passenger of the cancel.
+    ///
+    /// A `dd|base64` pager run has no protocol cancel to send — `peer_cancel`
+    /// is empty for it — but it still leaves a target command running when it
+    /// dies. The frame loop used to send the break only when there was a
+    /// cancel in front of it, so a pager timeout stopped nothing: the target's
+    /// `dd` kept the console until someone pressed Abort by hand. The break is
+    /// owed whenever the run reached the target at all, whatever the channel.
+    #[test]
+    fn a_pager_run_that_dies_still_owes_the_break() {
+        let mut pager = Transfer {
+            channel: Channel::Pager,
+            phase: Phase::Cmd {
+                step: Step::PagerRead,
+                seq: 0,
+                at: Instant::now(),
+            },
+            ..Transfer::default()
+        };
+        pager.fail("The target did not answer.".to_string());
+        assert!(
+            pager.take_pending_out().is_empty(),
+            "a pager has no ZMODEM cancel to send"
+        );
+        assert!(
+            pager.take_stop_owed(),
+            "but the break that stops its command is still owed"
+        );
+        assert!(
+            !pager.take_stop_owed(),
+            "taken once — the frame loop runs every tick and would resend it"
+        );
+
+        // Nothing that never reached the target owes a break either.
+        let mut idle = Transfer::default();
+        idle.fail("The target never answered.".to_string());
+        assert!(!idle.take_stop_owed());
+
+        // A second stop — Abort pressed again after the run already ended —
+        // runs `fail` with no cancel of its own. It must not erase the one a
+        // dropped link is still waiting to pay back on reconnect.
+        let mut owed = Transfer {
+            channel: Channel::Zmodem,
+            phase: Phase::Run {
+                at: Instant::now() + RUN_TIMEOUT,
+            },
+            ..Transfer::default()
+        };
+        owed.fail("The link dropped mid-run.".to_string());
+        owed.fail("Aborted.".to_string());
+        assert_eq!(
+            owed.take_pending_out(),
+            ZMODEM_CANCEL,
+            "a later failure with nothing to cancel must not throw the debt away"
+        );
+        assert!(owed.take_stop_owed(), "and the break stays owed too");
+    }
+
     /// A peer inside a transfer has its console in raw mode and cannot hear
     /// `^C`, so a live ZMODEM run also sends the protocol's own cancel. A run
     /// that is not a ZMODEM session — nothing running, or a `dd|base64` pager
@@ -2783,6 +2998,14 @@ mod tests {
             SETTLE > Duration::from_secs(12),
             "the Bee reported after 12.8 s; {SETTLE:?} would call that gap Sent"
         );
+        // The *worst* gap measured, not the first one: at 56.0 s the target is
+        // still inside `rz`, and a budget that expired before then would call
+        // the run Sent and hand its console to the next transfer too early —
+        // which is the accident this whole window exists to prevent.
+        assert!(
+            SETTLE > Duration::from_secs(56),
+            "the Bee's worst measured lag was 56.0 s; {SETTLE:?} is not enough"
+        );
     }
 
     /// `sz` writes `OO` and exits in the same breath, and the frame loop reads
@@ -2867,8 +3090,11 @@ mod tests {
             staged.display()
         );
 
-        // When the sender's name *is* the name asked for there is nothing to
-        // sweep, and nothing here may ever delete the destination.
+        // A transfer that never claimed the path owns nothing there — even
+        // when `rz` would have written the destination itself, the same-name
+        // shape the next test covers head-on. `staged_owned` is false here
+        // precisely because `start` was never called, and that is what keeps
+        // the file, not the sibling arithmetic.
         std::fs::write(&staged, b"mine").expect("the destination");
         let mut transfer = Transfer {
             local: staged.clone(),
@@ -2882,9 +3108,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A receive that keeps the sender's name — device `firmware.bin` into
+    /// local `firmware.bin`, the ordinary download — gives `rz` the
+    /// destination as its writing path, so an unfinished run leaves a
+    /// truncated file *at* the name a later, good run would use, and the form
+    /// then refuses that run for a file nobody can use. The sweep has to take
+    /// back the destination itself when this run is the one that wrote it.
+    #[test]
+    fn an_aborted_receive_of_the_same_name_takes_back_the_destination() {
+        let dir = std::env::temp_dir().join(format!("linkr-sweep-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory to receive into");
+        let local = dir.join("firmware.bin");
+        std::fs::write(&local, b"half a download").expect("the partial the run was writing");
+
+        let mut transfer = Transfer {
+            local: local.clone(),
+            target: "/tmp/firmware.bin".to_string(),
+            direction: Direction::Recv,
+            channel: Channel::Zmodem,
+            staged_owned: true,
+            ..Transfer::default()
+        };
+        transfer.fail("The link dropped.".to_string());
+        assert!(
+            !local.exists(),
+            "the half-written destination must be taken back: {}",
+            local.display()
+        );
+
+        // …and a run that never owned it still leaves it alone: found is not
+        // made, even when the name is the one the form would have used.
+        std::fs::write(&local, b"mine").expect("the file the person already had");
+        let mut untouching = Transfer {
+            local: local.clone(),
+            target: "/tmp/firmware.bin".to_string(),
+            direction: Direction::Recv,
+            channel: Channel::Zmodem,
+            ..Transfer::default()
+        };
+        untouching.fail("The link dropped.".to_string());
+        assert!(local.exists(), "found is not made");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A file the person already had must outlive a transfer that never ran.
     ///
-    /// [`Transfer::staged_sibling`] takes its path from the form alone, so it
+    /// [`Transfer::rz_written`] takes its path from the form alone, so it
     /// names the same place whether or not anything was ever written there.
     /// [`Transfer::start`] refuses to begin a receive when that path is taken —
     /// but [`Transfer::probe_now`] and a bare [`Transfer::reset`] never consult
