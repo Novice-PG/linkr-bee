@@ -160,6 +160,24 @@ class AutobaudTests(unittest.TestCase):
         self.assertEqual(result["reconfigs"], "1")
         self.assertEqual(result["last"], "115200")
 
+    def test_a_quiet_line_does_not_let_a_short_binary_move_the_port(self):
+        """The silence hands back only the divisors a stream cannot fake.
+
+        An idle prompt is quiet for far longer than a burst gap, so it drops
+        the link's measured state exactly as a peer's rate change does. What
+        must not follow is a stream with no single-bit run in it: 0xCC on a
+        true 115200 line reads our own rate over two bit-times, and two is
+        inside the two-to-five a byte stream can leave, so it is refused even
+        here. Following it would take the port to 57600, and the same pulse
+        would then read as a match at the rate it just moved to, so nothing
+        later could ever put it back. This is the case an idle line followed
+        by a file dump produces; before the two-to-five bound it reached 57600
+        and stayed there.
+        """
+        result = self.run_scenario("quiet_then_a_short_binary")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,8 +52,13 @@
  * never longer than nine bit-times, and the two polarities only reach the
  * decision together when they timed the same run. A window with no
  * single-bit run anywhere in it therefore reports our own rate divided by
- * some k in 2..9, with nothing to tell that from a peer that really slowed
- * down. Measured: 0xCC at 115200 (runs of two and three bits) computes
+ * some k. That divisor is the shortest run the window left, and a byte with
+ * no single-bit run can leave no run shorter than two: the start bit's own
+ * low run is cut by the first data bit, so the low side is at least
+ * start-plus-leading-zeros and the high side at least trailing-ones-plus-
+ * stop, and the longest the two reach together is five bit-times (0xF0:
+ * five low, five high). Two to five, then, is what a stream like this reads
+ * as, with nothing to tell it from a peer that really slowed down. Measured: 0xCC at 115200 (runs of two and three bits) computes
  * 115200 x 11111 / (1389 x 16) = 57596, snaps to 57600, and agrees with
  * itself across windows — so "two windows agree" proves only that the pattern
  * is stable, not that the rate moved. Reconfiguring on it reaches 57600 by
@@ -75,18 +80,21 @@
  * turns out wrong can still be undone — the rollback the two-window rule
  * depends on.
  *
- * Silence is how the refusal reopens. A peer that really did slow to a whole
- * divisor of our own and a stream with no single-bit run in it arrive as the
- * same number — 921600 -> 115200 and 0xCC on a 115200 line are both
- * "current / k" — so while the link is carrying traffic no reading tells them
- * apart, and holding the port that works is the cheaper of the mistakes. A
- * line quiet for long enough is a link we no longer hold any evidence about:
- * the next reading is followed whether it moved or not, and the silence rather
- * than the pulse width is what chose. That is the re-probe the refusal needs
- * in order to be a delay instead of a lock, and it is also the case it gives
- * up — a quiet line that comes back carrying a stream with no single-bit run
- * is followed too. The alternative, holding the port forever, is what made
- * 921600 -> 115200 unreachable.
+ * Silence is how the refusal reopens — but only for the divisors a stream
+ * cannot fake. A peer that really did slow to a whole divisor of our own and
+ * a stream with no single-bit run in it arrive as the same number (921600 ->
+ * 115200 and 0xCC on a 115200 line are both "current / k"), so while the link
+ * is carrying traffic no reading tells them apart, and holding the port that
+ * works is the cheaper of the mistakes. A line quiet for long enough is a
+ * link we no longer hold any evidence about, and a divisor of six or more —
+ * one no byte stream can leave, since five bit-times is the longest run both
+ * polarities of a framed byte can time together — is then believed, which is
+ * what makes 921600 -> 115200 reachable. A divisor inside two to five is
+ * refused in every state, silence or not: that is exactly what an idle line
+ * followed by a binary file reads as, and following it would take the port to
+ * a rate the line never carried with no later window left to undo it. The
+ * refusal is a delay for the divisors only the line can produce, and a hold
+ * for the ones a stream produces too.
  */
 
 #include "uart_autobaud.h"
@@ -117,13 +125,20 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
  */
 #define AUTOBAUD_QUIET_UNVERIFY 8
 /*
- * The longest run a framed byte can leave on the line: a start bit plus eight
- * zero data bits, cut short by a stop bit that is always high. Both
- * polarities have to have timed the same run to reach the decision at all
- * (autobaud_apart), so this is also the ceiling on how far a stream with no
- * single-bit run can push the reading: current / k, k in 2..9.
+ * The refusal's bound while the link is trusted: every divisor from two to
+ * nine is refused, whether or not a byte stream could have produced it. Only
+ * the two-to-five half is a stream's doing (see AUTOBAUD_ARTIFACT_MAX_FACTOR
+ * and the file header); the rest is refused because a busy line that suddenly
+ * reads current/8 is a stutter, not a peer.
  */
 #define AUTOBAUD_MAX_FACTOR	9
+/*
+ * The longest shortest-run a window with no single-bit run in it can leave on
+ * both polarities at once, and so the largest divisor a byte stream can fake:
+ * five (0xF0 times five low and five high). A divisor at or below this is
+ * refused in every state, silence included — see the file header.
+ */
+#define AUTOBAUD_ARTIFACT_MAX_FACTOR 5
 /*
  * lowpulse and highpulse both hold the shortest run of their own polarity, so
  * on any line carrying one-bit runs they land on the same number of source
@@ -219,18 +234,21 @@ static uint32_t autobaud_snap(uint32_t measured)
 
 /*
  * True when `rate` is our own rate seen through a window whose shortest run
- * was not one bit long — that is, current / k for some k in
- * 2..9, inside the tolerance the port itself is held to.
+ * was not one bit long — that is, current / k for some k in 2..max_factor,
+ * inside the tolerance the port itself is held to.
  *
- * Meaningful only while the line is verified against the port: then a reading
- * below ours *has* to come from a missing single-bit run, because that is the
- * only thing that makes a matching line read low, and this is the shape it
- * reads low in. A reading that is none of these is not something a missing
- * run can produce, so if it repeats the line really did move.
+ * A reading below ours *has* to come from a missing single-bit run: that is
+ * the only thing that makes a matching line read low, and this is the shape it
+ * reads low in. max_factor decides how far to disbelieve it — the whole range
+ * while the link is trusted, only the two-to-five a stream can reach once the
+ * silence has handed the larger divisors back. A reading that is none of these
+ * is not something a missing run can produce, so if it repeats the line really
+ * did move.
  */
-static bool autobaud_reads_like_a_missing_bit(uint32_t rate, uint32_t current)
+static bool autobaud_reads_like_a_missing_bit(uint32_t rate, uint32_t current,
+					      uint32_t max_factor)
 {
-	for (uint32_t k = 2; k <= AUTOBAUD_MAX_FACTOR; k++) {
+	for (uint32_t k = 2; k <= max_factor; k++) {
 		uint32_t expect = current / k;
 		uint32_t delta = rate > expect ? rate - expect : expect - rate;
 
@@ -359,16 +377,23 @@ static void autobaud_tick(struct k_work *work)
 	}
 
 	/*
-	 * Verified, and low by a whole factor of ourselves: the shape of a
-	 * stream with no single-bit run in it, not of a peer that moved — see
-	 * the file header for the measurement behind that. Following it would
-	 * take the port to a rate the line never carried, and it could not be
-	 * put back: the pulse width that produced this number belongs to RXD
-	 * rather than to our divisor, so the port would read the same wrong
-	 * answer in every window after the change and nothing would ever
-	 * disagree with it again.
+	 * Low by a whole factor of ourselves: the shape of a stream with no
+	 * single-bit run in it, not of a peer that moved — see the file header
+	 * for the measurement behind that. Every divisor a byte stream can
+	 * reach (two to five) is refused whatever the link's state, because
+	 * following one would take the port to a rate the line never carried
+	 * and it could not be put back: the pulse width that produced this
+	 * number belongs to RXD rather than to our divisor, so the port would
+	 * read the same wrong answer in every window after the change and
+	 * nothing would ever disagree with it again. While the link is still
+	 * trusted the larger divisors are refused too — a busy line that
+	 * suddenly reads current/8 is a stutter, not a peer — and it is the
+	 * silence that hands those back.
 	 */
-	if (autobaud_verified && autobaud_reads_like_a_missing_bit(next, old_baud)) {
+	if (autobaud_reads_like_a_missing_bit(
+		    next, old_baud,
+		    autobaud_verified ? AUTOBAUD_MAX_FACTOR
+				      : AUTOBAUD_ARTIFACT_MAX_FACTOR)) {
 		autobaud_forget();
 		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
 			autobaud_warned_at = now;

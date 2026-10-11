@@ -221,6 +221,26 @@ static void scenario_quiet_then_an_integer_slowdown(void)
 	}
 }
 
+/* The gap this closes: the line has been quiet long enough to hand the
+ * evidence back, and *then* a stream with no single-bit run arrives — an idle
+ * prompt followed by a binary file. 0xCC on a true 115200 line reads our own
+ * rate over two bit-times in every window, which is inside the two-to-five a
+ * byte stream can reach, so it is still refused after the silence. Reading
+ * "the next reading is followed whether it moved or not" would take the port
+ * to 57600 — a rate the line never carried — and no later window would ever
+ * disagree with it again. */
+static void scenario_quiet_then_a_short_binary(void)
+{
+	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
+
+	for (int i = 0; i < 10; i++) {
+		quiet_window();
+	}
+	for (int i = 0; i < 20; i++) {
+		window(pulse(115200, 2), pulse(115200, 2));
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *scenario = argc > 1 ? argv[1] : "";
@@ -244,6 +264,8 @@ int main(int argc, char **argv)
 		scenario_one_gap_does_not_reopen();
 	} else if (strcmp(scenario, "quiet_then_an_integer_slowdown") == 0) {
 		scenario_quiet_then_an_integer_slowdown();
+	} else if (strcmp(scenario, "quiet_then_a_short_binary") == 0) {
+		scenario_quiet_then_a_short_binary();
 	} else {
 		fprintf(stderr, "unknown scenario: %s\n", scenario);
 		return 2;
