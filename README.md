@@ -51,12 +51,12 @@ Browser / desktop / mobile / Linkr
 ```
 
 - A Linkr Bee accessory: ESP32-C3 Super Mini, ESP32-C3 DevKitM, ESP32-C3 DevKitC,
-  or ESP32-C5 DevKitC.
+  ESP32-C5 DevKitC, or ESP32-WROOM-32 DevKitC.
 - A target with a UART console, and three wires: target TX to accessory RX, target RX
   to accessory TX, and a shared ground.
 - A host: Chrome or Chromium for the web terminal, one of the phone apps, the
-  `linkr` terminal (TUI plus assistant) on Linux, Windows and macOS, or the
-  Python / C terminal on macOS and Linux.
+  `linkr` terminal (TUI plus assistant) on Linux, Windows and macOS, the Python
+  terminal on macOS and Linux, or the C reference terminal on Linux only.
 
 The UART side is 3.3 V logic, not RS-232. See the
 [hardware requirements](docs/HARDWARE.md) before wiring a custom board.

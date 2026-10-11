@@ -339,6 +339,11 @@ impl SerialWatch {
         // rules do not set it: they report on their own rule and cannot
         // duplicate another rule's finding for the same line.
         let mut reported = false;
+        // Boot banners are counted per line, not per matching rule: one line
+        // can carry two banner spells (a SoC and its bootloader), but it is
+        // still a single boot observation. `observe_boot`'s burst bookkeeping
+        // stays per rule id — only the counter is deduplicated here.
+        let mut boot_counted = false;
         let rule_indexes: Vec<usize> = (0..self.state.rules.len()).collect();
         for index in rule_indexes {
             let rule = self.state.rules[index].clone();
@@ -347,7 +352,10 @@ impl SerialWatch {
             }
             match rule.kind {
                 RuleKind::Boot => {
-                    self.state.boot_count += 1;
+                    if !boot_counted {
+                        self.state.boot_count += 1;
+                        boot_counted = true;
+                    }
                     if let Some(finding) = self.observe_boot(&rule, line_number, at, &evidence) {
                         // `found` is implicit: findings are retained in state;
                         // the feed() callers read them via findings().

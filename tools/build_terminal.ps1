@@ -70,6 +70,41 @@ function Find-Python {
     return $null
 }
 
+function Get-Slug {
+    # The CI matrix in build.yml names every platform `matrix.name` and ships
+    # dist/linkr-terminal-<matrix.name>/, so local output has to use the same
+    # spelling (windows-x86_64, not windows-amd64 or the raw triple).
+    param([string]$Triple)
+    if ($Triple) {
+        $arch = $Triple.Split('-')[0]
+        if ($Triple -match 'linux') { $os = 'linux' }
+        elseif ($Triple -match 'windows') { $os = 'windows' }
+        elseif ($Triple -match 'darwin|apple') { $os = 'macos' }
+        else { $os = $Triple.Split('-')[1] }
+    }
+    else {
+        $os = 'windows'
+        $arch = $env:PROCESSOR_ARCHITECTURE
+    }
+    # Switch is case-insensitive, so AMD64/x86/ARM64 from the environment and
+    # the lowercase triple spellings both resolve here.
+    $arch = switch ($arch) {
+        'x86_64' { 'x86_64' }
+        'amd64' { 'x86_64' }
+        'i386' { 'i686' }
+        'i486' { 'i686' }
+        'i586' { 'i686' }
+        'i686' { 'i686' }
+        'x86' { 'i686' }
+        'aarch64' { 'arm64' }
+        'arm64' { 'arm64' }
+        'armv7l' { 'armv7' }
+        'armv7' { 'armv7' }
+        default { $arch.ToLowerInvariant() }
+    }
+    return "$os-$arch"
+}
+
 function Invoke-Cargo {
     param([string[]]$CargoArgs)
     Push-Location $cliDir
@@ -103,7 +138,7 @@ if (-not (Test-Path -LiteralPath $binary)) {
     throw "cargo finished but the executable is missing: $binary"
 }
 
-$slug = if ($Target) { $Target.ToLowerInvariant() } else { "windows-$env:PROCESSOR_ARCHITECTURE".ToLowerInvariant() }
+$slug = Get-Slug $Target
 $outDir = Join-Path (Join-Path $repoDir 'dist') "linkr-terminal-$slug"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $outBinary = Join-Path $outDir 'linkr.exe'

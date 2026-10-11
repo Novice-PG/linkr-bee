@@ -1,11 +1,6 @@
-<subagent sessionID="ses_f053023adffejUZd80zrwhCxiP" state="completed">
-All source files re-verified. Below is the complete inventory.
-
----
-
 # Linkr Bee Web Terminal — Complete UX + Feature Inventory
 
-Source of truth: `/home/rock/Documents/linkr-bee/web/index.html`, `/home/rock/Documents/linkr-bee/web/app.js`, `/home/rock/Documents/linkr-bee/web/*.js`, `/home/rock/Documents/linkr-bee/docs/DEVELOPMENT.md`.
+Source of truth: `web/index.html`, `web/app.js`, `web/*.js`, `docs/DEVELOPMENT.md` (paths relative to the repository root).
 All strings are given as exact literals. `en` = English, `zh` = Chinese (both shipped in every string table).
 
 ---
@@ -597,4 +592,3 @@ Related console classification (`inspectSerialConsole`) kinds: `login, sudo-pass
 - Timeouts: WS connect 15000, WS handshake 5000, WiFi scan 50000, WiFi event fallback 45000, diagnostics collect 8000, accessory status poll 20000/1500 (UART 6000/800, WebDAV 6000), target binding 35000, execution monitor 30000, run watchdog 900000, Full Auto window 900000, mgmt response 10000, geometry debounce 180, agent log tick 100, WiFi refreshes 1500/3500/7000, task/session save debounce 500.
 - Sizes: ATT 244, reliable payload `min(limit, 232)`, mgmt default payload 512, journal 128 KiB (read 12000/16000), log 4 MiB, scrollback 10000, toast 3×2200+250, download 128 MiB, composer maxlength 4000, serial input 2048.
 - Verification/binding markers: `LINKR_ID_<hex>`, `LINKR_EXIT_<hex>:<code>`, `LINKR_PART:`, `LINKR_SHA256:<64hex>`, `LINKR_BYTES: <n>`, `TOOL:<name>:available|missing`.
-</subagent>

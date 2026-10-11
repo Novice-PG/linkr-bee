@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "Cross-platform host CLI and TUI for the Linkr Bee wireless serial bridge"
 license = "Apache-2.0"
-repository = "https://github.com/linkr/linkr-bee"
+repository = "https://github.com/radxa/linkr-bee"
 authors = ["Linkr Bee contributors"]
 readme = "README.md"
 
@@ -37,15 +37,15 @@ tokio-stream = "0.1.19"
 async-trait = "0.1.92"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls"] }
 
-# Windows console mode bits, for keeping conhost's Quick Edit (`选择`) mode
-# from freezing the TUI. Already in the lock file through crossterm, so this
-# adds no new crate to the graph.
 # Unix-only pty pump (G3): posix_openpt/grantpt/unlockpt + FIONREAD gating.
 # Already in the lock file through crossterm, so this adds no new crate to the
 # graph and nothing for the Windows build to link
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows console mode bits, for keeping conhost's Quick Edit (`选择`) mode
+# from freezing the TUI. Already in the lock file through crossterm, so this
+# adds no new crate to the graph.
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["consoleapi", "processenv", "winbase", "wincon", "minwindef", "ntdef"] }
 

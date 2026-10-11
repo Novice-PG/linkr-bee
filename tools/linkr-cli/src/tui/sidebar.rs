@@ -186,7 +186,10 @@ fn hint(text: &str) -> Line<'static> {
 pub fn render_lines(app: &App) -> Vec<Line<'static>> {
     let lang = app.lang();
     let items = entries(app);
-    let selected = app.sidebar.selection;
+    // Clamped here as well as in `handle_key`: the list can shrink while the
+    // user only watches (a connection drops, the findings clear), and a stale
+    // `selection` past the end drew the body with no `▸` at all.
+    let selected = app.sidebar.selection.min(items.len().saturating_sub(1));
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cursor = 0usize;
 
@@ -377,6 +380,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if len == 0 {
         return;
     }
+    // The list grows and shrinks with the state (the Disconnect row appears,
+    // the findings block empties, the transport swap trades two rows for one):
+    // a selection left past the end drew no `▸` marker and made `Enter` a
+    // no-op, so it is pulled back before anything reads it — `Enter`'s guard
+    // below included.
+    let seen = app.sidebar.selection;
+    app.sidebar.select(seen, len);
     match key.code {
         KeyCode::Up => {
             app.sidebar.selection = app.sidebar.selection.saturating_sub(1);
@@ -534,7 +544,11 @@ fn flush_with(app: &mut App, load: impl FnOnce() -> TokenStore) {
 fn activate(app: &mut App, entry: SideEntry) {
     let lang = app.lang();
     match entry {
-        SideEntry::Nav(view) => app.set_view(view),
+        // Through the one door, like the function keys and the palette: the
+        // section link used to call `set_view` itself and so took a shortcut
+        // past the precheck two of the views carry (`F3` was gated, this was
+        // not).
+        SideEntry::Nav(view) => super::open_view(app, view),
         SideEntry::ToggleTransport => {
             if app.transport_locked() {
                 app.toast(NoticeLevel::Warn, t(MSG_TRANSPORT_LOCKED, lang).to_string());
@@ -1117,6 +1131,67 @@ mod tests {
             app.sidebar.lan_token.as_str(),
             STORES,
             "the previous host's leftover is what the switch replaces"
+        );
+    }
+
+    /// The list shrinks under the cursor — the link drops, `Disconnect` turns
+    /// back into `Connect`, the findings clear — and the selection was left
+    /// sitting on a row that no longer existed. The body then drew no `▸` at
+    /// all and `Enter` matched nothing, so the sidebar looked alive and
+    /// answered no key until the user pressed `Home`.
+    #[test]
+    fn a_shrunk_list_pulls_the_selection_back_onto_it() {
+        let mut app = crate::tui::test_app();
+        let len = entries(&app).len();
+        app.sidebar.selection = len + 3;
+
+        // The very next frame puts the marker back…
+        let marked = render_lines(&app)
+            .iter()
+            .any(|line| line.spans.first().map(|span| span.content.as_ref()) == Some("▸ "));
+        assert!(marked, "a selection past the end drew no cursor at all");
+
+        // …and a key that used to be swallowed now reaches the row it names:
+        // the last one is the dangerous preset, so the confirmation opens.
+        assert_eq!(
+            entries(&app).last(),
+            Some(&SideEntry::Preset(4)),
+            "the last row is `reboot` (PRESETS)"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.sidebar.selection, len - 1, "pulled back on the way in");
+        assert!(
+            app.dialog.is_some(),
+            "Enter reached the row under the cursor"
+        );
+    }
+
+    /// The section links used to call `set_view` themselves, which is a
+    /// different door from the one `F3`/`F6` and the palette take: two of the
+    /// views carry a precheck, so the same link opened them ungated — the
+    /// diagnostics view came up empty and silent where `F3` says why, and the
+    /// transfer form came up with no precheck run.
+    #[test]
+    fn a_section_link_takes_the_same_door_as_the_function_key() {
+        let mut app = crate::tui::test_app();
+        app.state = ConnectionState::Disconnected;
+
+        activate(&mut app, SideEntry::Nav(View::Diagnostics));
+        assert_eq!(app.view, View::Diagnostics);
+        assert!(
+            app.notices
+                .toasts
+                .last()
+                .is_some_and(|toast| toast.text.contains("BLE")),
+            "the diagnostics gate stayed silent: {:?}",
+            app.notices.toasts.last().map(|toast| toast.text.as_str())
+        );
+
+        activate(&mut app, SideEntry::Nav(View::Transfer));
+        assert_eq!(app.view, View::Transfer);
+        assert!(
+            !app.transfer.message.is_empty(),
+            "the transfer precheck never ran"
         );
     }
 }

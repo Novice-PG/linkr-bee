@@ -144,6 +144,12 @@ strings! {
         "CJK 探测：本控制台把中文按 1 列计宽，已补写被跳过的格子。";
     MOD_CJK_ASSUMED => "CJK probe: no answer, drawing as if glyphs take two columns.",
         "CJK 探测：未取得回答，按 2 列绘制。";
+    // Sticky modifiers. The label is the key's own name (`Shift`, `Ctrl`,
+    // `Alt`), which reads the same in both languages, so only the sentence
+    // around it is translated. These were the one pair of sentences the
+    // bilingual interface still emitted in English whatever `linkr-lang` said.
+    MOD_LATCH_RELEASED => "{} latch released.", "{} 锁定已解除。";
+    MOD_LATCH_ARMED => "{} armed for the next key.", "{} 已锁定，作用于下一个按键。";
 }
 
 type Ui = Terminal<drawsync::SyncBackend<CrosstermBackend<std::io::Stdout>>>;
@@ -1274,15 +1280,13 @@ fn paste_keys(app: &App, text: &str) -> Vec<KeyEvent> {
 // --- keys --------------------------------------------------------------------
 
 fn arm_sticky(app: &mut App, sticky: &mut StickyMods, next: StickyMods, label: &str) {
+    let lang = app.lang();
     if *sticky == next {
         *sticky = StickyMods::default();
-        app.toast(NoticeLevel::Info, format!("{label} latch released."));
+        app.toast(NoticeLevel::Info, tr!(t(MOD_LATCH_RELEASED, lang), label));
     } else {
         *sticky = next;
-        app.toast(
-            NoticeLevel::Info,
-            format!("{label} armed for the next key."),
-        );
+        app.toast(NoticeLevel::Info, tr!(t(MOD_LATCH_ARMED, lang), label));
     }
 }
 
@@ -1436,13 +1440,7 @@ fn route_key(
             return;
         }
         Global::View(view) => {
-            match view {
-                View::Diagnostics => open_diagnostics(app),
-                // The precheck is the gate, so opening the view *is* asking
-                // the device whether it can transfer at all.
-                View::Transfer => transfer_view::open(app, None),
-                _ => app.set_view(view),
-            }
+            open_view(app, view);
             return;
         }
         Global::ArmShift => {
@@ -1657,6 +1655,23 @@ fn open_diagnostics(app: &mut App) {
             NoticeLevel::Warn,
             t(MOD_NEED_BLE_DIAG, app.lang()).to_string(),
         );
+    }
+}
+
+/// Show a view — the **one** entry point for everything that opens one.
+///
+/// Two surfaces carry a precheck, so "open the view" and "ask the device
+/// whether it can be opened at all" are the same act: diagnostics refreshes
+/// or says it needs BLE, and the transfer form runs its precheck before it
+/// exists. The sidebar's section links used to call `set_view` directly and
+/// so took the back door past both — the palette entry and the sidebar entry
+/// for the same view behaved differently, and neither matched the function
+/// key. `Global::View` (F2..F6), the palette and the sidebar all land here.
+pub(crate) fn open_view(app: &mut App, view: View) {
+    match view {
+        View::Diagnostics => open_diagnostics(app),
+        View::Transfer => transfer_view::open(app, None),
+        _ => app.set_view(view),
     }
 }
 
@@ -2950,6 +2965,41 @@ mod tests {
         assert!(
             !app.copy_hint_shown,
             "the helper hint belongs to our own copies"
+        );
+    }
+
+    /// The sticky-modifier corner was the one pair of sentences the bilingual
+    /// interface still printed in English whatever `linkr-lang` said. The key
+    /// name in front (`Shift`, `Ctrl`, `Alt`) is the same in both languages,
+    /// so only the sentence around it moved into the table.
+    #[test]
+    fn the_sticky_modifier_news_follows_the_interface_language() {
+        let mut app = test_app();
+        let mut sticky = StickyMods::default();
+        let shift = StickyMods {
+            shift: true,
+            ..StickyMods::default()
+        };
+
+        arm_sticky(&mut app, &mut sticky, shift, "Shift");
+        assert_eq!(
+            app.notices.toasts.last().expect("arming says so").text,
+            "Shift armed for the next key.",
+            "the English wording does not move"
+        );
+
+        // The same press again releases the latch, and Chinese says so in
+        // Chinese.
+        app.settings.lang = crate::tui::i18n::Lang::Zh;
+        arm_sticky(&mut app, &mut sticky, shift, "Shift");
+        let released = &app.notices.toasts.last().expect("releasing says so").text;
+        assert!(
+            released.contains("Shift"),
+            "the key name still leads the sentence: {released}"
+        );
+        assert!(
+            released.contains("解除"),
+            "…and the sentence is Chinese now: {released}"
         );
     }
 }

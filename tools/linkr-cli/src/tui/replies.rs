@@ -59,7 +59,7 @@ pub fn reply_status(text: &str) -> ReplyStatus {
     let mut error = None;
     for line in text.lines() {
         let line = line.trim_end();
-        if line.starts_with("ERR") {
+        if is_err_line(line) {
             if error.is_none() {
                 error = Some(line.to_string());
             }
@@ -70,6 +70,19 @@ pub fn reply_status(text: &str) -> ReplyStatus {
     ReplyStatus {
         ok: error.is_none() && saw_ok,
         error,
+    }
+}
+
+/// `^ERR` with the web helper's word boundary (`/^ERR\b/`): the three letters
+/// have to end the token, so a payload that merely starts with them —
+/// `ERROR`, `ERRNO` — is not read as a failure line.
+fn is_err_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("ERR") else {
+        return false;
+    };
+    match rest.chars().next() {
+        None => true,
+        Some(next) => !next.is_alphanumeric() && next != '_',
     }
 }
 

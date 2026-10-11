@@ -410,13 +410,19 @@ pub async fn read_web_page(
                 Ok(Some(Ok(chunk))) => chunk,
                 Ok(Some(Err(error))) => return Err(wrap(&url, error.to_string())),
             };
-        budget = budget.saturating_sub(chunk.len());
-        if budget == 0 {
+        // The spec boundary is strictly `> 512 KiB` (AGENT_SPEC "web page"),
+        // so a page of exactly 512 KiB is readable: fail only when this chunk
+        // would push the total past the budget, not when it lands exactly on
+        // it. `saturating_sub` + `== 0` rejected the equal case outright.
+        if chunk.len() > budget {
             return Err(wrap(&url, ERR_TOO_LARGE.to_string()));
         }
+        budget -= chunk.len();
         source.push_str(&decoder.decode(&chunk));
     }
-    source.push_str(&decoder.decode(&[]));
+    // The body ended: hand over the tail `decode` held back for a next chunk
+    // that never comes, or a page cut mid-character loses its last glyph.
+    source.push_str(&decoder.flush());
 
     let page = extract_page(&source, &final_url, &content_type);
     let fetched_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

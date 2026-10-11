@@ -43,6 +43,9 @@ strings! {
     // lets the browser scan *and* list; a terminal has to do both itself.
     DLG_DEVICES_SCANNING => "scanning for Linkr devices…", "正在搜索 Linkr 设备…";
     DLG_DEVICES_EMPTY => "No Linkr device found.", "没有发现 Linkr 设备。";
+    // A nameless advertisement still gets a row; the placeholder is interface
+    // text, so it follows `linkr-lang` like everything else.
+    DLG_DEVICES_UNKNOWN => "(unknown)", "（未知）";
     DLG_DEVICES_KEYS => "↑↓ choose · Enter connect · Esc cancel",
         "↑↓ 选择 · Enter 连接 · Esc 取消";
 
@@ -733,7 +736,10 @@ fn device_lines(
     } else {
         for (index, device) in items.iter().enumerate() {
             let is_sel = index == selected;
-            let name = device.name.as_deref().unwrap_or("(unknown)");
+            let name = device
+                .name
+                .as_deref()
+                .unwrap_or(t(DLG_DEVICES_UNKNOWN, lang));
             let rssi = device
                 .rssi
                 .map(|v| format!("  {v} dBm"))

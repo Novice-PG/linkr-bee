@@ -326,7 +326,7 @@ pub fn watch_tool() -> ToolDef {
     ToolDef::new(
         "watch_serial_output",
         "Watch the console",
-        "Watch the live console for up to 120 seconds and report panics, boot loops and any literal patterns you name, with the lines that justify each finding. Use it for a reboot or a crash you are waiting for instead of repeated reads. Every finding is an observation of untrusted output, never proof of the cause.",
+        "Watch the live console for up to 60 seconds and report panics, boot loops and any literal patterns you name, with the lines that justify each finding. Use it for a reboot or a crash you are waiting for instead of repeated reads. Every finding is an observation of untrusted output, never proof of the cause.",
     )
     .sequential()
     .schema(obj(
@@ -337,7 +337,7 @@ pub fn watch_tool() -> ToolDef {
                 "maxItems": 8,
                 "items": string_range(1, 120),
             },
-            "timeoutMs": int_range(1000, 120000),
+            "timeoutMs": int_range(1000, 60_000),
         }),
     ))
 }
@@ -464,6 +464,21 @@ pub fn available_tools(accessory: bool, notes: bool, unlocked: &[&str]) -> Vec<T
     tools
 }
 
+/// The commands a `probe_tools` run actually found, out of the `(name,
+/// available)` pairs it reported.
+///
+/// A gate names *every* command it needs (`read_target_file` wants `dd` and
+/// `base64`), and [`unlock_tools`] asks for all of them at once, so the caller
+/// has to hand over the whole observation in one call. A command reported
+/// `missing` is evidence of absence, not something that may open a gate.
+pub fn observed_commands(pairs: &[(String, bool)]) -> Vec<String> {
+    pairs
+        .iter()
+        .filter(|(_, available)| *available)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// A probe that observed `dd` and `base64` unlocks `read_target_file`.
 /// Returns the tools newly opened by this observation, in catalogue order.
 pub fn unlock_tools(unlocked: &mut Vec<&'static str>, observed: &[String]) -> Vec<&'static str> {
@@ -560,6 +575,21 @@ mod tests {
                 assert!(tool
                     .description
                     .starts_with("Read up to 1024 bytes of a file on the target as text"));
+                continue;
+            }
+            if tool.name == "watch_serial_output" {
+                // 60 s is this client's ceiling: the schema and `tool_watch`
+                // agree with `serial_observation.js` (`Math.min(60000, …)`).
+                // The upstream description still advertises the mobile
+                // agent's 120 s, so the only allowed divergence is that one
+                // number.
+                let upstream =
+                    tool.description
+                        .replacen("up to 60 seconds", "up to 120 seconds", 1);
+                assert!(
+                    source.contains(&format!("description: \"{upstream}\"")),
+                    "watch description differs from pi-agent.mjs by more than the timeout wording"
+                );
                 continue;
             }
             let quoted_double = format!("description: \"{}\"", tool.description);
@@ -669,7 +699,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "watch_serial_output")
             .unwrap();
-        assert_eq!(watch.schema["properties"]["timeoutMs"]["maximum"], 120000);
+        assert_eq!(watch.schema["properties"]["timeoutMs"]["maximum"], 60000);
     }
 
     #[test]
@@ -689,6 +719,30 @@ mod tests {
             unlock_tools(&mut fresh, &["dd".to_string()]).is_empty(),
             "one missing command keeps the gate shut"
         );
+    }
+
+    #[test]
+    fn a_probe_is_offered_to_the_gate_as_one_whole_observation() {
+        // The shape the caller sees: `probe_tools` reports every name it was
+        // asked about, with whether the target has it. A gate wants all of its
+        // commands in a single call, so the observation has to survive as one
+        // list — offering `dd` and `base64` one at a time never satisfies
+        // `all(...)` and leaves the tool unreachable.
+        let pairs = vec![
+            ("dd".to_string(), true),
+            ("base64".to_string(), true),
+            ("lrzsz".to_string(), false),
+        ];
+        let mut unlocked: Vec<&'static str> = Vec::new();
+        assert_eq!(
+            unlock_tools(&mut unlocked, &observed_commands(&pairs)),
+            vec!["read_target_file"]
+        );
+
+        // A command the target does not have cannot stand in for one it does.
+        let half = vec![("dd".to_string(), true), ("base64".to_string(), false)];
+        let mut fresh: Vec<&'static str> = Vec::new();
+        assert!(unlock_tools(&mut fresh, &observed_commands(&half)).is_empty());
     }
 
     #[test]

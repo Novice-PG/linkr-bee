@@ -1,6 +1,6 @@
 # Implementation Spec: Port `tools/linkr_ble_terminal.py` (v1.0.0) to Rust
 
-Target file: `/home/rock/Documents/linkr-bee/tools/linkr_ble_terminal.py` (1424 lines). Everything below is derived line-by-line from that file and is sufficient to write a behavior-identical Rust port.
+Target file: `tools/linkr_ble_terminal.py` (1424 lines). Everything below is derived line-by-line from that file and is sufficient to write a behavior-identical Rust port.
 
 ---
 

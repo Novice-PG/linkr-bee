@@ -587,7 +587,11 @@ pub fn validate_ssid(ssid: &str, lang: Lang) -> Result<(), String> {
     if ssid.is_empty() {
         return Err(t(NET_ERR_ENTER_SSID, lang).to_string());
     }
-    if ssid.chars().count() > SSID_MAX {
+    // The web counts `.length` — UTF-16 units — and `replies::parse_scan_line`
+    // guards an SSID the same way. Counting `char`s here undercounts astral
+    // characters (one `char`, two UTF-16 units), so the two paths disagreed on
+    // what 32 means.
+    if ssid.encode_utf16().count() > SSID_MAX {
         return Err(tr!(t(NET_ERR_SSID_LEN, lang), SSID_MAX));
     }
     if ssid.contains(',') || ssid.chars().any(char::is_control) {

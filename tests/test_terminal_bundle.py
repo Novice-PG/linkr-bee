@@ -81,17 +81,24 @@ class BundleScriptTests(unittest.TestCase):
         self.assertIn("Get-FileHash -LiteralPath $path -Algorithm SHA256", script)
         self.assertIn("[Convert]::FromBase64String", script)
         self.assertIn("[IO.File]::WriteAllBytes($exePath, $bytes)", script)
-        # The terminal runs in this console with the script's own arguments,
-        # and its exit code leaves the script untouched.
+        # The terminal runs in this console with the script's own arguments.
         self.assertIn("-Wait -PassThru -NoNewWindow", script)
         self.assertIn("foreach ($argument in $args)", script)
-        self.assertIn("exit $process.ExitCode", script)
         self.assertNotIn("Start-Process powershell", script)
+        # Exit-code passthrough, checked structurally: -PassThru above is what
+        # makes .ExitCode readable, and the exit must be the script's last
+        # statement so nothing can overwrite the terminal's code after it.
+        self.assertTrue(
+            script.rstrip().endswith("exit $process.ExitCode"),
+            "the script must end on the terminal's exit code",
+        )
 
     def test_payload_name_and_version_are_stamped_in(self):
         script = build_script(name="linkr.exe", version="9.9.9")
         self.assertIn("$payloadName = 'linkr.exe'", script)
-        self.assertIn("$payloadVersion = '9.9.9'", script)
+        # The version is part of the generated header; it has no runtime use, so
+        # it is not stamped in as a variable.
+        self.assertIn("from linkr.exe, 9.9.9,", script)
         self.assertIn("tools/build_terminal_bundle.py", script)
 
     def test_header_documents_the_usual_invocations(self):
@@ -127,11 +134,13 @@ class BundleCommandTests(unittest.TestCase):
         code, data, printed = self.generate()
         self.assertEqual(code, 0)
         self.assertIn("Bundle:", printed)
+        # A UTF-8 BOM keeps Windows PowerShell 5.1 from reading the script as
+        # ANSI and garbling any non-ASCII it carries.
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
         self.assertIn(b"\r\n", data)
         self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
-        script = data.decode("utf-8")
+        script = data.decode("utf-8-sig")
         self.assertEqual(embedded_payload(script), PAYLOAD)
-        self.assertIn("linkr-bee-terminal.ps1", script)
 
     def test_version_defaults_to_the_cargo_version(self):
         _, data, _ = self.generate()
@@ -141,7 +150,7 @@ class BundleCommandTests(unittest.TestCase):
             re.M,
         )
         self.assertIsNotNone(cargo)
-        self.assertIn(f"$payloadVersion = '{cargo.group(1)}'", data.decode("utf-8"))
+        self.assertIn(f"from linkr.exe, {cargo.group(1)},", data.decode("utf-8-sig"))
 
     def test_stdout_prints_instead_of_writing(self):
         with tempfile.TemporaryDirectory() as tmp:

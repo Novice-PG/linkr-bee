@@ -415,8 +415,13 @@ pub fn verify_service_command(
     )
 }
 
+/// The LAST matching marker wins, for the reason `target_files::parse_file_read`
+/// spells out: the journal window handed to a parser can still hold the verify
+/// that ran before this one, and an earlier request's numbers must never be
+/// attributed to this one. A first match would report the stale value — the two
+/// parsers read the same journal and have to agree on which one is current.
 fn find_marker<'a>(lines: &'a [String], pattern: &Regex) -> Option<regex::Captures<'a>> {
-    lines.iter().find_map(|line| pattern.captures(line))
+    lines.iter().rev().find_map(|line| pattern.captures(line))
 }
 
 /// Collect the lines between a pair of block markers. An unterminated block is
@@ -1227,6 +1232,34 @@ mod tests {
         }
         text.push_str("LINKR_VERIFY:done\n");
         text
+    }
+
+    #[test]
+    fn the_last_marker_wins_over_an_earlier_verify_in_the_journal() {
+        // The journal window can still hold the verify that ran before this
+        // one. Reading the first marker would report that earlier read's size
+        // as this request's answer — the stale numbers would look like a real
+        // mismatch against an expectation the user just supplied.
+        let text = [
+            "LINKR_VERIFY:path=/etc/passwd",
+            "LINKR_VERIFY:file",
+            "LINKR_VERIFY:bytes=99",
+            "LINKR_VERIFY:done",
+            "LINKR_VERIFY:path=/etc/hosts",
+            "LINKR_VERIFY:file",
+            "LINKR_VERIFY:bytes=3",
+            "LINKR_VERIFY:done",
+            "",
+        ]
+        .join("\n");
+        let expectation = FileExpectation {
+            path: Some("/etc/hosts".into()),
+            bytes: Some(3),
+            sha256: String::new(),
+        };
+        let result = parse_verify_result(&text, &expectation).unwrap();
+        assert_eq!(result.status, Verdict::Match);
+        assert_eq!(result.bytes, Some(3), "the stale read must not win");
     }
 
     #[test]

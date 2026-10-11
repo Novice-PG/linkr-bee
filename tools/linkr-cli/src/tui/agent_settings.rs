@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::config::{is_loopback_host, write_secret_file};
+use crate::agent::config::{is_loopback_host, normalize_endpoint, write_secret_file};
 
 use super::i18n::{strings, t, Entry, Lang};
 use super::state::{App, TextField};
@@ -375,16 +375,14 @@ impl AgentSettingsState {
 
     /// Build the record the form currently describes.
     pub fn to_stored(&self, lang: Lang) -> Result<StoredAgent, String> {
-        let endpoint = self.endpoint.as_str().trim().to_string();
-        if endpoint.is_empty() {
-            return Err(t(ASST_ERR_ENDPOINT, lang).to_string());
-        }
-        let (scheme, rest) = endpoint.split_once("://").unwrap_or(("", ""));
-        let allowed = matches!(scheme, "http" | "https");
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        if !allowed || authority.contains('@') {
-            return Err(t(ASST_ERR_ENDPOINT, lang).to_string());
-        }
+        // One validator for one field: the runtime refuses a record it cannot
+        // call (`agent::config::validate_agent_config` → `normalize_endpoint`),
+        // so the dialog must refuse exactly the same strings. Splitting the
+        // endpoint by hand here is how `https://h/v1?tenant=1` and a hostless
+        // `http://` were saved while the load that follows read them as "not
+        // configured" and cleared the runtime that was already up.
+        let endpoint = normalize_endpoint(self.endpoint.as_str())
+            .map_err(|_| t(ASST_ERR_ENDPOINT, lang).to_string())?;
         let model = self.model.as_str().trim().to_string();
         if model.is_empty() {
             return Err(t(ASST_ERR_MODEL, lang).to_string());
@@ -1037,6 +1035,15 @@ mod tests {
         state = state_with("https://user:pass@example.com/v1", "gpt-4o");
         assert_eq!(state.to_stored(Lang::En).unwrap_err(), ERR_ENDPOINT);
 
+        // The query and the hostless forms the runtime refuses: the dialog used
+        // to accept both, then `runtime_config` read the record it had just
+        // written as unusable and dropped the live configuration.
+        state = state_with("https://api.example.com/v1?tenant=1", "gpt-4o");
+        assert_eq!(state.to_stored(Lang::En).unwrap_err(), ERR_ENDPOINT);
+
+        state = state_with("http://", "gpt-4o");
+        assert_eq!(state.to_stored(Lang::En).unwrap_err(), ERR_ENDPOINT);
+
         state = state_with("https://api.example.com/v1", "  ");
         assert_eq!(state.to_stored(Lang::En).unwrap_err(), ERR_MODEL);
 
@@ -1154,11 +1161,23 @@ mod tests {
     }
 
     /// A record the runtime cannot use reads as "not configured" instead of
-    /// spawning a runtime that fails on the first request.
+    /// spawning a runtime that fails on the first request. The dialog refuses
+    /// such an endpoint at save time — it shares the runtime's validator — but
+    /// a record written before that (or by hand) still has to be caught here.
     #[test]
     fn runtime_config_refuses_an_endpoint_it_cannot_call() {
         let state = state_with("https://api.example.com/v1?tenant=1", "gpt-4o");
-        let stored = state.to_stored(Lang::En).unwrap();
+        assert_eq!(
+            state.to_stored(Lang::En).unwrap_err(),
+            ERR_ENDPOINT,
+            "the dialog refuses what the runtime cannot call"
+        );
+
+        let stored = StoredAgent {
+            endpoint: "https://api.example.com/v1?tenant=1".to_string(),
+            model: "gpt-4o".to_string(),
+            ..StoredAgent::default()
+        };
         assert!(runtime_config_from(stored).is_none());
     }
 

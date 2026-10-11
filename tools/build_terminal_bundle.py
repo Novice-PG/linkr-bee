@@ -90,7 +90,6 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
 $payloadName = '{name}'
-$payloadVersion = '{version}'
 $payloadSha256 = '{digest}'
 
 $binDir = if ($env:LOCALAPPDATA) {{
@@ -199,8 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # CRLF by hand: `Path.write_text(newline=…)` needs Python 3.10, and the
-    # script is generated from whatever interpreter is around.
-    with args.output.open("w", encoding="utf-8", newline="\r\n") as handle:
+    # script is generated from whatever interpreter is around. utf-8-sig writes a
+    # BOM on purpose: Windows PowerShell 5.1 reads a BOM-less file as ANSI and
+    # would garble any non-ASCII the script carries (a Chinese comment today, a
+    # localized string tomorrow), while a BOM makes it decode the file as UTF-8.
+    with args.output.open("w", encoding="utf-8-sig", newline="\r\n") as handle:
         handle.write(script)
     print(
         f"Bundle: {args.output} ({len(payload)} bytes of {args.name}, version {version})"

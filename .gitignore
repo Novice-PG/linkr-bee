@@ -3,6 +3,9 @@ build/
 build-*/
 dist/
 *.spec
+*.exe
+*.o
+*.a
 
 # Python cache
 __pycache__/

@@ -46,6 +46,22 @@ pub fn store_path() -> PathBuf {
     path
 }
 
+/// The sibling a save writes through before the atomic rename: same directory,
+/// `<name>.<pid>.tmp`.
+///
+/// The pid keeps two processes writing the same store from colliding. With a
+/// shared name the second saver's `create_new` meets the first's file, unlinks
+/// it mid-write and publishes its own — a torn store, exactly what the
+/// write-through exists to prevent.
+fn write_through(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("lan_tokens.json"));
+    name.push(format!(".{}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
 fn device_key(device_id: &str) -> String {
     format!("device:{device_id}")
 }
@@ -195,14 +211,7 @@ impl TokenStore {
         // and `load` reads that as "no tokens at all" — every device silently
         // back to needs-auth. `rename` within one directory is atomic, so a
         // reader sees either the old file or the whole new one.
-        let tmp = {
-            let mut name = path
-                .file_name()
-                .map(|n| n.to_os_string())
-                .unwrap_or_else(|| std::ffi::OsString::from("lan_tokens.json"));
-            name.push(".tmp");
-            path.with_file_name(name)
-        };
+        let tmp = write_through(path);
         let mut options = std::fs::OpenOptions::new();
         // `create_new` never follows a symlink and never clobbers an existing
         // entry, so a pre-placed `.tmp` cannot redirect the write to another
@@ -442,10 +451,9 @@ mod tests {
 
         assert_eq!(TokenStore::load_from(&path), store);
 
-        let mut tmp = path.clone().into_os_string();
-        tmp.push(".tmp");
+        let tmp = write_through(&path);
         assert!(
-            !Path::new(&tmp).exists(),
+            !tmp.exists(),
             "the sibling write-through file was left behind"
         );
 

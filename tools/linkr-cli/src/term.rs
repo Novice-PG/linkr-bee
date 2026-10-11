@@ -443,7 +443,11 @@ impl InputPump {
                 libc::dup2(restore_fd, libc::STDIN_FILENO); // undo the swap
                 libc::tcsetattr(restore_fd, libc::TCSANOW, &original);
             }
-            close_all(&[restore_fd, master, slave]);
+            // `real` was moved into the closure's capture above and never ran
+            // (the thread never started), so its dup has to be closed here too:
+            // leaking one fd per failed spawn is how a retry loop runs the
+            // process out of descriptors.
+            close_all(&[real, restore_fd, master, slave]);
             return None;
         }
         // Detached on purpose: joining could block for the whole drain budget

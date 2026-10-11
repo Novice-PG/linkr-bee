@@ -116,11 +116,14 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ### GitHub Actions build
 
 The workflow in `.github/workflows/build.yml` builds the default WiFi + BLE
-configuration for `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and
-`esp32c5_devkitc/esp32c5/hpcore`. It runs on pushes to `main`, version tags,
-pull requests, and manual dispatches using Zephyr
-v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
-only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
+configuration for five boards: `esp32c3_supermini`, `esp32c3_devkitm`,
+`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, and
+`esp32_devkitc/esp32/procpu` (the ESP32-WROOM-32). It runs on pushes to `main`,
+version tags, pull requests, and manual dispatches using Zephyr v4.4.1 with
+Zephyr SDK 1.0.1. The four RISC-V boards install only the
+`riscv64-zephyr-elf` toolchain; the ESP32 needs
+`xtensa-espressif_esp32_zephyr-elf` instead, so the matrix carries the toolchain
+per board rather than pulling the full Zephyr CI image.
 
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
@@ -130,11 +133,12 @@ linkr-bee-esp32c3-supermini.bin
 linkr-bee-esp32c3-devkitm.bin
 linkr-bee-esp32c3-devkitc.bin
 linkr-bee-esp32c5-devkitc.bin
+linkr-bee-esp32-wroom-32.bin
 ```
 
 On macOS or Linux, extract the artifact, install
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/),
-connect the ESP32-C3 Super Mini, and run:
+connect the board, and run:
 
 ```sh
 ./flash_firmware.sh
@@ -147,13 +151,15 @@ If more than one serial device is connected, select it explicitly:
 ```
 
 The script infers the target from the standard image name and writes C3 at
-`0x0` or C5 at `0x2000` without a full-chip erase. Only image sectors are
-rewritten, so normal upgrades preserve the BLE identity and saved
-configuration. Use the board-specific factory-reset input when those settings
-must be cleared. The artifact also contains `FLASHING.txt`,
+`0x0`, C5 at `0x2000`, or ESP32-WROOM-32 at `0x1000`, without a full-chip
+erase. Only image sectors are rewritten, so normal upgrades preserve the BLE
+identity and saved configuration. Use the board-specific factory-reset input
+when those settings must be cleared. The artifact also contains `FLASHING.txt`,
 `firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
-WiFi, networking, Bluetooth, or binary-output configuration is absent.
+WiFi, networking, Bluetooth, or binary-output configuration is absent; the one
+WebDAV exception is the ESP32 board, where it asserts
+`# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set`.
 
 ## UART selection
 
@@ -323,9 +329,13 @@ input to GND permanently, and treat
 access to that pad or switch as access to factory reset. It does not erase
 firmware, the test-marker partition, or coredump storage.
 
-The Python, C, and Web Bluetooth clients send management commands directly;
-`--pair` is retained only as a deprecated no-op. The current WebDAV uploader
-also accepts anonymous HTTP only, so use it solely on a trusted local network.
+The Python, C, and Web Bluetooth clients send management commands directly.
+`--pair` is a real flag, not a no-op: it requests OS bonding during connect, so
+hold the Bee's GPIO1 to GND while it runs. On macOS the client only prints the
+hint — the system dialog appears when the encrypted service is read — and
+everywhere else the Python client calls the OS `pair()` directly. The current
+WebDAV uploader also accepts anonymous HTTP only, so use it solely on a trusted
+local network.
 
 UART RX bytes are buffered and periodically HTTP-PUT to
 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`. Upload waits for an IPv4

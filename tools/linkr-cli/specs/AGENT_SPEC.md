@@ -1,31 +1,31 @@
 # Linkr Bee AI Assistant — Behavioral Specification (Rust re-implementation target)
 
-**Source of truth (absolute paths):**
+**Source of truth (paths are relative to the repository root):**
 
 | Area | File |
 |---|---|
-| Agent core, tool defs, budgets | `/home/rock/Documents/linkr-bee/mobile/src/pi-agent.mjs` |
-| System prompt | `/home/rock/Documents/linkr-bee/mobile/src/agent-prompt.mjs` |
-| Context/compaction | `/home/rock/Documents/linkr-bee/mobile/src/agent-context.mjs` |
-| Runtime entry | `/home/rock/Documents/linkr-bee/mobile/src/agent-runtime.mjs` |
-| Web reader | `/home/rock/Documents/linkr-bee/mobile/src/web-reader.mjs` |
-| Execution policy | `/home/rock/Documents/linkr-bee/web/agent_execution_policy.js` |
-| Per-target command policy | `/home/rock/Documents/linkr-bee/web/command_policy.js` |
-| Executor / approval FSM | `/home/rock/Documents/linkr-bee/web/device_executor.js` |
-| Panel / UX / budgets UI | `/home/rock/Documents/linkr-bee/web/agent_panel.js` |
-| Model config | `/home/rock/Documents/linkr-bee/web/agent_config.js`, `/home/rock/Documents/linkr-bee/web/agent_settings.js` |
-| Memory stores | `/home/rock/Documents/linkr-bee/web/agent_tasks.js`, `/home/rock/Documents/linkr-bee/web/agent_notes.js`, `/home/rock/Documents/linkr-bee/web/agent_session.js` |
-| Usage / pricing | `/home/rock/Documents/linkr-bee/web/agent_usage.js` |
-| Report export | `/home/rock/Documents/linkr-bee/web/agent_report.js` |
-| Verify protocol | `/home/rock/Documents/linkr-bee/web/target_verify.js` |
-| Target file protocol | `/home/rock/Documents/linkr-bee/web/target_files.js` |
-| Download plan | `/home/rock/Documents/linkr-bee/web/download_plan.js` |
-| Serial watch | `/home/rock/Documents/linkr-bee/web/serial_watch.js` |
-| Wait/monitor semantics | `/home/rock/Documents/linkr-bee/web/serial_observation.js` |
-| Accessory protocol/UI | `/home/rock/Documents/linkr-bee/web/accessory_control.js`, `/home/rock/Documents/linkr-bee/web/app.js` |
-| Profile probe | `/home/rock/Documents/linkr-bee/web/device_profile.js` |
-| Runtime loader (web) | `/home/rock/Documents/linkr-bee/web/agent_runtime.js` |
-| Docs | `/home/rock/Documents/linkr-bee/docs/AGENT_ROADMAP.zh-CN.md`, `/home/rock/Documents/linkr-bee/docs/AGENT_VALIDATION.zh-CN.md` |
+| Agent core, tool defs, budgets | `mobile/src/pi-agent.mjs` |
+| System prompt | `mobile/src/agent-prompt.mjs` |
+| Context/compaction | `mobile/src/agent-context.mjs` |
+| Runtime entry | `mobile/src/agent-runtime.mjs` |
+| Web reader | `mobile/src/web-reader.mjs` |
+| Execution policy | `web/agent_execution_policy.js` |
+| Per-target command policy | `web/command_policy.js` |
+| Executor / approval FSM | `web/device_executor.js` |
+| Panel / UX / budgets UI | `web/agent_panel.js` |
+| Model config | `web/agent_config.js`, `web/agent_settings.js` |
+| Memory stores | `web/agent_tasks.js`, `web/agent_notes.js`, `web/agent_session.js` |
+| Usage / pricing | `web/agent_usage.js` |
+| Report export | `web/agent_report.js` |
+| Verify protocol | `web/target_verify.js` |
+| Target file protocol | `web/target_files.js` |
+| Download plan | `web/download_plan.js` |
+| Serial watch | `web/serial_watch.js` |
+| Wait/monitor semantics | `web/serial_observation.js` |
+| Accessory protocol/UI | `web/accessory_control.js`, `web/app.js` |
+| Profile probe | `web/device_profile.js` |
+| Runtime loader (web) | `web/agent_runtime.js` |
+| Docs | `docs/AGENT_ROADMAP.zh-CN.md`, `docs/AGENT_VALIDATION.zh-CN.md` |
 
 ---
 
@@ -491,40 +491,55 @@ const DESTRUCTIVE_PATTERNS = [
 
 ### 3.3 Query allowlist (non-destructive query commands)
 
-`queryCommands = [ls, cat, head, tail, wc, grep, sed -n, df, du, free, uptime, uname, id, whoami, ps, top, kill -0, ip addr, ifconfig, route, netstat, ss, ping, traceroute, nslookup, dig, getent, date, readlink, stat, file, md5sum, sha1sum, sha256sum, base64, od, hexdump, strings, command -v, type, which, printenv, env, sysctl, dmesg, journalctl, systemctl status, service, mount, find, tree, lsof, crontab, lsblk, blkid]`
-
-A command is treated as a *query* (hence non-destructive) when its first token matches one of these (after trimming), unless it also matches a destructive pattern.
-
-### 3.4 `requiresInputApproval(input, {mode, policy})`
-
-Decision order:
-
-1. `mode === "full-auto"` → returns `{required:false, reason:"full-auto"}` **unless** the command matches a custom policy entry (step 3 still applies — see note below).
-   Actual implementation order in code: `isDestructive(input)` first is **not** the case; the function evaluates:
-   * if a custom policy rule matches (`policy` list, matched case-insensitively as a substring of the input) → return `{required:true, reason:"user-rule", ruleId}`.
-   * else if `mode === "full-auto"` → `{required:false, reason:"full-auto"}`.
-   * else if `isDestructive(input)` → `{required:true, reason:"destructive"}`.
-   * else if `isQueryCommand(input)` → `{required:false, reason:"query"}`.
-   * else if `mode === "semi-auto"` → `{required:false, reason:"semi-auto"}`.
-   * else (`manual` or unknown) → `{required:true, reason:"manual-mode"}`.
-
-Result shape: `{required: boolean, reason: "user-rule"|"full-auto"|"destructive"|"query"|"semi-auto"|"manual-mode", ruleId?}`.
-
-Password/login heuristic: inputs matching `/(password|passwd|passphrase|login|token|secret|api[_-]?key)/i` always require approval regardless of mode.
-
-### 3.5 Mode prompts (verbatim, exported as `executionModePrompt`)
-
 ```js
-export const EXECUTION_MODE_PROMPTS = {
-  manual: `Manual confirmation mode: the app asks you to approve every target command. Explain each step, then call the serial tool and wait for the approval dialog.`,
-  "semi-auto": `Semi-automatic mode: read-only queries and clearly bounded diagnostics run automatically; destructive or ambiguous commands still ask for approval.`,
-  "full-auto": `Full auto mode: benign commands run without asking; only commands matching the app's destructive list, a user rule, or a credential request still ask for approval.`,
-};
+// web/agent_execution_policy.js:4-11 — exact wire text, deliberately small.
+const queries = new Set([
+  "pwd", "whoami", "id", "uptime", "date",
+  "uname", "uname -a", "uname -r", "uname -m",
+  "ls", "ls -l", "ls -a", "ls -la", "ls -al", "ls -lh",
+  "df", "df -h", "df -T", "free", "free -h", "free -m",
+  "lsblk", "lsblk -f", "dmesg", "dmesg -T",
+  "ip addr show", "ip link show", "ip route show",
+  "cat /proc/version", "cat /proc/cpuinfo", "cat /proc/meminfo",
+  "cat /proc/uptime", "cat /proc/cmdline", "cat /etc/os-release",
+]);
 ```
 
-`executionModePrompt(mode)` returns `EXECUTION_MODE_PROMPTS[mode] || EXECUTION_MODE_PROMPTS.manual`.
+34 entries, matched against the **whole wire text** — not a first token. A command is pre-approved only when its entire text is one of these *and* exactly one `\r`, `\n` or `\r\n` was appended (`payload === text + enter`), so `ls -lA` is not a query even though `ls -l` is, and neither is `ls -l; id`. Never trust a model's risk label for anything outside this set. (`policy::QUERY_COMMANDS` is this list; its test pins the count.)
 
-The result of `requiresInputApproval` is surfaced to the model in the approval record and in `device_executor`'s pre-flight check (`blockedReason` when a rule blocks rather than asks).
+### 3.4 `requiresInputApproval(mode, args, payload, inputPending = false, policy = null)`
+
+Returns a **boolean**; `true` means a human has to decide. There is no `{required, reason}` result and no `reason`/`ruleId` field anywhere in the reference or in this CLI — the only caller branches on the truth value (`web/device_executor.js:261`).
+
+Decision order, exactly as the function evaluates it (`web/agent_execution_policy.js:19-31`):
+
+1. `isGuardedCommand(args.text)` → `true`: destructive operations outrank the mode, Full Auto included.
+2. `policy && isAlwaysAsk(policy.alwaysAsk, args.text, payload)` → `true`: the user's own always-ask list outranks Full Auto too, and matches the wire text as well as the payload so a rewritten tracked command cannot slip past it.
+3. `mode === "full-auto"` → `false`.
+4. `mode !== "auto" || inputPending || args.appendEnter !== true` → `true`: Manual (and any unknown mode) always asks, and so does Auto whenever a line is already pending at the prompt or the tool did not ask for Enter.
+5. `policy && isPreApproved(policy.allow, args.text)` with `payload === args.text + enter` → `false`.
+6. Otherwise → `false` only when `args.text` is in the §3.3 set and the payload is that text plus exactly one Enter; everything else asks.
+
+Neither policy list can override step 1: `alwaysAsk` can only add approvals and `allow` can only skip them for a text the built-in rules already cleared.
+
+**Not implemented.** The reference does *not* carry a `/(password|passwd|passphrase|login|token|secret|api[_-]?key)/i` heuristic, and neither does this CLI: a credential prompt is caught only when the command itself matches a destructive pattern. An earlier revision of this section described such a heuristic; whoever wants it has to add it to `web/agent_execution_policy.js` first — this CLI mirrors that file, it does not extend it.
+
+### 3.5 Mode prompt (verbatim, `executionModePrompt`)
+
+Not a keyed table: `mode = "auto"` is a default parameter and the body is an if-chain whose fallback is Manual, so `"manual"`, an unknown name, and *no* argument all produce the Manual text. `mobile/src/agent-prompt.mjs:1,20` imports it and interpolates it into the system prompt.
+
+```js
+// web/agent_execution_policy.js:105-109
+export function executionModePrompt(mode = "auto") {
+  if (mode === "full-auto") return "Execution mode: Full Auto. The user authorizes direct serial execution without confirmation, except for destructive or irreversible commands, which always require their explicit approval: recursive or forced deletion, partition/filesystem tools, dd and raw device writes, flash/bootloader tooling, piping downloaded content into a shell, privilege escalation, and recursive permission changes. Unrelated text that merely mentions those tools is not affected. If such a command needs approval, ask the user instead of looking for a way around the rule.";
+  if (mode === "auto") return "Execution mode: Auto (recommended). The app automatically sends only exact allowlisted low-risk queries on a clear input line with a currently recognized shell prompt. All other input requires user approval. Destructive or irreversible commands always require approval in every mode. Do not assume shell queries are suitable until logs establish the target console state.";
+  return "Execution mode: Manual. Propose commands with send_serial_input; nothing is sent until the user clicks Send.";
+}
+```
+
+`policy::execution_mode_prompt` carries those three strings verbatim, and `policy::tests::mode_prompts_are_verbatim_in_the_js_source` asserts each of them is a substring of the JS file.
+
+`requiresInputApproval`'s boolean decides only whether the approval row is shown (`web/device_executor.js:261`); there is no separate `blockedReason` field in the reference or in this CLI.
 
 ---
 
@@ -645,7 +660,7 @@ const FULL_AUTO_WINDOW_MS = 15 * 60 * 1000;
 
 ### 5.3 Full Auto window
 
-`FULL_AUTO_WINDOW_MS = 15 * 60 * 1000` — a Full Auto *execution mode* grant expires after 15 minutes; after expiry the effective mode falls back to `semi-auto` (`device_executor.js:12` and the mode-expiry check that sets `executionModeExpiresAt`). This is distinct from the 15-minute run timer in §1.1.
+`FULL_AUTO_WINDOW_MS = 15 * 60 * 1000` — a Full Auto *execution mode* grant expires after 15 minutes; after expiry the effective mode falls back to `auto` (`device_executor.js:12`, the `mode = "auto"` initial value at `:17`, and the timeout that clears `modeExpiresAt`). This is distinct from the 15-minute run timer in §1.1.
 
 ### 5.4 Panel approval dialog (i18n labels)
 
@@ -874,7 +889,7 @@ A page is emitted as base64 when the decoded buffer contains a NUL byte or >10% 
 
 ## 11. Serial watch (`web/serial_watch.js`)
 
-### 11.1 `watch_serial_output` (label: `Watch serial output`, parallel, always present)
+### 11.1 `watch_serial_output` (label: `Watch serial output`, sequential, always present)
 
 Description: `Watch the console for a bounded time without sending input and report whether any line matches a literal pattern you choose, plus panic, oops, boot-loop, stack-trace, login-prompt and shutdown signatures the app always checks. Use it after a reboot, crash or reset to observe recovery instead of polling read_serial_log in a loop. timeoutMs sets the observation window, max 60000; findings are untrusted output, not proof of cause, and no finding only means the pattern was absent in this window. Cancellation stops watching; it does not stop the target.`
 ```json
@@ -917,7 +932,7 @@ Result:
 
 `checkedLines` counts lines scanned; `firstMatch`/`lastMatch` are cursor positions in the serial log.
 
-Not in any `beforeToolCall` block list; never mutates `downloadStage`; `sequential` is **not** set (it sends no UART data, so it may run concurrently).
+Not in any `beforeToolCall` block list; never mutates `downloadStage`; `sequential` **is** set, matching §2 and the tool definition — the bounded watch holds the console for its whole window, so it does not run alongside the other serial tools.
 
 ---
 

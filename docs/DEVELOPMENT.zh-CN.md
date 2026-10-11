@@ -104,10 +104,13 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 
 ### GitHub Actions 构建与刷写
 
-`.github/workflows/build.yml` 使用矩阵构建 `esp32c3_supermini`、
-`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore`
-的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、pull request 和手动触发时
-运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
+`.github/workflows/build.yml` 使用矩阵为五块开发板构建默认 WiFi + BLE 配置：
+`esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、
+`esp32c5_devkitc/esp32c5/hpcore`，以及 `esp32_devkitc/esp32/procpu`
+（即 ESP32-WROOM-32）。它会在 `main` push、版本 tag、pull request 和手动触发时
+运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。四块 RISC-V 板只安装
+`riscv64-zephyr-elf` 工具链；ESP32 需要 `xtensa-espressif_esp32_zephyr-elf`，
+所以矩阵按板型各自带工具链，而不是拉取完整的 Zephyr CI 镜像。
 
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
@@ -123,11 +126,13 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
 ```
 
-脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`，
-但不执行整片擦除。它只重写镜像覆盖的扇区，因此普通升级会保留 BLE identity
-和已保存配置；需要清除它们时使用板型对应的恢复出厂输入。artifact 还包含
-`FLASHING.txt`、`firmware.json`、ELF、linker map、
-最终 Kconfig、runner metadata 与 `SHA256SUMS`，便于调试和追溯。
+脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`、
+ESP32-WROOM-32 写入 `0x1000`，但不执行整片擦除。它只重写镜像覆盖的扇区，
+因此普通升级会保留 BLE identity 和已保存配置；需要清除它们时使用板型对应的
+恢复出厂输入。artifact 还包含 `FLASHING.txt`、`firmware.json`、ELF、
+linker map、最终 Kconfig、runner metadata 与 `SHA256SUMS`，便于调试和追溯。
+workflow 还会断言默认的 WiFi、联网、蓝牙与二进制输出配置齐全；唯一的 WebDAV
+例外是 ESP32 板，对该板断言为 `# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set`。
 
 ## UART 选择
 
@@ -242,7 +247,11 @@ WiFi/WebDAV 配置和上传 boot 计数器，并生成新的随机静态 BLE
 identity/address。不要让恢复输入永久接地，并将该焊盘或按键的物理访问视为
 恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
 
-Python、C 与 Web Bluetooth 客户端都会直接发送管理命令；`--pair` 仅作为兼容参数保留，当前是无操作。WebDAV 上传器也只接受匿名 HTTP，因此只能在可信局域网使用。
+Python、C 与 Web Bluetooth 客户端都会直接发送管理命令。`--pair` 是真实参数、
+不是无操作：它会在连接时请求系统配对，运行期间需把配件的 GPIO1 按到 GND。
+macOS 上客户端只打印提示——系统对话框会在读取加密服务时弹出；其他平台上
+Python 客户端直接调用系统的 `pair()`。WebDAV 上传器也只接受匿名 HTTP，因此
+只能在可信局域网使用。
 
 UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`。上传会等待 IPv4 地址、重试连接失败、为失败批次保留稳定文件名；更改目标或停用时会丢弃已排队旧数据。
 

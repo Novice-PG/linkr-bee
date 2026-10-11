@@ -267,11 +267,16 @@ impl DiagnosticsState {
 /// One `label ┆ value` row of the web `#diagnosticsGrid`.
 fn row_line(label: &str, value: &str, width: u16) -> Line<'static> {
     let label_width = 14usize;
+    // Cut the label to its field *before* padding it: `pad_columns` only pads,
+    // so a `group.key` of an extra `@info` group wider than 14 columns pushed
+    // the `│ ` separator and the value past the pane. The same cut the value
+    // below uses.
+    let label = super::dialogs::clip_columns(label, label_width);
     // Padded to `label_width` *columns*, not characters: a CJK label is two
     // columns per glyph, so the old `{:<14}` (which counts characters) left
     // the `│ ` separator four columns right of the English rows and pushed
     // `value` past the pane.
-    let label = pad_columns(label, label_width);
+    let label = pad_columns(&label, label_width);
     // 2 columns for the `│ ` separator.
     let value_width = (width as usize).saturating_sub(label_width + 2);
     let value = super::dialogs::clip_columns(value, value_width);

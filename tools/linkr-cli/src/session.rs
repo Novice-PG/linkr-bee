@@ -65,6 +65,12 @@ pub struct SessionInfo {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub baud: u64,
+    /// Whether the accessory management channel is reachable. Only a completed
+    /// BLE handshake opens it (`HandshakeData::mgmt_max` is `Some`); the LAN
+    /// bridge never sets it. The agent reads this to decide whether the five
+    /// accessory tools exist at all — they are useless, and their approval
+    /// cards meaningless, without the channel behind them.
+    pub mgmt: bool,
 }
 
 #[derive(Debug)]
@@ -192,6 +198,9 @@ impl SessionHandle {
             let mut info = handle.info.lock().expect("session info poisoned");
             info.connected = true;
             info.label = "test-device".to_string();
+            // A connected mock is a BLE-shaped one, so the accessory tools the
+            // agent gates on `mgmt` are reachable in tests that need them.
+            info.mgmt = true;
         }
         handle
     }
@@ -232,8 +241,13 @@ impl Default for CoreBus {
 /// `command` fields: `@w=`/`@d=` prefixes are redacted, everything else
 /// travels in the clear (PYTHON_CLI_SPEC section 3.2).
 pub(crate) fn redact_command(command: &str) -> String {
-    if command.starts_with("@w=") || command.starts_with("@d=") {
-        format!("{}=<redacted>", &command[..2])
+    // The prefix test ignores leading whitespace: `"  @w=ssid,secret"` is the
+    // same command as `"@w=ssid,secret"`, and one stray space must not hand a
+    // WiFi or WebDAV secret to a log line or the JSON `command` field. Only
+    // the redaction path trims, so an ordinary command is echoed verbatim.
+    let trimmed = command.trim_start();
+    if trimmed.starts_with("@w=") || trimmed.starts_with("@d=") {
+        format!("{}=<redacted>", &trimmed[..2])
     } else {
         command.to_string()
     }
@@ -412,11 +426,15 @@ impl SessionTask {
                 // (Python `send_payload`), and an unterminated line holds the
                 // `stty` back: written between two keystrokes it would split
                 // the command the user is still typing.
-                if let Some(geometry) = &mut self.geometry {
-                    if track_input {
+                //
+                // A terminal reply (DSR/CPR, `track_input=false`) is transport
+                // data, not a keystroke — web `onTerminalData({userInput:false})`
+                // never calls `markTerminalBusy`. It must leave the armed prompt
+                // timer alone, or a device query answered while the console sat
+                // idle would clear the debounce and the size push never fires.
+                if track_input {
+                    if let Some(geometry) = &mut self.geometry {
                         geometry.mark_input(&bytes);
-                    } else {
-                        geometry.mark_busy();
                     }
                 }
                 if let Err(error) = self.write_uart(&bytes).await {
@@ -588,6 +606,17 @@ impl SessionTask {
         let payload = match payload {
             Ok(payload) => payload,
             Err(gap) => {
+                // A gap is fatal for the *stream*, not the session, and this
+                // warning is the whole of it on purpose. The codec refuses to
+                // advance `rx_sequence` when a frame is missing, so every later
+                // frame keeps failing the same check and none of the
+                // desynchronized bytes is ever delivered: continuing cannot
+                // leak corrupt output, it only keeps the link up. That is
+                // Python's rule verbatim (`warn(...); return`, PYTHON_CLI_SPEC
+                // §4.3), and the web latches the same desync state and asks the
+                // user to reconnect without disconnecting itself. Dropping the
+                // session here would diverge from both and turn one lost ATT
+                // frame into a full disconnect.
                 self.bus.publish(CoreEvent::Notice {
                     level: NoticeLevel::Warn,
                     text: format!(
@@ -857,9 +886,15 @@ fn spawn_on(
     let kind = transport.kind();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (mgmt_done_tx, mgmt_done_rx) = mpsc::unbounded_channel();
+    // `mgmt_max` is the one signal that says the accessory management channel
+    // exists (Some only from a completed BLE handshake); derive `info.mgmt`
+    // from it here so the flag the agent gates accessory tools on can never
+    // drift from the channel it describes.
+    let mut info = data.info.clone();
+    info.mgmt = data.mgmt_max.is_some();
     let handle = SessionHandle {
         tx: cmd_tx,
-        info: Arc::new(Mutex::new(data.info.clone())),
+        info: Arc::new(Mutex::new(info)),
         bus: bus.clone(),
     };
     let geometry = if opts.geometry {
@@ -959,6 +994,7 @@ pub async fn spawn_session_with(
                     rx_bytes: 0,
                     tx_bytes: 0,
                     baud: 0,
+                    mgmt: true,
                 },
                 detail: format!(
                     "API v{}.{} device={device_id}",
@@ -986,6 +1022,7 @@ pub async fn spawn_session_with(
                     rx_bytes: 0,
                     tx_bytes: 0,
                     baud: 0,
+                    mgmt: false,
                 },
                 detail: format!("LAN bridge {host}"),
                 mgmt_max: None,
@@ -1076,6 +1113,7 @@ mod tests {
                 rx_bytes: 0,
                 tx_bytes: 0,
                 baud: 0,
+                mgmt: kind == TransportKind::Ble,
             },
             detail: "API v1.0 device=ab".to_string(),
             mgmt_max: if kind == TransportKind::Ble {
@@ -1161,6 +1199,13 @@ mod tests {
         assert_eq!(redact_command("@w scan"), "@w scan");
         assert_eq!(redact_command("@d off"), "@d off");
         assert_eq!(redact_command("@i?"), "@i?");
+        // Leading whitespace must not let a secret past the prefix test.
+        assert_eq!(redact_command("  @w=ssid,secret"), "@w=<redacted>");
+        assert_eq!(
+            redact_command("\t@d=http://user:pass@host/"),
+            "@d=<redacted>"
+        );
+        assert_eq!(redact_command("  @w off"), "  @w off");
     }
 
     #[test]

@@ -282,13 +282,23 @@ impl TermGrid {
     /// Web's `clearButton` empties `state.logBytes`/`state.logSize` in the same
     /// step (`web/app.js:3388`, spec §6.2), so a log saved after Clear starts
     /// from what arrives next rather than resurrecting a screen the user wiped.
+    /// Ctrl+L / toolbar Clear: wipe screen, scrollback *and* the save-log ring,
+    /// leaving the emulator's mode state at its defaults the way the web does.
+    ///
+    /// Web's Clear is `clearTerminalOutput(true)`, i.e. `state.term.reset()`
+    /// **then** `state.term.clear()` (`web/app.js:2985-2988`), so by the time
+    /// the cells go the emulator is a fresh one. Wiping the cells alone kept a
+    /// previous program's state: a scroll region that still captured every line
+    /// feed, `?25l`'s hidden cursor that nothing brought back, the last line's
+    /// SGR still on whatever the device prints next, and a saved cursor
+    /// `ESC[u` would still jump to. Two things are deliberately *not* reset —
+    /// they belong to the device or to a request in flight, not to the display.
     pub fn clear_pane(&mut self) {
-        self.screen = vec![vec![Cell::blank(); self.cols as usize]; self.rows as usize];
-        self.scrollback.clear();
-        self.cursor = (0, 0);
-        self.wrap_pending = false;
-        self.alt = None;
-        self.local_log.clear();
+        let title = std::mem::take(&mut self.title);
+        let reports = std::mem::take(&mut self.pending_reports);
+        self.reset();
+        self.title = title;
+        self.pending_reports = reports;
     }
 
     /// Re-fit the grid to a new pane size. Cells outside the new width are
@@ -458,6 +468,36 @@ impl TermGrid {
         }
     }
 
+    /// Blank `[from, to)` of a row, taking whole wide glyphs with it.
+    ///
+    /// A wide glyph is two cells — the base carries the character, the next one
+    /// is a continuation that only reserves the second column — and the pane
+    /// re-derives every cell's width from its glyph, dropping continuations on
+    /// the way out (`visible_cells`, `cells_to_line`). Half a glyph therefore
+    /// does not merely look wrong: an orphaned continuation pulls the rest of
+    /// the row one column left and an orphaned base pushes it one column right,
+    /// on this frame and every frame after it, because the grid *is* what the
+    /// pane draws. This is `put_char`'s repair for a glyph landing on another
+    /// one, applied to a range instead of a single cell.
+    fn erase_cells(line: &mut [Cell], from: usize, to: usize, blank: Cell) {
+        let to = to.min(line.len());
+        if from >= to {
+            return;
+        }
+        for cell in &mut line[from..to] {
+            *cell = blank;
+        }
+        // The range starts on the shadow of a glyph it left standing, or ends
+        // on the base of one whose shadow is just past it. Either way exactly
+        // one half is gone, so the other goes with it.
+        if from > 0 && line[from - 1].is_wide_base() {
+            line[from - 1] = blank;
+        }
+        if to < line.len() && line[to].is_continuation() {
+            line[to] = blank;
+        }
+    }
+
     fn erase_line(&mut self, mode: u16) {
         let (row, col) = self.cursor;
         let blank = self.blank();
@@ -469,20 +509,7 @@ impl TermGrid {
                 2 => (0, len),
                 _ => (col as usize, len),
             };
-            for cell in &mut line[from.min(len)..to.min(len)] {
-                *cell = blank;
-            }
-            // A wide glyph erased in half leaves no orphan continuation.
-            if from > 0
-                && line
-                    .get(from - 1)
-                    .map(|c| c.is_continuation())
-                    .unwrap_or(false)
-            {
-                if let Some(prev) = line.get_mut(from - 1) {
-                    *prev = blank;
-                }
-            }
+            Self::erase_cells(line, from.min(len), to.min(len), blank);
         }
     }
 
@@ -493,9 +520,8 @@ impl TermGrid {
             0 => {
                 let screen = self.screen_mut();
                 if let Some(line) = screen.get_mut(row as usize) {
-                    for cell in &mut line[col as usize..] {
-                        *cell = blank;
-                    }
+                    let len = line.len();
+                    Self::erase_cells(line, col as usize, len, blank);
                 }
                 for line in screen.iter_mut().skip(row as usize + 1) {
                     for cell in line.iter_mut() {
@@ -512,9 +538,7 @@ impl TermGrid {
                 }
                 if let Some(line) = screen.get_mut(row as usize) {
                     let last = (col as usize).min(line.len() - 1);
-                    for cell in &mut line[..=last] {
-                        *cell = blank;
-                    }
+                    Self::erase_cells(line, 0, last + 1, blank);
                 }
             }
             3 => {
@@ -609,9 +633,7 @@ impl TermGrid {
         let screen = self.screen_mut();
         if let Some(line) = screen.get_mut(row as usize) {
             let end = (col as usize + n as usize).min(line.len());
-            for cell in &mut line[col as usize..end] {
-                *cell = blank;
-            }
+            Self::erase_cells(line, col as usize, end, blank);
         }
     }
 
@@ -917,10 +939,13 @@ impl Perform for TermGrid {
         let bottom = self.bottom_margin;
         match action {
             'H' | 'f' => {
-                self.cursor.0 = param_at(params, 0, 1)
-                    .saturating_sub(1)
-                    .min(bottom)
-                    .max(top);
+                // Absolute addressing, because origin mode is not implemented:
+                // DECOM (`?6h`) is not in `apply_mode`'s list, so the margins
+                // never move the cursor here — the rule `'d'` already follows.
+                // Clamping into the scrolling region instead would fight
+                // `'A'`/`'B'`, which both carry an escape hatch for a cursor
+                // that legitimately sits outside it.
+                self.cursor.0 = param_at(params, 0, 1).saturating_sub(1).min(rows - 1);
                 self.cursor.1 = param_at(params, 1, 1).saturating_sub(1).min(cols - 1);
                 self.wrap_pending = false;
             }
@@ -1697,6 +1722,75 @@ mod tests {
             assert_eq!(row_text(&g, row), "");
         }
         assert_eq!(g.scrollback_len(), 0);
+    }
+
+    /// Erasing one half of a wide glyph takes the other half with it.
+    ///
+    /// `visible_cells` drops continuation cells, so a shadow left behind by
+    /// `ESC[X` on the base made the rest of the row render one column to the
+    /// left of its grid position — and since the cursor reads the grid, it then
+    /// sat one column off the glyph the user could see under it.
+    #[test]
+    fn erasing_half_a_wide_glyph_takes_the_other_half() {
+        let mut g = TermGrid::new(6, 1);
+        g.feed("中ab".as_bytes());
+        g.feed(b"\x1b[1;1H\x1b[X"); // erase the base, and only the base
+        assert_eq!(cell(&g, 0, 0).ch, ' ');
+        assert!(!cell(&g, 0, 1).is_continuation(), "the shadow went with it");
+        // Two blank columns, not one: the glyph claimed two, so the text
+        // behind it stays at the display column it was drawn at instead of
+        // sliding one to the left.
+        assert_eq!(row_text(&g, 0), "  ab");
+
+        // The mirror image: erasing *from* the shadow must take its base too,
+        // or a two-column glyph is left standing under a blank cell.
+        let mut g = TermGrid::new(6, 1);
+        g.feed("中ab".as_bytes());
+        g.feed(b"\x1b[1;2H\x1b[K");
+        assert_eq!(cell(&g, 0, 0).ch, ' ', "the base went with its shadow");
+        assert_eq!(row_text(&g, 0), "");
+    }
+
+    /// CUP addresses the screen, not the scrolling region.
+    ///
+    /// DECOM (`?6h`) is not implemented, so the origin never moves to the top
+    /// margin; `'d'` (VPA) has always addressed the whole screen and CUP has to
+    /// agree. Clamping into the region put a status line's region in the way of
+    /// every absolute address a full-screen program makes.
+    #[test]
+    fn cursor_position_addresses_the_whole_screen() {
+        let mut g = TermGrid::new(4, 5);
+        g.feed(b"\x1b[3;5r"); // region: rows 3..5
+        assert_eq!((g.top_margin, g.bottom_margin), (2, 4));
+        g.feed(b"\x1b[1;1H");
+        assert_eq!(g.cursor, (0, 0), "row 1 sits above the region");
+        g.feed(b"\x1b[5;4H");
+        assert_eq!(g.cursor, (4, 3));
+        g.feed(b"\x1b[1d");
+        assert_eq!(g.cursor.0, 0, "`d` and `H` agree");
+    }
+
+    /// Clear puts the emulator's mode state back as well, as the web's Clear
+    /// does: `clearTerminalOutput(true)` runs `state.term.reset()` (xterm.js
+    /// RIS) *before* `state.term.clear()` (`web/app.js:2985-2988`). Wiping the
+    /// cells alone left a scroll region still capturing every line feed, `?25l`'s
+    /// hidden cursor still hidden, the last line's SGR on the next byte the
+    /// device sends, and a saved cursor `ESC[u` would still jump to.
+    #[test]
+    fn clear_pane_resets_the_mode_state_with_the_screen() {
+        let mut g = TermGrid::new(6, 4);
+        g.feed(b"\x1b[2;3r"); // a scrolling region
+        g.feed(b"\x1b[?25l"); // a cursor a program hid
+        g.feed(b"\x1b[31m"); // a colour still selected
+        g.feed(b"\x1b[3;3H\x1b[s"); // and a saved cursor
+        assert_eq!(g.saved_cursor, (2, 2));
+
+        g.clear_pane();
+        assert_eq!((g.top_margin, g.bottom_margin), (0, 3), "region cleared");
+        assert!(g.cursor_visible, "the cursor comes back");
+        assert_eq!(g.saved_cursor, (0, 0));
+        assert_eq!(g.fg, Palette::Def);
+        assert_eq!(g.cursor, (0, 0));
     }
 
     #[test]

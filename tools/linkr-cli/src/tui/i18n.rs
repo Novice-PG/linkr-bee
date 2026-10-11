@@ -117,7 +117,7 @@ pub fn fill(template: &str, args: &[&dyn ::std::fmt::Display]) -> String {
 }
 
 /// [`fill`] with the arguments spelled out, so a call site never writes the
-/// `/// `&[&dyn Display]` slice type: `tr(t(DEVICE, lang), value)`.[/// `&[&dyn Display]` slice type: `tr(t(DEVICE, lang), value)`.dyn Display]` slice type: `tr!(t(DEVICE, lang), value)`.
+/// `&[&dyn Display]` slice type: `tr!(t(DEVICE, lang), value)`.
 macro_rules! tr {
     ($template:expr $(, $arg:expr)* $(,)?) => {{
         let __slots: &[&dyn ::std::fmt::Display] = &[$(&$arg),*];

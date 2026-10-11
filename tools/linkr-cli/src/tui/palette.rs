@@ -98,8 +98,6 @@ strings! {
     PAL_MSG_COPY_OSC52_ONLY => "Sent {} characters over OSC 52 — the terminal may ignore it.",
         "已通过 OSC 52 把 {} 个字符交给终端——它可能直接忽略。";
     PAL_MSG_COPY_FAILED => "Copy failed: {}", "复制失败：{}";
-    PAL_MSG_BLE_DIAGNOSTICS => "Connect over BLE to read diagnostics.",
-        "请先通过 BLE 连接再读取诊断。";
     PAL_MSG_NEW_CHAT => "New chat.", "新建对话。";
     PAL_MSG_EXPORT_EMPTY => "Nothing to export yet: no tasks or notes for this device.",
         "暂无可导出内容：此设备没有任务或笔记。";
@@ -131,7 +129,11 @@ fn view_terminal(app: &mut App) {
 }
 
 fn view_diagnostics(app: &mut App) {
-    app.set_view(View::Diagnostics);
+    // `view.diagnostics` and `diag.refresh` are the same act as `F3`, so they
+    // take the same door: this used to call `set_view` directly, which walked
+    // past the BLE gate — the view opened with no `@i?` behind it and, with no
+    // BLE, no reason either.
+    super::open_view(app, View::Diagnostics);
 }
 
 fn view_network(app: &mut App) {
@@ -319,19 +321,6 @@ fn open_chunk(app: &mut App) {
     super::dialogs::open_chunk(app);
 }
 
-fn refresh_diagnostics(app: &mut App) {
-    app.set_view(View::Diagnostics);
-    if app.ble_connected() {
-        let session = app.session.clone();
-        app.diagnostics.refresh(&session);
-    } else {
-        app.toast(
-            NoticeLevel::Warn,
-            t(PAL_MSG_BLE_DIAGNOSTICS, app.lang()).to_string(),
-        );
-    }
-}
-
 fn wifi_scan(app: &mut App) {
     app.set_view(View::Network);
     super::network_view::action(app, super::network_view::NetEntry::Scan);
@@ -371,6 +360,17 @@ fn new_chat(app: &mut App) {
         // unattended execution window. Done before the status line is written
         // so `set_mode`'s own caption cannot overwrite the new-chat one.
         super::assistant_view::set_mode(app, crate::agent::ExecMode::Auto);
+    }
+    // web `#agentNew` stops the run *before* it drops the transcript
+    // (`agent_panel.js:943-947`), the same thing the keyboard entry
+    // (`Ctrl+Shift+N`) does: without it the old reply keeps streaming into the
+    // fresh conversation, and `busy` going false while the runtime is still
+    // working defeats the `ASST_BUSY` guards. `set_mode(Auto)` above already
+    // stopped a run when it changed the mode, so this only covers Auto/Manual.
+    if app.assistant.busy {
+        if let Some(agent) = &app.agent {
+            agent.handle.stop();
+        }
     }
     let status = t(PAL_MSG_NEW_CHAT, lang).to_string();
     app.assistant = super::assistant_view::AssistantState::default();
@@ -705,7 +705,7 @@ pub const ACTIONS: &[Action] = &[
         title: PAL_T_DIAG_REFRESH,
         category: PAL_CAT_DIAGNOSTICS,
         shortcut: "",
-        run: refresh_diagnostics,
+        run: view_diagnostics,
     },
     Action {
         id: "wifi.scan",

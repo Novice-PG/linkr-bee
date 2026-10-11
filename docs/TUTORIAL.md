@@ -59,22 +59,26 @@ https://github.com/radxa/linkr-bee/releases/latest
 ```
 
 Linux ships as `linkr-terminal-<slug>.tar.gz`, Windows as
-`linkr-terminal-<slug>.zip`, and each unpacks to the same folder
-`tools/build_terminal.sh` produces locally, so the check is the one you would
-run on a local build; a `SHA256SUMS` at the top of the release covers every
-file on the page:
+`linkr-terminal-<slug>.zip`, where `<slug>` is the CI target name — one of
+`linux-x86_64`, `linux-i686`, `linux-arm64`, `linux-armv7`, `windows-x86_64`,
+`windows-i686`. Each archive unpacks to `linkr-terminal-<slug>/`, and
+`tools/build_terminal.sh` names the folder it builds the same way, so the
+commands below verify a local build just as well. The Windows builds use the
+`-msvc` toolchain (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`); a local
+`--target x86_64-pc-windows-gnu` build lands in the same `windows-x86_64`
+folder. A `SHA256SUMS` at the top of the release covers every file on the page:
 
 ```sh
-tar xzf linkr-terminal-linux-aarch64.tar.gz
-cd linkr-terminal-linux-aarch64
+tar xzf linkr-terminal-linux-arm64.tar.gz
+cd linkr-terminal-linux-arm64
 sha256sum -c SHA256SUMS
 chmod +x linkr
 ./linkr --version
 ```
 
 ```powershell
-Expand-Archive .\linkr-terminal-x86_64-pc-windows-gnu.zip
-cd linkr-terminal-x86_64-pc-windows-gnu
+Expand-Archive .\linkr-terminal-windows-x86_64.zip
+cd linkr-terminal-windows-x86_64
 (Get-FileHash .\linkr.exe -Algorithm SHA256).Hash   # must match SHA256SUMS
 .\linkr.exe --version
 ```
@@ -304,7 +308,7 @@ This is the whole `F1` help, in the order it is shown:
 | drag in the terminal | select text — releasing copies it |
 | `Enter` | send a line (the Enter mode applies) |
 | `Tab` / `Shift+Tab` | sent to the target as `TAB` / `CSI Z` |
-| `F6`..`F12` | sent to the target unchanged |
+| `F7`..`F12` | sent to the target unchanged |
 | `Ctrl+P` → `term.*` | font size, autoscroll, echo, save log, copy |
 | `Ctrl+P` → `app.*` | notices, help, quit, focus switching |
 

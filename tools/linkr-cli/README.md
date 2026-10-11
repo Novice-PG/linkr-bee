@@ -62,9 +62,12 @@ python3 tools/build_terminal_bundle.py --exe path/to/linkr.exe \
 
 `tests/test_terminal_bundle.py` covers the generator.
 
-CI (`.github/workflows/build.yml`, job `terminal`) builds the five targets —
-linux x86_64 and arm64, windows x86_64, macOS arm64 and x86_64 — runs the test
-suite and the lints, and uploads the binaries plus the bundle as artifacts.
+CI (`.github/workflows/build.yml`, job `terminal`) builds the six targets —
+linux x86_64, i686, arm64 and armv7, and windows x86_64 and i686 — runs the
+test suite and the lints, and uploads the binaries plus the bundle as
+artifacts. macOS is deliberately not one of them: nothing in this repository
+has ever been run on a Mac, and shipping an untested binary would be a promise
+nobody can keep.
 
 ### Cross-build the Windows binary from Linux
 

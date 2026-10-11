@@ -39,7 +39,7 @@ final report.
 | --- | --- | --- |
 | **P** protocol | `src/protocol/mgmt.rs`, `uart.rs`, `geometry.rs`, `validate.rs`, `src/protocol/mod.rs` | specs/PYTHON_CLI_SPEC.md |
 | **S** session/CLI | `src/transport/*`, `src/session.rs`, `src/cli.rs`, `src/term.rs`, `src/main.rs` | everything |
-| **T** TUI | `src/tui/*` | specs/WEB_UX_SPEC.md, `src/session.rs`, `src/agent/mod.rs` |
+| **T** TUI | `src/tui/*`, `src/transfer.rs`, `src/tui/transfer_view.rs` | specs/WEB_UX_SPEC.md, `src/session.rs`, `src/agent/mod.rs` |
 | **A** assistant | `src/agent/*`, `src/journal.rs`, `src/watch.rs`, `src/target_files.rs`, `src/target_verify.rs` | specs/AGENT_SPEC.md |
 
 Shared, integrator-owned (do not edit without updating this file):
@@ -359,6 +359,8 @@ the journal and watch), owns the task queue, and streams `AgentEvent`s.
 
 ## 8. Packaging (integrator, after merge)
 
-`build_terminal.sh` / `build_terminal.ps1` (cargo release build), a
-self-extracting `linkr.ps1` bundle generator, CI matrix for
-linux/windows/macos × x86_64/arm64 (+ armv7 where zigbuild allows), docs.
+`build_terminal.sh` / `build_terminal.ps1` (cargo release build), the
+self-extracting `linkr-bee-terminal.ps1` bundle generator
+(`tools/build_terminal_bundle.py`), and a CI matrix covering linux
+(x86_64, i686, arm64, armv7) and windows (x86_64, i686) — macOS is
+deliberately left out because nothing here has run on it — plus docs.

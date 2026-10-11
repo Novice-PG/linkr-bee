@@ -45,6 +45,28 @@ impl Utf8Decoder {
     pub fn decode(&mut self, input: &[u8]) -> String {
         let mut bytes = std::mem::take(&mut self.pending);
         bytes.extend_from_slice(input);
+        let (out, tail) = Self::run(&bytes, false);
+        self.pending = tail;
+        out
+    }
+
+    /// Emit what is still buffered because the stream ended, not the chunk.
+    /// Without this the last incomplete UTF-8 sequence of a stream — a page
+    /// the server cut mid-character — is dropped silently: there is no next
+    /// chunk to complete it, so its valid prefix has to be handed over now and
+    /// its bad tail replaced exactly as a mid-stream invalid byte would be.
+    pub fn flush(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        let bytes = std::mem::take(&mut self.pending);
+        Self::run(&bytes, true).0
+    }
+
+    /// The TextDecoder state machine over one buffer. `end` says no more bytes
+    /// follow: an incomplete tail is then invalid (replaced) rather than held,
+    /// otherwise it is returned for the next call.
+    fn run(bytes: &[u8], end: bool) -> (String, Vec<u8>) {
         let mut out = String::new();
         let mut i = 0;
         while i < bytes.len() {
@@ -57,7 +79,7 @@ impl Utf8Decoder {
             let (len, min) = match b {
                 0xc2..=0xdf => (2, 0x80),
                 0xe0..=0xef => (3, 0x800),
-                0xf0..=0xf4 => (4, 0x1000),
+                0xf0..=0xf4 => (4, 0x10000),
                 _ => {
                     out.push('\u{fffd}');
                     i += 1;
@@ -65,9 +87,14 @@ impl Utf8Decoder {
                 }
             };
             if i + len > bytes.len() {
-                // Incomplete tail: keep it for the next chunk.
-                self.pending = bytes[i..].to_vec();
-                return out;
+                if !end {
+                    // Incomplete tail: keep it for the next chunk.
+                    return (out, bytes[i..].to_vec());
+                }
+                // End of stream: nothing can complete it, so judge it now.
+                out.push('\u{fffd}');
+                i += 1;
+                continue;
             }
             let mut ok = true;
             for k in 1..len {
@@ -105,7 +132,7 @@ impl Utf8Decoder {
                 }
             }
         }
-        out
+        (out, Vec::new())
     }
 }
 

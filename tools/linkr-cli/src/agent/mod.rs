@@ -107,16 +107,22 @@ pub enum ExecMode {
 }
 
 impl ExecMode {
-    /// Storage/wire name, as used by `web/agent_execution_policy.js`.
+    /// Mode name as the web names it: `manual` | `auto` | `full-auto`
+    /// (`web/agent_panel.js:207/457`, and the `executionMode` field
+    /// `web/device_executor.js:204` puts in the status the model reads). The
+    /// Auto mode used to spell itself `semi-auto` here, a name the web has
+    /// never had — nothing failed on it, but the two clients described the
+    /// same mode differently to the same model.
     pub fn as_str(self) -> &'static str {
         match self {
             ExecMode::Manual => "manual",
-            ExecMode::Auto => "semi-auto",
+            ExecMode::Auto => "auto",
             ExecMode::FullAuto => "full-auto",
         }
     }
 
-    /// Unknown names fall back to `semi-auto`, the app's default.
+    /// Unknown names fall back to `auto`, the app's default. `semi-auto` is
+    /// still accepted: it is what this side used to call that mode.
     pub fn parse(value: &str) -> ExecMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "manual" => ExecMode::Manual,
@@ -961,9 +967,13 @@ impl Runtime {
             self.turn += 1;
 
             let mode = self.mode();
-            let baseline = prompt::serial_system_prompt(mode, false, self.notes_enabled);
+            // Accessory tools and their prompt paragraph exist only while the
+            // management channel does; the session carries that as `mgmt`
+            // (BLE handshake only), so both move with the link.
+            let accessory = self.session.info().mgmt;
+            let baseline = prompt::serial_system_prompt(mode, accessory, self.notes_enabled);
             let catalogue =
-                tools::available_tools(false, self.notes_enabled, &self.unlocked.clone());
+                tools::available_tools(accessory, self.notes_enabled, &self.unlocked.clone());
             let fixed_chars = baseline.chars().count()
                 + catalogue
                     .iter()
@@ -1320,7 +1330,40 @@ impl Runtime {
             policy_ref.as_ref(),
         );
         if needed {
-            self.ask_approval(tool, kind, payload.clone()).await?;
+            if let Err(rejection) = self.ask_approval(tool, kind, payload.clone()).await {
+                // A refusal is an outcome the record stream carries, not only a
+                // tool error: `device_executor.js` keeps the record it pushed
+                // before asking and `reject` marks it `denied`. Build the
+                // record this input would have had and leave it there, so the
+                // model sees exactly what the user turned down.
+                let key = self.session_key.clone();
+                let log_start = self.latest_cursor();
+                let mut store = self
+                    .records
+                    .lock()
+                    .map_err(|_| executor::ERR_RECORD_UNAVAILABLE.to_string())?;
+                let id = store.allocate_id();
+                let mut record = ExecutionRecord::new(
+                    id,
+                    key,
+                    self.input_revision,
+                    mode.as_str(),
+                    tool,
+                    command.clone(),
+                    payload.clone(),
+                    append_enter,
+                    &console_kind,
+                    now_ms(),
+                );
+                record.completion_token = token;
+                record.tool_probe = hints.tool_probe;
+                record.profile_probe = hints.profile_probe;
+                record.download = hints.download;
+                record.log_start = log_start;
+                record.mark_denied(rejection.clone());
+                store.push(record);
+                return Err(rejection);
+            }
         }
         // `device_executor.js` calls `check(record)` again once the user has
         // approved, against status read *now*. The console hint is re-read
@@ -1489,11 +1532,15 @@ impl Runtime {
 
         let mut unlocked: Vec<&'static str> = Vec::new();
         if let Some((pairs, cursor, session_id, record_id)) = observed {
+            // One call, with every command the probe found: a gate lists all of
+            // the commands it waits for (`read_target_file` needs `dd` and
+            // `base64`) and only opens when `all(...)` of them are present, so
+            // handing them over one at a time can never open it at all.
+            unlocked.extend(tools::unlock_tools(
+                &mut self.unlocked,
+                &tools::observed_commands(&pairs),
+            ));
             for (name, available) in pairs {
-                unlocked.extend(tools::unlock_tools(
-                    &mut self.unlocked,
-                    std::slice::from_ref(&name),
-                ));
                 self.capabilities.insert(
                     name,
                     executor::ToolCapability {
@@ -2702,12 +2749,20 @@ mod tests {
     #[test]
     fn exec_mode_wire_names() {
         assert_eq!(ExecMode::Manual.as_str(), "manual");
-        assert_eq!(ExecMode::Auto.as_str(), "semi-auto");
+        assert_eq!(
+            ExecMode::Auto.as_str(),
+            "auto",
+            "the name the web puts in `executionMode` and in the mode picker"
+        );
         assert_eq!(ExecMode::FullAuto.as_str(), "full-auto");
         assert_eq!(ExecMode::parse("manual"), ExecMode::Manual);
         assert_eq!(ExecMode::parse("full-auto"), ExecMode::FullAuto);
-        assert_eq!(ExecMode::parse("anything"), ExecMode::Auto);
+        assert_eq!(ExecMode::parse("auto"), ExecMode::Auto);
+        // The name this side used to write is still understood, so a config
+        // or a transcript that carries it lands on the same mode.
+        assert_eq!(ExecMode::parse("semi-auto"), ExecMode::Auto);
         assert_eq!(ExecMode::parse("SEMI-AUTO"), ExecMode::Auto);
+        assert_eq!(ExecMode::parse("anything"), ExecMode::Auto);
         assert_eq!(ExecMode::parse("Full_Auto"), ExecMode::FullAuto);
     }
 

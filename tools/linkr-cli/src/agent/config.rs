@@ -208,7 +208,12 @@ fn valid_header_name(name: &str) -> bool {
 /// A plain base URL: http(s), no credentials, no query, no fragment. One
 /// trailing slash is normalized away so the provider adapters can append a
 /// path deterministically.
-fn normalize_endpoint(endpoint: &str) -> Result<String, String> {
+///
+/// `pub(crate)` because the settings dialog validates the same field and must
+/// reach the same verdict: a value this rejects has to be rejected there too
+/// (`tui::agent_settings`), or a save reports "saved" for a record
+/// `load_config` then refuses, silently clearing the running runtime's config.
+pub(crate) fn normalize_endpoint(endpoint: &str) -> Result<String, String> {
     const ERR: &str =
         "Enter an HTTP(S) API base URL without credentials, query parameters or a fragment.";
     let url = reqwest::Url::parse(endpoint.trim()).map_err(|_| ERR.to_string())?;

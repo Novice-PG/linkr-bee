@@ -1210,8 +1210,13 @@ impl Transfer {
             let keep = SCAN_LIMIT / 2;
             self.scan.drain(..self.scan.len() - keep);
         }
-        while let Some(line) = self.take_scan_line() {
-            self.on_marker(&line);
+        // Drain every complete line *before* running any marker. `on_marker`
+        // can finish a step, and `next_step` clears `scan` when it types the
+        // following command: popping one line at a time and processing it
+        // inline would discard whatever was already queued behind that line.
+        let lines: Vec<String> = std::iter::from_fn(|| self.take_scan_line()).collect();
+        for line in &lines {
+            self.on_marker(line);
         }
     }
 

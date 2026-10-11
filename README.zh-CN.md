@@ -44,11 +44,12 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
         SBC 或嵌入式设备
 ```
 
-- 一台 Linkr Bee 配件：ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC
-  或 ESP32-C5 DevKitC。
+- 一台 Linkr Bee 配件：ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC、
+  ESP32-C5 DevKitC 或 ESP32-WROOM-32 DevKitC。
 - 一台带 UART 控制台的目标设备，三根线：目标 TX 接配件 RX、目标 RX 接配件 TX、共地。
 - 一台主机：桌面 Chrome/Chromium 用 Web 终端，或手机 App，或 Linux、Windows、
-  macOS 上的 `linkr` 终端（TUI + 助手），或 macOS、Linux 上的 Python / C 终端。
+  macOS 上的 `linkr` 终端（TUI + 助手），或 macOS、Linux 上的 Python 终端，
+  或仅限 Linux 的 C 参考终端。
 
 UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 [硬件需求](docs/HARDWARE.md)。

@@ -252,7 +252,7 @@ pub fn bottom_line(focus: &str, view: &str, detail: &str, width: u16, lang: Lang
     }
     let room = width - left_len;
     let right_len = cols(right);
-    let (tail, gap) = if right_len < room {
+    let (tail, gap) = if right_len <= room {
         (right.to_string(), room - right_len)
     } else if room >= 2 {
         let cut = clip(right, room - 1);
@@ -283,7 +283,7 @@ pub fn status_line(model: &StatusModel, width: u16) -> Line<'static> {
     let room = width - right_len;
     let left_spans = status_left_spans(model);
     let left_len = spans_cols(&left_spans);
-    let mut spans = if left_len < room {
+    let mut spans = if left_len <= room {
         let gap = room - left_len;
         let mut spans = left_spans;
         if gap > 0 {

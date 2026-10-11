@@ -311,6 +311,15 @@ impl ExecutionRecord {
         self.observation_closed = true;
     }
 
+    /// The user refused this input (`web/device_executor.js` `reject` → the
+    /// record's `state = "denied"`). The state is set first so the shared
+    /// failure bookkeeping runs through `mark_failed`'s `state != "denied"`
+    /// guard and keeps it: a refusal must not read back as a failed send.
+    pub fn mark_denied(&mut self, error: String) {
+        self.state = "denied".to_string();
+        self.mark_failed(error, false);
+    }
+
     /// True while the shell may still contribute output for this record.
     pub fn is_open(&self) -> bool {
         self.delivery == "sent" && !self.observation_closed

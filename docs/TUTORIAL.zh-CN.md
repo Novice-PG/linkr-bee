@@ -55,21 +55,25 @@ https://github.com/radxa/linkr-bee/releases/latest
 ```
 
 Linux 是 `linkr-terminal-<slug>.tar.gz`，Windows 是
-`linkr-terminal-<slug>.zip`，解开后的目录名都与 `tools/build_terminal.sh` 本地
-打包**完全一致**，所以校验命令也和本地构建一模一样；Release 顶层另有一份覆盖
-全部文件的 `SHA256SUMS`：
+`linkr-terminal-<slug>.zip`；`<slug>` 取自 CI 的目标名，即 `linux-x86_64`、
+`linux-i686`、`linux-arm64`、`linux-armv7`、`windows-x86_64`、`windows-i686`
+之一。解压出的目录就是 `linkr-terminal-<slug>/`，`tools/build_terminal.sh` 本地
+打包也用同一套命名，所以下面这套校验命令对本地构建同样适用。Windows 构建
+使用 `-msvc` 工具链（`x86_64-pc-windows-msvc`、`i686-pc-windows-msvc`）；本地用
+`--target x86_64-pc-windows-gnu` 构建出来的也落在同一个 `windows-x86_64` 目录下。
+Release 顶层另有一份覆盖全部文件的 `SHA256SUMS`：
 
 ```sh
-tar xzf linkr-terminal-linux-aarch64.tar.gz
-cd linkr-terminal-linux-aarch64
+tar xzf linkr-terminal-linux-arm64.tar.gz
+cd linkr-terminal-linux-arm64
 sha256sum -c SHA256SUMS
 chmod +x linkr
 ./linkr --version
 ```
 
 ```powershell
-Expand-Archive .\linkr-terminal-x86_64-pc-windows-gnu.zip
-cd linkr-terminal-x86_64-pc-windows-gnu
+Expand-Archive .\linkr-terminal-windows-x86_64.zip
+cd linkr-terminal-windows-x86_64
 (Get-FileHash .\linkr.exe -Algorithm SHA256).Hash   # 必须与 SHA256SUMS 一致
 .\linkr.exe --version
 ```
@@ -285,7 +289,7 @@ linkr --loopback-test ping --no-terminal || echo "配件没回应"
 | 在终端里拖动 | 选中文字，松手即复制 |
 | `Enter` | 发送一行（应用回车模式） |
 | `Tab` / `Shift+Tab` | 作为 `TAB` / `CSI Z` 发送给目标 |
-| `F6`..`F12` | 原样发送给目标 |
+| `F7`..`F12` | 原样发送给目标 |
 | `Ctrl+P` → `term.*` | 字号、自动滚动、回显、保存日志、复制 |
 | `Ctrl+P` → `app.*` | 通知、帮助、退出、焦点切换 |
 

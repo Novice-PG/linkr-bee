@@ -460,15 +460,26 @@ pub fn render_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 } else {
                     Color::LightRed
                 };
-                let clip: String = result.chars().take(width as usize).collect();
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        if *ok { "  ✓ " } else { "  ✗ " },
-                        Style::default().fg(color),
-                    ),
-                    Span::styled(name.clone(), Style::default().fg(color)),
-                    Span::styled(format!(" {clip}"), Style::default().fg(color)),
-                ]));
+                let marker = if *ok { "  ✓ " } else { "  ✗ " };
+                // A plan (`format_plan`) and any other multi-line result carry
+                // `\n`s, but ratatui never breaks inside a `Span`: the whole
+                // text used to collapse onto one row, and `chars().take(width)`
+                // then dropped everything past the first line. One `Line` per
+                // `\n` keeps every line, first prefixed with the marker and
+                // the tool name, each still cut to the pane width so a long
+                // one-line result stays a single row as before.
+                for (index, part) in result.split('\n').enumerate() {
+                    let clip: String = part.chars().take(width as usize).collect();
+                    if index == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(marker, Style::default().fg(color)),
+                            Span::styled(name.clone(), Style::default().fg(color)),
+                            Span::styled(format!(" {clip}"), Style::default().fg(color)),
+                        ]));
+                    } else {
+                        lines.push(Line::from(Span::styled(clip, Style::default().fg(color))));
+                    }
+                }
             }
             Entry::System(text) => {
                 lines.extend(wrapped(text, width, Style::default().fg(Color::DarkGray)));

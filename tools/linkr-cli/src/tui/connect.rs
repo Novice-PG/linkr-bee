@@ -134,6 +134,15 @@ fn begin(app: &mut App, opts: SessionOptions, setup: SessionSetup) {
         TransportSpec::Lan { .. } => TransportChoice::Lan.label(),
         TransportSpec::Ble { .. } => TransportChoice::Ble.label(),
     };
+    // Record the transport *this* attempt dials into the session snapshot
+    // before the state flips: `SessionInfo::kind` otherwise still names the
+    // session that just ended, and the top bar reads it through `live_kind`
+    // — so a LAN→BLE reconnect showed `LAN` for the whole attempt and after
+    // a failure. `adopt` overwrites it with the real session's kind.
+    app.info.kind = Some(match &opts.transport {
+        TransportSpec::Lan { .. } => TransportKind::Lan,
+        TransportSpec::Ble { .. } => TransportKind::Ble,
+    });
     app.state = ConnectionState::Connecting;
     app.detail = tr!(t(CONN_CONNECTING_OVER, lang), label);
     // The corner may only describe *this* attempt: a "Connected to …." toast
@@ -375,9 +384,6 @@ fn adopt(app: &mut App, session: SessionHandle) {
     }
     app.session = session;
     app.refresh_info();
-    // The handshake is done: this is where the web asks the device for its
-    // state (`requestDeviceState()`), token included.
-    super::start_lan_token_capture(app);
     if app.info.kind == Some(TransportKind::Lan) {
         app.settings.transport = TransportChoice::Lan;
     }
@@ -385,6 +391,13 @@ fn adopt(app: &mut App, session: SessionHandle) {
     // a no-op side-effect-wise; if the session reports it a tick later, this
     // is where "on connect" fires (spec §6.4).
     app.set_connection_state(ConnectionState::Connected);
+    // The handshake is done: this is where the web asks the device for its
+    // state (`requestDeviceState()`), token included. It has to run **after**
+    // the state flips to `Connected`: the capture opens with
+    // `ble_connected()`, and `refresh_info()` cannot have set the state for a
+    // session that reports the link a tick later — calling it earlier skipped
+    // the whole capture exactly then.
+    super::start_lan_token_capture(app);
     app.detail = app.info.label.clone();
     app.terminal.set_autoscroll(app.settings.autoscroll);
     let lang = app.lang();

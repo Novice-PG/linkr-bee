@@ -94,7 +94,8 @@ pub fn page_scroll(current: u16, limit: u16, step: u16, up: bool) -> u16 {
 /// renderer clamps against the live frame; both read the geometry that
 /// `sync_geometry` writes every iteration, so they agree.
 pub fn center_scroll_limit(app: &App) -> u16 {
-    scroll_limit(center_lines(app, app.center_width).len(), app.center_height)
+    let lines = center_lines(app, app.center_width);
+    scroll_limit(center_rows(&lines, app.center_width), app.center_height)
 }
 
 fn terminal_lines(app: &App, width: u16) -> Vec<Line<'static>> {
@@ -299,6 +300,21 @@ fn wrapped_rows(line: &Line<'_>, width: u16) -> u16 {
     cells.div_ceil(width).max(1)
 }
 
+/// Rows the center pane's body actually occupies once `.wrap()` has broken it
+/// to `width` columns, counted the same way the sidebar counts its rows
+/// ([`wrapped_rows`]).
+///
+/// [`scroll_limit`] has to be measured against *rows*, not lines: a body line
+/// wider than the pane takes more than one row on screen, so a limit built
+/// from `lines.len()` stopped short of the bottom and the last few lines could
+/// never be scrolled into view.
+fn center_rows(lines: &[Line<'static>], width: u16) -> usize {
+    lines
+        .iter()
+        .map(|line| usize::from(wrapped_rows(line, width)))
+        .sum()
+}
+
 /// The pane row and column the caret of the field being edited occupies.
 ///
 /// A view reports its caret as `(line index, column)` in the body
@@ -489,9 +505,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Center pane.
     let lines = center_lines(app, center.width);
-    let offset = app
-        .center_scroll
-        .min(scroll_limit(lines.len(), center.height));
+    let offset = app.center_scroll.min(scroll_limit(
+        center_rows(&lines, center.width),
+        center.height,
+    ));
     // Measured before the paragraph takes `lines`: the caret's row depends on
     // the same wrapping the paragraph is about to apply.
     let caret = center_caret(app, &lines, center.width, offset, center);

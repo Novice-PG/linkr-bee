@@ -183,7 +183,26 @@ jobs:
         run: |
           set -euo pipefail
           cd tools/linkr-cli
-          cargo test
+          # Tests must build against the *target*: without --target, i686/armv7/
+          # arm64 silently ran the host artifacts and the cross builds were
+          # never actually tested. The cross targets therefore need the same
+          # linker/pkg-config wiring as the release build below, or the test
+          # binaries cannot link their dbus.
+          case "${{ matrix.target }}" in
+            i686-unknown-linux-gnu)
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_SYSROOT_DIR=/
+              export PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              export PKG_CONFIG_ALLOW_CROSS=1
+              export PKG_CONFIG_SYSROOT_DIR=/
+              export PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig
+              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+              ;;
+          esac
+          cargo test --target "${{ matrix.target }}"
 
       - name: Lint the crate
         if: matrix.name == 'linux-x86_64'
@@ -490,12 +509,13 @@ jobs:
   # run, expire after 30 days, and never appear on the Releases page — so the
   # tutorial had nowhere stable to point at.
   #
-  # Every terminal archive unpacks to `linkr-terminal-<slug>/`, the same folder
-  # `tools/build_terminal.sh` produces locally, so the check is identical
-  # whichever way the file was obtained:
+  # Every terminal archive unpacks to `linkr-terminal-<slug>/`, where <slug> is
+  # the matrix name above (linux-x86_64, linux-arm64, …) — the same folder
+  # `tools/build_terminal.sh` and `tools/build_terminal.ps1` produce locally, so
+  # the check is identical whichever way the file was obtained:
   #
-  #     tar xzf linkr-terminal-linux-aarch64.tar.gz
-  #     cd linkr-terminal-linux-aarch64 && sha256sum -c SHA256SUMS
+  #     tar xzf linkr-terminal-linux-arm64.tar.gz
+  #     cd linkr-terminal-linux-arm64 && sha256sum -c SHA256SUMS
   release:
     name: Publish the release
     if: startsWith(github.ref, 'refs/tags/v')
