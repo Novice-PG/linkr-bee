@@ -354,7 +354,19 @@ impl SessionTask {
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        // Falling behind the transport fan-out drops the oldest
+                        // events, and `TransportEvent::Data` carries serial RX
+                        // bytes: this is the one place a silent drop corrupts
+                        // what the console shows. Say so instead of swallowing
+                        // it (the UI half already warns the same way).
+                        self.bus.publish(CoreEvent::Notice {
+                            level: NoticeLevel::Warn,
+                            text: format!(
+                                "console lagged: {dropped} transport events dropped, serial output may have gaps"
+                            ),
+                        });
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         self.teardown("transport gone").await;
                         return;
@@ -1147,6 +1159,44 @@ mod tests {
     }
 
     // ---- session behaviour ------------------------------------------------
+
+    /// A transport fan-out that falls behind drops its oldest events, and
+    /// `TransportEvent::Data` carries serial RX bytes. The session must
+    /// surface that as a warning instead of swallowing it — the same way the
+    /// TUI half already reports its own lagged `core` bus.
+    #[tokio::test]
+    async fn a_lagging_transport_fan_out_is_reported_not_swallowed() {
+        let mock = spawn_mock(TransportKind::Ble, 0, false);
+        let mut events = mock.bus.subscribe();
+
+        // One synchronous burst, larger than the hub's 256-slot buffer: with
+        // the session's consumer parked on this task, the oldest payloads are
+        // overwritten before it can ever read them.
+        for i in 0..400u32 {
+            mock.hub.publish(TransportEvent::Data {
+                channel: TransportChannel::UartTx,
+                bytes: vec![i as u8],
+            });
+        }
+
+        let mut reported = false;
+        for _ in 0..200 {
+            match tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+                Ok(Ok(CoreEvent::Notice { level, text })) => {
+                    if level == NoticeLevel::Warn && text.contains("lagged") {
+                        reported = true;
+                        break;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        assert!(
+            reported,
+            "a dropped transport burst must not pass in silence"
+        );
+    }
 
     #[tokio::test]
     async fn management_over_the_lan_bridge_is_rejected_before_the_wire() {

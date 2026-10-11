@@ -773,16 +773,13 @@ fn device_lines(
     lines
 }
 
-/// Truncate to `room` columns, marking the cut with `…` (a name that lost its
-/// tail silently would be exactly the "name is not complete" complaint again).
+/// Truncate to `room` *columns*, marking the cut with `…` (a name that lost
+/// its tail silently would be exactly the "name is not complete" complaint
+/// again). `clip_columns` measures in terminal columns — a CJK device name is
+/// two columns per glyph — where the old `chars().take` measured characters
+/// and let a Chinese name overrun the row by up to `room` columns.
 fn clip_name(name: &str, room: usize) -> String {
-    if name.chars().count() <= room {
-        return name.to_string();
-    }
-    let keep = room.saturating_sub(1);
-    let mut out: String = name.chars().take(keep).collect();
-    out.push('…');
-    out
+    clip_columns(name, room)
 }
 
 fn approval_lines(
@@ -1469,6 +1466,20 @@ mod tests {
         assert_eq!(clipped.chars().count(), 8, "{clipped}");
         assert!(clipped.ends_with('…'), "{clipped}");
         assert!(clipped.starts_with("Linkr B"), "{clipped}");
+    }
+
+    /// A CJK device name is two columns per glyph: the same `room` has to cut
+    /// *columns*, or a six-glyph name fills twelve columns of an eight-column
+    /// field and overruns the address column beside it.
+    #[test]
+    fn a_cjk_name_is_cut_by_columns() {
+        let clipped = clip_name("链路串口设备", 8);
+        let width = unicode_width::UnicodeWidthStr::width(clipped.as_str());
+        assert!(
+            width <= 8,
+            "{clipped:?} renders {width} columns in an 8-column room"
+        );
+        assert!(clipped.ends_with('…'), "{clipped:?}");
     }
 
     #[test]

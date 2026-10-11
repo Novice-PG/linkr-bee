@@ -845,11 +845,20 @@ pub fn parse_upload_progress(text: &str) -> UploadProgress {
                 marker.index, marker.offset
             ));
         }
-        if marker.total != marker.offset + marker.bytes {
+        // `checked_add`, not `+`: a marker is device output and all four counts
+        // come from `\d+`, so a corrupt line can carry one near `u64::MAX`.
+        // Plain addition wraps in release — which makes this very consistency
+        // check pass on numbers that cannot be right — and panics under the
+        // debug profile the tests run in.
+        if marker.offset.checked_add(marker.bytes) != Some(marker.total) {
             return fail(format!(
                 "Chunk {} appended {} bytes instead of {}: run verifyCommand and resume from its byte count.",
                 marker.index,
-                marker.total - marker.offset,
+                // The same hazard in the figure this message prints: `total`
+                // may sit below `offset` here, which `u64` cannot express (the
+                // JS reference prints the negative number; `i128` matches it
+                // and cannot wrap).
+                i128::from(marker.total) - i128::from(marker.offset),
                 marker.bytes
             ));
         }
@@ -1554,6 +1563,31 @@ LINKR_UPLOAD:chunk index=1 offset=720 bytes=280 total=1000\n";
             "No LINKR_UPLOAD:chunk confirmations in the output."
         );
         assert_eq!(none.count, 0);
+    }
+
+    /// A marker is device output, so its four counts are whatever the target
+    /// printed — `\d+` accepts twenty digits. `offset + bytes` on those wraps
+    /// in release (letting an impossible marker look consistent) and panics
+    /// under the debug profile the tests run in, and the figure the mismatch
+    /// message prints (`total - offset`) underflows the same way. Both now go
+    /// through arithmetic that cannot wrap; the verdict is unchanged.
+    #[test]
+    fn a_chunk_marker_whose_counts_overflow_is_refused_not_wrapped() {
+        let max = "18446744073709551615"; // u64::MAX, and a valid `\d+` run
+        let text = format!("LINKR_UPLOAD:chunk index=1 offset={max} bytes={max} total=0\n");
+        let progress = parse_upload_progress(&text);
+        assert_eq!(progress.status, UploadStatus::Incomplete);
+        assert_eq!(progress.count, 1);
+        assert_eq!(progress.next_offset, None);
+        assert_eq!(progress.bytes, 0);
+        // `total - offset` is negative here, exactly as the JS reference
+        // prints it; the point is that it is *printed*, not wrapped.
+        assert_eq!(
+            progress.reason,
+            format!(
+                "Chunk 1 appended -{max} bytes instead of {max}: run verifyCommand and resume from its byte count."
+            )
+        );
     }
 
     #[test]

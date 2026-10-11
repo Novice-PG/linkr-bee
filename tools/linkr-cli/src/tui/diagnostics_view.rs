@@ -3,6 +3,8 @@
 
 use std::collections::BTreeMap;
 
+use unicode_width::UnicodeWidthStr;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::oneshot;
@@ -265,7 +267,11 @@ impl DiagnosticsState {
 /// One `label ┆ value` row of the web `#diagnosticsGrid`.
 fn row_line(label: &str, value: &str, width: u16) -> Line<'static> {
     let label_width = 14usize;
-    let label = format!("{label:<label_width$}");
+    // Padded to `label_width` *columns*, not characters: a CJK label is two
+    // columns per glyph, so the old `{:<14}` (which counts characters) left
+    // the `│ ` separator four columns right of the English rows and pushed
+    // `value` past the pane.
+    let label = pad_columns(label, label_width);
     // 2 columns for the `│ ` separator.
     let value_width = (width as usize).saturating_sub(label_width + 2);
     let value = super::dialogs::clip_columns(value, value_width);
@@ -274,6 +280,19 @@ fn row_line(label: &str, value: &str, width: u16) -> Line<'static> {
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
+}
+
+/// Left-align `text` in a `width`-column field, measured in terminal columns
+/// (a CJK glyph is two). Text already at or past `width` is left untouched —
+/// same as `{:<width$}` did for characters, only now the unit is columns.
+fn pad_columns(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    let mut out = String::with_capacity(text.len() + width.saturating_sub(used));
+    out.push_str(text);
+    for _ in used..width {
+        out.push(' ');
+    }
+    out
 }
 
 /// Header + the six-row grid + status, mirroring WEB_UX_SPEC section 5.2.
@@ -426,6 +445,18 @@ mod tests {
         assert_eq!(zh[2].0, "BLE 访问");
         assert_eq!(zh[2].1, "开放 · 链路 L1");
         assert_eq!(zh[5].0, "上传队列");
+    }
+
+    /// The grid's label field is 14 *columns*. A CJK label is two columns per
+    /// glyph, so measuring characters ("运行时间" counts 4) padded it to 18
+    /// columns and shoved `│ ` four columns right of the English rows.
+    #[test]
+    fn the_label_field_is_measured_in_columns_not_characters() {
+        for label in ["Firmware", "运行时间", "BLE 访问", "上传队列"] {
+            let line = row_line(label, "value", 40);
+            let width = unicode_width::UnicodeWidthStr::width(line.spans[0].content.as_ref());
+            assert_eq!(width, 14, "label {label:?} occupies {width} columns");
+        }
     }
 
     #[test]

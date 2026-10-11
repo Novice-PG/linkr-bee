@@ -190,6 +190,19 @@ impl TokenStore {
         }
         let payload = serde_json::to_string(self)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // Write to a sibling and rename over the target: a crash between
+        // `truncate` and `write` on the real file would leave an empty store,
+        // and `load` reads that as "no tokens at all" — every device silently
+        // back to needs-auth. `rename` within one directory is atomic, so a
+        // reader sees either the old file or the whole new one.
+        let tmp = {
+            let mut name = path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_else(|| std::ffi::OsString::from("lan_tokens.json"));
+            name.push(".tmp");
+            path.with_file_name(name)
+        };
         let mut options = std::fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
@@ -197,8 +210,20 @@ impl TokenStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path)?;
-        file.write_all(payload.as_bytes())
+        {
+            let mut file = options.open(&tmp)?;
+            file.write_all(payload.as_bytes())?;
+            file.sync_all()?;
+        }
+        #[cfg(unix)]
+        {
+            // `mode` only binds when the file is created; a `.tmp` left behind
+            // by an earlier crash would keep whatever permissions it already
+            // had, so set them again before the rename publishes it.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, path)
     }
 
     /// Token stored for a device (web `selectDevice`). A value that is neither
@@ -375,6 +400,52 @@ mod tests {
                 mode & 0o777,
                 0o600,
                 "the token file must not be world readable"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The store is written through a sibling and renamed into place, so a
+    /// crash cannot leave a half-written (or empty) file at the real path —
+    /// `load` reads an empty file as "no tokens at all". Two observable
+    /// halves: the temporary never survives a save, and the 0600 permission
+    /// holds even when the file already existed with wider bits (a plain
+    /// `mode(0o600)` only binds on create).
+    #[test]
+    fn saving_uses_a_sibling_and_tightens_an_existing_file() {
+        let path = temp_path("atomic");
+        // Seed the destination as an older build could have left it: valid,
+        // but world-readable.
+        std::fs::write(&path, r#"{"tokens":{},"hosts":{}}"#).expect("seed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("widen");
+        }
+
+        let mut store = TokenStore::default();
+        store
+            .capture(DEVICE, TOKEN, "192.168.0.104")
+            .expect("accepted");
+        store.save_to(&path).expect("save");
+
+        assert_eq!(TokenStore::load_from(&path), store);
+
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        assert!(
+            !Path::new(&tmp).exists(),
+            "the sibling write-through file was left behind"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "an existing wider mode must be tightened on save"
             );
         }
         let _ = std::fs::remove_file(&path);

@@ -479,6 +479,10 @@ fn event_loop(
         // …and the same for the sidebar's link rows: switching between WiFi
         // and Bluetooth rewrites them wholesale (K6).
         let link_before = app.link_signature();
+        // …and for the surface itself: F2..F6 swap the whole centre pane, the
+        // one transition of this family the loop did not yet watch (K3 — the
+        // residual that survived K1/K5/K6).
+        let view_before = app.view;
 
         // 1. Session bus: UART output, connection lifecycle, notices.
         loop {
@@ -579,6 +583,7 @@ fn event_loop(
         //    by then the console has stopped moving, so this frame sticks (K1).
         app.sync_overlay_repaint(overlay_before);
         app.sync_link_repaint(link_before);
+        app.sync_view_repaint(view_before);
         app.poll_settle_repaint(Instant::now());
         if app.take_force_redraw() {
             let _ = terminal.clear();

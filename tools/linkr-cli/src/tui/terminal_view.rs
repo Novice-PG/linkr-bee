@@ -78,6 +78,16 @@ impl Cell {
     pub fn is_continuation(&self) -> bool {
         self.ch == CONT
     }
+
+    /// `true` when this cell starts a two-column glyph, so the cell to its
+    /// right is its shadow.
+    ///
+    /// The width has to come from the glyph, not from a stored flag: the grid
+    /// is filled from many paths (`print`, `erase_*`, `insert_chars`, the alt
+    /// screen swap) and only the shadow marker is written consistently.
+    pub fn is_wide_base(&self) -> bool {
+        !self.is_continuation() && UnicodeWidthChar::width(self.ch) == Some(2)
+    }
 }
 
 /// Geometry of the letterboxed grid inside a pane, mirroring the web fit
@@ -104,6 +114,14 @@ pub struct GridView {
 struct AltScreen {
     screen: Vec<Vec<Cell>>,
     cursor: (u16, u16),
+    /// The scrolling region the *primary* screen had when the alt screen came
+    /// up. Each xterm buffer owns its own region: the alt screen starts with
+    /// the full height, and leaving restores this one — with a single shared
+    /// field a region the shell had set leaked into every full-screen program
+    /// (and then back), so `ESC[K`/`IND`/scrolling stopped at a boundary that
+    /// belonged to the other screen.
+    top_margin: u16,
+    bottom_margin: u16,
 }
 
 /// The VT grid: visible screen + scrollback ring + parser state.
@@ -287,11 +305,28 @@ impl TermGrid {
         while self.screen.len() < rows as usize {
             self.screen.push(vec![Cell::blank(); cols as usize]);
         }
+        // The rows that no longer fit come off the bottom of the live screen.
+        // `pop` hands them back newest-first, so they are collected and put
+        // back in order: scrollback is chronological and its back is the
+        // newest row, and pushing them as they pop *reverses* them — three
+        // lines that fell off a shrink came back as the last one first, with
+        // the rows above the screen never matching what the device printed.
+        //
+        // Only while the primary screen is the live one. With an alt screen
+        // up, `self.screen` holds *its* rows and `self.scrollback` is still the
+        // primary screen's history: parking them here would surface them as
+        // the shell's own earlier output once the alt screen exits, which is
+        // content the scrollback never carried. The alt branch below drops its
+        // overflow the same way.
+        let mut overflow = Vec::new();
         while self.screen.len() > rows as usize {
             if let Some(line) = self.screen.pop() {
-                if self.scrollback_cap > 0 {
-                    self.push_scrollback(line);
-                }
+                overflow.push(line);
+            }
+        }
+        if self.alt.is_none() {
+            for line in overflow.into_iter().rev() {
+                self.push_scrollback(line);
             }
         }
         for line in self.scrollback.iter_mut() {
@@ -319,6 +354,10 @@ impl TermGrid {
             }
             alt.screen.truncate(rows as usize);
             alt.cursor = (alt.cursor.0.min(rows - 1), alt.cursor.1.min(cols - 1));
+            // …and its scrolling region follows the same rule as the live
+            // screen's above: a resize drops it back to the full height.
+            alt.top_margin = 0;
+            alt.bottom_margin = rows - 1;
         }
     }
 
@@ -352,6 +391,13 @@ impl TermGrid {
             bg: self.bg,
             attrs: 0,
         }
+    }
+
+    /// `DECSTBM` off: the scrolling region is the whole screen. Every buffer
+    /// starts here, so the alt-screen swap uses it on entry.
+    fn set_full_margins(&mut self) {
+        self.top_margin = 0;
+        self.bottom_margin = self.rows - 1;
     }
 
     fn scroll_up(&mut self, n: u16) {
@@ -803,9 +849,23 @@ impl Perform for TermGrid {
         };
         let screen = self.screen_mut();
         if let Some(line) = screen.get_mut(row as usize) {
-            line[col as usize] = cell;
-            if width == 2 && (col as usize + 1) < line.len() {
-                line[col as usize + 1] = Cell { ch: CONT, ..cell };
+            let at = col as usize;
+            // A glyph landing on either half of a wide one cuts it in two.
+            // xterm (and xterm.js, the pane's parity reference) blank the
+            // orphaned half instead of leaving a two-column glyph beside a
+            // one-column cell: this grid *is* what the pane draws, and
+            // `cells_to_line` re-derives each cell's width from its glyph, so
+            // an orphan would push every later cell of the line one column
+            // right — on this frame and every frame after it.
+            if at > 0 && line[at - 1].is_wide_base() {
+                line[at - 1] = Cell::blank();
+            }
+            if at + 1 < line.len() && line[at].is_wide_base() {
+                line[at + 1] = Cell::blank();
+            }
+            line[at] = cell;
+            if width == 2 && at + 1 < line.len() {
+                line[at + 1] = Cell { ch: CONT, ..cell };
             }
         }
         let next = col as usize + width;
@@ -1045,12 +1105,17 @@ impl TermGrid {
                         self.alt = Some(AltScreen {
                             screen,
                             cursor: self.cursor,
+                            top_margin: self.top_margin,
+                            bottom_margin: self.bottom_margin,
                         });
                         self.cursor = (0, 0);
+                        self.set_full_margins();
                     }
                 } else if let Some(alt) = self.alt.take() {
                     self.screen = alt.screen;
                     self.cursor = alt.cursor;
+                    self.top_margin = alt.top_margin;
+                    self.bottom_margin = alt.bottom_margin;
                 }
             }
             1048 => {
@@ -1071,11 +1136,16 @@ impl TermGrid {
                         self.alt = Some(AltScreen {
                             screen,
                             cursor: self.cursor,
+                            top_margin: self.top_margin,
+                            bottom_margin: self.bottom_margin,
                         });
                         self.cursor = (0, 0);
+                        self.set_full_margins();
                     }
                 } else if let Some(alt) = self.alt.take() {
                     self.screen = alt.screen;
+                    self.top_margin = alt.top_margin;
+                    self.bottom_margin = alt.bottom_margin;
                     self.restore_cursor();
                 }
             }
@@ -1649,6 +1719,90 @@ mod tests {
         assert_eq!(g.cursor.1, 3);
     }
 
+    /// Writing onto the *shadow* of a wide glyph cuts it in two. xterm blanks
+    /// the orphaned left half; leaving it would put a two-column glyph under a
+    /// one-column cell, and since `cells_to_line` re-derives each cell's width
+    /// from its glyph, everything after it on the line would print one column
+    /// right — a shift that never goes away, because the grid is what the pane
+    /// draws.
+    #[test]
+    fn a_glyph_on_a_wide_shadow_does_not_orphan_its_left_half() {
+        let mut g = TermGrid::new(8, 1);
+        g.feed("中ab".as_bytes());
+        assert_eq!(row_text(&g, 0), "中ab");
+        g.feed(b"\x1b[1;2Hx"); // cursor onto the shadow, then a narrow glyph
+        assert_eq!(cell(&g, 0, 0).ch, ' ', "the orphaned wide half is blanked");
+        assert_eq!(cell(&g, 0, 1).ch, 'x');
+        assert_eq!(cell(&g, 0, 2).ch, 'a');
+        assert_eq!(cell(&g, 0, 3).ch, 'b');
+        assert_eq!(row_text(&g, 0), " xab");
+        // Nothing wide survives on the line, so four cells print four columns.
+        let rendered = cells_to_line(&g.screen[0]);
+        let text: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.chars().any(|c| UnicodeWidthChar::width(c) == Some(2)),
+            "{text:?} still carries a wide glyph"
+        );
+    }
+
+    /// …and the other half of the same cut: a narrow glyph landing on the wide
+    /// *base* has to take its shadow's cell with it, or the pair prints one
+    /// column for two cells and pulls the rest of the line left.
+    #[test]
+    fn a_glyph_on_a_wide_base_takes_the_shadow_with_it() {
+        let mut g = TermGrid::new(8, 1);
+        g.feed("中ab".as_bytes());
+        g.feed(b"\x1b[1;1Hx");
+        assert_eq!(cell(&g, 0, 0).ch, 'x');
+        assert_eq!(
+            cell(&g, 0, 1).ch,
+            ' ',
+            "the shadow does not outlive its base"
+        );
+        assert!(!cell(&g, 0, 1).is_continuation());
+        assert_eq!(cell(&g, 0, 2).ch, 'a');
+        assert_eq!(row_text(&g, 0), "x ab");
+    }
+
+    /// A scrolling region belongs to the screen that set it. xterm gives each
+    /// buffer its own (`scrollTop`/`scrollBottom` live on the buffer), so a
+    /// region the shell set must not follow a full-screen program onto the alt
+    /// screen, and the alt screen must not carry its own back out.
+    #[test]
+    fn a_scrolling_region_does_not_leak_across_a_screen_swap() {
+        let mut g = TermGrid::with_scrollback(4, 3, 10);
+        g.feed(b"m0\r\nm1\r\nm2");
+        g.feed(b"\x1b[2;3r"); // region: rows 2..3
+        assert_eq!((g.top_margin, g.bottom_margin), (1, 2));
+
+        g.feed(b"\x1b[?1049h"); // a full-screen program
+        assert_eq!(
+            (g.top_margin, g.bottom_margin),
+            (0, 2),
+            "the alt screen owns the whole height"
+        );
+        // Scrolling off the bottom therefore moves the whole alt screen: with
+        // the shell's region leaked in, row 1 would have stayed put and `m0`'s
+        // counterpart would still be visible at the top.
+        g.feed(b"a\r\nb\r\nc\r\nd");
+        assert_eq!(row_text(&g, 0), "b");
+        assert_eq!(row_text(&g, 2), "d");
+        assert_eq!(
+            g.scrollback_len(),
+            0,
+            "the alt screen feeds no shell history"
+        );
+
+        g.feed(b"\x1b[?1049l");
+        assert_eq!(
+            (g.top_margin, g.bottom_margin),
+            (1, 2),
+            "the shell gets its own region back"
+        );
+        assert_eq!(row_text(&g, 0), "m0");
+        assert_eq!(row_text(&g, 2), "m2");
+    }
+
     #[test]
     fn autowrap_defers_then_wraps() {
         let mut g = TermGrid::with_scrollback(4, 3, 10);
@@ -1831,6 +1985,60 @@ mod tests {
         g.reset();
         assert_eq!(g.scrollback_len(), 0);
         assert_eq!(g.log_bytes().len(), 0);
+    }
+
+    /// A shrink retires the rows that no longer fit, and it retires them in
+    /// the order the device printed them. `Vec::pop` hands them back
+    /// newest-first, so pushing each one as it pops put the *last* line of the
+    /// old screen below the one after it: scroll back after a resize and three
+    /// lines of history come out shuffled.
+    #[test]
+    fn a_shrink_parks_the_retired_rows_in_the_order_they_were_printed() {
+        let mut g = TermGrid::with_scrollback(6, 4, 10);
+        g.feed(b"l0\r\nl1\r\nl2\r\nl3");
+        assert_eq!(g.scrollback_len(), 0, "nothing has scrolled off yet");
+
+        g.resize(6, 2);
+        assert_eq!(g.scrollback_len(), 2, "l2 and l3 no longer fit");
+
+        let view = g.render(4, 0);
+        let texts: Vec<String> = view
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "l2".to_string(),
+                "l3".to_string(),
+                "l0".to_string(),
+                "l1".to_string()
+            ],
+            "the retired pair keeps its order, ahead of the rows still on screen"
+        );
+    }
+
+    /// `self.screen` is the alt screen while one is up, but `self.scrollback`
+    /// is the primary screen's history. Retiring alt rows into it would show
+    /// them as the shell's own earlier output the moment the alt screen exits
+    /// — text the scrollback never carried.
+    #[test]
+    fn a_shrink_under_an_alt_screen_does_not_park_its_rows_in_the_shells_history() {
+        let mut g = TermGrid::with_scrollback(6, 4, 10);
+        g.feed(b"p0\r\np1\r\np2\r\np3");
+        g.feed(b"\x1b[?1049h");
+        g.feed(b"a0\r\na1\r\na2\r\na3");
+
+        g.resize(6, 2);
+        assert_eq!(g.scrollback_len(), 0, "the alt screen has no history");
+
+        g.feed(b"\x1b[?1049l");
+        assert_eq!(
+            g.scrollback_len(),
+            0,
+            "exiting the alt screen must not reveal rows it printed"
+        );
     }
 
     #[test]

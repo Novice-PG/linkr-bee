@@ -2065,7 +2065,19 @@ impl Runtime {
             None => self.read_page(None, limit),
         };
 
-        let haystack: Vec<char> = page.text.chars().flat_map(char::to_lowercase).collect();
+        // Folded for a case-insensitive match, but `at` below indexes *this*
+        // vector and the excerpt is cut on the text's own indices — and
+        // `to_lowercase` is not one character out for one character in: `İ`
+        // lowercases to two. So the folded character's position in `page.text`
+        // is carried alongside it, and the window is opened at that.
+        let mut haystack = Vec::new();
+        let mut origin = Vec::new();
+        for (index, ch) in page.text.chars().enumerate() {
+            for folded in ch.to_lowercase() {
+                haystack.push(folded);
+                origin.push(index);
+            }
+        }
         let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
         let mut matches = Vec::new();
         let mut more = false;
@@ -2077,10 +2089,14 @@ impl Runtime {
                         more = true;
                         break;
                     }
+                    // The whole matched run in the text's indices: folding can
+                    // stretch it, so it is measured rather than assumed.
+                    let start = origin[at];
+                    let matched = origin[at + needle.len() - 1] - start + 1;
                     matches.push(excerpt_around(
                         &page.text,
-                        at,
-                        needle.len(),
+                        start,
+                        matched,
                         query.chars().count(),
                     ));
                 }
@@ -2934,6 +2950,40 @@ mod tests {
         );
         assert_eq!(value["untrusted"], json!(true));
         assert_eq!(value["matches"], json!([]));
+    }
+
+    /// The folded haystack is not the same length as the log it was folded
+    /// from: `to_lowercase` maps a handful of characters to more than one
+    /// (`İ` becomes two). A match's position in the folded copy is therefore
+    /// not its position in the text, and the excerpt used to be cut on the
+    /// folded one — so a log with enough of them ahead of the match came back
+    /// with a window that held none of what was searched for.
+    #[test]
+    fn a_log_excerpt_is_cut_on_the_logs_own_indices_not_the_folded_ones() {
+        let mut runtime = bare_runtime();
+        let text = format!(
+            "{}{}panic{}",
+            "İ".repeat(200),
+            "x".repeat(250),
+            "y".repeat(50)
+        );
+        if let Ok(mut log) = runtime.journal.lock() {
+            log.append_bytes(text.as_bytes());
+        }
+
+        let value: Value = serde_json::from_str(
+            &runtime
+                .tool_search_log(&json!({ "query": "panic" }))
+                .unwrap(),
+        )
+        .unwrap();
+        let matches = value["matches"].as_array().expect("matches is an array");
+        assert_eq!(matches.len(), 1, "one hit in the log");
+        let excerpt = matches[0]["excerpt"].as_str().expect("excerpt is a string");
+        assert!(
+            excerpt.contains("panic"),
+            "the excerpt has to hold the match it was cut for: {excerpt}"
+        );
     }
 
     #[test]

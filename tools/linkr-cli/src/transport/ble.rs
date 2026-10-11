@@ -587,11 +587,26 @@ async fn pump(
     hub: Arc<EventHub>,
 ) {
     hub.publish(super::TransportEvent::Subscribed);
-    let mut central_events = match adapter.events().await {
-        Ok(stream) => stream,
-        Err(_) => return,
-    };
-    let mut central_alive = true;
+    // A failure to subscribe to adapter-level events must not take the data
+    // path down with it. `Subscribed` has already been published, so the
+    // session is holding this link open: returning here left it waiting on a
+    // connection that nothing would ever deliver UART bytes over and nothing
+    // would ever report as gone — the console simply went silent, on a link
+    // the UI still showed as connected. Only `CentralEvent::DeviceDisconnected`
+    // is read from this stream; the payload comes from `notifications`, so
+    // without it the loop below still carries every byte and the only thing
+    // lost is the prompt notice when the peer is unplugged mid-session (that
+    // stream ending still reports it, just later).
+    let mut central_alive = false;
+    let mut central_events: Pin<Box<dyn futures::Stream<Item = CentralEvent> + Send>> =
+        match adapter.events().await {
+            Ok(stream) => {
+                central_alive = true;
+                stream
+            }
+            // Never polled: the select arm below is guarded by `central_alive`.
+            Err(_) => Box::pin(futures::stream::empty()),
+        };
     loop {
         tokio::select! {
             item = notifications.next() => match item {

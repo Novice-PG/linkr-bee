@@ -694,6 +694,26 @@ impl App {
         }
     }
 
+    /// Arm a full repaint when the surface on screen moved since `before`.
+    ///
+    /// F2..F6 swap the whole centre pane, and with it most of what is drawn.
+    /// On a console that repainted itself underneath us (conhost, which
+    /// reflows whenever it likes) ratatui's cell diff believes those cells
+    /// already hold the right characters and never writes them again, so the
+    /// surface just left shows through the new one until `Ctrl+L` blanks the
+    /// viewport — the reported "residual when switching F2/F4", the same
+    /// family as F2/K5/K6, and the one transition of that family the loop did
+    /// not yet watch. Every route to a surface lands on [`App::set_view`], so
+    /// watching `view` here covers the F-keys, the sidebar's nav rows and the
+    /// palette's `view.*` alike; a switch is user-triggered and rare, so one
+    /// full repaint per switch is free. A frame in which the surface did not
+    /// move arms nothing, or every key press would clear the screen.
+    pub fn sync_view_repaint(&mut self, before: View) {
+        if self.view != before {
+            self.force_redraw = true;
+        }
+    }
+
     pub fn toast(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notices.push(level, text);
     }
@@ -1073,6 +1093,46 @@ mod tests {
         app.info.kind = Some(crate::transport::TransportKind::Ble);
         app.sync_link_repaint(before);
         assert!(app.take_force_redraw(), "a live link change repaints");
+    }
+
+    /// The residual that survived K1/K5/K6: switching surfaces with F2..F6
+    /// swaps the whole centre pane, and conhost can leave the old surface
+    /// showing through the new one until `Ctrl+L`. `set_view` is the single
+    /// door to a surface, so the loop watches `view` the same way it watches
+    /// the overlay latch and the link signature — one full repaint at the
+    /// moment the surface moves, nothing on a frame where it stands still.
+    #[test]
+    fn only_a_view_switch_arms_a_full_repaint() {
+        let mut app = crate::tui::test_app();
+        assert_eq!(app.view, View::Terminal);
+
+        // F4: terminal → network, the reported case.
+        let before = app.view;
+        app.set_view(View::Network);
+        app.sync_view_repaint(before);
+        assert!(app.take_force_redraw(), "switching surfaces repaints");
+
+        // A frame that does not touch the surface must not clear the screen,
+        // or every key press would.
+        let before = app.view;
+        app.sync_view_repaint(before);
+        assert!(!app.force_redraw, "a still surface arms nothing");
+
+        // Switching *to* the surface already up is not a transition either.
+        let before = app.view;
+        app.set_view(View::Network);
+        app.sync_view_repaint(before);
+        assert!(!app.force_redraw, "re-selecting the same view is a no-op");
+
+        // …and the refused switch — the console while a run captures — must
+        // not arm one: `set_view` returns before `view` moves, so there is
+        // nothing on screen to repaint.
+        app.transfer.engine.probe_now().expect("capture starts");
+        let before = app.view;
+        app.set_view(View::Terminal);
+        app.sync_view_repaint(before);
+        assert_eq!(app.view, View::Network, "the console stays locked");
+        assert!(!app.force_redraw, "a refused switch repaints nothing");
     }
 
     /// Web parity: an attempt pins the transport choice exactly like a live

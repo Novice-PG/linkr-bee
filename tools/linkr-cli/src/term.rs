@@ -249,12 +249,24 @@ mod input_pump {
                 return; // EOF: the terminal the user typed on is gone
             }
             if got < 0 {
-                // A non-blocking stdin reporting "nothing yet" is not EOF.
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
-                    std::thread::sleep(DRAIN_POLL);
-                    continue;
+                let error = std::io::Error::last_os_error();
+                match error.kind() {
+                    // A non-blocking stdin reporting "nothing yet" is not EOF.
+                    std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(DRAIN_POLL);
+                        continue;
+                    }
+                    // POSIX: a caught signal can interrupt `read` before any
+                    // byte arrives, and retrying is the correct handling —
+                    // treating it like EOF would stop the pump for the rest of
+                    // the session. This is hardening, not a fix we can
+                    // demonstrate: every handler in this process is registered
+                    // through `signal-hook-registry`, which sets `SA_RESTART`,
+                    // so the kernel restarts the read and EINTR does not
+                    // surface with today's dependencies.
+                    std::io::ErrorKind::Interrupted => continue,
+                    _ => return,
                 }
-                return;
             }
             let total = got as usize;
             let mut offset = 0;
