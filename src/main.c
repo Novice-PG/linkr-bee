@@ -163,11 +163,15 @@ static struct uart_config active_uart_config = {
 };
 
 /* Queue backing store in .bss instead of __noinit. K_MSGQ_DEFINE puts it in
- * __noinit, which the ESP32 linker script maps to dram1_0_seg; .bss lands in
- * dram0_0_seg, the roomier of the two. This is an exact expansion of
- * K_MSGQ_DEFINE (same STRUCT_SECTION_ITERABLE entry, same static initializer,
- * same alignment) with only the buffer's placement changed: contents never
- * need to survive reset, and both regions sit in the same 32 KB SRAM. */
+ * __noinit, which the ESP32 linker script maps to dram1_0_seg — the output
+ * section is *named* .dram0.noinit, but the map links it at 0x3ffe8000, i.e.
+ * inside the 98304 B dram1_0_seg; .bss lands in dram0_0_seg
+ * (0x3ffbdb5c/0x224a4), the roomier of the two at the time of the change
+ * (27896 B free against 9252 B — both measured on the 90285d5 build of this
+ * same board). This is an exact expansion of K_MSGQ_DEFINE (same
+ * STRUCT_SECTION_ITERABLE entry, same static initializer, same alignment)
+ * with only the buffer's placement changed: contents never need to survive
+ * reset. */
 static uint8_t __aligned(4)
 	ble_to_uart_storage[sizeof(struct bridge_packet) *
 			    CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH];
@@ -1833,7 +1837,6 @@ int main(void)
 	}
 
 	k_mutex_init(&uart_config_lock);
-	linkr_uart_autobaud_init(DT_REG_ADDR(LINKR_UART_NODE));
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	uart_irq_callback_user_data_set(bridge_uart, uart_rx_irq_callback, NULL);
 #endif
@@ -1842,6 +1845,14 @@ int main(void)
 		LOG_ERR("Bridge UART configuration failed: %d", err);
 		return err;
 	}
+
+	/* After the port, as uart_autobaud.h's contract says ("Must be called
+	 * once, after the port has been configured"). Arming first meant the
+	 * detector was already counting against a port nobody had programmed
+	 * yet, and a boot whose configure failed still armed a follower that
+	 * would later reprogram the port on its own. The first window is only
+	 * meaningful once there is a rate to measure against. */
+	linkr_uart_autobaud_init(DT_REG_ADDR(LINKR_UART_NODE));
 
 #if defined(ACTIVITY_LED_NODE)
 	if (!device_is_ready(activity_led.port)) {

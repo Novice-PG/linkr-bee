@@ -76,11 +76,14 @@ class AutobaudTests(unittest.TestCase):
         self.assertEqual(result["reconfigs"], "0")
 
     def test_before_anything_has_matched_a_slower_peer_is_still_followed(self):
-        """At reset there is no evidence to hold onto, so the feature works.
+        """A slower peer is still followed, which is the reason autobaud exists.
 
-        9600 measured against a port configured for 115200: two agreeing
-        windows, and the port goes. Refusing *this* would have meant refusing
-        the reason autobaud exists.
+        The link starts out verified — Kconfig's rate is what both ends were
+        set to — but verification only refuses readings *below* ours that are
+        our own rate over 2..9 bit-times, the shape a missing single-bit run
+        leaves. 9600 against a 115200 port is not that shape (/12), so two
+        agreeing windows move the port. Refusing *this* would have meant
+        refusing the reason autobaud exists.
         """
         result = self.run_scenario("startup_follows_a_slower_peer")
         self.assertEqual(result["rate"], "9600")
