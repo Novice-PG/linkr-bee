@@ -1040,7 +1040,16 @@ impl Runtime {
                 });
             }
 
+            // A stop that landed mid-stream must not run the batch: the calls
+            // captured so far may be truncated, and the user asked to halt.
+            if stopped {
+                return Ok(STOPPED_BY_USER.to_string());
+            }
+
             for call in tool_calls {
+                if self.stopped() {
+                    return Ok(STOPPED_BY_USER.to_string());
+                }
                 let (result, ok) = self.call_tool(&call).await;
                 self.history.push(Message::tool_result(
                     &call.id,
@@ -1057,9 +1066,6 @@ impl Runtime {
                     if let Some(pending) = self.pending_execution.as_mut() {
                         pending.reviewed_round = Some(self.turn);
                     }
-                }
-                if self.stopped() {
-                    return Ok(STOPPED_BY_USER.to_string());
                 }
                 if let Some(reason) = self.over_budget() {
                     return Ok(reason);
@@ -2033,8 +2039,14 @@ impl Runtime {
             self.read_page(None, limit)
         } else if let Some(after) = after {
             self.read_page(Some(after), limit)
-        } else {
+        } else if self.read_cursor > 0 {
+            // Continue from the cursor the previous read handed back.
             self.read_page(Some(self.read_cursor), limit)
+        } else {
+            // No cursor yet this run: mirror the reference `readLog({ limit })`
+            // (web/serial_journal.js `read`), where an omitted `after` returns
+            // the tail rather than the oldest retained bytes.
+            self.read_page(None, limit)
         };
         self.read_cursor = page.cursor;
         Ok(json!({
@@ -2527,17 +2539,28 @@ impl Runtime {
             .get("baud")
             .and_then(Value::as_i64)
             .ok_or("baud must be an integer between 300 and 3000000")?;
+        // Validate before the cast: `baud as u32` would wrap 2^32+300 down to
+        // 300 and slip past `set_uart_command`'s range check.
+        let baud = u32::try_from(baud).map_err(|_| {
+            format!(
+                "baud must be an integer between {} and {}",
+                accessory::MIN_BAUD,
+                accessory::MAX_BAUD
+            )
+        })?;
         let data_bits = args
             .get("dataBits")
             .and_then(Value::as_i64)
-            .map(|v| v as u8);
+            .map(|v| u8::try_from(v).map_err(|_| "dataBits must be 5, 6, 7 or 8".to_string()))
+            .transpose()?;
         let parity = args.get("parity").and_then(Value::as_str);
         let stop_bits = args
             .get("stopBits")
             .and_then(Value::as_i64)
-            .map(|v| v as u8);
+            .map(|v| u8::try_from(v).map_err(|_| "stopBits must be 1 or 2".to_string()))
+            .transpose()?;
         let flow = args.get("flow").and_then(Value::as_str);
-        let command = accessory::set_uart_command(baud as u32, data_bits, parity, stop_bits, flow)?;
+        let command = accessory::set_uart_command(baud, data_bits, parity, stop_bits, flow)?;
         self.accessory_mgmt("set_uart_config", command, true).await
     }
 
@@ -2635,15 +2658,46 @@ pub fn verify_next(status: &str) -> &'static str {
     }
 }
 
+/// Mirrors the mobile reference's `PRINTABLE`
+/// (`/^[\t\n\r\x20-\x7e\u00a0-\uffff]*$/` plus an explicit NUL rejection):
+/// tab, newline and carriage return are text, so a log or source file that
+/// merely contains line breaks is not mislabeled as binary. Everything from
+/// U+00A0 upward passes too — including astral-plane characters, which the JS
+/// class accepts through their surrogate units; only the remaining C0/C1
+/// controls and DEL count as binary.
 fn is_printable(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes)
-        .map(|text| !text.contains('\u{0}') && !text.chars().any(char::is_control))
+        .map(|text| {
+            text.chars().all(|c| {
+                matches!(c, '\t' | '\n' | '\r')
+                    || ('\u{20}'..='\u{7e}').contains(&c)
+                    || c >= '\u{a0}'
+            })
+        })
         .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_printable_accepts_tab_newline_cr_and_unicode_but_rejects_controls() {
+        assert!(is_printable(b"hello\nworld\r\n\ttab"));
+        assert!(is_printable("中文 emoji \u{1f600}".as_bytes()));
+        assert!(is_printable(b""));
+        assert!(!is_printable(b"bin\x00ary"), "NUL marks binary");
+        assert!(!is_printable(b"bell\x07x"), "C0 control marks binary");
+        assert!(!is_printable(b"esc\x1by"), "ESC marks binary");
+        assert!(
+            !is_printable(&[0xff, 0xfe, 0x00]),
+            "invalid UTF-8 marks binary"
+        );
+        assert!(
+            !is_printable("\u{85}".as_bytes()),
+            "C1 control (NEL) is outside the JS class"
+        );
+    }
 
     #[test]
     fn exec_mode_wire_names() {

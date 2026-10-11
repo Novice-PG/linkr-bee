@@ -243,8 +243,10 @@ fn first_block<'a>(document: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 /// The pure part of the reader: `offset`/`limit`/`find` → the returned window
-/// (`readWebPage`'s arithmetic, verbatim). `find` starts at `offset`, exactly
-/// like `indexOf(find, offset)` does in JS.
+/// (`readWebPage`'s arithmetic). `find` starts at `offset`, exactly like
+/// `indexOf(find, offset)` does in JS — but the returned match index is a
+/// character index into `text` rather than into the case-folded copy, because
+/// `to_lowercase` is not one character out for one character in (`İ` expands).
 pub fn window(
     text: &str,
     offset: usize,
@@ -254,17 +256,26 @@ pub fn window(
     let chars: Vec<char> = text.chars().collect();
     let total = chars.len();
     let index_from = |needle: &str, from: usize| -> Option<usize> {
-        let hay: Vec<char> = chars[from.min(total)..]
-            .iter()
-            .flat_map(|c| c.to_lowercase())
-            .collect();
+        let from = from.min(total);
+        // Fold for a case-insensitive match, but carry each folded character's
+        // position in the original char vector alongside it: a raw index into
+        // the folded vector would drift from `text`'s own indices whenever a
+        // character lowers to more than one (the same fix as `tool_search_log`).
+        let mut hay: Vec<char> = Vec::new();
+        let mut origin: Vec<usize> = Vec::new();
+        for (index, ch) in chars[from..].iter().enumerate() {
+            for folded in ch.to_lowercase() {
+                hay.push(folded);
+                origin.push(from + index);
+            }
+        }
         let needle: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
         if needle.is_empty() || hay.len() < needle.len() {
             return None;
         }
         hay.windows(needle.len())
             .position(|w| w == needle.as_slice())
-            .map(|found| found + from)
+            .map(|found| origin[found])
     };
     let match_index = find.map(|needle| match index_from(needle, offset) {
         Some(found) => found as i64,
@@ -497,6 +508,17 @@ mod tests {
         assert_eq!(window("Hello", 0, 5, Some("hELLO")).3, Some(true));
         // No find at all: matchIndex and matchFound are null.
         assert_eq!(window("Hello", 0, 5, None), (0, 5, None, None));
+    }
+
+    #[test]
+    fn window_find_index_does_not_drift_on_expanding_case_fold() {
+        // `İ` (U+0130) lowercases to two characters, so a folded index used
+        // directly would point one past the real match.
+        let text = format!("{}İTARGET", "a".repeat(10));
+        let (start, next, index, found) = window(&text, 0, 40, Some("target"));
+        assert_eq!(index, Some(11), "the match index is the text's own index");
+        assert_eq!(found, Some(true));
+        assert_eq!((start, next), (0, 17));
     }
 
     #[test]

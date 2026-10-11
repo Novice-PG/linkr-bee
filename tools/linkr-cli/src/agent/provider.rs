@@ -58,11 +58,16 @@ pub struct Usage {
 impl Usage {
     fn merge(&mut self, next: Usage) {
         // Google repeats the full usage on the last chunk; Anthropic splits it
-        // across message_start and message_delta. Additive would double count.
+        // across message_start (input + cache read) and message_delta (output),
+        // so an additive merge would double count and maxing each part is right.
         self.input = self.input.max(next.input);
         self.output = self.output.max(next.output);
         self.cache_read = self.cache_read.max(next.cache_read);
-        self.total = self.total.max(next.total);
+        // Each phase's own `total` only covers that phase, so maxing it alone
+        // yields max(input, output) for Anthropic instead of the real total.
+        // Fold the merged parts in as well; cache reads ride inside `input`
+        // for every provider, so they are not added on top of it.
+        self.total = self.total.max(next.total).max(self.input + self.output);
     }
 }
 
@@ -1370,6 +1375,27 @@ mod tests {
     }
 
     #[test]
+    fn usage_merge_sums_phased_anthropic_totals() {
+        let mut usage = Usage::default();
+        usage.merge(Usage {
+            input: 100,
+            output: 0,
+            cache_read: 40,
+            total: 100,
+        });
+        usage.merge(Usage {
+            input: 0,
+            output: 25,
+            cache_read: 0,
+            total: 25,
+        });
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.output, 25);
+        assert_eq!(usage.cache_read, 40);
+        assert_eq!(usage.total, 125, "total is input + output, not max");
+    }
+
+    #[test]
     fn anthropic_stream_decodes_events() {
         let body = concat!(
             "event: message_start\n",
@@ -1412,6 +1438,9 @@ mod tests {
             StreamDelta::Usage(usage) => {
                 assert_eq!(usage.output, 7);
                 assert_eq!(usage.cache_read, 2);
+                // message_start reported input 9, message_delta output 7: the
+                // combined total must be their sum, not max(9, 7).
+                assert_eq!(usage.total, 16);
             }
             other => panic!("expected usage, got {other:?}"),
         }

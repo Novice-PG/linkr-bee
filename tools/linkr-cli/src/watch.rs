@@ -419,11 +419,14 @@ impl SerialWatch {
         }
         // A gap longer than the window since the last banner of any kind
         // starts a new burst: every rule gets to report about it again.
+        // `saturating_sub` because the wall clock can step backwards (NTP, a
+        // restored VM): a bare `at - last` would panic in debug and wrap to a
+        // huge gap in release.
         let stale = self
             .state
             .boot_loop
             .last_at
-            .map(|last| at - last > self.state.boot_window_ms)
+            .map(|last| at.saturating_sub(last) > self.state.boot_window_ms)
             .unwrap_or(false);
         if stale {
             for reported in self.state.boot_loop.bursts.values_mut() {
@@ -646,8 +649,10 @@ fn push_banner(loop_: &mut BootLoop, at: u64, text: &str, window_ms: u64) -> boo
     }
     let mut dropped = false;
     // The observation that just arrived is never dropped, so the caller can
-    // always decide about the window that ends at `at`.
-    while loop_.times.len() > 1 && at - loop_.times[0] > window_ms {
+    // always decide about the window that ends at `at`. `saturating_sub` guards
+    // a backwards wall-clock step, which a bare subtraction would turn into a
+    // debug panic or a release wrap.
+    while loop_.times.len() > 1 && at.saturating_sub(loop_.times[0]) > window_ms {
         loop_.times.remove(0);
         loop_.banners.remove(0);
         dropped = true;

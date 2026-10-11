@@ -379,6 +379,7 @@ fn build_app(rt: Arc<tokio::runtime::Runtime>, session: SessionHandle, bus: Core
         started: Instant::now(),
         force_redraw: true,
         settle_repaint_at: None,
+        churn_since: None,
         pending_connect: None,
         pending_scan: None,
         socket_query: None,
@@ -638,6 +639,13 @@ fn on_core_event(app: &mut App, event: CoreEvent) {
                 app.watch.feed_bytes(&bytes, at_ms);
             }
             app.terminal.feed(&bytes);
+            // F2's last gap: the same-line rewrites of a progress line
+            // (`apt update`) are content churn, not a discrete transition,
+            // so none of the settle hooks above watched them and the pane
+            // kept its ghosted cells until Ctrl+L. Push the settle deadline
+            // instead: no repaint while the burst lasts, one full repaint
+            // once the device goes quiet.
+            app.note_output_churn(Instant::now());
             // Two things the device is still waiting on used to pile up in
             // the grid with no caller anywhere in the crate: the terminal's
             // own answers to `DSR`/`CPR` (`take_pending_reports`, so a program
@@ -1678,6 +1686,7 @@ pub(crate) fn test_app() -> App {
         started: Instant::now(),
         force_redraw: false,
         settle_repaint_at: None,
+        churn_since: None,
         pending_connect: None,
         pending_scan: None,
         socket_query: None,

@@ -124,6 +124,11 @@ pub fn wifi_command(
             PASSWORD_MAX
         ));
     }
+    // The command is newline-terminated on the wire, so a control character in
+    // the password would truncate the command or inject a second one.
+    if has_control_chars(password) {
+        return Err("password must not contain control characters".to_string());
+    }
     Ok(format!("@w={},{}", name, password))
 }
 

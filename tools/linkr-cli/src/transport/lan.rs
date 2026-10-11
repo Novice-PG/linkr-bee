@@ -130,6 +130,11 @@ const LAN_FRAME_MAX_BYTES: usize = 1024;
 /// (`LINKR_BLE_BRIDGE_UART_BAUD_RATE` 115200 → ≈11.5 KiB/s), so the queue
 /// never grows faster than it drains.
 const LAN_WRITE_BYTES_PER_SEC: f64 = 8.0 * 1024.0;
+/// Bound on queued outbound frames. The pacer already holds the *sender* to
+/// 8 KiB/s, so this only fills when the socket drains slower than that (a
+/// slow bridge): bounded, the sender waits instead of buffering a whole
+/// paste in memory.
+const LAN_COMMAND_QUEUE: usize = 64;
 
 /// Token bucket for the LAN uplink (`dist/BACKLOG.md` G2).
 ///
@@ -194,7 +199,7 @@ impl Pace {
 /// A connected LAN bridge: UART bytes travel as binary frames, management
 /// commands are rejected (the bridge has no Management Service).
 pub struct LanTransport {
-    commands: mpsc::UnboundedSender<LanCommand>,
+    commands: mpsc::Sender<LanCommand>,
     hub: Arc<EventHub>,
     pace: Pace,
 }
@@ -216,15 +221,18 @@ impl Transport for LanTransport {
         // so a bulk paste can never outrun the device's UART queue.
         for piece in chunk.chunks(LAN_FRAME_MAX_BYTES) {
             self.pace.take(piece.len()).await;
+            // Bounded channel: await here is backpressure, so a slow bridge
+            // makes the sender wait instead of growing the queue in memory.
             self.commands
                 .send(LanCommand::Uart(piece.to_vec()))
+                .await
                 .map_err(|_| anyhow::anyhow!("LAN bridge closed"))?;
         }
         Ok(())
     }
 
     async fn disconnect(&self) -> anyhow::Result<()> {
-        let _ = self.commands.send(LanCommand::Disconnect);
+        let _ = self.commands.send(LanCommand::Disconnect).await;
         Ok(())
     }
 
@@ -448,7 +456,7 @@ async fn dial_once(
 
     // --- serial pump -------------------------------------------------------
     let hub = Arc::new(EventHub::new());
-    let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+    let (commands_tx, commands_rx) = mpsc::channel(LAN_COMMAND_QUEUE);
     let (sink, source) = stream.split();
     tokio::spawn(pump(
         sink,
@@ -485,7 +493,7 @@ async fn pump(
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     >,
-    mut commands: mpsc::UnboundedReceiver<LanCommand>,
+    mut commands: mpsc::Receiver<LanCommand>,
     hub: Arc<EventHub>,
     mut buffered: Vec<Vec<u8>>,
     url: String,
@@ -860,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bulk_lan_write_is_split_and_paced_to_the_bridge() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(LAN_COMMAND_QUEUE);
         let transport = LanTransport {
             commands: tx,
             hub: Arc::new(EventHub::new()),
@@ -891,7 +899,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_keystroke_is_not_held_back_by_the_rate_limiter() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(LAN_COMMAND_QUEUE);
         let transport = LanTransport {
             commands: tx,
             hub: Arc::new(EventHub::new()),
@@ -931,7 +939,7 @@ mod tests {
         // The transport-level backstop; the session rejects earlier with the
         // same message.
         let hub = Arc::new(EventHub::new());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(LAN_COMMAND_QUEUE);
         let transport = LanTransport {
             commands: tx,
             hub,

@@ -79,6 +79,8 @@ const COMMAND_PATH: &str = r"(?:[./a-z0-9_-]+/)?";
 const ASSIGNMENT: &str = r"[a-z_][a-z0-9_]*=[^\s;&|]+\s+";
 
 /// Commands that must start a command position to count (JS `guardedCommands`).
+/// Like the JS side (`new RegExp(..., "i")`), these are compiled
+/// case-insensitively so `RM -rf /` cannot slip past the guard.
 const GUARDED_COMMANDS: &[&str] = &[
     // Recursive or forced deletion, including `find -delete` / `-exec rm`.
     r"rm\b[^\n]*\s-{1,2}[a-z]*[rf]",
@@ -122,7 +124,10 @@ fn guarded() -> &'static Vec<Regex> {
         let mut all: Vec<Regex> = GUARDED_COMMANDS
             .iter()
             .map(|source| {
-                Regex::new(&format!("{}(?:{})", start, source)).expect("guarded command pattern")
+                RegexBuilder::new(&format!("{}(?:{})", start, source))
+                    .case_insensitive(true)
+                    .build()
+                    .expect("guarded command pattern")
             })
             .collect();
         for source in GUARDED_PIPELINES {
@@ -437,6 +442,24 @@ mod tests {
             source.contains(r#"/>\\s*\\/dev\\/(?:sd|mmcblk|nvme|mtdblock|loop|disk)/i"#)
                 || source.contains("/>\\s*\\/dev\\/(?:sd|mmcblk|nvme|mtdblock|loop|disk)/i")
         );
+    }
+
+    #[test]
+    fn guarded_commands_match_case_insensitively_like_the_js_flag() {
+        // The JS compiles `guardedCommands` with the `i` flag, so an uppercase
+        // spelling must still be recognized as a guarded command.
+        for text in [
+            "RM -rf /",
+            "rm -RF /tmp/x",
+            "Sudo reboot",
+            "CHMOD -R 777 /",
+            "DD if=/dev/zero of=/dev/sda",
+            "Find /tmp -delete",
+        ] {
+            assert!(is_guarded_command(text), "{text} must be guarded");
+        }
+        // A mere mention is still not a command position.
+        assert!(!is_guarded_command("echo RM -rf mention"));
     }
 
     #[test]

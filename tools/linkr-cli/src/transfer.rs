@@ -143,6 +143,11 @@ const ZMODEM_CANCEL: &[u8] = &[
 /// itself, not answering us.
 const CAP_LIMIT: usize = 512 * 1024;
 
+/// Cap on the rolling marker-line buffer. A ZMODEM stream carries no `LF` (its
+/// `-e` escaping removes them), so while a run is in progress nothing drains
+/// this buffer; without a ceiling a whole download would sit here in memory.
+const SCAN_LIMIT: usize = 512 * 1024;
+
 /// Upper bound the pager accepts for an upload: `MAX_UPLOAD_CHUNKS` commands
 /// of `DEFAULT_CHUNK_BYTES` payload. Larger files need ZMODEM.
 const PAGER_LIMIT: u64 = MAX_UPLOAD_CHUNKS as u64 * DEFAULT_CHUNK_BYTES as u64;
@@ -791,6 +796,11 @@ impl Transfer {
         let Some(probe) = self.probe.clone() else {
             return Err("Run the probe first.".to_string());
         };
+        // Fold `~/x` into an absolute path once, here: every later step — the
+        // launch command, the per-chunk upload temp name, the pager read — must
+        // type the same absolute path, and `upload_chunk_command` /
+        // `read_file_command` reject anything that is not absolute.
+        self.target = self.expand(&self.target, &probe.home);
         self.validate(&probe)?;
         self.reset();
         // A cancel owed to a peer that is no longer there is not owed to the
@@ -1143,6 +1153,12 @@ impl Transfer {
             }
         }
         self.scan.extend_from_slice(bytes);
+        if self.scan.len() > SCAN_LIMIT {
+            // Keep the newest bytes: a marker line is at the tail, and the head
+            // is the part of a binary stream nothing will ever match.
+            let keep = SCAN_LIMIT / 2;
+            self.scan.drain(..self.scan.len() - keep);
+        }
         while let Some(line) = self.take_scan_line() {
             self.on_marker(&line);
         }
@@ -1538,6 +1554,10 @@ impl Transfer {
                         return;
                     }
                     if let Err(err) = std::fs::rename(&sibling, &self.local) {
+                        // The received bytes stay under the sender's name: this
+                        // run owns `sibling` no longer, so `fail`'s sweep must
+                        // not delete the very file it just received.
+                        self.staged_owned = false;
                         self.fail(format!(
                             "Received {}, which is not the name asked for, and could not rename it to {}: {err}",
                             sibling.display(),
@@ -1641,9 +1661,20 @@ impl Transfer {
         let cancel = self.peer_cancel();
         self.stop_host();
         self.sweep_staged();
+        // Drop the open handle first, then delete a truncated pager receive. A
+        // pager receive writes straight into `local` (no staging), so without
+        // this an aborted run leaves a partial file at the exact name a later,
+        // successful run would use — indistinguishable from a good one. The
+        // ZMODEM receive never needs it: it stages under the sender's name and
+        // is swept by `sweep_staged` above.
+        if self.download.take().is_some()
+            && self.direction == Direction::Recv
+            && self.channel == Channel::Pager
+        {
+            let _ = std::fs::remove_file(&self.local);
+        }
         self.queue.clear();
         self.steps.clear();
-        self.download = None;
         self.phase = Phase::Done;
         self.outcome = Outcome::Failed(reason);
         self.pending_out = cancel;

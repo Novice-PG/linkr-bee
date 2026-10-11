@@ -204,14 +204,25 @@ impl TokenStore {
             path.with_file_name(name)
         };
         let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        // `create_new` never follows a symlink and never clobbers an existing
+        // entry, so a pre-placed `.tmp` cannot redirect the write to another
+        // file. A stale temp from an earlier crash is unlinked — the link
+        // itself, never its target — and the create retried once.
+        options.create_new(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
         {
-            let mut file = options.open(&tmp)?;
+            let mut file = match options.open(&tmp) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&tmp)?;
+                    options.open(&tmp)?
+                }
+                Err(error) => return Err(error),
+            };
             file.write_all(payload.as_bytes())?;
             file.sync_all()?;
         }

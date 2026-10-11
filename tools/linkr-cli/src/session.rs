@@ -318,6 +318,10 @@ struct SessionTask {
     /// Serializes whole management requests (chunks + waits): the firmware
     /// reassembles one Command at a time.
     write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Where a finished management request hands its id back, so the loop can
+    /// release the core's per-request state (the Python `send()` `finally`
+    /// block, PYTHON_CLI_SPEC §2.5).
+    mgmt_done_tx: mpsc::UnboundedSender<RequestId>,
 }
 
 /// Sleeps until the geometry machine's debounce expires; `None` (nothing due)
@@ -334,6 +338,7 @@ impl SessionTask {
         mut self,
         mut commands: mpsc::UnboundedReceiver<SessionCommand>,
         mut events: broadcast::Receiver<TransportEvent>,
+        mut mgmt_done: mpsc::UnboundedReceiver<RequestId>,
     ) {
         loop {
             tokio::select! {
@@ -372,6 +377,18 @@ impl SessionTask {
                         return;
                     }
                 },
+                // A management request's caller is done — response, timeout or
+                // disconnect. Release the core's per-request state for that id;
+                // otherwise a timed-out request leaves `pending`/`events` behind
+                // and a hostile device can grow them without bound by replaying
+                // the same request id.
+                done = mgmt_done.recv() => {
+                    if let Some(id) = done {
+                        if let Some(mgmt) = &mut self.mgmt {
+                            mgmt.finish(id);
+                        }
+                    }
+                }
                 // The size sync's debounce is wall-clock, and an idle console
                 // sends no further RX to wake this loop: without this arm the
                 // first push would wait for bytes that never arrive (web arms
@@ -507,6 +524,7 @@ impl SessionTask {
         let info = Arc::clone(&self.info);
         let lock = Arc::clone(&self.write_lock);
         let debug = self.debug_io;
+        let done = self.mgmt_done_tx.clone();
         tokio::spawn(async move {
             let _guard = lock.lock().await;
             let result = run_mgmt_request(
@@ -514,6 +532,9 @@ impl SessionTask {
                 wait_final,
             )
             .await;
+            // Hand the id back so the loop releases the core's state, whatever
+            // the outcome. This is the Python `send()` `finally` block.
+            let _ = done.send(id);
             let _ = reply.send(result);
         });
     }
@@ -586,8 +607,21 @@ impl SessionTask {
                 text: format!("RX {}", python_repr_bytes(&payload)),
             });
         }
-        if let Some(log) = &mut self.log {
-            let _ = std::io::Write::write_all(log, &payload);
+        // The log is a capture the user asked for, so a write that fails must
+        // not look like a complete transcript. Report it once and stop writing:
+        // a full disk would otherwise emit a notice per payload.
+        let log_error = match &mut self.log {
+            Some(log) => std::io::Write::write_all(log, &payload).err(),
+            None => None,
+        };
+        if let Some(error) = log_error {
+            self.bus.publish(CoreEvent::Notice {
+                level: NoticeLevel::Warn,
+                text: format!(
+                    "log file write failed ({error}); the capture is incomplete from here on"
+                ),
+            });
+            self.log = None;
         }
         if let Some(geometry) = &mut self.geometry {
             geometry.observe(&String::from_utf8_lossy(&payload));
@@ -822,6 +856,7 @@ fn spawn_on(
 ) -> SessionHandle {
     let kind = transport.kind();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (mgmt_done_tx, mgmt_done_rx) = mpsc::unbounded_channel();
     let handle = SessionHandle {
         tx: cmd_tx,
         info: Arc::new(Mutex::new(data.info.clone())),
@@ -857,13 +892,14 @@ fn spawn_on(
         log,
         debug_io: opts.debug_io,
         write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        mgmt_done_tx,
     };
     let events = task.transport.events();
     bus.publish(CoreEvent::Connection {
         state: ConnectionState::Connected,
         detail: data.detail,
     });
-    tokio::spawn(task.run(cmd_rx, events));
+    tokio::spawn(task.run(cmd_rx, events, mgmt_done_rx));
     handle
 }
 

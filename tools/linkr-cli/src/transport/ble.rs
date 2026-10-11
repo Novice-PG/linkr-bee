@@ -48,6 +48,11 @@ const BUSY_BUDGET: Duration =
 /// How often to look for a link somebody else is dialling while we wait for it
 /// (only `Connect` waits instead of re-dialling — see [`connect_with_retry`]).
 const BUSY_POLL: Duration = Duration::from_millis(250);
+/// Ceiling on a single btleplug call. A call that never returns would hold the
+/// session's write lock forever and stall every management request behind it,
+/// so each attempt is bounded. Generous on purpose: a real GATT write or notify
+/// completes in milliseconds; only a wedged adapter reaches this.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `true` when a failure is BlueZ saying "someone else is using this" — the
 /// D-Bus message (`In Progress`), the error name (`…Error.InProgress`) or the
@@ -100,6 +105,11 @@ fn adapter_error(error: btleplug::Error) -> anyhow::Error {
 /// `budget` has not run out, back off between the attempts, then hand whatever
 /// is left to [`adapter_error`].
 ///
+/// Each attempt is bounded by [`CALL_TIMEOUT`]: a btleplug call that never
+/// returns would otherwise hold the session's write lock forever and stall
+/// every management request behind it. A timeout is reported, never retried —
+/// the operation may have partially landed.
+///
 /// `retryable` must only accept failures where the operation demonstrably did
 /// **not** happen: `In Progress` (`org.bluez.Error.InProgress`) means BlueZ
 /// never started it — a second `linkr`, a phone app or a session of ours that
@@ -119,14 +129,20 @@ where
 {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        match operation().await {
-            Ok(value) => return Ok(value),
-            Err(error)
+        match tokio::time::timeout(CALL_TIMEOUT, operation()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error))
                 if retryable(&error.to_string()) && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(BUSY_BACKOFF).await;
             }
-            Err(error) => return Err(adapter_error(error)),
+            Ok(Err(error)) => return Err(adapter_error(error)),
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "Bluetooth call timed out after {} s; the adapter did not answer",
+                    CALL_TIMEOUT.as_secs()
+                ))
+            }
         }
     }
 }

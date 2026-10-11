@@ -287,6 +287,24 @@ pub const TOAST_LIFETIME: Duration = Duration::from_millis(2200);
 /// time a reflow takes.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 
+/// Grace period after the last *device output* before the frame is repainted
+/// a second time, for the same reason as [`RESIZE_SETTLE`]: a conhost
+/// repaints itself behind us not only on resizes but whenever it reflows, and
+/// same-line progress rewrites (`apt update`, `wget`) are the fastest way to
+/// desynchronise the cell diff — each rewrite is shorter than the last, and
+/// the difference is exactly what the diff then never writes again (F2, the
+/// `apt` ghosting). Churn does not repaint *now* (that would clear the
+/// screen on every burst); it only pushes the deadline, so the repaint
+/// lands once the device falls quiet and then sticks.
+pub const CONTENT_SETTLE: Duration = Duration::from_millis(250);
+
+/// Longest a full repaint may be starved by non-stop output. A device that
+/// never stops talking would keep the settle deadline forever in the
+/// future, so once a burst has run this long the frame is repainted anyway
+/// and the clock restarts: one full repaint per second at worst, invisible
+/// next to text that is scrolling anyway.
+pub const CHURN_REPAINT_MAX: Duration = Duration::from_secs(1);
+
 impl Toast {
     pub fn expired(&self, now: Instant) -> bool {
         now.duration_since(self.at) > TOAST_LIFETIME
@@ -414,6 +432,11 @@ pub struct App {
     /// until Ctrl+L (K1). Every resize event pushes the deadline forward, so a
     /// drag collapses into exactly one extra repaint once the mouse stops.
     pub settle_repaint_at: Option<Instant>,
+    /// When the current burst of device output started, so a stream that
+    /// never settles still cannot starve the full repaint forever (see
+    /// [`App::note_output_churn`] and [`CHURN_REPAINT_MAX`]). `None` while
+    /// no burst is running.
+    pub churn_since: Option<Instant>,
 
     /// Visible height of the center pane in rows; the layout feeds it back so
     /// the VT grid and the scroll helpers know their geometry.
@@ -632,8 +655,28 @@ impl App {
     pub fn poll_settle_repaint(&mut self, now: Instant) {
         if self.settle_repaint_at.is_some_and(|at| now >= at) {
             self.settle_repaint_at = None;
+            self.churn_since = None;
             self.force_redraw = true;
         }
+    }
+
+    /// Push the settle deadline without repainting now, for device output
+    /// rather than a resize. The same-line rewrites of a progress line churn
+    /// the pane dozens of times a second, and while that lasts there is
+    /// nothing to gain from clearing the screen — but the moment it stops,
+    /// the frame is repainted in full and whatever conhost reflowed
+    /// underneath it is wiped (F2, the `apt update` ghosting: content churn
+    /// is not a discrete transition, so none of the `sync_*_repaint` hooks
+    /// watched it). Non-stop output would starve that repaint forever, so a
+    /// burst older than [`CHURN_REPAINT_MAX`] repaints immediately and
+    /// restarts the clock.
+    pub fn note_output_churn(&mut self, now: Instant) {
+        let since = *self.churn_since.get_or_insert(now);
+        if now.duration_since(since) >= CHURN_REPAINT_MAX {
+            self.churn_since = Some(now);
+            self.force_redraw = true;
+        }
+        self.settle_repaint_at = Some(now + CONTENT_SETTLE);
     }
 
     /// True while a modal overlay (command palette or dialog) owns a slice of
@@ -1017,6 +1060,52 @@ mod tests {
 
         app.poll_settle_repaint(start + Duration::from_millis(40) + RESIZE_SETTLE);
         assert!(app.take_force_redraw(), "one repaint after the drag ends");
+    }
+
+    /// F2 (the `apt update` ghosting): device output is content churn, not a
+    /// discrete transition, so it must not repaint while it lasts — but the
+    /// frame is repainted in full once the output settles, wiping whatever
+    /// conhost reflowed underneath.
+    #[test]
+    fn output_churn_repaints_once_the_device_settles() {
+        let mut app = crate::tui::test_app();
+        let start = Instant::now();
+
+        app.note_output_churn(start);
+        assert!(!app.force_redraw, "churn must not clear the screen");
+
+        app.note_output_churn(start + Duration::from_millis(100));
+        app.poll_settle_repaint(start + Duration::from_millis(200));
+        assert!(!app.force_redraw, "the deadline follows the latest output");
+
+        app.poll_settle_repaint(start + Duration::from_millis(100) + CONTENT_SETTLE);
+        assert!(app.take_force_redraw(), "the settled repaint arrives");
+        assert!(app.churn_since.is_none(), "the burst is over");
+        app.poll_settle_repaint(start + Duration::from_secs(5));
+        assert!(!app.force_redraw, "and exactly once");
+    }
+
+    /// F2: output that never stops would keep the settle deadline forever in
+    /// the future, so a burst older than [`CHURN_REPAINT_MAX`] repaints
+    /// immediately and restarts the clock — one full repaint per second at
+    /// worst.
+    #[test]
+    fn nonstop_output_cannot_starve_the_repaint() {
+        let mut app = crate::tui::test_app();
+        let start = Instant::now();
+
+        app.note_output_churn(start);
+        app.note_output_churn(start + Duration::from_millis(500));
+        assert!(
+            !app.force_redraw,
+            "half a second of output is not yet a stall"
+        );
+
+        app.note_output_churn(start + CHURN_REPAINT_MAX);
+        assert!(app.take_force_redraw(), "a full second forces the repaint");
+
+        app.poll_settle_repaint(start + CHURN_REPAINT_MAX + CONTENT_SETTLE);
+        assert!(app.take_force_redraw(), "the settled repaint still lands");
     }
 
     /// K5: the loop watches this flag, so it has to read as "open" for both
