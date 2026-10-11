@@ -114,6 +114,28 @@ pub fn set_diagnostic_sink(sink: Option<Sender<(NoticeLevel, String)>>) {
     *DIAGNOSTIC_SINK.lock().expect("diagnostic sink poisoned") = sink;
 }
 
+/// How long a runtime may take to wind down before the process stops waiting.
+///
+/// Both runtimes own a task that only leaves on a platform call: the CLI's
+/// holds the session and with it the live transport, the TUI's holds the
+/// deferred connect. Tearing a live Windows BLE session down runs synchronous
+/// COM teardown (`BLEDevice::drop` closes the GATT services,
+/// `BLECharacteristic::drop` removes its value-changed handler) **on whichever
+/// worker is running that task**, and a worker parked in a synchronous section
+/// never reaches a yield point. `Runtime`'s `Drop` has no timeout and joins
+/// those workers, so it waits for ever and the process never leaves — with the
+/// console still on the alternate screen, which is indistinguishable from a
+/// hung TUI. This budget is what keeps that from holding the process open;
+/// whatever is left is killed by the OS when the process exits, which is about
+/// to happen anyway.
+pub(crate) const RUNTIME_SHUTDOWN_BUDGET: Duration = Duration::from_millis(750);
+
+/// [`tokio::runtime::Runtime::shutdown_timeout`] with that budget. The timeout
+/// overload exists precisely because `Drop` has none.
+pub(crate) fn shutdown_bounded(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_BUDGET);
+}
+
 fn diagnostic(level: NoticeLevel, line: String) {
     let slot = DIAGNOSTIC_SINK.lock().expect("diagnostic sink poisoned");
     if let Some(tx) = slot.as_ref() {
@@ -933,7 +955,12 @@ fn execute(cli: Cli) -> i32 {
             return EXIT_ERROR;
         }
     };
-    runtime.block_on(drive(cli, validated, wifi, lan_token))
+    let code = runtime.block_on(drive(cli, validated, wifi, lan_token));
+    // The session task is this runtime's last tenant and it owns the live
+    // transport, so this is where a BLE session does its synchronous teardown.
+    // Bound the wait (see [`RUNTIME_SHUTDOWN_BUDGET`]).
+    shutdown_bounded(runtime);
+    code
 }
 
 /// Geometry is on exactly when Python enables it: not `--no-terminal`, a TTY
@@ -1413,6 +1440,41 @@ mod tests {
     use super::*;
     use crate::event::MgmtKind;
     use std::sync::{Arc, Mutex};
+
+    /// The process must not be held open by a worker that will not unwind.
+    ///
+    /// `Runtime`'s `Drop` has no timeout: it joins its workers, and a worker
+    /// parked in a synchronous section never reaches the yield point that would
+    /// let it stop. That is the shape a live Windows BLE session has when it is
+    /// dropped — synchronous GATT teardown on the worker running the session
+    /// task — so the budget is what decides whether "quit" actually ends the
+    /// process. Every worker is parked on purpose: with one still free, even a
+    /// plain `Drop` would look healthy.
+    #[test]
+    fn a_worker_that_will_not_unwind_cannot_hold_the_shutdown() {
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .expect("a multi-thread runtime");
+        for _ in 0..workers {
+            runtime.spawn(async {
+                // No await point anywhere: this worker cannot be stopped.
+                std::thread::sleep(Duration::from_secs(20));
+            });
+        }
+        // Give every spawned task time to reach its sleep.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        shutdown_bounded(runtime);
+        assert!(
+            started.elapsed() < RUNTIME_SHUTDOWN_BUDGET * 4,
+            "the wind-down waited {:?}, so the budget was not applied",
+            started.elapsed()
+        );
+    }
 
     /// The TUI owns the screen, so `linkr:` diagnostics must reach its notice
     /// log instead of the console: ratatui diffs its own buffer and never

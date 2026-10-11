@@ -204,7 +204,22 @@ fn ui_thread(ctx: TuiContext) -> i32 {
             return 1;
         }
     };
-    ui_session(rt, ctx)
+    // A handle is deliberately kept here. Without it `App`'s clone is the last
+    // one, so the runtime is wound down *inside* `event_loop` — that is, before
+    // `ui_session` has handed the console back — and a worker that will not
+    // unwind then leaves the user in front of a TUI that never goes away: the
+    // alternate screen stays up and `run`'s `join` never returns. Holding the
+    // handle makes this the last one, so the wind-down happens after the
+    // terminal is the user's again, and on a budget rather than for ever.
+    let code = ui_session(Arc::clone(&rt), ctx);
+    match Arc::try_unwrap(rt) {
+        // Nothing else holds it: the only chance to bound the wait.
+        Ok(runtime) => crate::cli::shutdown_bounded(runtime),
+        // Something still shares the runtime, so there is no owned value left
+        // to bound; the plain `Drop` is all that remains.
+        Err(_shared) => {}
+    }
+    code
 }
 
 /// Take the terminal over (raw mode + alternate screen) and restore it on
