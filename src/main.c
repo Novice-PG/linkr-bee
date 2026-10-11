@@ -947,7 +947,20 @@ static int apply_uart_config(const struct uart_config *cfg)
  */
 uint32_t linkr_uart_config_current(void)
 {
-	return active_uart_config.baudrate;
+	uint32_t baudrate;
+
+	/*
+	 * Under the same lock that guards every other reader and the one
+	 * writer. The struct is assigned as a whole in apply_uart_config()
+	 * while the lock is held, and the autobaud tick runs on the system
+	 * workqueue, so an unlocked read can land between the assignment's
+	 * members and report a rate the port was never set to.
+	 */
+	k_mutex_lock(&uart_config_lock, K_FOREVER);
+	baudrate = active_uart_config.baudrate;
+	k_mutex_unlock(&uart_config_lock);
+
+	return baudrate;
 }
 
 int linkr_uart_config_reconfigure(uint32_t baudrate)

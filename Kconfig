@@ -100,10 +100,26 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 	  only reset the ring and throw away good data).
 
 	  Limits: it needs the peer to toggle bits, so an idle line is simply
-	  skipped. Traffic made only of bytes 0x80-0xFE with a zero LSB
-	  throughout a whole window would time two-bit runs and report half
-	  the rate; the next windows then see the real line rate again and
-	  put it back, because the measurement depends only on RXD.
+	  skipped, and traffic carrying no single-bit run anywhere in a window
+	  (only bytes 0x80-0xFE with a zero LSB throughout manage that) times
+	  two-bit runs and reports our own rate divided by k, k in 2..9. That
+	  reading cannot be corrected by waiting: the pulse width belongs to
+	  RXD and not to our divisor, so once the port moves there the same
+	  width matches at the new rate and every later window agrees with it.
+	  Two things hold the port while the link is known good. A reading
+	  within 2% marks the link verified again; and a verified link refuses
+	  — and logs — a reading of our own rate over k, because that is the
+	  one shape and the one direction a missing single-bit run can
+	  produce. The refusal reopens on silence: eight empty windows (3.2 s)
+	  mean a link we no longer hold evidence about, so the next reading is
+	  followed whether it moved or not. That re-probe is what makes a real
+	  drop to a whole divisor of our rate followable at all, and it is also
+	  the case the protection gives up: a quiet line that comes back
+	  carrying such a stream is followed too. It is the mirror of the one
+	  case that never is: a peer switching 115200 to 57600 with no gap in
+	  its output reads as our own rate over a two-bit run for as long as
+	  it keeps sending, and the port stays where it is until the line goes
+	  quiet — 3.2 s of silence is the only thing that tells the two apart.
 
 	  Restricted to the classic ESP32: this depends on
 	  <soc/uart_struct.h> and the auto-baud registers, which are only

@@ -1,6 +1,7 @@
 # 桥接队列丢包排查记录（固件侧）
 
-> 最后更新: 2026-10-04
+> 最后更新: 2026-10-11
+> 行号基准: 本文 `文件:行` 引用已按本 PR 的 HEAD 逐条重定位（以符号/字面量为锚点核对），不是写作当时的行号。
 > 范围: 本文只记录 **固件（板子）侧** 三处缓冲的丢包条件与影响，供上游与后续排障参考。
 > 客户端侧的三个问题（LAN 重连、上行限流、粘贴卡住）不在此列，见代码提交与本次 PR。
 
@@ -12,24 +13,24 @@
 `git log -S"discarded + keep - written" -- src/ws_bridge.c` 指向
 `e915983 feat: add WiFi and LAN WebSocket bridge`，并且有三处明文规定：
 
-- `Kconfig:369` 帮助文本：*A client slower than the UART **drops oldest data
+- `Kconfig:419` 帮助文本：*A client slower than the UART **drops oldest data
   instead of blocking** the bridge.*
-- `docs/DEVELOPMENT.md:259` / `docs/DEVELOPMENT.zh-CN.md:208`：
+- `docs/DEVELOPMENT.md:259` / `docs/DEVELOPMENT.zh-CN.md:207`：
   「每个客户端独立 TX 环形缓冲；**慢客户端丢弃最旧数据，不会拖慢桥**」
 - `prj.conf` 出厂开关 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y`，
   注释：*Disconnected BLE delivery is best-effort; **it cannot stall UART***。
 
 硬件只决定**缓冲开多大**，不决定满了怎么办。
 
-**板级配置现状（2026-10-09 逐项核对 `boards/esp32_devkitc_esp32_procpu.conf`）**：
+**板级配置现状（2026-10-11 逐项核对 `boards/esp32_devkitc_esp32_procpu.conf`）**：
 这块板**没有把任何缓冲砍到 Kconfig 默认值以下**——两处同值，一处反而更大：
 
 | 项 | Kconfig 默认 | 板级取值 |
 |---|---|---|
-| `WS_BRIDGE_CLIENT_BUFFER_SIZE` | 2048 | **2048**（`:210`） |
-| `UART_RX_BUFFER_SIZE` | 16384 | **16384**（`:143`） |
-| `WS_BRIDGE_MAX_CLIENTS` | 2 | **2**（`:202`） |
-| `BLE_TO_UART_QUEUE_DEPTH` | 8 | **16**（`:147`，更大） |
+| `WS_BRIDGE_CLIENT_BUFFER_SIZE` | 2048 | **2048**（`:242`） |
+| `UART_RX_BUFFER_SIZE` | 16384 | **16384**（`:170`） |
+| `WS_BRIDGE_MAX_CLIENTS` | 2 | **2**（`:234`） |
+| `BLE_TO_UART_QUEUE_DEPTH` | 8 | **16**（`:179`，更大） |
 
 > **历史注**：本文早先记的是「砍到 1024 B / `MAX_CLIENTS=1` / `UART_RX_BUFFER_SIZE=4096`」，
 > 那是**压缩期**的取值（表格「压缩期为 …」括注保留，供对照当时的实测）；现配置已回到
@@ -48,9 +49,9 @@ SBC 控制台 ──115200 波特(8N1 ≈ 11520 B/s)──▶
 
 | # | 缓冲 | 默认大小 | ESP32-WROOM 板取值 | 满了怎么办 | 可观测性 |
 |---|---|---|---|---|---|
-| ① | `uart_rx_ring`（`src/main.c:180`） | 16384 B（≈1.42 s） | **16384 B**（≈1.42 s，与默认同值；压缩期为 4096 → 8192 B） | 计数丢弃（`src/main.c:462`） | `@i?` → `@info uart dropped=`（`src/main.c:1005`） |
-| ② | 每客户端 `tx_ring`（`src/ws_bridge.c:73`） | 2048 B | **2048 B**（≈178 ms，与默认同值；压缩期为 1024 B/≈89 ms） | **丢最旧**（`src/ws_bridge.c:882-888`） | `@i?` → `@info ws … dropped=`（`src/ws_bridge.c:937`） |
-| ③ | `ble_to_uart_queue`（`src/main.c:175`） | 深度 **8** × `BLE_TO_UART_MAX_LEN 244` = **1952 B**（≈170 ms） | 深度 **16** = **3904 B**（≈339 ms，**比默认大一倍**） | **整条拒绝** `-ENOMEM`（`src/main.c:1472` 预检 / `:1483` 单条入队） | **2026-10-06 起有计数器**：`@i?` → `@info queue dropped=`；`LOG_WRN` 也随日志级 1→2 恢复可见 |
+| ① | `uart_rx_ring`（`src/main.c:188`） | 16384 B（≈1.42 s） | **16384 B**（≈1.42 s，与默认同值；压缩期为 4096 → 8192 B） | 计数丢弃（`src/main.c:466`） | `@i?` → `@info uart dropped=`（`src/main.c:1022`） |
+| ② | 每客户端 `tx_ring`（`src/ws_bridge.c:73`） | 2048 B | **2048 B**（≈178 ms，与默认同值；压缩期为 1024 B/≈89 ms） | **丢最旧**（`src/ws_bridge.c:891-895`） | `@i?` → `@info ws … dropped=`（`src/ws_bridge.c:941`） |
+| ③ | `ble_to_uart_queue`（`src/main.c:178`） | 深度 **8** × `BLE_TO_UART_MAX_LEN 244` = **1952 B**（≈170 ms） | 深度 **16** = **3904 B**（≈339 ms，**比默认大一倍**） | **整条拒绝** `-ENOMEM`（`src/main.c:1489` 预检 / `:1500` 单条入队） | **2026-10-06 起有计数器**：`@i?` → `@info queue dropped=`；`LOG_WRN` 也随日志级 1→2 恢复可见 |
 
 ### 丢包触发条件
 
@@ -64,9 +65,9 @@ SBC 控制台 ──115200 波特(8N1 ≈ 11520 B/s)──▶
    所以同一笔数据，队列空时过、有积压时丢，**结果是概率性的**。
 
 **② 下行（SBC → 客户端）**：`linkr_ws_feed()` 每次喂入 ≤ `UART_RX_CHUNK`
-（`Kconfig:34`，默认 232 B，范围 20–244），所以 `src/ws_bridge.c:877` 的
+（`Kconfig:34`，默认 232 B，范围 20–244），所以 `src/ws_bridge.c:886` 的
 「单次超缓冲只留尾部」分支在本板**不可达**（232 < 2048）；实际丢的全部走
-`src/ws_bridge.c:882` 的**丢最旧**。触发条件一句话：
+`src/ws_bridge.c:891` 的**丢最旧**。触发条件一句话：
 
 ```
 WS 发送侧停顿 ≥ 2048 ÷ 11520 ≈ 178 ms，且 SBC 在满速打印
@@ -116,10 +117,10 @@ WS 发送侧停顿 ≥ 2048 ÷ 11520 ≈ 178 ms，且 SBC 在满速打印
 1. **完全静默**：无错误码、无重传、无乱序标记。字节**只会少，不会错**
    （`ring_buf` 原样拷贝），收端无法察觉中间缺了一段。
 2. **上行丢 = 整条命令凭空蒸发**（一个字节都不入队，收端无从察觉字节少了）。
-   **但本板现已可观测**：`@i?` → `@info queue dropped=%u`（`src/main.c:1017`）
+   **但本板现已可观测**：`@i?` → `@info queue dropped=%u`（`src/main.c:1034`）
    有独立计数器；设备日志 `LOG_WRN("Dropping BLE->UART write; queue full")`
-   （`src/main.c:1387`）在 `CONFIG_LOG_DEFAULT_LEVEL=2`（**WARN**，
-   `boards/esp32_devkitc_esp32_procpu.conf:162`）下也会打印。
+   （`src/main.c:1404`）在 `CONFIG_LOG_DEFAULT_LEVEL=2`（**WARN**，
+   `boards/esp32_devkitc_esp32_procpu.conf:194`）下也会打印。
    > **历史注**：本文早先记的是「没有上行丢包计数器、日志级 1 只保留 ERROR ⇒ 连日志
    > 都没有」，那是**压缩期**的状态；计数器与日志级 1→2 均已加上，此条按现值更正。
 3. **下行丢 = 终端输出中间缺块**（丢最旧，即**中段**而非尾巴）：

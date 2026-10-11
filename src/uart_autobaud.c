@@ -30,8 +30,12 @@
  * shorter than the burst period would depend on luck. An empty window is not
  * a failure — it means the line has not toggled at all since the window
  * opened, which says nothing about the rate — so it costs nothing and never
- * blocks a later answer. (A stream of 0x00 or 0xFF is not empty: its stop bit
- * still leaves a one-bit high run, so that case measures fine.)
+ * blocks a later answer. (A stream of 0x00 or 0xFF is not empty — the start
+ * and stop bits keep toggling the line, so it also keeps resetting the silence
+ * counter — but it does not measure either: the two polarities time runs of
+ * nine and one bits, fail autobaud_apart() in every window, and are discarded
+ * like any window that cannot be trusted. Nothing is taken from it, and
+ * nothing needs to be.)
  *
  * Two windows must agree before the port is touched. A single window can be
  * wrong: a glitch that survives the filter, or a byte with no single-bit run
