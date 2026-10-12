@@ -45,7 +45,7 @@ class AutobaudTests(unittest.TestCase):
             "\n#endif /* LINKR_UART_AUTOBAUD */",
             ["autobaud_tick", "autobaud_reads_like_a_missing_bit",
              "autobaud_snap", "autobaud_forget", "autobaud_apart",
-             "linkr_uart_autobaud_init"],
+             "autobaud_pulse_within_cycles", "linkr_uart_autobaud_init"],
         )
         (directory / "autobaud_functions.inc").write_text(block)
         cls.binary = directory / "autobaud-tests"
@@ -177,6 +177,87 @@ class AutobaudTests(unittest.TestCase):
         result = self.run_scenario("quiet_then_a_short_binary")
         self.assertEqual(result["rate"], "115200")
         self.assertEqual(result["reconfigs"], "0")
+
+    def test_an_artifact_reading_above_our_rate_is_refused(self):
+        """The reading this link really produced: 2.7% high, held not chased.
+
+        A 115200 line that was being mis-sampled latched a shortest pulse of
+        676 cycles against the true 694 in window after window, which
+        computes 118342 — and the two-window rule moved a real board there.
+        The move cost the ring reset (33 bytes gone mid-transfer) and ~3.5%
+        of every byte after, and the wrong port then kept re-measuring as
+        itself, so nothing ever put it back. A reading this close to our own
+        rate says nothing worth acting on: it is our own rate measured short.
+        """
+        result = self.run_scenario("artifact_high_is_refused")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+
+    def test_a_peer_at_an_odd_rate_is_still_followed(self):
+        """The hold is a bound on the gap, not a list of blessed rates.
+
+        If the peer really is at a rate the snap table does not know — 150000,
+        say, 30% above our own — the bridge must follow it exactly as it
+        always did, or swapping to that peer leaves it deaf, which is the
+        failure autobaud exists to prevent. Nothing about being "non-standard"
+        refuses a reading.
+        """
+        result = self.run_scenario("odd_rate_peer_is_followed")
+        # pulse() truncates 80e6/150000 to 533 cycles, so the harness computes
+        # 150092 from it — a tenth of a percent off in the harness's own
+        # arithmetic. What matters here is the property, not the digit: the
+        # port left 115200 for a far, non-standard rate and stayed there.
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertNotEqual(result["rate"], "115200")
+        self.assertEqual(result["rate"], result["last"])
+        self.assertGreater(int(result["rate"]), 115200 * 11 // 10)
+
+    def test_a_port_found_at_a_wrong_rate_is_put_back(self):
+        """What the real board looked like, and the way out.
+
+        A port at 118342 that nothing has measured keeps no claim to be
+        trusted, so the hold does not protect it: the first clean windows read
+        the true rate (694 cycles -> 115200), which two agreeing windows
+        follow, and the port comes back with `verified` re-armed. This is the
+        rollback the two-window rule always promised, and the reason the hold
+        is conditioned on a trustworthy port rather than applied blindly.
+        """
+        result = self.run_scenario("stuck_port_recovers")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertEqual(result["last"], "115200")
+        self.assertEqual(result["verified"], "1")
+
+    def test_a_short_pulse_at_a_high_rate_is_held_without_a_percentage_band(self):
+        """The detector's error is fixed in cycles, so percent alone loses it.
+
+        A 230400 port whose detector latches 329 cycles where the true pulse is
+        347 — the same 18 cycles short it is short by at 115200. Eighteen
+        cycles is 5.3% of a bit-time here, so a hold of five percent by rate
+        misses it by a hair; at 921600 the same defect is 21% and the rate band
+        is not even close. The band in cycles is what covers the difference: a
+        port that moved would go to 243143, a rate no peer is at, and the same
+        short pulse would then read as a match at the rate it just moved to, so
+        nothing would ever put it back.
+        """
+        result = self.run_scenario("short_pulse_at_high_rate_is_held")
+        self.assertEqual(result["rate"], "230400")
+        self.assertEqual(result["reconfigs"], "0")
+
+    def test_a_short_pulse_never_holds_a_real_move(self):
+        """The cycle band is a bound on the gap, exactly like the percentage one.
+
+        150000 arriving on a 115200 port moves the pulse 161 cycles from what
+        the port is programmed for — six times the band's width — so the port
+        is still taken to the peer's rate as it always was, detector error and
+        all. If this ever fails, the band has grown wide enough to make the
+        bridge deaf to a peer that really did change rate, which is the failure
+        autobaud exists to prevent.
+        """
+        result = self.run_scenario("a_short_pulse_does_not_hold_a_real_move")
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertNotEqual(result["rate"], "115200")
+        self.assertEqual(result["rate"], result["last"])
 
 
 if __name__ == "__main__":

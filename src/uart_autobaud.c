@@ -84,6 +84,43 @@
  * turns out wrong can still be undone — the rollback the two-window rule
  * depends on.
  *
+ * Measured on a real link, that rollback has one hole, and it is the small
+ * delta. A 115200 line read 118342 — 2.7% high, because one window's shortest
+ * pulse was cut a little short — in window after window, and the two-window
+ * rule followed the port there; the move cost a ring reset (33 bytes gone
+ * mid-transfer) and mis-sampling at the new rate cost ~3.5% of every byte
+ * after, and the mis-sampling is what kept re-measuring the port as itself,
+ * so "the next windows measure the true rate again" never happened. The hole
+ * is that a reading a few percent off our own is indistinguishable from our
+ * own rate read badly, and the rule this file states — hold the port that
+ * works — was never applied to it: only the divisor shape was refused. A
+ * reading within AUTOBAUD_HOLD_PCT of our own, taken while the port sits at a
+ * rate worth trusting, is now held instead of chased.
+ *
+ * The hole is deeper than the percentage, though, because the detector's error
+ * is a fixed number of *cycles* and not a fixed fraction of a bit-time.
+ * Measured on hardware: a true 694-cycle pulse latched as 676, and a true
+ * 699-cycle one as 675 — the same ~18 cycles short in both, at two different
+ * port rates. A constant 18 cycles is 2.7% of a bit-time at 115200 but 5.3% at
+ * 230400 and 21% at 921600, so a hold measured only in percent stops covering
+ * the error exactly where the link gets fast. The hold therefore has two
+ * mouths — the percentage band for the rate, and a cycle band for the raw
+ * pulse count — and either one holds the port. See AUTOBAUD_HOLD_CYCLES for
+ * the trade the second one makes.
+ *
+ * The hold is a bound on the *gap*, not a list of blessed rates: nothing a
+ * peer does lands inside it. Every other rate a console boots to is at least
+ * 20% away or a whole divisor — 115200 -> 230400 is +100%, 921600 -> 1000000
+ * is +8.5% — and a rate that is odd but real, 150000 say, is far enough from
+ * ours that it is followed exactly as it always was. Being a rate the snap
+ * table knows is neither necessary nor sufficient for the port to move.
+ *
+ * What the hold does need is a port worth trusting: one the line has been
+ * measured against, or the standard rate both ends were configured to. A port
+ * at a rate some earlier decision moved to, with nothing measured since, gets
+ * no hold — the first clean reading still names the real rate and puts it
+ * back, which is the rollback the two-window rule always promised.
+ *
  * Silence is how the refusal reopens — but only for the divisors a stream
  * cannot fake. A peer that really did slow to a whole divisor of our own and
  * a stream with no single-bit run in it arrive as the same number (921600 ->
@@ -156,6 +193,38 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #define AUTOBAUD_AGREE_PCT	5
 #define AUTOBAUD_GLITCH_FILT	16 /* cycles, ~200 ns at 80 MHz */
 #define AUTOBAUD_TOLERANCE_PCT	2 /* UART itself is good for ~2-3% */
+/*
+ * How close to our own rate a reading may sit and still be treated as our own
+ * rate measured badly rather than a rate worth chasing. Five percent: wide
+ * enough to swallow the 2.7% a mis-measured window produced on real hardware,
+ * narrow enough that every other rate a console boots to stays out of it —
+ * the closest pair in the snap table is 921600 -> 1000000 at 8.5%, and every
+ * divisor pair is further apart still. See the file header: this is a bound
+ * on the gap, not a list of rates the port is allowed to move to.
+ */
+#define AUTOBAUD_HOLD_PCT	5
+/*
+ * The same hold expressed in the units the detector actually reports. Its error
+ * is a fixed number of source-clock cycles rather than a fraction of a
+ * bit-time — measured: 676 latched against a true 694 at 115200, and 675
+ * against 699 at 118517, the same ~18 short in both. Eighteen cycles is 2.7% of
+ * a bit-time at 115200 but 5.3% at 230400, 10.6% at 460800 and 21% at 921600,
+ * so the percentage band above loses its grip on the error exactly where the
+ * rate climbs. This band keeps it: a latched pulse within this many cycles of
+ * the one the port is programmed for is the detector's own error, whatever rate
+ * it happens to be wearing.
+ *
+ * Twenty-four cycles: comfortably wider than the 18-19 measured, and still far
+ * narrower than every move between two rates a console boots to *below* ours —
+ * the nearest of those, 115200 arriving on a 921600 port, is 607 cycles away.
+ * The one thing it swallows is a small upward step at a high rate: 921600 ->
+ * 1000000 is 7 cycles apart. That trade falls the same way the rest of this
+ * file does. At 921600 the detector's own error is 18 cycles against a 7-cycle
+ * step, so a port that followed that reading would land further from the peer
+ * than one that held still did — the hold is not what makes that rate hard, the
+ * detector is, and the hold is what keeps the port from chasing it.
+ */
+#define AUTOBAUD_HOLD_CYCLES	24
 #define AUTOBAUD_MIN_BAUD	300	   /* mirrors Kconfig's range */
 #define AUTOBAUD_MAX_BAUD	3000000 /* mirrors Kconfig's range */
 /*
@@ -217,8 +286,11 @@ static bool autobaud_apart(uint32_t a, uint32_t b)
 	return (hi - lo) * 100u > lo * AUTOBAUD_AGREE_PCT;
 }
 
-/* Rounds to a rate worth reporting when the measurement is a whisker off. */
-static uint32_t autobaud_snap(uint32_t measured)
+/*
+ * The standard rate `measured` sits within 1% of, or 0 when it sits within 1%
+ * of none — which is a rate no peer can be set to.
+ */
+static uint32_t autobaud_standard_within_1pct(uint32_t measured)
 {
 	static const uint32_t standard[] = {
 		9600,    14400,   19200,   38400,	 57600,  74880,
@@ -233,7 +305,55 @@ static uint32_t autobaud_snap(uint32_t measured)
 			return s;
 		}
 	}
-	return measured;
+	return 0;
+}
+
+/* Rounds to a rate worth reporting when the measurement is a whisker off. */
+static uint32_t autobaud_snap(uint32_t measured)
+{
+	uint32_t s = autobaud_standard_within_1pct(measured);
+
+	return s ? s : measured;
+}
+
+/*
+ * True when `rate` sits within the snap margin (1%) of a rate a console can
+ * actually be set to — this is about the *port's* rate being one worth
+ * trusting, not about which readings may move it. The rate in Kconfig is a
+ * standard console rate, so a port still at (or snapped to) one is a port
+ * both ends were configured to; the hold in the tick leans on that, because
+ * it is only safe to call a near-our-rate reading "our own rate, badly
+ * measured" while our own rate is one the line could plausibly be at. See
+ * the file header — no reading is refused for being non-standard.
+ */
+static bool autobaud_is_standard(uint32_t rate)
+{
+	return autobaud_standard_within_1pct(rate) != 0;
+}
+
+/* True when `rate` sits within `pct` of `base`, either side. */
+static bool autobaud_within_pct(uint32_t rate, uint32_t base, uint32_t pct)
+{
+	uint32_t delta = rate > base ? rate - base : base - rate;
+
+	return delta * 100u <= base * pct;
+}
+
+/*
+ * True when `div_meas` — the shortest pulse the detector latched, in
+ * source-clock cycles per bit — sits within `cycles` of the pulse the port is
+ * programmed for. `div_cur` is the same quantity scaled by sixteen
+ * (`div_int << 4 | div_frag`), so it is rounded back down here with the same
+ * rounding the divider arithmetic itself uses, and the two numbers below are
+ * directly comparable. See AUTOBAUD_HOLD_CYCLES.
+ */
+static bool autobaud_pulse_within_cycles(uint32_t div_meas, uint32_t div_cur,
+					 uint32_t cycles)
+{
+	uint32_t expect = (div_cur + 8u) >> 4;
+	uint32_t delta = div_meas > expect ? div_meas - expect : expect - div_meas;
+
+	return delta <= cycles;
 }
 
 /*
@@ -377,6 +497,48 @@ static void autobaud_tick(struct k_work *work)
 		 */
 		autobaud_verified = true;
 		autobaud_forget(); /* we already match the line */
+		return;
+	}
+
+	/*
+	 * Close to our own rate, and the port is one worth trusting: this is
+	 * our own rate measured through a window whose shortest pulse was cut
+	 * a little short, not a rate worth chasing. Chasing it is what cost a
+	 * real board its data — the port was moved 2.7% for a reading that
+	 * said nothing, the move reset the ring (33 bytes gone mid-transfer)
+	 * and mis-sampling at the new rate cost ~3.5% of every byte after it.
+	 *
+	 * Note what this is *not*: a list of rates the port may move to. A
+	 * peer set to an odd but real rate (150000, say) is outside the band
+	 * and is followed as it always was; the hold is a bound on how small a
+	 * move is worth making, and below a few percent the two rates work
+	 * identically anyway.
+	 *
+	 * Two ways in, because the detector's error is fixed in cycles while
+	 * the percentage band is fixed in percent, and the two only agree at
+	 * 115200: see AUTOBAUD_HOLD_CYCLES. The pulse comparison also puts the
+	 * numbers it decided on into the log, which is what the next person to
+	 * look at this will need.
+	 *
+	 * The port has to be worth trusting for the hold to apply: measured
+	 * against the line already, or the standard rate both ends were
+	 * configured to. A port at a rate some earlier decision moved to, with
+	 * nothing measured since, keeps no such claim — a clean reading of the
+	 * real rate is then free to put it back.
+	 */
+	if ((autobaud_verified || autobaud_is_standard(old_baud)) &&
+	    (autobaud_within_pct(measured, old_baud, AUTOBAUD_HOLD_PCT) ||
+	     autobaud_pulse_within_cycles(div_meas, div_cur,
+					  AUTOBAUD_HOLD_CYCLES))) {
+		autobaud_forget();
+		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
+			autobaud_warned_at = now;
+			LOG_WRN("UART autobaud: line reads %u (min pulse %u "
+				"cycles, port programmed for %u) — our own "
+				"rate measured short, not a move; holding %u",
+				(uint32_t)measured, div_meas,
+				(uint32_t)((div_cur + 8u) >> 4), old_baud);
+		}
 		return;
 	}
 
