@@ -1189,7 +1189,12 @@ async fn drain(
                     let (_, outputs) = render_event(json, quiet, event);
                     sink(&outputs);
                 }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                // Never silent: a lag means events were dropped, and the
+                // caller's output is now missing whatever they carried.
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    eprintln!("linkr: warning: bus lagged; {skipped} event(s) dropped");
+                    continue;
+                }
                 Err(_) => break,
             }
         }
@@ -1215,7 +1220,10 @@ async fn pump_until(
                     let (_, outputs) = render_event(json, quiet, event);
                     sink(&outputs);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    eprintln!("linkr: warning: bus lagged; {skipped} event(s) dropped");
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break None,
             },
         }
@@ -1264,7 +1272,20 @@ async fn run_loopback(
                     let (_, outputs) = render_event(json, quiet(), event);
                     emit(&outputs);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // A lag means the bus dropped messages we never saw, so the
+                // bytes they carried are gone from `received` too. The PASS
+                // test is "does the payload appear in what we got", and that
+                // question is unanswerable once a chunk has been skipped: the
+                // run cannot pass, and waiting out the deadline only turns a
+                // 4-second failure into a 120-second one. Fail now and say
+                // why, so the counter is what a bug report quotes.
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    eprintln!(
+                        "loopback FAIL (lagged: {skipped} event(s) dropped by the bus) <- {}",
+                        python_repr_bytes(&received)
+                    );
+                    return false;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = tokio::time::sleep(wait) => {
@@ -1370,23 +1391,38 @@ async fn terminal_loop(
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     break TerminalEnd::Closed;
                 };
-                // The escape byte only counts inside one read chunk.
-                match data.iter().position(|byte| *byte == validated.escape) {
-                    Some(position) => {
-                        if position != 0 {
-                            if let Err(failure) =
-                                send_payload(&session, &data[..position], cli).await
-                            {
+                // The escape byte is an interactive quit key, so it may only be
+                // honoured when the user is actually typing at a terminal.
+                //
+                // In line mode stdin is a pipe: the bytes are somebody's payload,
+                // not keystrokes. Scanning them for the escape byte aborts any
+                // transfer whose data happens to contain it — binary payloads hit
+                // a byte value roughly once per 256 bytes, so a ZMODEM file dies
+                // a few hundred bytes in. Pass line-mode input through untouched.
+                if line_mode {
+                    if let Err(failure) = send_payload(&session, &data, cli).await {
+                        error(failure);
+                        break TerminalEnd::Failed;
+                    }
+                } else {
+                    // The escape byte only counts inside one read chunk.
+                    match data.iter().position(|byte| *byte == validated.escape) {
+                        Some(position) => {
+                            if position != 0 {
+                                if let Err(failure) =
+                                    send_payload(&session, &data[..position], cli).await
+                                {
+                                    error(failure);
+                                    break TerminalEnd::Failed;
+                                }
+                            }
+                            break TerminalEnd::Closed;
+                        }
+                        None => {
+                            if let Err(failure) = send_payload(&session, &data, cli).await {
                                 error(failure);
                                 break TerminalEnd::Failed;
                             }
-                        }
-                        break TerminalEnd::Closed;
-                    }
-                    None => {
-                        if let Err(failure) = send_payload(&session, &data, cli).await {
-                            error(failure);
-                            break TerminalEnd::Failed;
                         }
                     }
                 }
@@ -1401,7 +1437,13 @@ async fn terminal_loop(
                         Flow::Disconnected => break TerminalEnd::Disconnected,
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Never silent: the console lost whole events, so the screen
+                // is now missing output it should have shown. Say so on stderr
+                // rather than letting the gap pass as a quiet link.
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    eprintln!("linkr: warning: bus lagged; {skipped} event(s) dropped");
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break TerminalEnd::Disconnected,
             },
             () = winch(&mut winch_signal) => {
