@@ -347,15 +347,93 @@ async fn geometry_due(deadline: Option<std::time::Instant>) {
     }
 }
 
+/// Move the transport fan-out off the session loop's critical path.
+///
+/// `EventHub` publishes on a `broadcast` channel, which overwrites its oldest
+/// entry once the ring wraps (256 events). Its only consumer is the
+/// session task's `run` loop, and that loop is not only a reader: it awaits a
+/// whole BLE round trip every time it writes (`handle_command` -> `write_uart`),
+/// and nothing drains the fan-out while that await is in flight.
+///
+/// Losing a `TransportEvent::Data` is not cosmetic. It carries serial RX bytes,
+/// and `UartCodec` keys on a strictly consecutive sequence number: five frames
+/// lost mid-transfer leave `rx_sequence` behind for good, because a gap is
+/// reported without advancing it — every later frame then fails the same check
+/// and is refused. That is exactly what a 1 MiB loopback cost: `expected 7947`
+/// for the remaining 7183 frames of the transfer, none of them delivered.
+///
+/// This task only ever receives and forwards, so it never stops draining while
+/// it is alive and the ring cannot wrap on its account. The queue is unbounded
+/// on purpose: when the loop is parked in a write the bytes must wait, and
+/// waiting is the one alternative to vanishing.
+///
+/// A `Lagged` here would mean the ring wrapped between two consecutive
+/// `recv` calls on a task with no other work, which the loop below cannot
+/// reach; it is reported rather than ignored because a silent hole is the
+/// exact failure this task exists to remove.
+async fn forward_transport_events(
+    mut events: broadcast::Receiver<TransportEvent>,
+    tx: mpsc::UnboundedSender<TransportEvent>,
+    bus: CoreBus,
+) {
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                // The receiver is gone: the session loop has ended and there is
+                // nobody left to hand bytes to.
+                if tx.send(event).is_err() {
+                    return;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                bus.publish(CoreEvent::Notice {
+                    level: NoticeLevel::Warn,
+                    text: format!(
+                        "console lagged: {dropped} transport events dropped, serial output may have gaps"
+                    ),
+                });
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 impl SessionTask {
     async fn run(
         mut self,
         mut commands: mpsc::UnboundedReceiver<SessionCommand>,
-        mut events: broadcast::Receiver<TransportEvent>,
+        events: broadcast::Receiver<TransportEvent>,
         mut mgmt_done: mpsc::UnboundedReceiver<RequestId>,
     ) {
+        // Take the lossy fan-out out of this loop before anything can stall it
+        // (see `forward_transport_events`).
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        tokio::spawn(forward_transport_events(events, event_tx, self.bus.clone()));
         loop {
             tokio::select! {
+                // Bytes first, and this is load-bearing. Reassembling one
+                // event is microseconds of bookkeeping, while one
+                // `SessionCommand::Uart` costs a BLE round trip, so the two
+                // arms cannot be left to an even split: on a link sending
+                // faster than half the loop can absorb, the RX half loses
+                // ground monotonically, which is the back-pressure the fan-out
+                // used to express by dropping. Priority here empties the queue
+                // before the next write starts, and a queue that is empty when
+                // the write begins cannot grow across it.
+                biased;
+                event = event_rx.recv() => match event {
+                    // The forwarder stops only once the fan-out itself closes,
+                    // so this is the transport going away, not a lost sender.
+                    None => {
+                        self.teardown("transport gone").await;
+                        return;
+                    }
+                    Some(event) => {
+                        if !self.handle_transport_event(event).await {
+                            return;
+                        }
+                    }
+                },
                 command = commands.recv() => match command {
                     None => {
                         self.teardown("session closed").await;
@@ -365,30 +443,6 @@ impl SessionTask {
                         if !self.handle_command(command).await {
                             return;
                         }
-                    }
-                },
-                event = events.recv() => match event {
-                    Ok(event) => {
-                        if !self.handle_transport_event(event).await {
-                            return;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                        // Falling behind the transport fan-out drops the oldest
-                        // events, and `TransportEvent::Data` carries serial RX
-                        // bytes: this is the one place a silent drop corrupts
-                        // what the console shows. Say so instead of swallowing
-                        // it (the UI half already warns the same way).
-                        self.bus.publish(CoreEvent::Notice {
-                            level: NoticeLevel::Warn,
-                            text: format!(
-                                "console lagged: {dropped} transport events dropped, serial output may have gaps"
-                            ),
-                        });
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        self.teardown("transport gone").await;
-                        return;
                     }
                 },
                 // A management request's caller is done — response, timeout or
@@ -1250,9 +1304,10 @@ mod tests {
         let mock = spawn_mock(TransportKind::Ble, 0, false);
         let mut events = mock.bus.subscribe();
 
-        // One synchronous burst, larger than the hub's 256-slot buffer: with
-        // the session's consumer parked on this task, the oldest payloads are
-        // overwritten before it can ever read them.
+        // One synchronous burst, larger than the hub's 256-slot buffer. Nothing
+        // can drain it while this task holds the runtime and never yields, so
+        // the oldest payloads are overwritten before the forwarding task that
+        // normally drains the hub ever gets to run.
         for i in 0..400u32 {
             mock.hub.publish(TransportEvent::Data {
                 channel: TransportChannel::UartTx,
