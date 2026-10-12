@@ -228,12 +228,21 @@ to run them`.
 | `--enter <raw\|cr\|lf\|crlf>` | what `Enter` sends, default `raw` |
 | `--local-echo` | echo typed bytes locally, for a target that does not |
 | `--line-mode` | send one visible line at a time instead of raw terminal mode |
-| `--escape <TYPE>` | the key that leaves the session, default `^]` |
+| `--escape <TYPE>` | the key that leaves the session, default `^]` — **interactive TTY only** |
 | `--ble-write-size <BYTES>` | cap each NUS write; `0` (the default) negotiates one automatically |
 | `--write-response` | acknowledge every chunk — NUS fallback only; Reliable UART always does |
 | `--write-delay-ms <MS>` | pause between chunks, default `5.0` — NUS fallback only |
 | `--tui` | hand the connected session to the TUI, exactly what `linkr tui` does |
 | `--yes` | let the assistant approve its own commands (TUI approval broker) |
+
+**The escape byte is a keystroke, not a byte — that distinction is the whole
+rule.** `line_mode` is `--line-mode` *or* a stdin that is not a TTY (a pipe, a
+file, `cat file | linkr`), and it means "these bytes are somebody's payload". In
+that mode nothing is scanned for `^]`: the input is forwarded untouched. Binary
+data meets `0x1d` roughly once every 256 bytes, so a payload that is read for a
+command key dies a few hundred bytes in — quietly, and far too early to look
+like a cause. Only an interactive terminal, where the bytes really are
+keystrokes, honours `--escape`.
 
 ### Subcommands
 
