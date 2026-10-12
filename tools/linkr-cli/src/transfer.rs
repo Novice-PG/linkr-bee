@@ -55,13 +55,23 @@ pub const MARKER: &str = "LINKR_ZM:";
 
 /// Bytes handed to the session per tick while a transfer runs.
 ///
-/// Deliberately a quarter of the ~1 KiB burst the bridge is known to survive
-/// (`dist/paste_integrity.py`: 1600 B loses 136) and just over the ~232 B
-/// reliable BLE payload, so one tick is one bridge write rather than a
-/// queue-filling blast.
-pub const CHUNK_BYTES: usize = 256;
+/// One tick has to be **exactly one reliable frame**, because one frame is
+/// exactly one ATT write: 12 B of header plus a 232 B payload is the 244 B the
+/// negotiated MTU carries, and the session frames whatever it is handed from
+/// scratch. 256 did not meet that. It is past the frame, so every tick framed
+/// as 232 + 24 and cost *two* writes, the second one a 24-byte payload behind
+/// its own header. Measured on the 64 KiB loopback: lines of 232 B (one frame,
+/// one write) came back at 2381 B/s and lines of 256 B (two writes) at
+/// 2027 B/s — 11 % more bytes per line bought 17 % less throughput, and the
+/// fitted per-line cost was 68 ms plus 29 ms per write.
+///
+/// 232 is also the *smaller* burst, so it stays inside the queue the old value
+/// was picked to respect rather than pushing past it: a tick now tops out at
+/// the 244 B frame the bridge was sized for. The single-write rule is the part
+/// that was wrong; the caution behind it is unchanged.
+pub const CHUNK_BYTES: usize = 232;
 
-/// Minimum spacing between two chunks: 256 B / 25 ms ≈ 10 KiB/s. Both numbers
+/// Minimum spacing between two chunks: 232 B / 25 ms ≈ 9 KiB/s. Both numbers
 /// are constants rather than settings because the safe value is a property of
 /// the bridge's queue, not of the person running the TUI.
 pub const CHUNK_INTERVAL: Duration = Duration::from_millis(25);
