@@ -56,6 +56,17 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define UART_RX_CHUNK CONFIG_LINKR_BLE_BRIDGE_UART_RX_CHUNK
 #define UART_RX_BUFFER_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 
+/* Where the RX ring stops being drained so the peer is held off. Percent of
+ * UART_RX_BUFFER_SIZE; the gate trips at the high mark and releases at the low
+ * one so it does not chatter. See uart_to_ble_thread(). */
+#define UART_RX_HIGH_WATERMARK \
+	((UART_RX_BUFFER_SIZE * CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT) / 100)
+#define UART_RX_LOW_WATERMARK \
+	((UART_RX_BUFFER_SIZE * CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT) / 100)
+
+BUILD_ASSERT(CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT >
+	     CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT);
+
 #define CONTROL_CMD_PREFIX "@linkr "
 #define CONTROL_CMD_MAX_LEN 416
 #define FACTORY_RESET_CONFIRM_MS 2000
@@ -1033,6 +1044,23 @@ static void diagnostics_response(struct bt_conn *conn)
 	 * and the web parser, both key on the group name). */
 	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
 				    (unsigned int)atomic_get(&uart_queue_dropped));
+	{
+		/* Whether the 40-92 ms handoff stalls come from the -EBUSY/-ENOMEM
+		 * retry backoff (slept_ms) or from waiting on the peer (wait_max_ms).
+		 * Its own group, like `queue`, so existing parsers stay intact.
+		 * See ble_uart_reliable.c for what each counter means. */
+		uint32_t ind_total, ind_retry, ind_busy, ind_nomem;
+		uint32_t ind_slept, ind_timeout, ind_wait_max;
+
+		linkr_uart_reliable_diag(&ind_total, &ind_retry, &ind_busy,
+					 &ind_nomem, &ind_slept, &ind_timeout,
+					 &ind_wait_max);
+		(void)send_control_response(conn,
+					    "@info rel ind=%u retry=%u busy=%u nomem=%u slept_ms=%u timeout=%u wait_max_ms=%u\r\n",
+					    ind_total, ind_retry, ind_busy,
+					    ind_nomem, ind_slept, ind_timeout,
+					    ind_wait_max);
+	}
 #if IS_ENABLED(CONFIG_SYS_HEAP_RUNTIME_STATS)
 	heap_status_response(conn);
 #endif
@@ -1662,18 +1690,50 @@ static void uart_to_ble_thread(void)
 	size_t len = 0;
 	int64_t last_rx = 0;
 	bool accounted = false;
+	/* Backpressure hysteresis. Once the RX ring crosses the high watermark we
+	 * stop pulling from it, which lets the driver's own FIFO fill and throttle
+	 * the peer. We only resume below the low mark so the gate does not chatter
+	 * at the threshold. `gated` is thread-local state, not shared. */
+	bool gated = false;
 
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
 	for (;;) {
 		uint32_t dropped;
 		uint32_t got;
+		uint32_t buffered;
 		unsigned int key;
 
 		dropped = atomic_set(&uart_rx_dropped, 0);
 		if (dropped) {
 			LOG_WRN("Dropped %u UART RX bytes; BLE is slower than UART",
 				dropped);
+		}
+
+		/* Watermark gate. Software backpressure cannot make the link
+		 * lossless on its own: with RX/TX/GND only there is no RTS to lower,
+		 * so a peer that keeps sending eventually overruns the FIFO. What
+		 * this does buy is the *shape* of the loss — without it, a full ring
+		 * drops every byte that arrives for as long as the backlog lasts;
+		 * with it, the ring stops filling and the peer is held off by the
+		 * (far smaller) hardware FIFO instead. Fewer bytes lost, not none.
+		 *
+		 * The gate only stops the *pull* (len == 0). A half-filled chunk is
+		 * always forwarded first: holding it back would keep the ring full
+		 * and latch the gate on forever, and a peer that is quiet because it
+		 * waits for those very bytes would stall instead of being throttled. */
+		buffered = ring_buf_size_get(&uart_rx_ring);
+		if (buffered >= UART_RX_HIGH_WATERMARK) {
+			gated = true;
+		} else if (buffered <= UART_RX_LOW_WATERMARK) {
+			gated = false;
+		}
+		if (gated && len == 0) {
+			/* Nothing in hand, so stopping here really does stop pulling.
+			 * The peer is now held off by the driver FIFO instead of the
+			 * ring dropping whatever arrives. */
+			(void)k_sem_take(&uart_rx_sem, K_MSEC(2));
+			continue;
 		}
 
 		if (len == sizeof(buf)) {
@@ -1699,7 +1759,13 @@ static void uart_to_ble_thread(void)
 		}
 
 		if (len > 0 &&
-		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
+		    (gated ||
+		     k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS)) {
+			/* While gated this is the only way the in-hand bytes leave the
+			 * thread, and draining them is what lets the ring fall to the
+			 * low watermark and reopen the gate. Waiting for the idle
+			 * timeout here would stall a peer that is quiet because it is
+			 * waiting for these very bytes. */
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
 				accounted = false;

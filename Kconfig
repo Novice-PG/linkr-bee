@@ -62,6 +62,34 @@ config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	  notifications are being sent. Larger values reduce dropped boot-log
 	  bytes when the SBC emits a burst faster than BLE can transmit.
 
+	  Past LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT the bridge stops draining
+	  this buffer, which is what makes a larger value useful for anything
+	  beyond absorbing a short burst.
+
+config LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT
+	int "Drain-gate high watermark, percent of the UART RX buffer"
+	default 80
+	range 20 100
+	help
+	  Percentage of UART RX buffering at which the bridge stops pulling bytes
+	  out of it. Holding the buffer full lets the driver's FIFO fill and apply
+	  whatever flow control the peer honours, instead of the ring silently
+	  discarding every byte that arrives while the backlog lasts.
+
+	  This is not a lossless guarantee: a link wired RX/TX/GND only has no RTS
+	  to lower, so a peer that keeps sending still overruns the FIFO. It changes
+	  how much is lost, not whether any is. 100 disables the gate.
+
+config LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT
+	int "Drain-gate release watermark, percent of the UART RX buffer"
+	default 50
+	range 0 99
+	help
+	  Percentage at or below which draining resumes after the gate has tripped.
+	  The gap between this and the high watermark is the hysteresis that keeps
+	  the gate from chattering around a single threshold. Must be lower than
+	  LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT.
+
 config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
 	int "Transport to UART packet queue depth"
 	default 8
