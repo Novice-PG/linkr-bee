@@ -119,6 +119,12 @@ pub struct App {
     pub notices: Vec<Notice>,
     /// What the device last said when asked `@i?`, and whether a read is out.
     pub diagnostics: DiagnosticsState,
+    /// WiFi/WebDAV management state for the network view.
+    pub network: crate::views::network::NetworkState,
+    /// Transfer records for the transfer view.
+    pub transfer: crate::views::transfer::TransferState_,
+    /// The assistant's session state for the assistant view.
+    pub assistant: crate::views::assistant::AssistantState,
 }
 
 impl Default for App {
@@ -151,6 +157,9 @@ impl Default for App {
             watch: Vec::new(),
             notices: Vec::new(),
             diagnostics: DiagnosticsState::default(),
+            network: crate::views::network::NetworkState::default(),
+            transfer: crate::views::transfer::TransferState_::default(),
+            assistant: crate::views::assistant::AssistantState::default(),
         }
     }
 }

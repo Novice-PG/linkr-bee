@@ -127,6 +127,84 @@ pub struct Strings {
     /// Prefix of the link security level (`link L2`).
     pub diag_link_level: &'static str,
 
+    // --- network view -----------------------------------------------------
+    /// The WiFi section heading.
+    pub net_wifi_section: &'static str,
+    /// Why WiFi management needs BLE.
+    pub net_wifi_needs_ble: &'static str,
+    /// The network-name (SSID) field label.
+    pub net_ssid_label: &'static str,
+    /// The password field label.
+    pub net_password_label: &'static str,
+    /// The value an empty field shows.
+    pub net_empty_value: &'static str,
+    /// Suffix marking an action as BLE-only (`（仅限 BLE）`).
+    pub net_ble_only: &'static str,
+    /// The scan action.
+    pub net_scan: &'static str,
+    /// The connect action.
+    pub net_connect: &'static str,
+    /// The WiFi-off action.
+    pub net_wifi_off: &'static str,
+    /// The status action.
+    pub net_status: &'static str,
+    /// The scan-results section heading.
+    pub net_results_section: &'static str,
+    /// Shown when a scan has produced nothing.
+    pub net_no_results: &'static str,
+    /// The WebDAV section heading.
+    pub net_webdav_section: &'static str,
+    /// The WebDAV target URL label.
+    pub net_url_label: &'static str,
+    /// The set action.
+    pub net_set: &'static str,
+    /// The disable action.
+    pub net_disable: &'static str,
+    /// The WebDAV state prefix (`on`/`off`).
+    pub net_state_on: &'static str,
+    pub net_state_off: &'static str,
+
+    // --- transfer view ----------------------------------------------------
+    /// The outgoing-files section heading.
+    pub xfer_out_section: &'static str,
+    /// The incoming-files section heading.
+    pub xfer_in_section: &'static str,
+    /// Shown when no transfer has happened yet.
+    pub xfer_empty: &'static str,
+    /// The upload command hint.
+    pub xfer_upload_hint: &'static str,
+    /// The download command hint.
+    pub xfer_download_hint: &'static str,
+    /// A one-line transfer record: name, size, state.
+    pub xfer_record_failed: &'static str,
+    pub xfer_record_saved: &'static str,
+    pub xfer_record_unverified: &'static str,
+    pub xfer_record_pending: &'static str,
+
+    // --- assistant view ---------------------------------------------------
+    /// The session section heading.
+    pub asst_session_section: &'static str,
+    /// The tasks section heading.
+    pub asst_tasks_section: &'static str,
+    /// Shown when no task has been recorded for this device.
+    pub asst_no_tasks: &'static str,
+    /// Shown when the agent is not configured.
+    pub asst_not_configured: &'static str,
+    /// The notes section heading.
+    pub asst_notes_section: &'static str,
+    /// Shown when the device has no durable notes.
+    pub asst_no_notes: &'static str,
+    /// The execution-mode row label.
+    pub asst_mode_label: &'static str,
+    /// The three mode names.
+    pub asst_mode_auto: &'static str,
+    pub asst_mode_manual: &'static str,
+    pub asst_mode_full_auto: &'static str,
+    /// The token-usage row label.
+    pub asst_usage_label: &'static str,
+    /// The pending-approval row.
+    pub asst_awaiting: &'static str,
+
     // --- notices ---------------------------------------------------------
     /// "Theme: light" and friends — the toast shown by the toggle.
     pub theme_switched_prefix: &'static str,
@@ -187,6 +265,45 @@ const ZH: Strings = Strings {
     theme_dark: "深色",
     theme_light: "浅色",
     pending_review: "待确认",
+    net_wifi_section: "WiFi",
+    net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
+    net_ssid_label: "网络名称",
+    net_password_label: "密码",
+    net_empty_value: "—",
+    net_ble_only: "（仅限 BLE）",
+    net_scan: "[扫描]",
+    net_connect: "[连接 WiFi]",
+    net_wifi_off: "[WiFi 关闭]",
+    net_status: "[WiFi 状态]",
+    net_results_section: "扫描结果",
+    net_no_results: "暂无结果",
+    net_webdav_section: "WebDAV 日志上传",
+    net_url_label: "目标 URL",
+    net_set: "[设置]",
+    net_disable: "[关闭]",
+    net_state_on: "开启",
+    net_state_off: "关闭",
+    xfer_out_section: "发送到设备",
+    xfer_in_section: "从设备取回",
+    xfer_empty: "暂无传输记录。",
+    xfer_upload_hint: "上传：put <本地文件> <目标路径>",
+    xfer_download_hint: "下载：get <目标路径> <本地文件>",
+    xfer_record_failed: "失败",
+    xfer_record_saved: "已保存",
+    xfer_record_unverified: "未校验",
+    xfer_record_pending: "进行中",
+    asst_session_section: "会话",
+    asst_tasks_section: "任务",
+    asst_no_tasks: "此设备暂无任务记录。",
+    asst_not_configured: "未配置模型端点（Ctrl+P 打开面板设置）。",
+    asst_notes_section: "设备笔记",
+    asst_no_notes: "暂无笔记。",
+    asst_mode_label: "执行模式",
+    asst_mode_auto: "自动（仅白名单命令免确认）",
+    asst_mode_manual: "手动（每次都确认）",
+    asst_mode_full_auto: "全自动（危险命令仍确认）",
+    asst_usage_label: "Token 用量",
+    asst_awaiting: "等待确认",
 };
 
 const EN: Strings = Strings {
@@ -242,6 +359,46 @@ const EN: Strings = Strings {
     theme_dark: "dark",
     theme_light: "light",
     pending_review: "asks first",
+    net_wifi_section: "WiFi",
+    net_wifi_needs_ble:
+        "Connect over BLE to manage WiFi (the LAN transport has no management channel).",
+    net_ssid_label: "Network name",
+    net_password_label: "Password",
+    net_empty_value: "—",
+    net_ble_only: " (BLE only)",
+    net_scan: "[Scan]",
+    net_connect: "[Connect WiFi]",
+    net_wifi_off: "[WiFi off]",
+    net_status: "[WiFi status]",
+    net_results_section: "Scan results",
+    net_no_results: "no results yet",
+    net_webdav_section: "WebDAV log upload",
+    net_url_label: "Target URL",
+    net_set: "[Set]",
+    net_disable: "[Disable]",
+    net_state_on: "on",
+    net_state_off: "off",
+    xfer_out_section: "To the device",
+    xfer_in_section: "From the device",
+    xfer_empty: "No transfers yet.",
+    xfer_upload_hint: "Upload: put <local file> <target path>",
+    xfer_download_hint: "Download: get <target path> <local file>",
+    xfer_record_failed: "failed",
+    xfer_record_saved: "saved",
+    xfer_record_unverified: "unverified",
+    xfer_record_pending: "running",
+    asst_session_section: "Session",
+    asst_tasks_section: "Tasks",
+    asst_no_tasks: "No tasks recorded for this device.",
+    asst_not_configured: "No model endpoint configured (Ctrl+P opens the palette).",
+    asst_notes_section: "Device notes",
+    asst_no_notes: "no notes",
+    asst_mode_label: "Execution mode",
+    asst_mode_auto: "auto (only allowlisted commands run unattended)",
+    asst_mode_manual: "manual (every send is confirmed)",
+    asst_mode_full_auto: "full auto (destructive commands still ask)",
+    asst_usage_label: "Token usage",
+    asst_awaiting: "awaiting approval",
 };
 
 impl Lang {
@@ -339,6 +496,45 @@ mod tests {
                 s.theme_dark,
                 s.theme_light,
                 s.pending_review,
+                s.net_wifi_section,
+                s.net_wifi_needs_ble,
+                s.net_ssid_label,
+                s.net_password_label,
+                s.net_empty_value,
+                s.net_ble_only,
+                s.net_scan,
+                s.net_connect,
+                s.net_wifi_off,
+                s.net_status,
+                s.net_results_section,
+                s.net_no_results,
+                s.net_webdav_section,
+                s.net_url_label,
+                s.net_set,
+                s.net_disable,
+                s.net_state_on,
+                s.net_state_off,
+                s.xfer_out_section,
+                s.xfer_in_section,
+                s.xfer_empty,
+                s.xfer_upload_hint,
+                s.xfer_download_hint,
+                s.xfer_record_failed,
+                s.xfer_record_saved,
+                s.xfer_record_unverified,
+                s.xfer_record_pending,
+                s.asst_session_section,
+                s.asst_tasks_section,
+                s.asst_no_tasks,
+                s.asst_not_configured,
+                s.asst_notes_section,
+                s.asst_no_notes,
+                s.asst_mode_label,
+                s.asst_mode_auto,
+                s.asst_mode_manual,
+                s.asst_mode_full_auto,
+                s.asst_usage_label,
+                s.asst_awaiting,
             ];
             for field in all {
                 assert!(!field.trim().is_empty(), "empty string in {lang:?}");

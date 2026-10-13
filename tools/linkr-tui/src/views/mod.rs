@@ -6,7 +6,10 @@
 //! with no terminal, no session and no clock, and it is the shape every
 //! remaining view copies: get the model right, then place it.
 
+pub mod assistant;
 pub mod diagnostics;
+pub mod network;
+pub mod transfer;
 
 /// The sample reply used by `--sample` and by tests, so the grid can be looked
 /// at with real data instead of an empty state. Kept here rather than in the

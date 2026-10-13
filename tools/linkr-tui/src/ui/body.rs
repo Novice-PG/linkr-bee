@@ -10,7 +10,7 @@
 //! never guesses its own size and never paints past it. That is the whole
 //! contract, and it is why a body can be asserted on without a terminal.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use crate::app::App;
 use crate::event::View;
@@ -38,20 +38,10 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         // shows.
         View::Terminal => Vec::new(),
         View::Diagnostics => views::diagnostics::lines(app, theme, width),
-        _ => unfinished(app, theme, width),
+        View::Network => views::network::lines(app, theme, width),
+        View::Assistant => views::assistant::lines(app, theme, width),
+        View::Transfer => views::transfer::lines(app, theme, width),
     }
-}
-
-/// The body of a view that has no content yet: one muted line that says which
-/// view it is, so an unimplemented pane is never mistaken for a broken one.
-fn unfinished(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            crate::text::clip_to(&format!("  {}", app.strings().view_empty), width as usize),
-            theme.muted(),
-        )),
-    ]
 }
 
 #[cfg(test)]
@@ -117,32 +107,28 @@ mod tests {
         }
     }
 
-    /// An unfinished view says so, in the current language, in muted text —
-    /// never a bare frame. Diagnostics is no longer one of them.
+    /// Every view has a body that names itself, in either language. There is
+    /// no unfinished view left: all five are built.
     #[test]
-    fn an_unfinished_view_says_so() {
+    fn every_view_names_itself() {
         let theme = Theme::DARK;
-        let mut app = App {
-            lang: Lang::Zh,
-            ..App::default()
-        };
-        app.view = View::Assistant;
-        let painted = lines(&app, &theme, 60);
-        let text = text_of(&painted);
-        assert!(text.contains("尚未实现"), "{text:?}");
-        for line in &painted {
-            for span in &line.spans {
-                assert_eq!(span.style.fg, Some(theme.muted));
+        for view in View::ALL {
+            for lang in [Lang::Zh, Lang::En] {
+                let mut app = App {
+                    lang,
+                    ..App::default()
+                };
+                app.view = view;
+                if view == View::Terminal {
+                    continue; // the pane is silent until the device writes
+                }
+                let text = text_of(&lines(&app, &theme, 60));
+                assert!(
+                    text.contains(lang.view_name(view)),
+                    "{view:?} {lang:?}: {text:?}"
+                );
             }
         }
-        app.lang = Lang::En;
-        assert!(text_of(&lines(&app, &theme, 60)).contains("not implemented"));
-
-        // The diagnostics view is built, so it no longer says that.
-        app.view = View::Diagnostics;
-        let text = text_of(&lines(&app, &theme, 60));
-        assert!(!text.contains("not implemented"), "{text:?}");
-        assert!(text.contains("Diagnostics"), "{text:?}");
     }
 
     /// A view's body is told how wide the pane is, and never paints past it —
