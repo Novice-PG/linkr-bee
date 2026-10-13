@@ -32,24 +32,31 @@ three rules:
 | `theme.rs` | The design system: 16 tokens × two themes (the web client's `:root` and `[data-theme="light"]`, terminal pair from xterm.js), and every role-based style, block and colour helper |
 | `event.rs` | `ConnectionState`, `NoticeLevel`, `View` — and the F2–F6 rota, which is derived from the view list rather than written out twice |
 | `i18n.rs` | Every user-visible string, in Chinese and English, in two `const` tables so a missing translation cannot compile |
-| `app.rs` | The state a frame needs and its transitions (view rota, theme toggle, bounded notices, clamped sidebar cursor) |
+| `text.rs` | Display-width text: pad, clip and wrap measured in *columns*, because a CJK glyph is two of them and `{:<14}` is not |
+| `app.rs` | The state a frame needs and its transitions (view rota, theme toggle, bounded notices, clamped sidebar cursor, `ble_connected`) |
 | `ui/mod.rs` | Layout (`regions`) and composition (`draw`), plus headless rendering for tests and `--print-frame` |
 | `ui/chrome.rs` | Top bar (state dot, busy indicator, counters, speed, autoscroll, clock) and bottom bar (focus, view, state, key hints) |
 | `ui/sidebar.rs` | The four sidebar sections, the accent-chip selection, and the display-width wrap that keeps a long row inside its column |
-| `ui/body.rs` | The centre column: the full-bleed serial pane and the framed views |
+| `ui/body.rs` | The centre column: which view's content goes in it, and the frame that does or does not wrap it |
 | `ui/toast.rs` | The notice stack in the top-right corner |
+| `views/diagnostics.rs` | The `@i?` read, end to end: `@info` parsing, the six web-client formatters, the read's state machine, and the grid |
 
-Views other than the serial terminal currently say so in their body rather than
-showing an empty frame. Diagnostics, Network, Assistant and Transfer, the
-command palette, the help overlay and the dialogs are the next steps; the
-transport, protocol, terminal emulation and agent layers follow behind them.
+`views/` is where a view lives: a *model* (what the device said, as plain data)
+and a *painter* (a pure function from `&App` plus a pane width to lines). The
+split is the reason a whole view can be pinned to the documented sample reply
+without a socket, a clock or a terminal.
+
+Network, Assistant and Transfer still say so in their body rather than showing
+an empty frame. They are the next steps, followed by the command palette, the
+help overlay and the dialogs; the transport, protocol, terminal emulation and
+agent layers follow behind them.
 
 ## Gates — all four must pass before a commit
 
 ```sh
 cargo fmt --check                                   # style
 cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
-cargo test                                          # 81 tests, headless
+cargo test                                          # 111 tests, headless
 for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
          x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-pc-windows-msvc \
          x86_64-apple-darwin aarch64-apple-darwin; do
@@ -68,7 +75,12 @@ cargo run -- --print-frame 100x30                     # plain text
 cargo run -- --print-frame 100x30 --ansi              # with true-colour escapes
 cargo run -- --print-frame 100x30 --ansi --theme light --lang en
 cargo run -- --print-frame 100x30 --ansi --transport ble   # transport reported as locked
+cargo run -- --print-frame 110x32 --view diagnostics --state connected --sample
 ```
+
+`--view` opens on a named view, `--state` previews a connection state, and
+`--sample` loads the documented `@info` reply, so a content view can be inspected
+with real data instead of its empty state.
 
 The frame is rendered through ratatui's test backend, so this works over SSH,
 in CI, and with no TTY at all. `dev/frame-to-html.py` turns an `--ansi` dump
@@ -90,10 +102,15 @@ large, and everything in them is reproducible from the source.
   `static RwLock`. Here `&Theme` flows into every render function, so tests can
   paint either theme with no shared state and a repaint can never observe a
   half-changed palette.
-- **Wrapping is ours.** A sidebar row too wide for its column is wrapped by
-  display width, with a break at whitespace when there is one and between glyphs
-  when there is not — Chinese has no spaces, and the old panel ran off the
-  column instead of wrapping.
+- **Wrapping is ours.** A row too wide for its column is wrapped by display
+  width, with a break at whitespace when there is one and between glyphs when
+  there is not — Chinese has no spaces, and the old panel ran off the column
+  instead of wrapping. The arithmetic lives once, in `text.rs`, because a second
+  copy is how two views come to disagree about what a column is.
+- **A body is told how wide its pane is and never paints past it.** Every line
+  goes through a width-aware path, so a message that would wrap in a narrow pane
+  is clipped instead — a wrapped body line shifts every row below it and stops
+  the frame matching its own layout. A test walks every view at six widths.
 - **The sidebar cursor is clamped by the state**, and a test pins the cursor's
   range to the rows the sidebar actually offers, so the two cannot drift.
 - **The status dot is filled whenever there is anything to report** (connected,

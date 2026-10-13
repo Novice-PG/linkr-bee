@@ -80,6 +80,38 @@ pub struct Strings {
     /// Placeholder in a view whose body has no content yet.
     pub view_empty: &'static str,
 
+    // --- diagnostics view -------------------------------------------------
+    /// Prefix of the "last read" stamp (`@i? · updated 19:08:06`).
+    pub diag_updated: &'static str,
+    /// Shown before diagnostics have ever been read.
+    pub diag_not_read: &'static str,
+    /// Why there is nothing to read: management commands are BLE-only.
+    pub diag_no_ble: &'static str,
+    /// Shown while `@i?` is in flight.
+    pub diag_loading: &'static str,
+    /// Shown when a read completed and reported nothing.
+    pub diag_empty: &'static str,
+    /// The keys this view answers to.
+    pub diag_keys_hint: &'static str,
+    /// The local failure when the link closed before a reply arrived.
+    pub diag_poll_closed: &'static str,
+    /// Grid label for the firmware version.
+    pub diag_label_firmware: &'static str,
+    /// Grid label for the device's uptime.
+    pub diag_label_uptime: &'static str,
+    /// Grid label for who may use the BLE link.
+    pub diag_label_ble_access: &'static str,
+    /// Grid label for the UART ring buffer.
+    pub diag_label_uart_buffer: &'static str,
+    /// Grid label for the upload queue.
+    pub diag_label_upload_queue: &'static str,
+    /// `sys.owner` is `0`: the link is open to anyone.
+    pub diag_access_open: &'static str,
+    /// `sys.owner` is someone else: access is scoped to one host.
+    pub diag_access_scoped: &'static str,
+    /// Prefix of the link security level (`link L2`).
+    pub diag_link_level: &'static str,
+
     // --- notices ---------------------------------------------------------
     /// "Theme: light" and friends — the toast shown by the toggle.
     pub theme_switched_prefix: &'static str,
@@ -119,6 +151,21 @@ const ZH: Strings = Strings {
     view_assistant: "助手",
     view_transfer: "文件传输",
     view_empty: "此视图尚未实现",
+    diag_updated: "@i? · 已更新",
+    diag_not_read: "@i? 尚未读取",
+    diag_no_ble: "通过 BLE 连接后才能读取诊断（管理命令仅限 BLE）。",
+    diag_loading: "正在读取 @i?…",
+    diag_empty: "暂无设备信息。",
+    diag_keys_hint: "r 刷新 · PgUp/PgDn 滚动 · F2 终端",
+    diag_poll_closed: "诊断数据到达前连接已断开",
+    diag_label_firmware: "固件",
+    diag_label_uptime: "运行时间",
+    diag_label_ble_access: "BLE 访问",
+    diag_label_uart_buffer: "UART 缓冲",
+    diag_label_upload_queue: "上传队列",
+    diag_access_open: "开放",
+    diag_access_scoped: "受限",
+    diag_link_level: "链路 L",
     theme_switched_prefix: "主题",
     theme_dark: "深色",
     theme_light: "浅色",
@@ -153,6 +200,21 @@ const EN: Strings = Strings {
     view_assistant: "Assistant",
     view_transfer: "File transfer",
     view_empty: "This view is not implemented yet",
+    diag_updated: "@i? · updated",
+    diag_not_read: "@i? not read yet",
+    diag_no_ble: "Connect over BLE to read diagnostics (management commands are BLE-only).",
+    diag_loading: "reading @i?…",
+    diag_empty: "No device information yet.",
+    diag_keys_hint: "r refresh · PgUp/PgDn scroll · F2 terminal",
+    diag_poll_closed: "disconnected before diagnostics arrived",
+    diag_label_firmware: "Firmware",
+    diag_label_uptime: "Uptime",
+    diag_label_ble_access: "BLE access",
+    diag_label_uart_buffer: "UART Buffer",
+    diag_label_upload_queue: "Upload Queue",
+    diag_access_open: "open",
+    diag_access_scoped: "scoped",
+    diag_link_level: "link L",
     theme_switched_prefix: "Theme",
     theme_dark: "dark",
     theme_light: "light",
@@ -233,6 +295,21 @@ mod tests {
                 s.view_assistant,
                 s.view_transfer,
                 s.view_empty,
+                s.diag_updated,
+                s.diag_not_read,
+                s.diag_no_ble,
+                s.diag_loading,
+                s.diag_empty,
+                s.diag_keys_hint,
+                s.diag_poll_closed,
+                s.diag_label_firmware,
+                s.diag_label_uptime,
+                s.diag_label_ble_access,
+                s.diag_label_uart_buffer,
+                s.diag_label_upload_queue,
+                s.diag_access_open,
+                s.diag_access_scoped,
+                s.diag_link_level,
                 s.theme_switched_prefix,
                 s.theme_dark,
                 s.theme_light,
@@ -269,6 +346,39 @@ mod tests {
                 labels.len(),
                 "duplicate state label in {lang:?}"
             );
+        }
+    }
+
+    /// Every diagnostics entry is genuinely translated: a copy that forgot to
+    /// translate would otherwise pass as the Chinese one. The one label that is
+    /// deliberately untranslated (`WiFi`) is not in this table at all.
+    #[test]
+    fn the_diagnostics_table_is_translated() {
+        let pairs = |lang: Lang| -> Vec<(&'static str, &'static str)> {
+            let s = lang.strings();
+            vec![
+                ("diag_updated", s.diag_updated),
+                ("diag_not_read", s.diag_not_read),
+                ("diag_no_ble", s.diag_no_ble),
+                ("diag_loading", s.diag_loading),
+                ("diag_empty", s.diag_empty),
+                ("diag_keys_hint", s.diag_keys_hint),
+                ("diag_poll_closed", s.diag_poll_closed),
+                ("diag_label_firmware", s.diag_label_firmware),
+                ("diag_label_uptime", s.diag_label_uptime),
+                ("diag_label_ble_access", s.diag_label_ble_access),
+                ("diag_label_uart_buffer", s.diag_label_uart_buffer),
+                ("diag_label_upload_queue", s.diag_label_upload_queue),
+                ("diag_access_open", s.diag_access_open),
+                ("diag_access_scoped", s.diag_access_scoped),
+                ("diag_link_level", s.diag_link_level),
+            ]
+        };
+        let zh = pairs(Lang::Zh);
+        let en = pairs(Lang::En);
+        assert_eq!(zh.len(), 15, "the diagnostics view carries 15 entries");
+        for ((name, zh), (_, en)) in zh.iter().zip(&en) {
+            assert_ne!(zh, en, "{name} is untranslated");
         }
     }
 

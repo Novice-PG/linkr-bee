@@ -127,12 +127,17 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
         let block = theme.view_block(app.view_name());
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        // The body is told the width the border left it, so a row can never be
+        // laid out for the frame's width and then spill into the border.
         frame.render_widget(
-            Paragraph::new(body::lines(app, &theme)).style(ground),
+            Paragraph::new(body::lines(app, &theme, inner.width)).style(ground),
             inner,
         );
     } else {
-        frame.render_widget(Paragraph::new(body::lines(app, &theme)).style(ground), area);
+        frame.render_widget(
+            Paragraph::new(body::lines(app, &theme, area.width)).style(ground),
+            area,
+        );
     }
 }
 

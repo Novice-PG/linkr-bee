@@ -8,6 +8,7 @@
 use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::theme::{Theme, ThemeChoice};
+use crate::views::diagnostics::DiagnosticsState;
 
 /// Which link carries the session. The sidebar names it and the CLI pins it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -111,6 +112,8 @@ pub struct App {
     /// Findings from the panic/reboot watch.
     pub watch: Vec<String>,
     pub notices: Vec<Notice>,
+    /// What the device last said when asked `@i?`, and whether a read is out.
+    pub diagnostics: DiagnosticsState,
 }
 
 impl Default for App {
@@ -140,6 +143,7 @@ impl Default for App {
             ],
             watch: Vec::new(),
             notices: Vec::new(),
+            diagnostics: DiagnosticsState::default(),
         }
     }
 }
@@ -163,6 +167,13 @@ impl App {
     /// The connection state as text, in the current language.
     pub fn state_name(&self) -> &'static str {
         self.lang.state_name(self.state)
+    }
+
+    /// Whether management commands can go out at all. They travel the BLE
+    /// management channel only, so a LAN session cannot reach them however
+    /// connected it is — the diagnostics view says so instead of failing later.
+    pub fn ble_connected(&self) -> bool {
+        self.state == ConnectionState::Connected && self.transport == Transport::Ble
     }
 
     /// The transport as the sidebar shows it, with its lock suffix when a CLI
@@ -394,6 +405,37 @@ mod tests {
         assert_eq!(app.sidebar_rows(), crate::ui::sidebar::targets(&app).len());
         app.quick_send.push(QuickSend::new("ls"));
         assert_eq!(app.sidebar_rows(), crate::ui::sidebar::targets(&app).len());
+    }
+
+    /// A first frame has nothing from the device: the diagnostics grid starts
+    /// empty, not with a stale read.
+    #[test]
+    fn the_diagnostics_grid_starts_empty() {
+        let app = App::default();
+        assert!(!app.diagnostics.has_data());
+        assert!(!app.diagnostics.done);
+        assert!(!app.diagnostics.loading);
+        assert_eq!(app.diagnostics.updated, None);
+    }
+
+    /// Management commands are BLE-only: a LAN session is connected and still
+    /// unable to reach them, which is what the diagnostics view reports.
+    #[test]
+    fn management_commands_need_the_ble_link() {
+        let mut app = App {
+            state: ConnectionState::Connected,
+            ..App::default()
+        };
+        assert!(app.ble_connected(), "a connected BLE session can manage");
+        app.transport = Transport::Lan;
+        assert!(!app.ble_connected(), "a LAN session cannot");
+        app.state = ConnectionState::Connecting;
+        app.transport = Transport::Ble;
+        assert!(!app.ble_connected(), "dialling is not connected");
+        app.state = ConnectionState::Failed;
+        assert!(!app.ble_connected());
+        app.state = ConnectionState::Disconnected;
+        assert!(!app.ble_connected());
     }
 
     /// Theme and language shortcuts read the state, so a view never has to know

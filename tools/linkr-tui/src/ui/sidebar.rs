@@ -4,12 +4,16 @@
 //! each row *is*, [`lines`] colours those rows from the theme. Tests assert on
 //! `rows` for structure and on `lines` for colour, so a layout change cannot
 //! hide behind a style change.
+//!
+//! The width helpers live in [`crate::text`] because every view needs the same
+//! column arithmetic — a second copy is how the two drift apart.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
 use crate::event::View;
+use crate::text::{pad_to, wrap};
 use crate::theme::Theme;
 
 /// What a sidebar row means, which decides how it is painted.
@@ -197,60 +201,6 @@ pub fn fitted(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             None => Vec::new(),
         })
         .collect()
-}
-
-/// Greedy wrap to `width` display columns: break at the last whitespace when
-/// there is one (which consumes it, as a terminal does), otherwise between
-/// glyphs. Empty text yields nothing to paint.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    let mut last_space: Option<usize> = None;
-
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + ch_width > width && !current.is_empty() {
-            match last_space {
-                Some(at) if at > 0 => {
-                    let rest = current[at + 1..].to_string();
-                    current.truncate(at);
-                    out.push(std::mem::take(&mut current));
-                    current = rest;
-                }
-                _ => {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            current_width = unicode_width::UnicodeWidthStr::width(current.as_str());
-            last_space = None;
-        }
-        if ch == ' ' {
-            last_space = Some(current.len());
-        }
-        current.push(ch);
-        current_width += ch_width;
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
-/// Pad `text` with spaces to `width` display columns (never truncating: a
-/// sidebar wider than its column is a layout problem, not something to hide).
-fn pad_to(text: &str, width: usize) -> String {
-    let current = unicode_width::UnicodeWidthStr::width(text);
-    match width.checked_sub(current) {
-        Some(missing) if missing > 0 => format!("{text}{}", " ".repeat(missing)),
-        _ => text.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -591,58 +541,5 @@ mod tests {
         let hint = "  Enter 发送 · reboot 先确认";
         assert!(UnicodeWidthStr::width(hint) <= SIDEBAR_WIDTH as usize);
         assert!(pieces.iter().any(|p| p == hint), "{pieces:?}");
-    }
-
-    /// A run with no whitespace breaks between glyphs rather than overflowing:
-    /// Chinese has no spaces to break at, which is how the old panel ran off
-    /// the column instead of wrapping.
-    #[test]
-    fn a_run_without_spaces_breaks_between_glyphs() {
-        let text = "这个提示没有空格但是太长了";
-        let pieces = wrap(text, 8);
-        assert!(pieces.len() > 1, "{pieces:?}");
-        for piece in &pieces {
-            assert!(UnicodeWidthStr::width(piece.as_str()) <= 8, "{piece:?}");
-        }
-        assert_eq!(pieces.concat(), text);
-    }
-
-    /// A hard break — no whitespace to break at — loses nothing and reorders
-    /// nothing, and a row that already fits comes through untouched.
-    #[test]
-    fn a_hard_break_is_lossless() {
-        for (text, width) in [
-            ("short", 30usize),
-            ("exactly ten", 11),
-            ("abcdefghij", 4),
-            ("中文字符测试", 3),
-        ] {
-            let pieces = wrap(text, width);
-            assert_eq!(pieces.concat(), text, "{text:?} at {width}");
-            for piece in &pieces {
-                assert!(
-                    UnicodeWidthStr::width(piece.as_str()) <= width,
-                    "{piece:?} at {width}"
-                );
-            }
-        }
-    }
-
-    /// Breaking at a space consumes that space, which is what a terminal does —
-    /// so the pieces rejoin to the original with their separators.
-    #[test]
-    fn a_space_break_consumes_its_space() {
-        let pieces = wrap("a b c d e f g", 4);
-        assert_eq!(pieces, vec!["a b", "c d", "e f", "g"]);
-        assert_eq!(pieces.join(" "), "a b c d e f g");
-    }
-
-    /// Nothing to wrap yields nothing to paint, and a zero-width column cannot
-    /// wrap at all, so the text survives whole rather than being diced away.
-    #[test]
-    fn degenerate_widths_keep_their_text() {
-        assert_eq!(wrap("", 5), Vec::<String>::new());
-        assert_eq!(wrap("", 0), Vec::<String>::new());
-        assert_eq!(wrap("abc", 0), vec!["abc".to_string()]);
     }
 }

@@ -57,6 +57,25 @@ impl View {
     pub fn from_fkey(key: u8) -> Option<View> {
         View::ALL.into_iter().find(|view| view.fkey() == key)
     }
+
+    /// The spelling a command line or a settings file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            View::Terminal => "terminal",
+            View::Diagnostics => "diagnostics",
+            View::Network => "network",
+            View::Assistant => "assistant",
+            View::Transfer => "transfer",
+        }
+    }
+
+    /// The view a name refers to. Unknown names give `None`, so a caller can
+    /// report the bad value instead of silently showing the wrong view.
+    pub fn from_name(name: &str) -> Option<View> {
+        View::ALL
+            .into_iter()
+            .find(|view| view.as_str() == name.trim().to_ascii_lowercase())
+    }
 }
 
 #[cfg(test)]
@@ -84,5 +103,32 @@ mod tests {
         let mut sorted = View::ALL;
         sorted.sort_by_key(|v| v.fkey());
         assert_eq!(sorted, View::ALL);
+    }
+
+    /// Every view round-trips through its spelling, the names are distinct and
+    /// a name that is not a view is refused rather than guessed at.
+    #[test]
+    fn every_view_round_trips_through_its_name() {
+        let names: Vec<&str> = View::ALL.iter().map(|v| v.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "terminal",
+                "diagnostics",
+                "network",
+                "assistant",
+                "transfer"
+            ]
+        );
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "two views share a name");
+        for view in View::ALL {
+            assert_eq!(View::from_name(view.as_str()), Some(view));
+        }
+        assert_eq!(View::from_name(" NETWORK "), Some(View::Network));
+        assert_eq!(View::from_name("files"), None);
+        assert_eq!(View::from_name(""), None);
     }
 }

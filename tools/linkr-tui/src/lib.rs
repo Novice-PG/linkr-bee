@@ -7,5 +7,7 @@
 pub mod app;
 pub mod event;
 pub mod i18n;
+pub mod text;
 pub mod theme;
 pub mod ui;
+pub mod views;

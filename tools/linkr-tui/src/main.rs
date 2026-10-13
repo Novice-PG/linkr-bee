@@ -21,6 +21,7 @@ use linkr_tui::event::{ConnectionState, View};
 use linkr_tui::i18n::Lang;
 use linkr_tui::theme::ThemeChoice;
 use linkr_tui::ui;
+use linkr_tui::views;
 
 /// How often a frame is repainted with no input: the clock and the busy
 /// indicator move on this beat, and it is slow enough to cost nothing.
@@ -48,6 +49,12 @@ fn usage(prog: &str) -> String {
          \x20     --state <STATE>\n\
          \x20         preview a connection state: disconnected, connecting,\n\
          \x20         connected or failed [default: connecting]\n\
+         \x20     --view <VIEW>\n\
+         \x20         open on a view: terminal, diagnostics, network, assistant\n\
+         \x20         or transfer [default: terminal]\n\
+         \x20     --sample\n\
+         \x20         fill the frame with the documented sample reply, so a\n\
+         \x20         --print-frame shows a populated view instead of an empty one\n\
          \x20 -h, --help\n\
          \x20         Print help\n\
          \x20 -V, --version\n\
@@ -60,10 +67,16 @@ fn usage(prog: &str) -> String {
 struct Args {
     lang: Lang,
     theme: ThemeChoice,
-    state: ConnectionState,
+    /// The previewed connection state, when the command line named one. Left
+    /// unset so the default can depend on what else was asked for.
+    state: Option<ConnectionState>,
+    /// The view to open on, when the command line named one.
+    view: Option<View>,
     print_frame: Option<(u16, u16)>,
     /// Dump the frame with true-colour escapes instead of plain text.
     ansi: bool,
+    /// Load the documented sample reply, so an inspection shows content.
+    sample: bool,
     /// A transport pinned on the command line: the sidebar then says `locked`,
     /// because the keyboard cannot switch what the flag decided.
     transport: Option<Transport>,
@@ -81,9 +94,11 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
     let mut args = Args {
         lang: Lang::default(),
         theme: ThemeChoice::default(),
-        state: ConnectionState::Connecting,
+        state: None,
+        view: None,
         print_frame: None,
         ansi: false,
+        sample: false,
         transport: None,
     };
     let mut i = 0;
@@ -132,7 +147,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             }
             "--state" => {
                 let raw = value("--state");
-                args.state = match raw.as_str() {
+                args.state = Some(match raw.as_str() {
                     "disconnected" => ConnectionState::Disconnected,
                     "connecting" => ConnectionState::Connecting,
                     "connected" => ConnectionState::Connected,
@@ -141,7 +156,13 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                         prog,
                         &format!("invalid value '{other}' for '--state <STATE>'"),
                     ),
-                };
+                });
+            }
+            "--view" => {
+                let raw = value("--view");
+                args.view = Some(View::from_name(&raw).unwrap_or_else(|| {
+                    fail(prog, &format!("invalid value '{raw}' for '--view <VIEW>'"))
+                }));
             }
             "--print-frame" => {
                 // The size is optional: `--print-frame 100x30` or bare.
@@ -155,6 +176,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 args.print_frame = Some(size);
             }
             "--ansi" => args.ansi = true,
+            "--sample" => args.sample = true,
             "--transport" => {
                 let raw = value("--transport");
                 args.transport = match raw.as_str() {
@@ -232,17 +254,31 @@ fn main() -> io::Result<()> {
 
     let args = parse_args(&prog, &argv);
 
+    // Without `--state`, the preview is a link being dialled — except under
+    // `--sample`, where the sample reply means the link answered.
+    let state = args.state.unwrap_or(if args.sample {
+        ConnectionState::Connected
+    } else {
+        ConnectionState::Connecting
+    });
+
     let mut app = App {
         lang: args.lang,
         theme: args.theme,
-        state: args.state,
+        state,
         transport_locked: args.transport.is_some(),
         ..App::default()
     };
     if let Some(transport) = args.transport {
         app.transport = transport;
     }
+    if let Some(view) = args.view {
+        app.view = view;
+    }
     app.clock = local_clock();
+    if args.sample {
+        app.diagnostics.apply(&views::sample_reply(), local_clock());
+    }
 
     if let Some((cols, rows)) = args.print_frame {
         if args.ansi {
@@ -345,8 +381,9 @@ mod tests {
         let parsed = args(&[]);
         assert_eq!(parsed.lang, Lang::Zh);
         assert_eq!(parsed.theme, ThemeChoice::Dark);
-        assert_eq!(parsed.state, ConnectionState::Connecting);
+        assert_eq!(parsed.state, None);
         assert_eq!(parsed.print_frame, None);
+        assert!(!parsed.sample);
     }
 
     /// Flags parse to the state they name.
@@ -355,7 +392,49 @@ mod tests {
         let parsed = args(&["--lang", "en", "--theme", "light", "--state", "connected"]);
         assert_eq!(parsed.lang, Lang::En);
         assert_eq!(parsed.theme, ThemeChoice::Light);
-        assert_eq!(parsed.state, ConnectionState::Connected);
+        assert_eq!(parsed.state, Some(ConnectionState::Connected));
+        for (raw, expected) in [
+            ("disconnected", ConnectionState::Disconnected),
+            ("connecting", ConnectionState::Connecting),
+            ("connected", ConnectionState::Connected),
+            ("failed", ConnectionState::Failed),
+        ] {
+            assert_eq!(args(&["--state", raw]).state, Some(expected), "{raw}");
+        }
+    }
+
+    /// `--view` opens on the view it names, and a name that is not a view is
+    /// refused rather than silently ignored.
+    #[test]
+    fn the_view_flag_selects_a_view_by_name() {
+        assert_eq!(args(&[]).view, None);
+        for view in View::ALL {
+            assert_eq!(args(&["--view", view.as_str()]).view, Some(view));
+        }
+        assert_eq!(args(&["--view", "network"]).view, Some(View::Network));
+    }
+
+    /// `--sample` fills the frame, and it implies an answered link unless the
+    /// command line named a state of its own.
+    #[test]
+    fn sample_fills_the_frame_and_implies_a_connected_link() {
+        let mut app = App::default();
+        let parsed = args(&["--sample", "--print-frame"]);
+        assert!(parsed.sample);
+        assert_eq!(parsed.state, None, "no state was named");
+
+        // The resolution `main` performs, without a terminal.
+        app.diagnostics
+            .apply(&views::sample_reply(), "19:08:06".into());
+        assert!(app.diagnostics.has_data());
+        assert!(app.diagnostics.done);
+        assert_eq!(app.diagnostics.updated.as_deref(), Some("19:08:06"));
+
+        // An explicit state still wins.
+        assert_eq!(
+            args(&["--sample", "--state", "failed"]).state,
+            Some(ConnectionState::Failed)
+        );
     }
 
     /// The frame size is optional and parses both ways.
