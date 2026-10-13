@@ -56,50 +56,6 @@ pub fn clip_to(text: &str, width: usize) -> String {
     out
 }
 
-/// Greedy wrap to `width` display columns: break at the last whitespace when
-/// there is one (which consumes it, as a terminal does), otherwise between
-/// glyphs. Empty text yields nothing to paint.
-pub fn wrap(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    let mut last_space: Option<usize> = None;
-
-    for ch in text.chars() {
-        let glyph = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + glyph > width && !current.is_empty() {
-            match last_space {
-                Some(at) if at > 0 => {
-                    let rest = current[at + 1..].to_string();
-                    current.truncate(at);
-                    out.push(std::mem::take(&mut current));
-                    current = rest;
-                }
-                _ => {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            current_width = columns(current.as_str());
-            last_space = None;
-        }
-        if ch == ' ' {
-            last_space = Some(current.len());
-        }
-        current.push(ch);
-        current_width += glyph;
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,53 +112,14 @@ mod tests {
         }
     }
 
-    /// A run with no whitespace breaks between glyphs rather than overflowing:
-    /// Chinese has no spaces to break at, which is how the old panel ran off the
-    /// column instead of wrapping.
+    /// A clip is the answer to a row that is too long — and it is a *cut*, not a
+    /// wrap: the row stays one row, so nothing below it moves.
     #[test]
-    fn a_run_without_spaces_breaks_between_glyphs() {
-        let text = "这个提示没有空格但是太长了";
-        let pieces = wrap(text, 8);
-        assert!(pieces.len() > 1, "{pieces:?}");
-        for piece in &pieces {
-            assert!(columns(piece) <= 8, "{piece:?}");
-        }
-        assert_eq!(pieces.concat(), text);
-    }
-
-    /// A hard break loses nothing and reorders nothing; a row that already fits
-    /// comes through untouched.
-    #[test]
-    fn a_hard_break_is_lossless() {
-        for (text, width) in [
-            ("short", 30usize),
-            ("exactly ten", 11),
-            ("abcdefghij", 4),
-            ("中文字符测试", 3),
-        ] {
-            let pieces = wrap(text, width);
-            assert_eq!(pieces.concat(), text, "{text:?} at {width}");
-            for piece in &pieces {
-                assert!(columns(piece) <= width, "{piece:?} at {width}");
-            }
-        }
-    }
-
-    /// Breaking at a space consumes that space, which is what a terminal does —
-    /// so the pieces rejoin to the original with their separators.
-    #[test]
-    fn a_space_break_consumes_its_space() {
-        let pieces = wrap("a b c d e f g", 4);
-        assert_eq!(pieces, vec!["a b", "c d", "e f", "g"]);
-        assert_eq!(pieces.join(" "), "a b c d e f g");
-    }
-
-    /// Nothing to wrap yields nothing to paint, and a zero-width column cannot
-    /// wrap at all, so the text survives whole rather than being diced away.
-    #[test]
-    fn degenerate_widths_keep_their_text() {
-        assert_eq!(wrap("", 5), Vec::<String>::new());
-        assert_eq!(wrap("", 0), Vec::<String>::new());
-        assert_eq!(wrap("abc", 0), vec!["abc".to_string()]);
+    fn a_clip_keeps_a_row_one_row() {
+        let long = "Enter sends · reboot asks first";
+        let cut = clip_to(long, 29);
+        assert!(columns(&cut) <= 29, "{cut:?}");
+        assert!(cut.ends_with('…'), "{cut:?} is not marked as cut");
+        assert!(!cut.contains('\n'), "a clip wrapped");
     }
 }

@@ -98,6 +98,11 @@ pub struct App {
     pub tx: u64,
     /// The link speed once the device has reported one.
     pub baud: Option<u32>,
+    /// The BLE link level the device reports (`L1`, `L2`). Unknown until the
+    /// link exists, which is why the chrome shows a placeholder while dialling.
+    pub link_level: Option<u8>,
+    /// The signal the link is carrying, in dBm. Also unknown until connected.
+    pub signal_dbm: Option<i32>,
     pub autoscroll: bool,
     /// `HH:MM:SS`, filled by the event loop so a frame is a pure function.
     pub clock: String,
@@ -130,6 +135,8 @@ impl Default for App {
             rx: 0,
             tx: 0,
             baud: None,
+            link_level: None,
+            signal_dbm: None,
             autoscroll: true,
             clock: "00:00:00".to_string(),
             sidebar_cursor: 0,
@@ -181,18 +188,46 @@ impl App {
     pub fn transport_text(&self) -> String {
         let s = self.strings();
         if self.transport_locked {
-            format!("{} ({})", self.transport.name(), s.transport_locked)
+            format!("{} {}", self.transport.name(), s.transport_locked)
         } else {
             self.transport.name().to_string()
         }
+    }
+
+    /// The placeholder a slot shows while the device has not reported a value.
+    pub fn unknown(&self) -> &'static str {
+        self.strings().value_unknown
     }
 
     /// The baud slot: the speed once known, the placeholder before that.
     pub fn baud_text(&self) -> String {
         match self.baud {
             Some(baud) => baud.to_string(),
-            None => self.strings().baud_unknown.to_string(),
+            None => self.unknown().to_string(),
         }
+    }
+
+    /// The link level, as the chrome names it (`link L1`), or the placeholder
+    /// while there is no link to report one.
+    pub fn link_text(&self) -> String {
+        match self.link_level {
+            Some(level) => format!("{}{level}", self.strings().diag_link_level),
+            None => self.unknown().to_string(),
+        }
+    }
+
+    /// The signal reading, or the placeholder while there is none.
+    pub fn signal_text(&self) -> String {
+        match self.signal_dbm {
+            Some(dbm) => format!("{dbm} {}", self.strings().signal_unit),
+            None => self.unknown().to_string(),
+        }
+    }
+
+    /// The glyph for the current state. The chrome and the sidebar row both ask
+    /// this, so one frame can never show two different glyphs for one state.
+    pub fn state_glyph(&self) -> &'static str {
+        self.state.glyph()
     }
 
     /// Toggle the theme and return the notice that announces it, so the caller
@@ -279,6 +314,8 @@ mod tests {
         assert!(!app.transport_locked);
         assert!(app.autoscroll);
         assert_eq!(app.baud, None);
+        assert_eq!(app.link_level, None);
+        assert_eq!(app.signal_dbm, None);
         assert_eq!(app.rx, 0);
         assert_eq!(app.tx, 0);
         assert!(app.notices.is_empty());
@@ -315,7 +352,8 @@ mod tests {
     #[test]
     fn the_baud_slot_fills_in_once_known() {
         let mut app = App::default();
-        assert_eq!(app.baud_text(), "—");
+        assert_eq!(app.baud_text(), app.unknown());
+        assert_eq!(app.baud_text(), "─");
         app.baud = Some(115_200);
         assert_eq!(app.baud_text(), "115200");
     }

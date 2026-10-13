@@ -18,15 +18,30 @@ pub enum Lang {
 /// One language's whole vocabulary.
 #[derive(Debug, Clone, Copy)]
 pub struct Strings {
-    // --- top bar ---------------------------------------------------------
+    // --- technical tokens -------------------------------------------------
+    // Deliberately untranslated: the design writes `RX`, `TX`, `Auto` and
+    // `dBm` in the Chinese interface too, and keeping them Latin is what keeps
+    // the top bar the same width whichever language is in force.
     /// Prefix of the receive counter (`RX`).
     pub rx: &'static str,
     /// Prefix of the transmit counter (`TX`).
     pub tx: &'static str,
-    /// Shown in the baud slot before the device reports one.
-    pub baud_unknown: &'static str,
     /// The auto-scroll indicator.
     pub autoscroll: &'static str,
+    /// The unit of the signal reading beside the state (`dBm`).
+    pub signal_unit: &'static str,
+    /// What a slot shows before the device has reported a value.
+    ///
+    /// One glyph for every such slot, as the design has it: the rule spans its
+    /// cell, so an unknown speed and an unknown signal read as the same
+    /// absence rather than as two different kinds of dash.
+    pub value_unknown: &'static str,
+    /// The colon and its spacing after a field label.
+    ///
+    /// Chinese uses the full-width colon, which carries its own space; English
+    /// needs an explicit one. Keeping both in the table is what lets the two
+    /// rows be laid out by the same code.
+    pub label_separator: &'static str,
 
     // --- sidebar ---------------------------------------------------------
     /// Section header for the connection block.
@@ -124,10 +139,12 @@ pub struct Strings {
 }
 
 const ZH: Strings = Strings {
-    rx: "接收",
-    tx: "发送",
-    baud_unknown: "—",
-    autoscroll: "自动滚动",
+    rx: "RX",
+    tx: "TX",
+    autoscroll: "Auto",
+    signal_unit: "dBm",
+    value_unknown: "─",
+    label_separator: "：",
     section_connection: "连接",
     section_views: "视图",
     section_quick_send: "快捷发送",
@@ -136,7 +153,7 @@ const ZH: Strings = Strings {
     device_label: "设备",
     connect: "连接",
     switch_device: "切换设备",
-    transport_locked: "已锁定",
+    transport_locked: "（已锁定）",
     quick_send_hint: "Enter 发送 · reboot 先确认",
     watch_empty: "暂无发现",
     focus_terminal: "终端",
@@ -175,8 +192,10 @@ const ZH: Strings = Strings {
 const EN: Strings = Strings {
     rx: "RX",
     tx: "TX",
-    baud_unknown: "—",
     autoscroll: "Auto",
+    signal_unit: "dBm",
+    value_unknown: "─",
+    label_separator: ": ",
     section_connection: "Connection",
     section_views: "Views",
     section_quick_send: "Quick send",
@@ -185,8 +204,12 @@ const EN: Strings = Strings {
     device_label: "Device",
     connect: "Connect",
     switch_device: "Switch device",
-    transport_locked: "locked",
-    quick_send_hint: "Enter sends · reboot asks first",
+    transport_locked: "(locked)",
+    // Fits the 29-column sidebar with three columns to spare. The longer
+    // `Enter sends · reboot asks first` overflowed the column and wrapped onto a
+    // second row, which pushed every section below it one row down — the
+    // sidebar then sat differently in English than in Chinese.
+    quick_send_hint: "Enter sends · reboot asks",
     watch_empty: "no findings yet",
     focus_terminal: "Terminal",
     focus_sidebar: "Sidebar",
@@ -270,8 +293,10 @@ mod tests {
             let all = [
                 s.rx,
                 s.tx,
-                s.baud_unknown,
                 s.autoscroll,
+                s.signal_unit,
+                s.value_unknown,
+                s.label_separator,
                 s.section_connection,
                 s.section_views,
                 s.section_quick_send,
@@ -380,6 +405,63 @@ mod tests {
         for ((name, zh), (_, en)) in zh.iter().zip(&en) {
             assert_ne!(zh, en, "{name} is untranslated");
         }
+    }
+
+    /// The technical tokens are the same in both languages, and the value
+    /// placeholder is one column wide. Both matter for the same reason: the
+    /// chrome is laid out to the column, and a token that changed width with the
+    /// language — or a placeholder that rendered as two columns — would move
+    /// everything after it.
+    #[test]
+    fn the_technical_tokens_do_not_move_with_the_language() {
+        let zh = Lang::Zh.strings();
+        let en = Lang::En.strings();
+        for (name, zh, en) in [
+            ("rx", zh.rx, en.rx),
+            ("tx", zh.tx, en.tx),
+            ("autoscroll", zh.autoscroll, en.autoscroll),
+            ("signal_unit", zh.signal_unit, en.signal_unit),
+            ("value_unknown", zh.value_unknown, en.value_unknown),
+        ] {
+            assert_eq!(zh, en, "{name} differs between the languages");
+        }
+        for lang in [Lang::Zh, Lang::En] {
+            let placeholder = lang.strings().value_unknown;
+            assert_eq!(
+                crate::text::columns(placeholder),
+                1,
+                "{lang:?} placeholder {placeholder:?} is not one column wide"
+            );
+        }
+    }
+
+    /// The label separator is genuinely localised, and it costs the same number
+    /// of columns in both languages: the full-width Chinese colon carries its
+    /// own gap, so the English one has to spell that gap out. A separator that
+    /// cost more in one language would move every value in that language.
+    #[test]
+    fn the_label_separator_keeps_the_value_in_one_column() {
+        for lang in [Lang::Zh, Lang::En] {
+            let s = lang.strings();
+            let row = format!("{}{}{}", s.device_label, s.label_separator, "X");
+            assert!(row.ends_with('X'), "{row:?}");
+            assert_eq!(
+                crate::text::columns(s.label_separator),
+                2,
+                "{lang:?}: the separator is not a colon and a gap"
+            );
+            assert!(
+                !s.label_separator.starts_with(' '),
+                "{lang:?}: the separator starts with the gap"
+            );
+        }
+        // The Chinese colon is a colon and the gap is inside it; the English one
+        // is a colon plus an explicit space.
+        let zh = Lang::Zh.strings().label_separator;
+        let en = Lang::En.strings().label_separator;
+        assert_ne!(zh, en);
+        assert_eq!(zh, "：");
+        assert_eq!(en, ": ");
     }
 
     /// Every view has a title in both languages, and the titles differ between

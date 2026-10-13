@@ -8,51 +8,35 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
-use crate::event::ConnectionState;
 use crate::theme::Theme;
 
-/// The dot that opens the top bar. A filled circle for a live session, a ring
-/// while dialling, and the same glyph in the state's colour otherwise — the web
-/// client's status dot.
-fn dot(app: &App) -> &'static str {
-    match app.state {
-        ConnectionState::Disconnected => "○",
-        _ => "●",
-    }
-}
-
-/// The indeterminate busy indicator: three cells, one marching marker. It only
-/// shows while something is in flight, so a still frame has no moving parts.
-pub fn busy(tick: usize) -> String {
-    const CELLS: usize = 3;
-    let at = tick % CELLS;
-    let cells: Vec<&str> = (0..CELLS)
-        .map(|cell| if cell == at { "-" } else { "·" })
-        .collect();
-    cells.join(" ")
-}
-
-/// Separator between the top bar's groups.
+/// The separator between the top bar's groups.
 const DOT: &str = " · ";
 
-/// The top bar's left half: state dot, state word, and a busy indicator while
-/// the state is not settled.
+/// The top bar's left half: the state's glyph, the state's name, and the two
+/// facts that describe the link — the level it negotiated and the signal it is
+/// carrying. Both read as placeholders until the device reports them, which is
+/// what the design's first frame shows.
 pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(format!("{} ", dot(app)), theme.state_dot(app.state)),
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", app.state_glyph()),
+            theme.state_dot(app.state),
+        ),
         Span::styled(app.state_name().to_string(), theme.text()),
-    ];
-    if matches!(app.state, ConnectionState::Connecting) {
-        spans.push(Span::styled(format!(" {}", busy(app.tick)), theme.muted()));
-    }
-    Line::from(spans)
+        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(app.link_text(), theme.muted()),
+        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(app.signal_text(), theme.muted()),
+    ])
 }
 
 /// The top bar's right half: traffic counters, the link speed, autoscroll and
-/// the clock, in that order — the web client's status strip.
+/// the clock, in that order — the web client's status strip. It ends flush with
+/// the last column, so the strip's right edge does not move with the numbers.
 pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
     let s = app.strings();
-    let mut spans = vec![
+    Line::from(vec![
         Span::styled(format!("{} {}", s.rx, app.rx), theme.muted()),
         Span::styled(DOT.to_string(), theme.muted()),
         Span::styled(format!("{} {}", s.tx, app.tx), theme.muted()),
@@ -62,11 +46,7 @@ pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
         Span::styled(s.autoscroll.to_string(), theme.muted()),
         Span::styled(DOT.to_string(), theme.muted()),
         Span::styled(app.clock.clone(), theme.muted()),
-    ];
-    if !spans.is_empty() {
-        spans.push(Span::raw(" "));
-    }
-    Line::from(spans)
+    ])
 }
 
 /// The bottom bar's left half: which region has the keyboard, which view is
@@ -105,60 +85,134 @@ pub fn bar_style(theme: &Theme) -> Style {
     theme.panel()
 }
 
+/// The dot the status pill opens with. A filled circle in every state, so the
+/// pill reads as a state light and the colour is what carries the state.
+const PILL_DOT: &str = "●";
+
+/// The terminal pane's status pill: the live state, on a chip, for the pane's
+/// head row.
+///
+/// The web client keeps this pill in its header — one dot, the state, and the
+/// device it is on. The pane's head row is where the design puts it. The device
+/// name is already a sidebar row of its own, so the pill carries the dot and
+/// the state and nothing else.
+///
+/// The dot takes the state's colour from the same place the top bar's glyph and
+/// the sidebar's do, so the three can never disagree about what the session is
+/// doing — which is what the design's own screenshot does, painting the same
+/// connecting state amber in two places and blue in this one.
+pub fn status_pill(app: &App, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        // The padding is part of the chip, so it carries the chip's ground.
+        Span::styled(format!(" {PILL_DOT} "), theme.pill_dot(app.state)),
+        Span::styled(app.state_name().to_string(), theme.pill()),
+        Span::styled(" ", theme.pill()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::ConnectionState;
     use crate::i18n::Lang;
+    use crate::text::columns;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// The top bar names the state and, while dialling, shows the busy
-    /// indicator; a settled session shows no moving parts.
+    /// The pill names the live state, opens with a filled dot in the state's own
+    /// colour, and sits on the chip's ground — the design's `● 连接中…`.
     #[test]
-    fn the_top_bar_shows_the_state_and_a_busy_indicator_only_while_dialling() {
+    fn the_status_pill_names_the_state_with_a_state_coloured_dot() {
         let theme = Theme::DARK;
         let mut app = App {
             lang: Lang::Zh,
             ..App::default()
         };
         app.state = ConnectionState::Connecting;
-        let text = line_text(&top_left(&app, &theme));
-        assert!(text.contains("连接中…"), "{text:?}");
-        assert!(text.contains('-') && text.contains('·'), "{text:?}");
+        let pill = status_pill(&app, &theme);
+        assert_eq!(line_text(&pill), " ● 连接中… ");
+        assert_eq!(pill.spans[0].style.fg, Some(theme.warn));
+        assert_eq!(pill.spans[0].style.bg, Some(theme.panel_3));
+        assert_eq!(pill.spans[1].style, theme.pill());
+        assert_eq!(pill.spans[2].style, theme.pill());
 
         app.state = ConnectionState::Connected;
-        let text = line_text(&top_left(&app, &theme));
-        assert!(text.contains("已连接"), "{text:?}");
-        assert!(
-            !text.contains('-'),
-            "connected still shows the busy bar: {text:?}"
+        let connected = status_pill(&app, &theme);
+        assert_eq!(line_text(&connected), " ● 已连接 ");
+        // The dot is the only thing that moves with the state, and it is the
+        // same colour the top bar's glyph and the sidebar's use.
+        assert_eq!(connected.spans[0].style.fg, Some(theme.accent_strong));
+        assert_eq!(connected.spans[1].content, app.state_name());
+    }
+
+    /// The pill's geometry is the design's: the dot, the state, and one column
+    /// of padding each side. Its width is what puts its right edge in the
+    /// designed column, so a change here moves the pill.
+    #[test]
+    fn the_pill_is_the_dot_the_state_and_its_padding() {
+        let theme = Theme::DARK;
+        let app = App {
+            lang: Lang::En,
+            state: ConnectionState::Connecting,
+            ..App::default()
+        };
+        let pill = status_pill(&app, &theme);
+        assert_eq!(line_text(&pill), " ● connecting… ");
+        assert_eq!(pill.width(), 1 + 1 + 1 + columns("connecting…") + 1);
+    }
+
+    /// Both themes paint the pill: a light pane is not left without its state.
+    #[test]
+    fn the_pill_follows_the_theme() {
+        let app = App::default();
+        let dark = status_pill(&app, &Theme::DARK);
+        let light = status_pill(&app, &Theme::LIGHT);
+        assert_eq!(line_text(&dark), line_text(&light));
+        assert_eq!(dark.spans[1].style, Theme::DARK.pill());
+        assert_eq!(light.spans[1].style, Theme::LIGHT.pill());
+    }
+
+    /// The top bar names the state and the two facts about its link. Until the
+    /// device reports either, both slots hold the placeholder — the frame the
+    /// design's screenshots show.
+    #[test]
+    fn the_top_bar_names_the_state_and_its_link_facts() {
+        let theme = Theme::DARK;
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        app.state = ConnectionState::Connecting;
+        assert_eq!(line_text(&top_left(&app, &theme)), "◐ 连接中… · ─ · ─");
+
+        app.state = ConnectionState::Connected;
+        assert_eq!(line_text(&top_left(&app, &theme)), "● 已连接 · ─ · ─");
+
+        app.link_level = Some(2);
+        app.signal_dbm = Some(-58);
+        assert_eq!(
+            line_text(&top_left(&app, &theme)),
+            "● 已连接 · 链路 L2 · -58 dBm"
+        );
+
+        app.lang = Lang::En;
+        assert_eq!(
+            line_text(&top_left(&app, &theme)),
+            "● connected · link L2 · -58 dBm"
         );
     }
 
-    /// The busy indicator marches and wraps: three cells, one marker, always
-    /// exactly one marker whatever tick it is handed.
+    /// The glyph changes with the state, and takes the state's colour.
     #[test]
-    fn the_busy_indicator_marches_and_always_has_one_marker() {
-        let frames: Vec<String> = (0..6).map(busy).collect();
-        for frame in &frames {
-            assert_eq!(frame.matches('-').count(), 1, "{frame:?}");
-            assert_eq!(frame.matches('·').count(), 2, "{frame:?}");
-        }
-        assert_eq!(frames[0], frames[3], "the cycle repeats after three ticks");
-        assert_ne!(frames[0], frames[1]);
-    }
-
-    /// The dot changes with the state, and takes the state's colour.
-    #[test]
-    fn the_status_dot_follows_the_state() {
+    fn the_status_glyph_follows_the_state() {
         let theme = Theme::DARK;
         let mut app = App::default();
         let cases = [
             (ConnectionState::Connected, theme.accent_strong(), "●"),
-            (ConnectionState::Connecting, theme.warn(), "●"),
-            (ConnectionState::Failed, theme.danger(), "●"),
+            (ConnectionState::Connecting, theme.warn(), "◐"),
+            (ConnectionState::Failed, theme.danger(), "◆"),
             (ConnectionState::Disconnected, theme.muted(), "○"),
         ];
         for (state, style, glyph) in cases {
@@ -167,19 +221,14 @@ mod tests {
             assert_eq!(line.spans[0].style.fg, style.fg, "{state:?}");
             assert_eq!(line.spans[0].content.trim_end(), glyph, "{state:?}");
         }
-        // A session with anything live to say is filled; only the resting
-        // state is hollow, so the dot reads at a glance.
-        assert_eq!(dot(&App::default()), "○");
     }
 
     /// The right half reads counters, speed, autoscroll and the clock, in that
-    /// order, in both languages.
+    /// order — and reads the same in both languages, because the tokens in it
+    /// are deliberately untranslated.
     #[test]
     fn the_top_bar_right_reads_the_counters_in_order() {
-        for (lang, rx, tx, auto) in [
-            (Lang::Zh, "接收", "发送", "自动滚动"),
-            (Lang::En, "RX", "TX", "Auto"),
-        ] {
+        for lang in [Lang::Zh, Lang::En] {
             let mut app = App {
                 lang,
                 ..App::default()
@@ -188,8 +237,11 @@ mod tests {
             app.tx = 34;
             app.clock = "19:52:50".to_string();
             let text = line_text(&top_right(&app, &Theme::DARK));
-            let expected = format!("{rx} 12 · {tx} 34 · — · {auto} · 19:52:50 ");
-            assert_eq!(text, expected);
+            assert_eq!(
+                text, "RX 12 · TX 34 · ─ · Auto · 19:52:50",
+                "{lang:?} translates a token the design keeps Latin"
+            );
+            assert!(!text.ends_with(' '), "{text:?} carries a trailing space");
         }
     }
 
@@ -204,7 +256,48 @@ mod tests {
         app.baud = Some(115_200);
         app.clock = "19:52:50".to_string();
         let text = line_text(&top_right(&app, &Theme::DARK));
-        assert_eq!(text, "RX 0 · TX 0 · 115200 · Auto · 19:52:50 ");
+        assert_eq!(text, "RX 0 · TX 0 · 115200 · Auto · 19:52:50");
+    }
+
+    /// One frame names the session's state once and the same way: the top bar
+    /// and the bottom bar both carry the state's own name, and neither carries
+    /// another state's — a frame that said `连接中…` in one place and
+    /// `connecting…` in the other would be showing two answers to one question.
+    #[test]
+    fn the_bars_name_the_state_the_same_way() {
+        for lang in [Lang::Zh, Lang::En] {
+            for state in [
+                ConnectionState::Disconnected,
+                ConnectionState::Connecting,
+                ConnectionState::Connected,
+                ConnectionState::Failed,
+            ] {
+                let app = App {
+                    lang,
+                    state,
+                    ..App::default()
+                };
+                let theme = Theme::DARK;
+                let top = top_left(&app, &theme);
+                let bottom = bottom_left(&app, &theme);
+                // The state's name is its own span, so the check is exact rather
+                // than a search: `disconnected` contains `connected`.
+                assert_eq!(top.spans[1].content.as_ref(), app.state_name());
+                assert_eq!(
+                    top.spans[0].content.trim_end(),
+                    app.state_glyph(),
+                    "{lang:?}/{state:?}"
+                );
+                assert_eq!(
+                    bottom.spans.last().unwrap().content.as_ref(),
+                    app.state_name()
+                );
+                assert_eq!(
+                    bottom.spans.last().unwrap().style.fg,
+                    theme.state_dot(state).fg
+                );
+            }
+        }
     }
 
     /// The bottom bar's left half names the focus, the view and the state.

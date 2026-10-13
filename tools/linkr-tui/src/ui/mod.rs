@@ -12,6 +12,7 @@ pub mod toast;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
@@ -20,10 +21,21 @@ use crate::app::App;
 /// Height of the top and bottom bars, in rows.
 pub const BAR_HEIGHT: u16 = 1;
 
-/// Width of the sidebar column, in columns — wide enough for the longest
-/// designed row (`Transport: BLE (locked)` and the Chinese equivalent) with the
-/// cursor marker and a margin.
+/// Width of the sidebar rail, in columns — wide enough for the longest designed
+/// row (`Transport: BLE (locked)` and the Chinese equivalent) with the cursor
+/// marker and a margin. The rail's last column is its edge, so the rows
+/// themselves have [`SIDEBAR_TEXT_WIDTH`].
 pub const SIDEBAR_WIDTH: u16 = 30;
+
+/// The rail's edge: one column of rule, so the sidebar reads as a column of its
+/// own rather than as the left margin of the centre pane.
+pub const DIVIDER_WIDTH: u16 = 1;
+
+/// The glyph that edge is drawn with.
+pub const DIVIDER_GLYPH: &str = "│";
+
+/// Columns the sidebar's own rows may use.
+pub const SIDEBAR_TEXT_WIDTH: u16 = SIDEBAR_WIDTH - DIVIDER_WIDTH;
 
 /// The regions of a frame, resolved once so tests can assert on them without
 /// painting.
@@ -116,8 +128,37 @@ fn draw_bar(
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let lines = sidebar::fitted(app, &theme, area.width);
-    frame.render_widget(Paragraph::new(lines).style(theme.panel()), area);
+    // The rows get the rail minus its edge, so a row can never be laid out
+    // against the rail's width and then paint over the rule.
+    let text_area = Rect {
+        width: area.width.saturating_sub(DIVIDER_WIDTH),
+        ..area
+    };
+    let lines = sidebar::lines(app, &theme, text_area.width);
+    frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
+    draw_divider(frame, &theme, area);
+}
+
+/// The rule down the sidebar's right edge.
+///
+/// It spans the middle band only: the bars are full width and run across it, so
+/// a rule through them would fence off the top bar's own status strip.
+fn draw_divider(frame: &mut Frame, theme: &crate::theme::Theme, area: Rect) {
+    if area.width < DIVIDER_WIDTH + 1 || area.height == 0 {
+        // A rail with no room for both its text and its edge drops the edge:
+        // the rows are what the user came for.
+        return;
+    }
+    let column = Rect {
+        x: area.x + area.width - DIVIDER_WIDTH,
+        y: area.y,
+        width: DIVIDER_WIDTH,
+        height: area.height,
+    };
+    let rule: Vec<Line<'static>> = (0..column.height)
+        .map(|_| Line::from(Span::styled(DIVIDER_GLYPH, theme.line())))
+        .collect();
+    frame.render_widget(Paragraph::new(rule).style(theme.panel()), column);
 }
 
 fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
@@ -138,7 +179,39 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(body::lines(app, &theme, area.width)).style(ground),
             area,
         );
+        draw_status_pill(frame, app, area);
     }
+}
+
+/// Columns the status pill keeps between itself and the pane's right edge.
+const PILL_MARGIN: u16 = 1;
+
+/// The status pill, flush right on the pane's head row.
+///
+/// It rides the pane's own first row rather than the top bar: the design keeps
+/// that row for it, and the top bar is already spoken for by the counters and
+/// the clock. Only the unframed view reaches here — a framed view puts its
+/// title on the border that row would otherwise carry.
+fn draw_status_pill(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let theme = app.theme();
+    let pill = chrome::status_pill(app, &theme);
+    let width = pill.width() as u16;
+    let room = area.width.saturating_sub(PILL_MARGIN);
+    if width > room {
+        // A pane too narrow for its pill drops it: the pane is what the user
+        // came for, and half a chip is worse than none.
+        return;
+    }
+    let head = Rect {
+        x: area.x + room - width,
+        y: area.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(pill), head);
 }
 
 fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
@@ -381,6 +454,131 @@ mod tests {
         }
     }
 
+    /// The rail's edge is drawn: one rule down the middle band, in the rail's
+    /// last column, and never through the bars.
+    #[test]
+    fn the_divider_runs_down_the_middle_band_only() {
+        let app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        let text = render_to_text(&app, 110, 30);
+        let rows: Vec<&str> = text.lines().collect();
+        assert_eq!(rows.len(), 30);
+        for (y, row) in rows.iter().enumerate() {
+            let carries = row.contains(DIVIDER_GLYPH);
+            if y == 0 || y == 29 {
+                assert!(!carries, "row {y} runs the rule through a bar: {row:?}");
+            } else {
+                assert!(carries, "row {y} is missing the rule: {row:?}");
+                let before = row.split(DIVIDER_GLYPH).next().unwrap();
+                assert_eq!(
+                    crate::text::columns(before),
+                    SIDEBAR_TEXT_WIDTH as usize,
+                    "row {y} puts the rule in the wrong column: {row:?}"
+                );
+            }
+        }
+    }
+
+    /// The two languages lay the sidebar out row for row: the same rows carry
+    /// content, each starting in the same column.
+    ///
+    /// This is the property the design broke. Its English hint was one column
+    /// too long for the sidebar, so it wrapped onto a second line and pushed
+    /// `Watch` — and everything after it — one row below the Chinese one; and
+    /// its English state row was drawn on top of the row beneath it. Neither
+    /// can happen here: the plan is a function of the session state, and a row
+    /// is fitted to its column rather than wrapped.
+    #[test]
+    fn the_sidebar_lays_out_the_same_in_both_languages() {
+        for (width, height) in [(110u16, 30u16), (96, 24), (80, 20)] {
+            let ink = |lang: Lang| -> Vec<(bool, Option<usize>)> {
+                let app = App {
+                    lang,
+                    ..App::default()
+                };
+                let buffer = render_buffer(&app, width, height).expect("a frame");
+                (0..height)
+                    .map(|y| {
+                        let filled: Vec<usize> = (0..SIDEBAR_TEXT_WIDTH)
+                            .filter(|x| buffer[(*x, y)].symbol() != " ")
+                            .map(|x| x as usize)
+                            .collect();
+                        (!filled.is_empty(), filled.first().copied())
+                    })
+                    .collect()
+            };
+            let zh = ink(Lang::Zh);
+            let en = ink(Lang::En);
+            assert_eq!(zh.len(), en.len(), "{width}x{height}");
+            for (y, (zh, en)) in zh.iter().zip(&en).enumerate() {
+                assert_eq!(
+                    zh.0, en.0,
+                    "{width}x{height}: row {y} has content in one language only"
+                );
+                assert_eq!(
+                    zh.1, en.1,
+                    "{width}x{height}: row {y} starts in a different column"
+                );
+            }
+        }
+    }
+
+    /// The terminal pane carries its status pill, flush right on its head row
+    /// with one column of margin — the same columns in every language, because
+    /// the pill is right-aligned and only its width moves.
+    #[test]
+    fn the_terminal_pane_carries_its_status_pill() {
+        // The chip runs to here and stops: the pane's last column is the margin.
+        let chip_right = 110 - 1 - PILL_MARGIN;
+        for lang in [Lang::Zh, Lang::En] {
+            let app = App {
+                lang,
+                ..App::default()
+            };
+            let theme = app.theme();
+            let buffer = render_buffer(&app, 110, 30).expect("a frame");
+            let row = 1;
+            let chip = |x: u16| buffer[(x, row)].bg == theme.panel_3;
+            assert!(chip(chip_right), "{lang:?} the pill stops short");
+            assert!(!chip(chip_right + 1), "{lang:?} the pill has no margin");
+            assert!(
+                !(0..SIDEBAR_WIDTH).any(chip),
+                "{lang:?} the pill covers the rail"
+            );
+            // The pill carries the live state, and the row carries nothing else.
+            let text = render_to_text(&app, 110, 30);
+            let head = text.lines().nth(1).unwrap_or_default();
+            assert!(head.contains(app.state_name()), "{lang:?} {head:?}");
+        }
+    }
+
+    /// A framed view puts its title on the border instead, so it grows no pill.
+    #[test]
+    fn a_framed_view_has_no_status_pill() {
+        let app = App {
+            view: View::Diagnostics,
+            ..App::default()
+        };
+        let buffer = render_buffer(&app, 110, 30).expect("a frame");
+        let tail: String = (SIDEBAR_WIDTH..110)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect();
+        assert!(!tail.contains('●'), "a framed view grew a pill: {tail:?}");
+    }
+
+    /// A pane too narrow for its pill drops it rather than showing half a chip.
+    #[test]
+    fn a_narrow_pane_drops_its_status_pill() {
+        let app = App::default();
+        let text = render_to_text(&app, 40, 12);
+        assert!(!text.contains('●'), "{text}");
+        // Wide enough, and it is back.
+        let wide = render_to_text(&app, 110, 30);
+        assert!(wide.contains('●'), "{wide}");
+    }
+
     /// A rendered frame shows the designed chrome: the top bar's counters, every
     /// sidebar section and view, and the bottom bar's hints.
     #[test]
@@ -398,7 +596,7 @@ mod tests {
             lines[0]
         );
         assert!(
-            lines[0].contains("接收 0") && lines[0].contains("19:52:50"),
+            lines[0].contains("RX 0") && lines[0].contains("19:52:50"),
             "{}",
             lines[0]
         );

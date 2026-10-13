@@ -248,6 +248,20 @@ impl Theme {
     pub fn toast(&self) -> Style {
         Style::default().bg(self.panel_3).fg(self.text)
     }
+
+    /// The status pill on the centre pane's head row: a `--panel-3` chip with
+    /// primary text, so it reads as a surface laid over the pane's own ground
+    /// rather than as another line of the pane.
+    pub fn pill(&self) -> Style {
+        Style::default().bg(self.panel_3).fg(self.text)
+    }
+
+    /// The pill's dot: a filled circle in the state's own colour, on the pill's
+    /// ground. One style for every state — the colour is what carries the
+    /// state, which is how the web client paints its `.status-dot`.
+    pub fn pill_dot(&self, state: ConnectionState) -> Style {
+        self.state_dot(state).bg(self.panel_3)
+    }
 }
 
 /// Which theme the user chose, as persisted in `tui.json`. The web remembers

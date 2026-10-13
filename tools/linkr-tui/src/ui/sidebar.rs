@@ -1,26 +1,63 @@
 //! The sidebar: connection block, view list, quick sends and the watch list.
 //!
-//! Two layers, deliberately: [`rows`] builds the plain content and marks what
-//! each row *is*, [`lines`] colours those rows from the theme. Tests assert on
-//! `rows` for structure and on `lines` for colour, so a layout change cannot
-//! hide behind a style change.
+//! Three layers, deliberately. [`rows`] builds the plain content and marks what
+//! each row *is* and how far it is indented; [`lines`] colours those rows from
+//! the theme and fits them to the column. Tests assert on `rows` for structure
+//! and on `lines` for colour, so a layout change cannot hide behind a style
+//! change.
 //!
-//! The width helpers live in [`crate::text`] because every view needs the same
-//! column arithmetic — a second copy is how the two drift apart.
+//! **One plan, every language.** The row plan is a function of the session
+//! state only: the same number of rows, in the same order, at the same indents,
+//! whatever language is in force. A row is never wrapped — it is fitted to the
+//! column, and the strings that go into it are held short enough by the tests
+//! here. Wrapping is what the design did with `Enter sends · reboot asks first`
+//! (31 columns in a 29-column column), and that extra row pushed `Watch` — and
+//! everything after it — one row down, so the English sidebar no longer lined
+//! up with the Chinese one.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
 use crate::event::View;
-use crate::text::{pad_to, wrap};
+use crate::text::clip_to;
 use crate::theme::Theme;
+
+/// How far a section header sits from the left edge. The hint under `Quick
+/// send` shares it: it belongs to the header, not to the list under it.
+const HEADER_INDENT: u8 = 0;
+
+/// How far a row inside a section sits: one marker's worth of room, so a label
+/// lines up under the text of the row above it rather than under its marker.
+const ITEM_INDENT: u8 = 2;
+
+/// The watch section sits one column deeper, as the design has it.
+const WATCH_INDENT: u8 = 3;
+
+/// The cursor's marker: a small triangle, so the accent chip reading as a
+/// button still shows which row the keyboard is on.
+pub const CURSOR_MARKER: &str = "▸ ";
+
+/// What follows a shortcut that asks before it runs. The design marks `reboot`
+/// with it, and it is the difference between a red row and a row the user can
+/// see is red *because it is the dangerous one*.
+///
+/// U+26A0 is East Asian *ambiguous* — one column in every terminal that
+/// resolves ambiguity to narrow, two in the ones that do not. It is the last
+/// glyph on its row and the row is fitted to the column, so a wide reading
+/// costs at most the marker's right half; it cannot shift a row.
+pub const DANGER_MARKER: &str = "⚠";
 
 /// What a sidebar row means, which decides how it is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowStyle {
     /// A section header (`Connection`, `Views`, …).
     Header,
+    /// A blank row between two sections. Part of the plan, not an accident:
+    /// the sections land on the designed rows because the gaps count.
+    Gap,
+    /// The session's state and its link, under the connection header.
+    State,
     /// A plain label (`Device: …`).
     Label,
     /// A dimmed hint line.
@@ -35,32 +72,70 @@ pub enum RowStyle {
     Dangerous,
 }
 
-/// One sidebar row: its text and what it means.
+/// One sidebar row: what it says, what it means, and where it sits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
+    /// The row's own text — its label, its action, its view name.
     pub text: String,
     pub style: RowStyle,
+    /// Leading columns, before `text`.
+    pub indent: u8,
+    /// A dimmed tail after the text (` · ─`), which only the state row has.
+    pub tail: Option<String>,
+    /// A marker after the text, in the danger colour: `reboot ⚠`. Only the
+    /// shortcuts that ask before running carry it.
+    pub marker: Option<&'static str>,
 }
 
 impl Row {
-    fn new(text: impl Into<String>, style: RowStyle) -> Row {
+    fn at(text: impl Into<String>, style: RowStyle, indent: u8) -> Row {
         Row {
             text: text.into(),
             style,
+            indent,
+            tail: None,
+            marker: None,
         }
+    }
+
+    /// The same, with a dimmed tail.
+    fn trailing(mut self, tail: impl Into<String>) -> Row {
+        self.tail = Some(tail.into());
+        self
+    }
+
+    /// The same, marked as a row that asks before it runs.
+    fn marked(mut self, marker: &'static str) -> Row {
+        self.marker = Some(marker);
+        self
+    }
+
+    /// The row laid out, less its marker: the indent, then the text. The marker
+    /// is painted separately, because it carries a colour of its own.
+    fn laid_out(&self) -> String {
+        format!("{}{}", " ".repeat(self.indent as usize), self.text)
+    }
+
+    /// Whether the cursor can land on this row.
+    pub fn selectable(&self) -> bool {
+        matches!(
+            self.style,
+            RowStyle::Action | RowStyle::Selected | RowStyle::ActiveView | RowStyle::Dangerous
+        )
     }
 }
 
 /// The selectable rows, in cursor order. The sidebar cursor indexes this list,
 /// so highlighting and navigation can never disagree with what is drawn.
 pub fn targets(app: &App) -> Vec<String> {
-    let mut out = vec![format!(
-        "{}: {}",
-        app.strings().transport_label,
-        app.transport_text()
+    let s = app.strings();
+    let mut out = vec![labelled(
+        s.transport_label,
+        &app.transport_text(),
+        s.label_separator,
     )];
-    out.push(app.strings().connect.to_string());
-    out.push(app.strings().switch_device.to_string());
+    out.push(s.connect.to_string());
+    out.push(s.switch_device.to_string());
     for view in View::ALL {
         out.push(app.lang.view_name(view).to_string());
     }
@@ -70,7 +145,12 @@ pub fn targets(app: &App) -> Vec<String> {
     out
 }
 
-/// The whole sidebar, top to bottom.
+/// `Transport: BLE` — a label, the language's separator, then the value.
+pub fn labelled(label: &str, value: &str, separator: &str) -> String {
+    format!("{label}{separator}{value}")
+}
+
+/// The whole sidebar, top to bottom, exactly as many rows as the design draws.
 pub fn rows(app: &App) -> Vec<Row> {
     let s = app.strings();
     let mut rows = Vec::new();
@@ -81,37 +161,46 @@ pub fn rows(app: &App) -> Vec<Row> {
         here
     };
     let selected = |index: usize| app.sidebar_cursor == index;
-
-    // --- Connection -------------------------------------------------------
-    rows.push(Row::new(s.section_connection, RowStyle::Header));
-
-    let transport_index = next_cursor();
-    rows.push(Row::new(
-        format!("{}: {}", s.transport_label, app.transport_text()),
-        if selected(transport_index) {
+    let action_style = |index: usize| {
+        if selected(index) {
             RowStyle::Selected
         } else {
             RowStyle::Action
-        },
+        }
+    };
+
+    // --- Connection -------------------------------------------------------
+    rows.push(Row::at(
+        s.section_connection,
+        RowStyle::Header,
+        HEADER_INDENT,
     ));
-    rows.push(Row::new(
-        format!("{}: {}", s.device_label, app.device_name),
+    // The state row is read, not chosen: it is not a cursor target, which is
+    // why it takes no cursor index.
+    rows.push(
+        Row::at(app.state_name(), RowStyle::State, HEADER_INDENT)
+            .trailing(format!(" · {}", app.link_text())),
+    );
+
+    let transport = next_cursor();
+    rows.push(Row::at(
+        labelled(s.transport_label, &app.transport_text(), s.label_separator),
+        action_style(transport),
+        ITEM_INDENT,
+    ));
+    rows.push(Row::at(
+        labelled(s.device_label, &app.device_name, s.label_separator),
         RowStyle::Label,
+        ITEM_INDENT,
     ));
     for label in [s.connect, s.switch_device] {
         let index = next_cursor();
-        rows.push(Row::new(
-            label,
-            if selected(index) {
-                RowStyle::Selected
-            } else {
-                RowStyle::Action
-            },
-        ));
+        rows.push(Row::at(label, action_style(index), ITEM_INDENT));
     }
 
     // --- Views ------------------------------------------------------------
-    rows.push(Row::new(s.section_views, RowStyle::Header));
+    rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
+    rows.push(Row::at(s.section_views, RowStyle::Header, HEADER_INDENT));
     for view in View::ALL {
         let index = next_cursor();
         let style = if selected(index) {
@@ -121,12 +210,17 @@ pub fn rows(app: &App) -> Vec<Row> {
         } else {
             RowStyle::Action
         };
-        rows.push(Row::new(app.lang.view_name(view), style));
+        rows.push(Row::at(app.lang.view_name(view), style, ITEM_INDENT));
     }
 
     // --- Quick send -------------------------------------------------------
-    rows.push(Row::new(s.section_quick_send, RowStyle::Header));
-    rows.push(Row::new(s.quick_send_hint, RowStyle::Hint));
+    rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
+    rows.push(Row::at(
+        s.section_quick_send,
+        RowStyle::Header,
+        HEADER_INDENT,
+    ));
+    rows.push(Row::at(s.quick_send_hint, RowStyle::Hint, HEADER_INDENT));
     for quick in &app.quick_send {
         let index = next_cursor();
         let style = if selected(index) {
@@ -136,85 +230,117 @@ pub fn rows(app: &App) -> Vec<Row> {
         } else {
             RowStyle::Action
         };
-        rows.push(Row::new(quick.command.clone(), style));
+        let row = Row::at(quick.command.clone(), style, ITEM_INDENT);
+        // The marker belongs to the command, not to the cursor: `reboot` is
+        // dangerous whether or not the keyboard happens to be sitting on it.
+        rows.push(if quick.dangerous {
+            row.marked(DANGER_MARKER)
+        } else {
+            row
+        });
     }
 
     // --- Watch ------------------------------------------------------------
-    rows.push(Row::new(s.section_watch, RowStyle::Header));
+    rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
+    rows.push(Row::at(s.section_watch, RowStyle::Header, HEADER_INDENT));
     if app.watch.is_empty() {
-        rows.push(Row::new(s.watch_empty, RowStyle::Hint));
+        rows.push(Row::at(s.watch_empty, RowStyle::Hint, WATCH_INDENT));
     } else {
         for finding in &app.watch {
-            rows.push(Row::new(finding.clone(), RowStyle::Action));
+            rows.push(Row::at(finding.clone(), RowStyle::Action, WATCH_INDENT));
         }
     }
 
     rows
 }
 
-/// The sidebar painted: the cursor row first, so a selected row's chip covers
-/// the whole line, and every row indented under its section header.
+/// The sidebar painted for a column `width` columns wide.
 ///
-/// `width` is the sidebar's inner width. The selected row is padded to it, so
-/// the chip reads as a button rather than as coloured text; the padding counts
-/// display columns, not characters, so a CJK row is padded correctly.
+/// Every row is fitted to that width: a row is never wrapped and never spills,
+/// because a wrapped row shifts every row below it. The selected row is an
+/// accent chip that hugs its text, as the design's does — padding it out to the
+/// full column would make it read as a bar rather than as the row it marks.
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    let cursor_marker = "▶ ";
-    let indent = "  ";
     let width = width as usize;
     rows(app)
         .into_iter()
-        .map(|row| {
-            let (text, style) = match row.style {
-                RowStyle::Header => (row.text, theme.section_header()),
-                RowStyle::Label => (format!("{indent}{}", row.text), theme.text()),
-                RowStyle::Hint => (format!("{indent}{}", row.text), theme.muted()),
-                RowStyle::Action => (format!("{indent}{}", row.text), theme.text()),
-                RowStyle::Selected => {
-                    let marked = format!("{cursor_marker}{}", row.text);
-                    (pad_to(&marked, width), theme.selected())
+        .map(|row| match row.style {
+            RowStyle::Gap => Line::from(""),
+            RowStyle::State => {
+                let glyph = Span::styled(
+                    format!("{} ", app.state_glyph()),
+                    theme.state_dot(app.state),
+                );
+                let room = width.saturating_sub(2);
+                let mut spans = vec![glyph, Span::styled(clip_to(&row.text, room), theme.text())];
+                if let Some(tail) = row.tail {
+                    let used = crate::text::columns(&row.text);
+                    let left = room.saturating_sub(used);
+                    spans.push(Span::styled(clip_to(&tail, left), theme.muted()));
                 }
-                RowStyle::ActiveView => (
-                    format!("{indent}{}", row.text),
-                    theme.text().add_modifier(Modifier::BOLD),
-                ),
-                RowStyle::Dangerous => (format!("{indent}{}", row.text), theme.danger()),
-            };
-            Line::from(Span::styled(text, style))
+                Line::from(spans)
+            }
+            RowStyle::Selected => {
+                // The chip hugs the whole row, marker included, so a selected
+                // dangerous shortcut stays one unbroken chip.
+                let text = clip_to(&format!("{CURSOR_MARKER}{}", row.text), width);
+                let mut chip = text;
+                if let Some(marker) = row.marker {
+                    chip.push_str(&format!(" {marker}"));
+                }
+                Line::from(Span::styled(chip, theme.selected()))
+            }
+            other => {
+                // A marker is budgeted for before the text is fitted, so a row
+                // that runs long loses its tail rather than its warning.
+                let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
+                let room = width.saturating_sub(crate::text::columns(&tail));
+                let mut spans = vec![Span::styled(
+                    clip_to(&row.laid_out(), room),
+                    style_for(other, theme),
+                )];
+                if !tail.is_empty() {
+                    spans.push(Span::styled(tail, theme.danger()));
+                }
+                Line::from(spans)
+            }
         })
         .collect()
 }
 
-/// The sidebar as the frame paints it: [`lines`], with any row too wide for the
-/// column broken onto the next line. The design's English hint is the case that
-/// needs it — `Enter sends · reboot asks first` wraps with `first` on its own
-/// row — and a Chinese row has no spaces to break at, so a run longer than the
-/// column breaks between glyphs instead of running under the centre column.
-pub fn fitted(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    lines(app, theme, width)
-        .into_iter()
-        .flat_map(|line| match line.spans.into_iter().next() {
-            Some(span) => wrap(&span.content, width as usize)
-                .into_iter()
-                .map(|piece| Line::from(Span::styled(piece, span.style)))
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        })
-        .collect()
+/// The colour a row type is painted in — the whole of the theme's say in the
+/// sidebar's appearance.
+fn style_for(style: RowStyle, theme: &Theme) -> ratatui::style::Style {
+    match style {
+        RowStyle::Header => theme.section_header(),
+        RowStyle::Hint => theme.muted(),
+        RowStyle::Dangerous => theme.danger(),
+        RowStyle::ActiveView => theme.text().add_modifier(Modifier::BOLD),
+        _ => theme.text(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::i18n::Lang;
-    use crate::ui::SIDEBAR_WIDTH;
-    use unicode_width::UnicodeWidthStr;
+    use crate::text::columns;
+    use crate::ui::SIDEBAR_TEXT_WIDTH;
 
-    fn app_en() -> App {
+    fn app_in(lang: Lang) -> App {
         App {
-            lang: Lang::En,
+            lang,
             ..App::default()
         }
+    }
+
+    fn app_en() -> App {
+        app_in(Lang::En)
+    }
+
+    /// The text of a painted row, marker and indent included.
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     /// The rows appear in the designed order: four sections, each header
@@ -229,8 +355,91 @@ mod tests {
             .map(|r| r.text.as_str())
             .collect();
         assert_eq!(headers, vec!["Connection", "Views", "Quick send", "Watch"]);
-        // The first row of the list is the first header.
         assert_eq!(rows[0].style, RowStyle::Header);
+    }
+
+    /// The connection block opens with the session's state and its link, which
+    /// is read rather than chosen: the cursor never lands on it.
+    #[test]
+    fn the_connection_block_opens_with_the_state_row() {
+        let app = app_en();
+        let rows = rows(&app);
+        let state = &rows[1];
+        assert_eq!(state.style, RowStyle::State);
+        assert_eq!(state.text, "disconnected");
+        assert_eq!(state.tail.as_deref(), Some(" · ─"));
+        assert!(!state.selectable(), "the state row is a cursor target");
+        assert!(
+            !targets(&app).iter().any(|t| t == "disconnected"),
+            "the state row is in the cursor list"
+        );
+    }
+
+    /// Every language lays the sidebar out the same: the same number of rows,
+    /// the same kinds, at the same indents. That is what makes the frames line
+    /// up — the bug this pins is the design's, where the English hint wrapped
+    /// onto a second row and pushed `Watch` one row below the Chinese one.
+    #[test]
+    fn the_row_plan_is_the_same_in_every_language() {
+        let zh = rows(&app_in(Lang::Zh));
+        let en = rows(&app_en());
+        assert_eq!(zh.len(), en.len(), "the two languages plan different rows");
+        for (index, (zh, en)) in zh.iter().zip(&en).enumerate() {
+            assert_eq!(zh.style, en.style, "row {index} differs in kind");
+            assert_eq!(zh.indent, en.indent, "row {index} differs in indent");
+            assert_eq!(
+                zh.tail.is_some(),
+                en.tail.is_some(),
+                "row {index} has a tail in one language only"
+            );
+        }
+    }
+
+    /// Nothing in the sidebar has to be cut off, in either language: if a row
+    /// needs clipping, the plan has grown a row that is too long for its
+    /// column, and the string is what has to change.
+    #[test]
+    fn no_row_is_wider_than_its_column_in_either_language() {
+        for lang in [Lang::Zh, Lang::En] {
+            let app = app_in(lang);
+            for row in rows(&app) {
+                let budget = SIDEBAR_TEXT_WIDTH as usize;
+                let used = row.indent as usize
+                    + columns(&row.text)
+                    + row.tail.as_ref().map(|t| columns(t)).unwrap_or(0)
+                    + if row.style == RowStyle::Selected {
+                        columns(CURSOR_MARKER)
+                    } else if row.style == RowStyle::State {
+                        2
+                    } else {
+                        0
+                    };
+                assert!(
+                    used <= budget,
+                    "{lang:?} row {:?} needs {used} of {budget} columns",
+                    row.text
+                );
+            }
+        }
+    }
+
+    /// The painted rows all fit the column, in both languages and at every
+    /// width: the property the layout depends on.
+    #[test]
+    fn painted_rows_never_exceed_the_column() {
+        for lang in [Lang::Zh, Lang::En] {
+            let app = app_in(lang);
+            for width in [4u16, 12, SIDEBAR_TEXT_WIDTH, 60] {
+                for line in lines(&app, &Theme::DARK, width) {
+                    let text = text_of(&line);
+                    assert!(
+                        columns(&text) <= width as usize,
+                        "{lang:?} at {width}: {text:?} is {} columns",
+                        columns(&text)
+                    );
+                }
+            }
+        }
     }
 
     /// Every view is listed, under the Views header, and the active one is
@@ -255,7 +464,7 @@ mod tests {
     }
 
     /// The cursor lands on exactly one row, and only on a selectable one — a
-    /// header can never be the cursor's target.
+    /// header, a gap or the state row can never be the cursor's target.
     #[test]
     fn the_cursor_marks_exactly_one_selectable_row() {
         let mut app = app_en();
@@ -335,22 +544,38 @@ mod tests {
     /// view" rule, enforced.
     #[test]
     fn painted_rows_take_their_colours_from_the_theme() {
-        let app = app_en();
+        let app = App {
+            state: crate::event::ConnectionState::Connecting,
+            ..app_en()
+        };
         let theme = Theme::DARK;
-        let painted = lines(&app, &theme, SIDEBAR_WIDTH);
+        let painted = lines(&app, &theme, SIDEBAR_TEXT_WIDTH);
         let rows = rows(&app);
         assert_eq!(painted.len(), rows.len());
         for (row, line) in rows.iter().zip(&painted) {
-            let span = &line.spans[0];
+            if row.style == RowStyle::Gap {
+                assert!(text_of(line).is_empty());
+                continue;
+            }
+            let first = &line.spans[0];
             match row.style {
-                RowStyle::Header => assert_eq!(span.style.fg, Some(theme.accent)),
-                RowStyle::Hint => assert_eq!(span.style.fg, Some(theme.muted)),
+                RowStyle::Header => assert_eq!(first.style.fg, Some(theme.accent)),
+                RowStyle::Hint => assert_eq!(first.style.fg, Some(theme.muted)),
                 RowStyle::Selected => {
-                    assert_eq!(span.style.bg, Some(theme.accent));
-                    assert_eq!(span.style.fg, Some(theme.accent_ink));
+                    assert_eq!(first.style.bg, Some(theme.accent));
+                    assert_eq!(first.style.fg, Some(theme.accent_ink));
                 }
-                RowStyle::Dangerous => assert_eq!(span.style.fg, Some(theme.danger)),
-                _ => assert_eq!(span.style.fg, Some(theme.text)),
+                RowStyle::Dangerous => assert_eq!(first.style.fg, Some(theme.danger)),
+                RowStyle::State => {
+                    assert_eq!(
+                        first.style.fg,
+                        Some(theme.warn),
+                        "the state glyph takes the state's colour"
+                    );
+                    assert_eq!(line.spans[1].style.fg, Some(theme.text));
+                    assert_eq!(line.spans[2].style.fg, Some(theme.muted));
+                }
+                _ => assert_eq!(first.style.fg, Some(theme.text)),
             }
         }
     }
@@ -360,8 +585,8 @@ mod tests {
     #[test]
     fn the_light_theme_paints_the_same_rows_differently() {
         let app = app_en();
-        let dark = lines(&app, &Theme::DARK, SIDEBAR_WIDTH);
-        let light = lines(&app, &Theme::LIGHT, SIDEBAR_WIDTH);
+        let dark = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        let light = lines(&app, &Theme::LIGHT, SIDEBAR_TEXT_WIDTH);
         assert_eq!(dark.len(), light.len());
         let header_dark = dark[0].spans[0].style.fg;
         let header_light = light[0].spans[0].style.fg;
@@ -370,176 +595,261 @@ mod tests {
         assert_ne!(header_dark, header_light);
     }
 
-    /// A selected row starts with the marker and the rest are indented: the
-    /// chip has to cover the cursor mark, so the mark is part of the row text.
+    /// A selected row starts with the marker and the rest are indented to their
+    /// section: the chip has to cover the cursor mark, so the mark is part of
+    /// the row text.
     #[test]
     fn the_cursor_row_carries_the_marker() {
         let app = app_en();
-        let painted = lines(&app, &Theme::DARK, SIDEBAR_WIDTH);
-        let marked: Vec<&str> = painted
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        let marked: Vec<String> = painted
             .iter()
-            .filter(|l| l.spans[0].content.starts_with("▶ "))
-            .map(|l| l.spans[0].content.as_ref())
+            .map(text_of)
+            .filter(|t| t.starts_with(CURSOR_MARKER))
             .collect();
         assert_eq!(marked.len(), 1);
-        assert!(marked[0].starts_with("▶ Transport:"));
+        assert!(marked[0].starts_with("▸ Transport:"), "{:?}", marked[0]);
+    }
+
+    /// Exactly the shortcuts that ask before running carry the warning marker,
+    /// and the marker is the command's — not the cursor's — so moving the
+    /// keyboard onto `reboot` does not change it.
+    #[test]
+    fn only_a_dangerous_shortcut_carries_the_warning_marker() {
+        for lang in [Lang::Zh, Lang::En] {
+            let app = app_in(lang);
+            let marked: Vec<Row> = rows(&app)
+                .into_iter()
+                .filter(|r| r.marker.is_some())
+                .collect();
+            assert_eq!(marked.len(), 1, "{lang:?}");
+            assert_eq!(marked[0].text, "reboot");
+            assert_eq!(marked[0].marker, Some(DANGER_MARKER));
+        }
+    }
+
+    /// The marker is its own span in the danger colour, so the row reads as a
+    /// warning rather than as a label that happens to be red.
+    #[test]
+    fn the_warning_marker_takes_the_danger_colour() {
+        let app = app_en();
+        let theme = Theme::DARK;
+        let line = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
+            .into_iter()
+            .find(|l| text_of(l).trim().starts_with("reboot"))
+            .expect("the dangerous row");
+        assert_eq!(text_of(&line), format!("  reboot {DANGER_MARKER}"));
+        assert_eq!(line.spans.len(), 2, "the marker is not its own span");
+        assert_eq!(line.spans[0].style.fg, Some(theme.danger));
+        assert_eq!(line.spans[1].content, format!(" {DANGER_MARKER}"));
+        assert_eq!(line.spans[1].style.fg, Some(theme.danger));
+    }
+
+    /// The marker must be one column: it is budgeted for inside the row's
+    /// width, so a glyph the terminal draws wide would eat into the row.
+    #[test]
+    fn the_warning_marker_is_one_column() {
+        assert_eq!(columns(DANGER_MARKER), 1);
+    }
+
+    /// A row that runs long loses its text, never its warning, and never wraps
+    /// — the row count is what must hold.
+    #[test]
+    fn the_warning_marker_survives_a_row_that_runs_long() {
+        let mut app = app_en();
+        app.quick_send = vec![crate::app::QuickSend::guarded(
+            "reboot into the bootloader and wait for the host",
+        )];
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        assert_eq!(painted.len(), rows(&app).len());
+        let line = painted
+            .iter()
+            .find(|l| text_of(l).contains('…'))
+            .expect("the cut row");
+        assert!(
+            text_of(line).ends_with(DANGER_MARKER),
+            "the cut row lost its warning: {:?}",
+            text_of(line)
+        );
+        assert!(columns(&text_of(line)) <= SIDEBAR_TEXT_WIDTH as usize);
+    }
+
+    /// Selecting a dangerous shortcut keeps its warning: the chip covers the
+    /// marker too, in one unbroken span.
+    #[test]
+    fn a_selected_dangerous_shortcut_keeps_its_marker_in_the_chip() {
+        let mut app = app_en();
+        app.sidebar_cursor = rows(&app)
+            .iter()
+            .filter(|r| r.selectable())
+            .position(|r| r.marker.is_some())
+            .expect("the dangerous shortcut is selectable");
+        let theme = Theme::DARK;
+        let chip = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
+            .into_iter()
+            .find(|l| text_of(l).starts_with(CURSOR_MARKER))
+            .expect("the chip");
+        assert_eq!(
+            text_of(&chip),
+            format!("{CURSOR_MARKER}reboot {DANGER_MARKER}")
+        );
+        assert_eq!(chip.spans.len(), 1, "the chip is broken into two spans");
+        assert_eq!(chip.spans[0].style, theme.selected());
+    }
+
+    /// The chip hugs its text instead of spanning the column: the design's
+    /// selection covers exactly the row it marks, and a chip padded out to the
+    /// full column would read as a bar.
+    #[test]
+    fn the_selected_chip_hugs_its_text() {
+        for lang in [Lang::Zh, Lang::En] {
+            let app = app_in(lang);
+            let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+            let chip = painted
+                .iter()
+                .map(text_of)
+                .find(|t| t.starts_with(CURSOR_MARKER))
+                .expect("a selected row");
+            let row = rows(&app)
+                .into_iter()
+                .find(|r| r.style == RowStyle::Selected)
+                .unwrap();
+            assert_eq!(chip, format!("{CURSOR_MARKER}{}", row.text));
+            assert!(
+                columns(&chip) < SIDEBAR_TEXT_WIDTH as usize,
+                "{lang:?} chip {chip:?} spans the whole column"
+            );
+            assert!(!chip.ends_with(' '), "{lang:?} chip {chip:?} is padded");
+        }
+    }
+
+    /// A row too long for its column is cut, not wrapped and not spilled: the
+    /// row count is what must not change, because a wrapped row would shift
+    /// every row below it.
+    #[test]
+    fn an_overlong_row_is_cut_rather_than_wrapped() {
+        let mut app = app_en();
+        app.device_name = "Linkr BLE UART with a very long advertised name".to_string();
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        assert_eq!(
+            painted.len(),
+            rows(&app).len(),
+            "a long row changed the row count"
+        );
+        let device = painted
+            .iter()
+            .map(text_of)
+            .find(|t| t.trim_start().starts_with("Device:"))
+            .expect("the device row");
+        assert!(device.contains('…'), "{device:?} was not marked as cut");
+        assert!(columns(&device) <= SIDEBAR_TEXT_WIDTH as usize);
+    }
+
+    /// No row is empty except the gaps, in either language: a blank row in the
+    /// middle of a section is a layout bug the design does not have.
+    #[test]
+    fn only_gap_rows_are_blank() {
+        for lang in [Lang::Zh, Lang::En] {
+            let app = app_in(lang);
+            for row in rows(&app) {
+                if row.style == RowStyle::Gap {
+                    assert!(row.text.is_empty(), "a gap carries text");
+                } else {
+                    assert!(!row.text.trim().is_empty(), "blank row in {lang:?}");
+                }
+            }
+        }
     }
 
     /// Wide (CJK) text keeps its indent and never overflows the column — the
     /// class of bug that shifted the old panel: a two-column glyph counted as
     /// one made the chip and every row after it sit wrong.
     #[test]
-    fn wide_text_keeps_its_indent_and_never_overflows() {
+    fn wide_text_keeps_its_indent() {
         for lang in [Lang::Zh, Lang::En] {
-            let app = App {
-                lang,
-                ..App::default()
-            };
+            let app = app_in(lang);
             for (row, line) in rows(&app)
                 .iter()
-                .zip(lines(&app, &Theme::DARK, SIDEBAR_WIDTH))
+                .zip(lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH))
             {
-                let text = line.spans[0].content.to_string();
-                if row.style == RowStyle::Header {
-                    assert!(!text.starts_with(' '), "header {text:?} is indented");
-                } else if row.style == RowStyle::Selected {
-                    // The cursor row carries the marker where the indent goes,
-                    // so the chip starts at column zero.
-                    assert!(
-                        text.starts_with("▶ "),
-                        "cursor row {text:?} lost its marker"
-                    );
-                } else {
-                    assert!(text.starts_with("  "), "row {text:?} lost its indent");
+                let text = text_of(&line);
+                match row.style {
+                    RowStyle::Gap => assert!(text.is_empty()),
+                    // These two carry a marker instead of an indent: the state
+                    // row's glyph, and the cursor's triangle on the chip.
+                    RowStyle::State => assert!(
+                        text.starts_with(app.state_glyph()),
+                        "row {text:?} lost the state's glyph"
+                    ),
+                    RowStyle::Selected => {
+                        assert!(text.starts_with(CURSOR_MARKER), "{text:?}");
+                    }
+                    _ => {
+                        let indent = " ".repeat(row.indent as usize);
+                        assert!(
+                            text.starts_with(&indent),
+                            "row {text:?} lost its {}-column indent",
+                            row.indent
+                        );
+                        assert!(
+                            !text.starts_with(&format!("{indent} ")),
+                            "row {text:?} is indented past its section"
+                        );
+                    }
                 }
-            }
-
-            // What is painted never overflows, in either language: a row too
-            // wide for the column is wrapped, not spilled.
-            for line in fitted(&app, &Theme::DARK, SIDEBAR_WIDTH) {
-                let text = line.spans[0].content.to_string();
-                let width = UnicodeWidthStr::width(text.as_str());
-                assert!(
-                    width <= SIDEBAR_WIDTH as usize,
-                    "{lang:?} painted row {text:?} is {width} columns wide"
-                );
             }
         }
 
         // The Chinese rows are genuinely wide, so the width accounting above is
         // exercised rather than passing on ASCII by accident.
-        let zh = App {
-            lang: Lang::Zh,
-            ..App::default()
-        };
-        let painted = lines(&zh, &Theme::DARK, SIDEBAR_WIDTH);
+        let zh = app_in(Lang::Zh);
+        let painted = lines(&zh, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
         let view_row = painted
             .iter()
-            .find(|l| l.spans[0].content.contains("串口终端"))
+            .map(text_of)
+            .find(|t| t.contains("串口终端"))
             .expect("the serial terminal row");
-        let text = view_row.spans[0].content.to_string();
         assert!(
-            UnicodeWidthStr::width(text.as_str()) > text.chars().count(),
-            "{text:?} carries no wide glyph"
+            columns(&view_row) > view_row.chars().count(),
+            "{view_row:?} carries no wide glyph"
         );
     }
 
-    /// No row is ever empty, in either language: a blank row in the sidebar is
-    /// a layout bug the design does not have.
+    /// The plan is the design's, row for row: the sections land where the
+    /// screenshots put them, gaps included.
     #[test]
-    fn no_row_is_ever_blank() {
-        for lang in [Lang::Zh, Lang::En] {
-            let app = App {
-                lang,
-                ..App::default()
-            };
-            for row in rows(&app) {
-                assert!(!row.text.trim().is_empty(), "blank row in {lang:?}");
-            }
-        }
-    }
-
-    /// The selected row's chip spans the whole sidebar column, in both
-    /// languages: the padding counts display columns, so a CJK row's chip lines
-    /// up with the narrow ones instead of stopping short.
-    #[test]
-    fn the_selected_chip_spans_the_column_in_both_languages() {
-        for lang in [Lang::Zh, Lang::En] {
-            let app = App {
-                lang,
-                ..App::default()
-            };
-            let painted = lines(&app, &Theme::DARK, SIDEBAR_WIDTH);
-            let chip = painted
-                .iter()
-                .find(|l| l.spans[0].style.bg == Some(Theme::DARK.accent))
-                .expect("a selected row");
-            let width = UnicodeWidthStr::width(chip.spans[0].content.as_ref());
-            assert_eq!(width, SIDEBAR_WIDTH as usize, "{lang:?} chip {width} wide");
-        }
-    }
-
-    /// A chip is padded, never truncated: a sidebar too narrow for its longest
-    /// row keeps the text whole rather than cutting it off silently.
-    #[test]
-    fn a_narrow_column_pads_but_never_truncates() {
-        let app = App {
-            lang: Lang::Zh,
-            ..App::default()
-        };
-        let painted = lines(&app, &Theme::DARK, 4);
-        let chip = painted
-            .iter()
-            .find(|l| l.spans[0].style.bg == Some(Theme::DARK.accent))
-            .expect("a selected row");
+    fn the_plan_matches_the_designed_rows() {
+        let app = app_en();
+        let plan: Vec<(RowStyle, u8)> = rows(&app).iter().map(|r| (r.style, r.indent)).collect();
+        use RowStyle::*;
         assert_eq!(
-            chip.spans[0].content.as_ref(),
-            "▶ 传输方式: BLE",
-            "a chip narrower than its text must keep the text whole and unpadded"
+            plan,
+            vec![
+                (Header, 0),
+                (State, 0),
+                (Selected, 2),
+                (Label, 2),
+                (Action, 2),
+                (Action, 2),
+                (Gap, 0),
+                (Header, 0),
+                (ActiveView, 2),
+                (Action, 2),
+                (Action, 2),
+                (Action, 2),
+                (Action, 2),
+                (Gap, 0),
+                (Header, 0),
+                (Hint, 0),
+                (Action, 2),
+                (Action, 2),
+                (Action, 2),
+                (Action, 2),
+                (Dangerous, 2),
+                (Gap, 0),
+                (Header, 0),
+                (Hint, 3),
+            ]
         );
-    }
-
-    /// The English hint is the one row too wide for the column, and it wraps
-    /// exactly as the design draws it: the break falls before `first`, which
-    /// starts a new row at the left margin.
-    #[test]
-    fn the_long_english_hint_wraps_as_the_design_draws_it() {
-        let app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        let pieces: Vec<String> = fitted(&app, &Theme::DARK, SIDEBAR_WIDTH)
-            .iter()
-            .map(|l| l.spans[0].content.to_string())
-            .collect();
-        let hint = "  Enter sends · reboot asks first";
-        assert!(UnicodeWidthStr::width(hint) > SIDEBAR_WIDTH as usize);
-        let start = pieces
-            .iter()
-            .position(|p| p.starts_with("  Enter"))
-            .expect("the hint row");
-        assert_eq!(pieces[start], "  Enter sends · reboot asks");
-        assert_eq!(pieces[start + 1], "first");
-        assert!(
-            !pieces[start + 1].starts_with(' '),
-            "the wrapped tail kept an indent"
-        );
-    }
-
-    /// The Chinese hint fits the column, so it stays on one row: the wrap is
-    /// driven by the width, not by the language.
-    #[test]
-    fn the_chinese_hint_fits_on_one_row() {
-        let app = App {
-            lang: Lang::Zh,
-            ..App::default()
-        };
-        let pieces: Vec<String> = fitted(&app, &Theme::DARK, SIDEBAR_WIDTH)
-            .iter()
-            .map(|l| l.spans[0].content.to_string())
-            .collect();
-        let hint = "  Enter 发送 · reboot 先确认";
-        assert!(UnicodeWidthStr::width(hint) <= SIDEBAR_WIDTH as usize);
-        assert!(pieces.iter().any(|p| p == hint), "{pieces:?}");
     }
 }
