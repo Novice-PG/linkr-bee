@@ -1,0 +1,88 @@
+//! Shared vocabulary: the small enums every other module names.
+
+/// Where the session stands. Drives the status dot, the toast and the text in
+/// the bars — one state, one meaning, everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+/// How loud a notice is. Toasts, the notice log and inline messages all colour
+/// themselves from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// The five centre-column views, in sidebar order. The F-key rota (`F2`–`F6`)
+/// follows this order, so inserting a view in the middle shifts the rota with
+/// it instead of leaving a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Terminal,
+    Diagnostics,
+    Network,
+    Assistant,
+    Transfer,
+}
+
+impl View {
+    /// Every view, in the order the sidebar lists them and the F-keys walk.
+    pub const ALL: [View; 5] = [
+        View::Terminal,
+        View::Diagnostics,
+        View::Network,
+        View::Assistant,
+        View::Transfer,
+    ];
+
+    /// The function key that selects this view: `F2` for the serial terminal
+    /// through `F6` for file transfer, matching the hint in the bottom bar.
+    pub fn fkey(self) -> u8 {
+        match self {
+            View::Terminal => 2,
+            View::Diagnostics => 3,
+            View::Network => 4,
+            View::Assistant => 5,
+            View::Transfer => 6,
+        }
+    }
+
+    /// The view asked for by an F-key, if any.
+    pub fn from_fkey(key: u8) -> Option<View> {
+        View::ALL.into_iter().find(|view| view.fkey() == key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The F-key rota is a bijection over the views: every key maps to exactly
+    /// one view and every view is reachable, so no view is orphaned.
+    #[test]
+    fn the_fkey_rota_covers_every_view_exactly_once() {
+        let keys: Vec<u8> = View::ALL.iter().map(|v| v.fkey()).collect();
+        assert_eq!(keys, vec![2, 3, 4, 5, 6]);
+        for view in View::ALL {
+            assert_eq!(View::from_fkey(view.fkey()), Some(view));
+        }
+        for key in [0, 1, 7, 12, 255] {
+            assert_eq!(View::from_fkey(key), None);
+        }
+    }
+
+    /// The sidebar order and the F-key order are the same list, so the hint in
+    /// the bottom bar can never disagree with the sidebar.
+    #[test]
+    fn sidebar_order_is_the_fkey_order() {
+        let mut sorted = View::ALL;
+        sorted.sort_by_key(|v| v.fkey());
+        assert_eq!(sorted, View::ALL);
+    }
+}
