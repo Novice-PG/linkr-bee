@@ -54,9 +54,17 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 /*
  * Two full decision rounds must name the same rate before the port moves. A
  * glitch that survives the filter can produce one confident wrong answer; two
- * agreeing rounds four seconds apart are much harder to fake, and if we do
- * move wrongly, the very next rounds measure the true rate (the measurement
- * depends only on RXD, never on what we are currently set to) and move back.
+ * agreeing rounds four seconds apart are much harder to fake.
+ *
+ * What this does not do is rescue a move to one of our own divisors, and the
+ * reasoning it used to carry — that measuring depends only on RXD, so a wrong
+ * move would be measured back and undone by the very next round — is the part
+ * that does not hold. The rate that brought us here was not our own setting
+ * made wrong, it was a window with no one-bit run in it; the line hands back
+ * the same number whether the port sits at 115200 or at 57600, so after the
+ * move it reads as a match instead of as a mistake. Nothing in the next round
+ * disagrees, and the port stays where it was taken. That is why the divisor
+ * check runs before any round is allowed to count.
  */
 #define CONFIRM_ROUNDS 2
 
@@ -72,6 +80,13 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 /* A round without a single usable reading; give up rather than guess forever. */
 #define REFUSED_MAX 8
 
+/*
+ * The divisor refusal speaks once every half minute rather than once per round,
+ * because a peer that really is sitting a factor away from us keeps saying it
+ * every round and the console has no other way to know why detection is stuck.
+ */
+#define ARTEFACT_WARN_MS 30000
+
 static uart_hal_context_t hal_ctx;
 static uint32_t src_hz;
 static struct k_work_delayable autobaud_work;
@@ -86,6 +101,9 @@ static uint32_t candidate;
 static uint32_t candidate_rounds;
 
 static uint32_t refused;
+
+/* When the divisor refusal last explained itself on the console. */
+static int64_t artefact_warned_at;
 
 /*
  * The earliest time another decision may be taken. Used for two different
@@ -147,6 +165,30 @@ static void round_decide(uint32_t rate)
 		candidate = 0;
 		candidate_rounds = 0;
 		refused = 0;
+		return;
+	}
+
+	/*
+	 * A whole factor of ourselves is a window that never saw a one-bit run,
+	 * not a peer that moved, and this is the one reading a wrong move can
+	 * never be talked out of: the pulse came from RXD, so the line answers
+	 * the same way whether the port is right or at current/k — and after the
+	 * move the answer matches, so no later round can disagree with it.
+	 * Agreeing twice would only have proved the data was stable. See
+	 * linkr_autobaud_divisor_artefact() for why five is the cut and for the
+	 * cost of taking it.
+	 */
+	if (current != 0 && linkr_autobaud_divisor_artefact(snapped, current)) {
+		if (k_uptime_get() - artefact_warned_at >= ARTEFACT_WARN_MS) {
+			artefact_warned_at = k_uptime_get();
+			LOG_WRN("Line reads %u while the port is %u, which is "
+				"ourselves divided by a whole factor — a window "
+				"with no one-bit run in it, not a peer that "
+				"moved. Keeping %u",
+				snapped, current, current);
+		}
+		candidate = 0;
+		candidate_rounds = 0;
 		return;
 	}
 

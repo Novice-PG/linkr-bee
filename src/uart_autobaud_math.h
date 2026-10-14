@@ -182,4 +182,56 @@ static inline uint32_t linkr_autobaud_snap(uint32_t rate)
 	return 0;
 }
 
+/*
+ * The longest shortest-run a window with no single-bit run in it can leave on
+ * both polarities at once, and therefore the largest divisor a byte stream can
+ * fake: five. A framed byte holds its low run for the start bit plus at most
+ * eight zero data bits, and the stop bit is always high, so the low side never
+ * exceeds nine; the two sides only reach the decision together when they timed
+ * the same run, and the longest that can be is 0xF0 — five low and five high.
+ * A divisor above this cannot be produced by data, so it stays followable.
+ */
+#define LINKR_AUTOBAUD_MAX_ARTIFACT_FACTOR 5u
+
+/**
+ * Whether `rate` is `current` divided by a whole factor a byte stream can fake.
+ *
+ * This is the shape of a window that never saw a single-bit run, and it is the
+ * one reading a wrong move cannot be recovered from. The pulse that produced
+ * the number belongs to RXD rather than to our divider, so the line keeps
+ * handing back the same wrong answer after the port has moved to it — and once
+ * the port sits at current/k, that answer reads as a match, so nothing ever
+ * disagrees with it again. Two agreeing rounds prove only that the data is
+ * stable, not that the peer moved. Measured on hardware: a 0xCC stream at
+ * 115200 leaves runs of two and three bits and computes 57596, which snaps to
+ * 57600 and then confirms itself.
+ *
+ * The cost is real and is taken on purpose. A peer that genuinely drops to a
+ * half, third, quarter or fifth of our rate is indistinguishable from this by
+ * any number of windows, so it will not be followed either — the port stays
+ * where it was and whoever holds the board sets it by hand. That trade falls
+ * one way because the two outcomes are not alike: following a fake costs every
+ * byte from then on and looks like a wireless fault, while declining to follow
+ * a real move costs one rate setting. A drop to a sixth or further stays
+ * followable, and 115200 down to 9600 — the case detection exists for — is a
+ * factor of twelve.
+ *
+ * `current` of zero is a port whose rate is not known, so nothing can be a
+ * divisor of it.
+ */
+static inline bool linkr_autobaud_divisor_artefact(uint32_t rate, uint32_t current)
+{
+	for (uint32_t k = 2; k <= LINKR_AUTOBAUD_MAX_ARTIFACT_FACTOR; k++) {
+		uint32_t expect = current / k;
+
+		if (expect != 0 &&
+		    linkr_autobaud_within(rate, expect,
+					  LINKR_AUTOBAUD_TOLERANCE_PCT)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 #endif /* LINKR_UART_AUTOBAUD_MATH_H_ */

@@ -124,6 +124,66 @@ static void polarities_must_agree(void)
 	      "apart() depends on operand order", 1, 0);
 }
 
+/*
+ * A reading that is ourselves divided by a whole factor is a window with no
+ * one-bit run in it. Every bound below comes out of linkr_autobaud_within()
+ * run over current/k for k in 2..5, so the cases pin both edges of each window
+ * rather than quoting its centre — a rule only worth having if it turns exactly
+ * where it says it turns.
+ */
+static void divisors_of_ourselves_are_not_a_peer(void)
+{
+	/* The measured artefact itself: 0xCC at 115200 leaves runs of two and
+	 * three bits and computes 57596, which snaps to 57600 and would then
+	 * confirm itself forever. */
+	check(linkr_autobaud_divisor_artefact(57600u, 115200u) == true,
+	      "half of ourselves is the artefact", 1, 0);
+	check(linkr_autobaud_divisor_artefact(57596u, 115200u) == true,
+	      "the value before snapping is too", 1, 0);
+
+	/* Top of the half window: 97 * R <= 5760000 under the symmetric rule. */
+	check(linkr_autobaud_divisor_artefact(59381u, 115200u) == true,
+	      "the top edge of the half window still counts", 1, 0);
+	check(linkr_autobaud_divisor_artefact(59382u, 115200u) == false,
+	      "one unit past the top edge does not", 1, 0);
+
+	/* Bottom: current/k may sit up to 3% above the reading, and 3% of 57600
+	 * is 1728, so 55872 is the last one. */
+	check(linkr_autobaud_divisor_artefact(55872u, 115200u) == true,
+	      "the bottom edge of the half window still counts", 1, 0);
+	check(linkr_autobaud_divisor_artefact(55871u, 115200u) == false,
+	      "one unit below the bottom edge does not", 1, 0);
+
+	/* Whole factors through the range a framed byte can fake. Five is the
+	 * limit: five low and five high is the longest both polarities reach
+	 * together without a one-bit run in the window. */
+	check(linkr_autobaud_divisor_artefact(38400u, 115200u) == true,
+	      "a third of ourselves counts", 1, 0);
+	check(linkr_autobaud_divisor_artefact(23040u, 115200u) == true,
+	      "a fifth of ourselves counts", 1, 0);
+
+	/* Past five no byte stream can fake it, so those stay followable —
+	 * including a sixth, which is the shape a 115200 console dropped to
+	 * 19200 arrives in. */
+	check(linkr_autobaud_divisor_artefact(19200u, 115200u) == false,
+	      "a sixth of ourselves stays followable", 1, 0);
+	check(linkr_autobaud_divisor_artefact(9600u, 115200u) == false,
+	      "115200 to 9600, the case detection exists for", 1, 0);
+
+	/* Not a divisor: our own rate, and a peer that got faster. Neither is
+	 * shaped like a missing one-bit run, so neither is refused. */
+	check(linkr_autobaud_divisor_artefact(115200u, 115200u) == false,
+	      "our own rate is not its own artefact", 1, 0);
+	check(linkr_autobaud_divisor_artefact(230400u, 115200u) == false,
+	      "a peer that sped up cannot be a divisor of us", 1, 0);
+	check(linkr_autobaud_divisor_artefact(50000u, 115200u) == false,
+	      "a rate that fits no factor is followed", 1, 0);
+
+	/* A port whose rate is not known has no divisors to stand on. */
+	check(linkr_autobaud_divisor_artefact(57600u, 0u) == false,
+	      "an unknown current rate refuses nothing", 1, 0);
+}
+
 static void snapping_names_one_rate_or_none(void)
 {
 	check(linkr_autobaud_snap(115200u) == 115200u, "exact 115200",
@@ -202,6 +262,7 @@ int main(void)
 {
 	within_is_symmetric_and_exclusive();
 	polarities_must_agree();
+	divisors_of_ourselves_are_not_a_peer();
 	pulses_become_rates();
 	snapping_names_one_rate_or_none();
 	the_list_has_no_ambiguous_neighbours();
