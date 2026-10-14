@@ -65,6 +65,54 @@ static inline bool linkr_autobaud_within(uint32_t a, uint32_t b, uint32_t pct)
 }
 
 /**
+ * How far the two polarities may disagree and still be counted as one window.
+ *
+ * Wider than the rate tolerance on purpose: a window whose lowest and highest
+ * runs of one bit agree to 5% has seen the same event twice, while the rate
+ * tolerance only has to keep a snapped answer unambiguous.
+ */
+#define LINKR_AUTOBAUD_AGREE_PCT 5u
+
+/**
+ * Whether the low and high latches timed the same shortest run.
+ *
+ * On a line carrying one-bit runs both polarities latch the same number of
+ * source-clock cycles — measured on hardware as exactly equal (8319/8319,
+ * 692/692, 4159/4159) — so a window in which they differ by more than the
+ * agree margin did not time one event twice. The smaller reading is then a
+ * spike that passed the glitch filter, or the half-pulse left when stty moved
+ * the divisor while its own bytes were still queued (measured: 461/692 and
+ * 1776/4159). One window cannot say which side is wrong.
+ *
+ * Acting on one anyway is how a port gets taken somewhere the line never was.
+ * The rate reduction takes the smaller reading, so an 80-cycle spike on a
+ * 694-cycle bit reads as 1 Mbaud, snaps cleanly to 1000000, and then holds:
+ * every honest window that follows is slower than it, so those windows only
+ * increment the count that says the best reading has been holding, and the
+ * third one decides. The filter that should have caught the spike runs at 16
+ * cycles, and this is what catches the rest.
+ *
+ * A window of 0x00 or 0xFF is refused by the same rule — its polarities time
+ * nine and one bits — which costs that window and nothing else: a line
+ * carrying no other byte carries no rate this rule could trust anyway.
+ *
+ * The margin is measured against the smaller reading, because both are lower
+ * bounds on the true bit time and the smaller is therefore the closer of the
+ * two.
+ *
+ * Two zeroes compare as agreeing: nothing was timed, and the caller already
+ * treats that as silence. A zero against a real pulse does not — one polarity
+ * seeing nothing is a window that only half happened.
+ */
+static inline bool linkr_autobaud_apart(uint32_t low, uint32_t high)
+{
+	uint32_t lo = low < high ? low : high;
+	uint32_t hi = low < high ? high : low;
+
+	return (hi - lo) * 100u > lo * LINKR_AUTOBAUD_AGREE_PCT;
+}
+
+/**
  * Turn the shortest pulse the hardware saw into a line rate, or 0 if the
  * reading cannot be one.
  *

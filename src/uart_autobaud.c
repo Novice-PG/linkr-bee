@@ -195,6 +195,19 @@ static void autobaud_tick(struct k_work *work)
 		goto reschedule;
 	}
 
+	/*
+	 * Both latches watch the same wire, so when they disagree by more than
+	 * the agree margin this window did not time one event twice and carries
+	 * no rate at all. It is skipped like silence rather than counted as a
+	 * refusal: the round's best reading is still a lower bound whatever
+	 * noise arrived since, so it survives, but no window is allowed to
+	 * advance the count of windows that have agreed with it while the line
+	 * is in this state. See linkr_autobaud_apart().
+	 */
+	if (linkr_autobaud_apart(low, high)) {
+		goto reschedule;
+	}
+
 	min_cycles = low < high ? low : high;
 	rate = linkr_autobaud_rate(min_cycles, src_hz);
 

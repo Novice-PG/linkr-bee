@@ -75,6 +75,55 @@ static void pulses_become_rates(void)
 	      "266666 cycles is 300 baud", linkr_autobaud_rate(266666u, APB), 300u);
 }
 
+/*
+ * On a line carrying one-bit runs the two polarities latch the same width, so
+ * anything wider than the agree margin is one side being wrong — and the rate
+ * reduction takes the smaller reading, which is the one a spike writes. Every
+ * case here is about that: a window either says "nothing happened" or it is
+ * discarded, but it is never allowed to become a rate.
+ */
+static void polarities_must_agree(void)
+{
+	/* Exactly equal, as measured on a real line (8319/8319, 692/692). */
+	check(linkr_autobaud_apart(692u, 692u) == false,
+	      "identical polarities are one window", 1, 0);
+
+	/* The detector's own rounding: 26 cycles off a 694-cycle bit is 3.7%,
+	 * still inside the 5% margin, so this is one measurement. */
+	check(linkr_autobaud_apart(694u, 720u) == false,
+	      "3.7% apart still agrees", 1, 0);
+
+	/* Exactly 5% still agrees — the rule is wider than, not equal to. */
+	check(linkr_autobaud_apart(1000u, 1050u) == false,
+	      "exactly 5% apart still agrees", 1, 0);
+	check(linkr_autobaud_apart(1000u, 1051u) == true,
+	      "just over 5% apart does not", 1, 0);
+
+	/* The case that matters. An 80-cycle spike on a 694-cycle bit reads as
+	 * 1 Mbaud, snaps cleanly to 1000000, and then holds: every honest
+	 * window after it is slower, so those only count as agreement. */
+	check(linkr_autobaud_apart(80u, 694u) == true,
+	      "a glitch-sized pulse against a real bit is refused", 1, 0);
+
+	/* What stty moving the divisor mid-byte measured: 461 against 692, a
+	 * pulse cut in half. */
+	check(linkr_autobaud_apart(461u, 692u) == true,
+	      "a half pulse against a whole one is refused", 1, 0);
+
+	/* A polarity that saw nothing is a window that only half happened. */
+	check(linkr_autobaud_apart(0u, 694u) == true,
+	      "one silent polarity is not agreement", 1, 0);
+
+	/* Both silent is silence, which the caller handles before asking. */
+	check(linkr_autobaud_apart(0u, 0u) == false,
+	      "both silent is silence, not disagreement", 1, 0);
+
+	/* Whichever way round they are written. */
+	check(linkr_autobaud_apart(692u, 461u) ==
+		      linkr_autobaud_apart(461u, 692u),
+	      "apart() depends on operand order", 1, 0);
+}
+
 static void snapping_names_one_rate_or_none(void)
 {
 	check(linkr_autobaud_snap(115200u) == 115200u, "exact 115200",
@@ -152,6 +201,7 @@ static void the_list_has_no_ambiguous_neighbours(void)
 int main(void)
 {
 	within_is_symmetric_and_exclusive();
+	polarities_must_agree();
 	pulses_become_rates();
 	snapping_names_one_rate_or_none();
 	the_list_has_no_ambiguous_neighbours();
