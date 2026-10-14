@@ -27,4 +27,3 @@ pub mod ui;
 pub mod views;
 pub mod vt;
 pub mod watch;
-pub mod zmodem;

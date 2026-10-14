@@ -190,88 +190,33 @@ pub struct Strings {
     pub xfer_in_section: &'static str,
     /// Shown when no transfer has happened yet.
     pub xfer_empty: &'static str,
-    /// The upload command hint.
-    pub xfer_upload_hint: &'static str,
-    /// The download command hint.
-    pub xfer_download_hint: &'static str,
     /// A one-line transfer record: name, size, state.
     pub xfer_record_failed: &'static str,
     pub xfer_record_saved: &'static str,
     pub xfer_record_unverified: &'static str,
     pub xfer_record_pending: &'static str,
-    /// How a ZMODEM transfer is started — the palette route, which is the one
-    /// the keyboard really offers.
-    pub xfer_zmodem_hint: &'static str,
-    /// Prefix of the banner and the notice for a send (`sending to the
-    /// device: <file>`).
-    pub xfer_started_out: &'static str,
-    /// Prefix of the banner and the notice for a receive (`receiving into:
-    /// <directory>`).
-    pub xfer_started_in: &'static str,
-    /// Prefix of the notice raised when a transfer ends cleanly.
-    pub xfer_finished: &'static str,
-    /// Prefix of the notice raised when a transfer is given up on.
-    pub xfer_cancelled: &'static str,
-    /// Shown when a transfer was asked for while one is already running.
-    pub xfer_busy: &'static str,
-    /// Shown when a transfer was asked for with no link.
+    /// Shown when a precheck was asked for with no link.
     pub xfer_needs_link: &'static str,
-    /// Prefix of the notice raised when a transfer cannot be started at all.
-    pub xfer_start_failed: &'static str,
-    /// Prefix of the notice raised for each file that arrives.
-    pub xfer_saved_notice: &'static str,
-    /// Prefix of the notice raised for each file that does not.
-    pub xfer_failed_notice: &'static str,
-    /// Shown when a send was asked for with no file named.
-    pub xfer_no_path: &'static str,
-    /// The form's rows, in the order the keyboard walks them.
-    pub xfer_direction: &'static str,
-    pub xfer_local_row: &'static str,
-    pub xfer_target_row: &'static str,
-    pub xfer_actions_row: &'static str,
-    /// The two directions. `send` is this host offering a file, `receive` is
-    /// this host taking whatever the device sends.
-    pub xfer_dir_send: &'static str,
-    pub xfer_dir_recv: &'static str,
-    /// The three actions on the action row.
+    /// The one row this view draws: the precheck.
     pub xfer_check: &'static str,
-    pub xfer_start: &'static str,
-    pub xfer_abort: &'static str,
     /// The precheck section heading.
     pub xfer_precheck: &'static str,
     /// The precheck has not been run.
     pub xfer_probe_idle: &'static str,
     /// The precheck is waiting on the device.
     pub xfer_probe_running: &'static str,
-    /// The device has ZMODEM's tools.
-    pub xfer_probe_zmodem: &'static str,
-    /// The device has no ZMODEM, but the shell pager's tools are there.
-    pub xfer_probe_pager: &'static str,
-    /// The device has neither, so a file cannot move either way.
-    pub xfer_probe_none: &'static str,
+    /// The device has everything the pager's commands are built from.
+    pub xfer_probe_ready: &'static str,
+    /// The device is missing tools, so a file cannot move with it.
+    pub xfer_probe_missing: &'static str,
     /// The precheck was asked and never answered.
     pub xfer_probe_no_answer: &'static str,
-    /// The channel a run would take.
-    pub xfer_channel_row: &'static str,
-    /// The progress of the run in flight.
-    pub xfer_progress_row: &'static str,
-    /// What the run in flight is doing.
-    pub xfer_status_row: &'static str,
-    pub xfer_sending: &'static str,
-    pub xfer_receiving: &'static str,
-    /// The precheck has to be run before a transfer may start.
-    pub xfer_probe_first: &'static str,
-    /// A transfer was stopped by the keyboard.
-    pub xfer_aborted: &'static str,
-    /// The console belongs to the transfer while one runs.
-    pub xfer_console_locked: &'static str,
-    /// The keys this view answers, so a form that looks like a form says how
-    /// it is driven.
+    /// The row naming the tool an upload's digest can be taken with.
+    pub xfer_digest_row: &'static str,
+    /// Shown when the device has no digest tool at all.
+    pub xfer_no_digest: &'static str,
+    /// The keys this view answers.
     pub xfer_keys_hint: &'static str,
-    /// The device path row, when ZMODEM leaves the name to the far end.
-    pub xfer_target_by_device: &'static str,
-    /// A run was asked for over the shell pager before it is wired up.
-    pub xfer_pager_pending: &'static str,
 
     // --- assistant view ---------------------------------------------------
     /// The session section heading.
@@ -413,50 +358,21 @@ const ZH: Strings = Strings {
     xfer_out_section: "发送到设备",
     xfer_in_section: "从设备取回",
     xfer_empty: "暂无传输记录。",
-    xfer_upload_hint: "上传：put <本地文件> <目标路径>",
-    xfer_download_hint: "下载：get <目标路径> <本地文件>",
     xfer_record_failed: "失败",
     xfer_record_saved: "已保存",
     xfer_record_unverified: "未校验",
     xfer_record_pending: "进行中",
-    xfer_zmodem_hint: "ZMODEM：Ctrl+P 面板 → 发送文件… / 接收文件…",
-    xfer_started_out: "正在发送到设备：",
-    xfer_started_in: "正在接收，写入：",
-    xfer_finished: "传输结束。",
-    xfer_cancelled: "传输已取消：",
-    xfer_busy: "已有传输在进行中。",
-    xfer_needs_link: "未连接——没有开始传输。",
-    xfer_start_failed: "无法开始传输：",
-    xfer_saved_notice: "已保存：",
-    xfer_failed_notice: "传输失败：",
-    xfer_no_path: "请输入要发送的文件路径。",
-    xfer_direction: "方向",
-    xfer_local_row: "本机路径",
-    xfer_target_row: "设备路径",
-    xfer_actions_row: "操作",
-    xfer_dir_send: "发送到设备",
-    xfer_dir_recv: "从设备取回",
-    xfer_check: "检测",
-    xfer_start: "开始",
-    xfer_abort: "中止",
+    xfer_needs_link: "未连接——什么都没发出。",
+    xfer_check: "预检目标机工具",
     xfer_precheck: "预检",
-    xfer_probe_idle: "尚未运行",
+    xfer_probe_idle: "尚未运行——按 Enter 询问设备",
     xfer_probe_running: "正在询问设备…",
-    xfer_probe_zmodem: "设备有 lrzsz，走 ZMODEM",
-    xfer_probe_pager: "设备没有 lrzsz，走 dd|base64",
-    xfer_probe_none: "设备既没有 lrzsz 也没有 dd/base64",
-    xfer_probe_no_answer: "预检没有回答",
-    xfer_channel_row: "通道",
-    xfer_progress_row: "进度",
-    xfer_status_row: "状态",
-    xfer_sending: "正在发送…",
-    xfer_receiving: "正在接收…",
-    xfer_probe_first: "请先运行预检：没有结果就不开始传输。",
-    xfer_aborted: "传输已中止。",
-    xfer_console_locked: "传输进行中——控制台在本次运行结束前已锁定。",
-    xfer_keys_hint: "↑↓ 移动 · Enter 确认 · ←→ 切换 · Esc 返回",
-    xfer_target_by_device: "由设备端决定",
-    xfer_pager_pending: "dd|base64 通道尚未接入，暂时只能用 ZMODEM。",
+    xfer_probe_ready: "目标机可以收发文件（dd|base64 分页，与 web 端一致）",
+    xfer_probe_missing: "目标机缺少工具，无法收发文件：",
+    xfer_probe_no_answer: "预检没有应答",
+    xfer_digest_row: "校验工具",
+    xfer_no_digest: "无——只能搬运，结果无法校验",
+    xfer_keys_hint: "Enter 预检 · Esc 返回终端",
     asst_session_section: "会话",
     asst_tasks_section: "任务",
     asst_no_tasks: "此设备暂无任务记录。",
@@ -562,50 +478,21 @@ const EN: Strings = Strings {
     xfer_out_section: "To the device",
     xfer_in_section: "From the device",
     xfer_empty: "No transfers yet.",
-    xfer_upload_hint: "Upload: put <local file> <target path>",
-    xfer_download_hint: "Download: get <target path> <local file>",
     xfer_record_failed: "failed",
     xfer_record_saved: "saved",
     xfer_record_unverified: "unverified",
     xfer_record_pending: "running",
-    xfer_zmodem_hint: "ZMODEM: Ctrl+P palette → Send a file… / Receive files…",
-    xfer_started_out: "sending to the device: ",
-    xfer_started_in: "receiving into: ",
-    xfer_finished: "Transfer finished.",
-    xfer_cancelled: "Transfer cancelled: ",
-    xfer_busy: "A transfer is already running.",
-    xfer_needs_link: "Not connected — no transfer was started.",
-    xfer_start_failed: "cannot start the transfer: ",
-    xfer_saved_notice: "saved: ",
-    xfer_failed_notice: "transfer failed: ",
-    xfer_no_path: "Name a file to send.",
-    xfer_direction: "Direction",
-    xfer_local_row: "On this host",
-    xfer_target_row: "On the device",
-    xfer_actions_row: "Actions",
-    xfer_dir_send: "Send to the device",
-    xfer_dir_recv: "Receive from the device",
-    xfer_check: "Check",
-    xfer_start: "Start",
-    xfer_abort: "Abort",
+    xfer_needs_link: "Not connected — nothing was sent.",
+    xfer_check: "Check the target's tools",
     xfer_precheck: "Precheck",
-    xfer_probe_idle: "not run yet",
+    xfer_probe_idle: "not run yet — press Enter to ask the device",
     xfer_probe_running: "asking the device…",
-    xfer_probe_zmodem: "device has lrzsz — ZMODEM",
-    xfer_probe_pager: "no lrzsz on the device — dd|base64",
-    xfer_probe_none: "the device has neither lrzsz nor dd/base64",
+    xfer_probe_ready: "the target can take a file (dd|base64 paging, as on the web)",
+    xfer_probe_missing: "the target is missing tools, so a file cannot move:",
     xfer_probe_no_answer: "the precheck did not answer",
-    xfer_channel_row: "Channel",
-    xfer_progress_row: "Progress",
-    xfer_status_row: "Status",
-    xfer_sending: "Sending…",
-    xfer_receiving: "Receiving…",
-    xfer_probe_first: "Run the precheck first: nothing transfers without it.",
-    xfer_aborted: "Transfer aborted.",
-    xfer_console_locked: "Transferring — the console is locked until this run ends.",
-    xfer_keys_hint: "up/down move · Enter activate · left/right change · Esc back",
-    xfer_target_by_device: "chosen by the device",
-    xfer_pager_pending: "The dd|base64 channel is not wired up yet; ZMODEM only for now.",
+    xfer_digest_row: "Digest",
+    xfer_no_digest: "none — bytes move, the result cannot be proved",
+    xfer_keys_hint: "Enter precheck · Esc back to the terminal",
     asst_session_section: "Session",
     asst_tasks_section: "Tasks",
     asst_no_tasks: "No tasks recorded for this device.",
@@ -781,23 +668,21 @@ mod tests {
                 s.xfer_out_section,
                 s.xfer_in_section,
                 s.xfer_empty,
-                s.xfer_upload_hint,
-                s.xfer_download_hint,
                 s.xfer_record_failed,
                 s.xfer_record_saved,
                 s.xfer_record_unverified,
                 s.xfer_record_pending,
-                s.xfer_zmodem_hint,
-                s.xfer_started_out,
-                s.xfer_started_in,
-                s.xfer_finished,
-                s.xfer_cancelled,
-                s.xfer_busy,
                 s.xfer_needs_link,
-                s.xfer_start_failed,
-                s.xfer_saved_notice,
-                s.xfer_failed_notice,
-                s.xfer_no_path,
+                s.xfer_check,
+                s.xfer_precheck,
+                s.xfer_probe_idle,
+                s.xfer_probe_running,
+                s.xfer_probe_ready,
+                s.xfer_probe_missing,
+                s.xfer_probe_no_answer,
+                s.xfer_digest_row,
+                s.xfer_no_digest,
+                s.xfer_keys_hint,
                 s.asst_session_section,
                 s.asst_tasks_section,
                 s.asst_no_tasks,

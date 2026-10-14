@@ -7,7 +7,6 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::accessory::{self, UartSettings};
@@ -15,14 +14,12 @@ use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::session::{Dial, Session};
-use crate::text::human_bytes;
 use crate::theme::{Theme, ThemeChoice};
 use crate::transfer::probe::{self, TRANSFER_PROBE};
-use crate::transfer::zmodem::{Event as TransferEvent, LiveTransfer};
 use crate::transport::{Link, LinkEvent};
 use crate::views::diagnostics::DiagnosticsState;
 use crate::views::terminal::TerminalPane;
-use crate::views::transfer::{RecordState, TransferState};
+use crate::views::transfer::TransferState;
 use crate::watch::{SerialWatch, WatchOptions};
 use crate::{dialogs, palette};
 
@@ -42,6 +39,10 @@ pub use crate::transport::LinkKind as Transport;
 pub struct ProbeRun {
     /// When the question went out.
     pub started: Instant,
+    /// When the device last printed anything. The answer has no end marker, so
+    /// this is what closes it: a console that has gone quiet has finished
+    /// answering.
+    pub quiet_since: Instant,
     /// Everything the device has printed since, best-effort as text. The answer
     /// is a list of tool names; a byte that is not text was not going to name
     /// one.
@@ -54,6 +55,12 @@ pub struct ProbeRun {
 /// typing into: a board busy with something else answers when it answers, and a
 /// probe that gave up after a second would report a working board as broken.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long the console has to hold still before its answer is taken as
+/// complete. Shorter than [`PROBE_TIMEOUT`] because it measures a different
+/// thing: that one is "the board never spoke", this one is "the board has
+/// finished speaking".
+pub const PROBE_QUIET: Duration = Duration::from_millis(600);
 
 /// A shortcut in the sidebar's quick-send list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,13 +163,6 @@ pub struct App {
     /// since. `None` unless [`TransferState::probing`], which is the flag a
     /// frame reads; this is the buffer the answer is collected into.
     pub probe: Option<ProbeRun>,
-    /// The ZMODEM transfer in flight, if any.
-    ///
-    /// Held as one value rather than as "an engine and a flag": a direction kept
-    /// beside a session is a direction that can outlive it. While this is
-    /// `Some`, the link belongs to the transfer and the device has no keyboard
-    /// — see [`App::send_bytes`].
-    pub live_transfer: Option<LiveTransfer>,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The device's own output, as the serial pane shows it.
@@ -269,7 +269,6 @@ impl Default for App {
             network: crate::views::network::NetworkState::default(),
             transfer: TransferState::default(),
             probe: None,
-            live_transfer: None,
             assistant: crate::views::assistant::AssistantState::default(),
             terminal: TerminalPane::new(),
             enter: crate::serial::keys::EnterMode::default(),
@@ -612,28 +611,21 @@ impl App {
         let was_live = self.session.is_live();
         let was_connected = self.state == ConnectionState::Connected;
         let describe = self.session.describe().to_string();
-        // While a transfer owns the link the device's bytes are a protocol
-        // dialogue, not output. They go to the codec and the codec's answers go
-        // back out; a pane that also painted them would show a screenful of
-        // escapes, and a pane that answered one of the emulator's own questions
-        // would inject a report into the middle of a block.
         let now = Instant::now();
-        let mut outbound = Vec::new();
         for event in self.session.pump() {
             match event {
-                LinkEvent::Data(bytes) => match self.live_transfer.as_mut() {
-                    Some(live) => outbound.extend(live.feed(&bytes)),
-                    None => {
-                        self.terminal.push(&bytes);
-                        self.trace.rx(&bytes);
-                        if self.collect_output {
-                            self.output.push_back(bytes.clone());
-                        }
-                        // A precheck reads the same console the pane paints:
-                        // its answer is not a management reply and does not
-                        // arrive on the bridge's own channel, so it is picked
-                        // out of the target's output as it prints.
-                        self.feed_probe(&bytes);
+                LinkEvent::Data(bytes) => {
+                    self.terminal.push(&bytes);
+                    self.trace.rx(&bytes);
+                    if self.collect_output {
+                        self.output.push_back(bytes.clone());
+                    }
+                    // A precheck reads the same console the pane paints:
+                    // its answer is not a management reply and does not
+                    // arrive on the bridge's own channel, so it is picked
+                    // out of the target's output as it prints.
+                    self.feed_probe(&bytes);
+                    {
                         // The same bytes, read a second time by the watch. It
                         // looks for a line saying `Kernel panic` or `Out of
                         // memory`, and where lines end is its own business — a
@@ -642,7 +634,7 @@ impl App {
                         let at = wall_clock_ms();
                         self.observe(&bytes, at);
                     }
-                },
+                }
                 // Something the far end said in words: a bridge announcement,
                 // not target output. It is shown and never typed, and it is
                 // scrubbed first because what a bridge says about itself is
@@ -698,27 +690,17 @@ impl App {
         if let Some(query) = self.talk.abandon(now) {
             self.report_unanswered(query);
         }
-        if self.live_transfer.is_none() {
-            // A program that asks a question — where is the cursor, how wide is
-            // the screen — blocks until it hears back, so the emulator's answers
-            // go out on the tick that produced them. Always *after* the feed: an
-            // answer is about the screen those bytes have just painted. With no
-            // link they are dropped, which is the right way round — a cursor
-            // report delivered late is worse than one never sent, because the
-            // program that asked has already given up and moved on.
-            for reply in self.terminal.take_replies() {
-                self.session.send(&reply);
-            }
+        // A program that asks a question — where is the cursor, how wide is the
+        // screen — blocks until it hears back, so the emulator's answers go out
+        // on the tick that produced them. Always *after* the feed: an answer is
+        // about the screen those bytes have just painted. With no link they are
+        // dropped, which is the right way round — a cursor report delivered late
+        // is worse than one never sent, because the program that asked has
+        // already given up and moved on.
+        for reply in self.terminal.take_replies() {
+            self.session.send(&reply);
         }
-        self.fold_transfer();
         self.fold_probe();
-        // Written after the fold, so a session that ended on this tick still
-        // gets its closing frames out: the sign-off is part of the dialogue, not
-        // a consequence of it. One write for the whole tick, because it is one
-        // byte stream either way.
-        if !outbound.is_empty() {
-            self.session.send(&outbound);
-        }
         let now_live = self.session.is_live();
         if let Some(state) = self.session.state() {
             self.state = state;
@@ -738,13 +720,6 @@ impl App {
             };
             let text = format!("{prefix}{describe}");
             self.push_notice(Notice { text, level });
-        }
-        if !now_live && self.live_transfer.is_some() {
-            // The wire went away with a file half moved. Give up on it and say
-            // which: a transfer that kept waiting for a link that no longer
-            // exists would sit in the view reading "running" for ever.
-            let prefix = self.strings().xfer_cancelled;
-            self.end_transfer(prefix, NoticeLevel::Warn);
         }
         if was_live && !now_live {
             // The last thing a target says very often has no newline after it —
@@ -1013,11 +988,7 @@ impl App {
     /// Send raw bytes. Silent when there is no link, because this is the path a
     /// *keystroke* takes and a toast per character would bury the screen.
     pub fn send_bytes(&mut self, bytes: &[u8]) -> bool {
-        // A transfer owns the wire. A byte typed into a ZMODEM dialogue is not
-        // input, it is corruption in the middle of a block — and the CRCs do not
-        // catch it: they check the far end's data, not what this end
-        // interleaved with it.
-        if !self.connected() || self.transferring() {
+        if !self.connected() {
             return false;
         }
         if !self.session.send(bytes) {
@@ -1069,17 +1040,6 @@ impl App {
     /// silence is right for a keystroke and wrong for a preset, where the user
     /// pressed a button and is owed an answer.
     pub fn send_command(&mut self, text: &str) -> bool {
-        // The transfer is checked first, so a preset pressed while one is
-        // running is told what is actually in the way rather than "not
-        // connected" — which would send the user looking at the wrong thing.
-        if self.transferring() {
-            let message = self.strings().xfer_busy.to_string();
-            self.push_notice(Notice {
-                text: message,
-                level: NoticeLevel::Warn,
-            });
-            return false;
-        }
         if !self.connected() {
             let message = self.strings().not_connected.to_string();
             self.push_notice(Notice {
@@ -1119,323 +1079,92 @@ impl App {
 
     // --- the transfer ------------------------------------------------------
 
-    /// Whether a transfer owns the link right now.
-    ///
-    /// The keyboard asks this. While a transfer is in flight, a byte typed into
-    /// the device is not a keystroke — it is corruption in the middle of a
-    /// block, and ZMODEM will not notice: the CRCs check the far end's data, not
-    /// what this end interleaved with it.
-    pub fn transferring(&self) -> bool {
-        self.live_transfer.is_some()
-    }
-
     /// Ask the device what file-transfer tools it has.
     ///
-    /// Nothing is typed before the answer comes back, and that is the whole
-    /// point: the channel a run takes is the device's to choose, and a start
-    /// guessed at would put ZMODEM escapes at a board that has never heard of
-    /// them. The answer is collected by [`App::fold_probe`] as the console
+    /// The file path on this bridge is the web's: `dd | base64`, paged a chunk
+    /// at a time, because there is nothing else a console can carry and nothing
+    /// else the web client uses. So the only thing worth asking before the
+    /// operator picks a path is whether *this* board has the tools those
+    /// commands are built from — a board without them cannot take a file at
+    /// all, and finding that out from a failed transfer is finding it out too
+    /// late. The answer is collected by [`App::fold_probe`] as the console
     /// prints it.
     pub fn run_transfer_probe(&mut self) -> bool {
-        if self.transferring() {
-            crate::views::transfer::say(self, self.strings().xfer_busy, NoticeLevel::Warn);
-            return false;
-        }
         if !self.connected() {
             crate::views::transfer::say(self, self.strings().xfer_needs_link, NoticeLevel::Warn);
+            return false;
+        }
+        if self.transfer.probing {
+            // A second question would put a second command between the first
+            // one's answer lines, and a reader cannot tell whose line is whose.
             return false;
         }
         if !self.send_command(TRANSFER_PROBE) {
             return false;
         }
+        let now = Instant::now();
         self.transfer.probing = true;
         self.transfer.message.clear();
         self.probe = Some(ProbeRun {
-            started: Instant::now(),
+            started: now,
+            quiet_since: now,
             text: String::new(),
         });
         true
     }
 
-    /// Start the run the transfer form describes.
+    /// Fold the precheck in flight into the form, and let it go once the console
+    /// has had its say.
     ///
-    /// The channel is the precheck's, not the form's: a board with `lrzsz`
-    /// takes a block session, and a board with only the pager's tools has to be
-    /// talked to in shell commands. Both are the same two paths on the form,
-    /// which is why the form does not offer the choice.
-    pub fn start_transfer_from_form(&mut self) -> bool {
-        if self.transferring() {
-            crate::views::transfer::say(self, self.strings().xfer_busy, NoticeLevel::Warn);
-            return false;
-        }
-        if !self.connected() {
-            crate::views::transfer::say(self, self.strings().xfer_needs_link, NoticeLevel::Warn);
-            return false;
-        }
-        match self.transfer.channel() {
-            None => {
-                // No precheck, or a precheck that found neither channel: the
-                // reason is worth more than the silence of a refused click.
-                let text = if self.transfer.probe.is_none() {
-                    self.strings().xfer_probe_first
-                } else {
-                    self.strings().xfer_probe_none
-                };
-                crate::views::transfer::say(self, text, NoticeLevel::Warn);
-                false
-            }
-            Some(probe::Channel::Zmodem) => self.start_zmodem_from_form(),
-            Some(probe::Channel::Base64) => {
-                crate::views::transfer::say(
-                    self,
-                    self.strings().xfer_pager_pending,
-                    NoticeLevel::Warn,
-                );
-                false
-            }
-        }
-    }
-
-    /// A ZMODEM run, from the two paths on the form.
-    ///
-    /// The device path is not sent: `rz` on the far end names the file itself,
-    /// and a path this end chose would either be ignored or, worse, be taken as
-    /// a command to the shell. It is kept on the form because the pager needs
-    /// it and because what a run is for belongs on the screen.
-    fn start_zmodem_from_form(&mut self) -> bool {
-        let path = self.transfer.local.trim();
-        if self.transfer.uploading() {
-            if path.is_empty() {
-                crate::views::transfer::say(self, self.strings().xfer_no_path, NoticeLevel::Warn);
-                return false;
-            }
-            self.start_send(PathBuf::from(path))
-        } else {
-            let dir = if path.is_empty() {
-                dialogs::RECEIVE_DEFAULT
-            } else {
-                path
-            };
-            self.start_receive(PathBuf::from(dir))
-        }
-    }
-
-    /// Fold the precheck in flight into the form, and let it go when the device
-    /// has answered — or when it has had long enough and has not.
+    /// There is no end marker to wait for: the answer is `command -v` output, so
+    /// its length is the device's business and the last tool's line is the last
+    /// line. What closes the question is therefore *quiet* — the console has
+    /// stopped printing — with an overall deadline behind it for a board that
+    /// never answers at all. That is the same way the web client decides an
+    /// execution has settled, and it is the only honest way to read a reply
+    /// whose shape is not known in advance.
     fn fold_probe(&mut self) {
-        let Some(run) = self.probe.as_mut() else {
+        let Some(run) = self.probe.as_ref() else {
             return;
         };
-        if let Some(report) = probe::parse_probe(&run.text) {
-            let word = match report.channel() {
-                Some(probe::Channel::Zmodem) => self.strings().xfer_probe_zmodem,
-                Some(probe::Channel::Base64) => self.strings().xfer_probe_pager,
-                None => self.strings().xfer_probe_none,
-            };
-            let level = if report.channel().is_none() {
-                NoticeLevel::Warn
-            } else {
-                NoticeLevel::Info
-            };
-            self.probe = None;
-            self.transfer.probing = false;
-            self.transfer.probe = Some(report);
-            crate::views::transfer::say(self, word, level);
+        let quiet = run.quiet_since.elapsed() >= PROBE_QUIET;
+        let expired = run.started.elapsed() >= PROBE_TIMEOUT;
+        if !quiet && !expired {
             return;
         }
-        // A probe that is still out is not a failure yet. Only the timeout says
-        // "did not answer", because a slow console and a broken one look alike
-        // until one of them has had time to speak.
-        if run.started.elapsed() >= PROBE_TIMEOUT {
-            self.probe = None;
-            self.transfer.probing = false;
+        let text = run.text.clone();
+        self.probe = None;
+        self.transfer.probing = false;
+        // Nothing at all came back. That is not "this board has no tools": it is
+        // a console that never answered, and reporting it as a board without
+        // `dd` would send the operator looking at the wrong end of the link.
+        if text.trim().is_empty() {
             crate::views::transfer::say(
                 self,
                 self.strings().xfer_probe_no_answer,
                 NoticeLevel::Warn,
             );
+            return;
         }
+        // An answer with no tool names in it is a *real* answer — every tool
+        // asked for is missing — so it becomes an empty report rather than a
+        // failure. The echoed command line is in that text too, and it names no
+        // tool, which is exactly why the parser only accepts whole lines.
+        let report = probe::parse_probe(&text).unwrap_or_default();
+        let (word, level) = if report.usable() {
+            (self.strings().xfer_probe_ready, NoticeLevel::Info)
+        } else {
+            (self.strings().xfer_probe_missing, NoticeLevel::Warn)
+        };
+        self.transfer.probe = Some(report);
+        crate::views::transfer::say(self, word, level);
     }
 
     /// Hand one chunk of the console to the precheck that is waiting on it.
     fn feed_probe(&mut self, bytes: &[u8]) {
         if let Some(run) = self.probe.as_mut() {
             run.text.push_str(&String::from_utf8_lossy(bytes));
-        }
-    }
-
-    /// Offer a local file to the device.
-    ///
-    /// Refuses out loud rather than quietly doing nothing: the operator picked
-    /// it from a list and is owed an answer. The `rz\r` wakeup goes out with the
-    /// first frame, so the device's shell starts a receiver — which is what a
-    /// real `sz` on the far side of this bridge does.
-    pub fn start_send(&mut self, path: PathBuf) -> bool {
-        if let Some(refusal) = self.transfer_refusal() {
-            self.push_notice(refusal);
-            return false;
-        }
-        match LiveTransfer::send(vec![path]) {
-            Ok(live) => {
-                self.begin_transfer(live);
-                true
-            }
-            Err(err) => {
-                let text = format!("{}{err}", self.strings().xfer_start_failed);
-                self.push_notice(Notice {
-                    text,
-                    level: NoticeLevel::Error,
-                });
-                false
-            }
-        }
-    }
-
-    /// Take whatever the device offers into `dir`.
-    ///
-    /// The far end has to be *sending*: this end announces a receiver and waits
-    /// for the `sz` on the other side to answer, which is why nothing appears
-    /// until the device's first file does.
-    pub fn start_receive(&mut self, dir: PathBuf) -> bool {
-        if let Some(refusal) = self.transfer_refusal() {
-            self.push_notice(refusal);
-            return false;
-        }
-        self.begin_transfer(LiveTransfer::receive(dir));
-        true
-    }
-
-    /// Give up on the transfer in flight, and leave nothing half-written.
-    pub fn cancel_transfer(&mut self) {
-        if self.live_transfer.is_none() {
-            return;
-        }
-        let prefix = self.strings().xfer_cancelled;
-        self.end_transfer(prefix, NoticeLevel::Warn);
-    }
-
-    /// Why a transfer cannot start, as a notice the caller can show. `None` when
-    /// it can.
-    fn transfer_refusal(&self) -> Option<Notice> {
-        if self.transferring() {
-            return Some(Notice {
-                text: self.strings().xfer_busy.to_string(),
-                level: NoticeLevel::Warn,
-            });
-        }
-        if !self.connected() {
-            return Some(Notice {
-                text: self.strings().xfer_needs_link.to_string(),
-                level: NoticeLevel::Warn,
-            });
-        }
-        None
-    }
-
-    /// Store the session and write its opening frames.
-    fn begin_transfer(&mut self, mut live: LiveTransfer) {
-        let bytes = live.opening_bytes();
-        let (upload, target) = (live.upload, live.target.clone());
-        self.live_transfer = Some(live);
-        if !bytes.is_empty() {
-            self.session.send(&bytes);
-        }
-        let s = self.strings();
-        let (prefix, level) = if upload {
-            (s.xfer_started_out, NoticeLevel::Info)
-        } else {
-            (s.xfer_started_in, NoticeLevel::Info)
-        };
-        let text = format!("{prefix}{target}");
-        self.push_notice(Notice { text, level });
-    }
-
-    /// Let the session go, discarding what it was writing.
-    fn end_transfer(&mut self, prefix: &str, level: NoticeLevel) {
-        let Some(live) = self.live_transfer.take() else {
-            return;
-        };
-        // Before the engine is dropped: a cancelled download has a half file open
-        // on disk, and a partial file that looks complete is the one outcome a
-        // cancel must not leave behind.
-        live.discard_partial();
-        self.transfer.abandon();
-        let text = format!("{prefix}{}", live.target);
-        self.push_notice(Notice { text, level });
-    }
-
-    /// Fold the transfer in flight into the records and the counters, and let it
-    /// go when it is over.
-    fn fold_transfer(&mut self) {
-        // The borrow of `live_transfer` has to end before the records can be
-        // touched, so everything wanted from it is taken in one go.
-        let (events, progress, upload, done) = match self.live_transfer.as_mut() {
-            None => return,
-            Some(live) => (
-                live.take_events(),
-                live.progress().cloned(),
-                live.upload,
-                live.is_done(),
-            ),
-        };
-        for event in events {
-            self.record_transfer(event, upload);
-        }
-        if let Some(progress) = progress {
-            self.transfer
-                .counted(&progress.name, upload, progress.bytes, progress.total);
-        }
-        if done {
-            self.live_transfer = None;
-            let text = self.strings().xfer_finished.to_string();
-            self.push_notice(Notice {
-                text,
-                level: NoticeLevel::Info,
-            });
-        }
-    }
-
-    /// One thing that happened, as the records and the notices show it.
-    ///
-    /// `upload` is the session's, not the event's: a session runs one way, so a
-    /// file that ends belongs to whichever direction the session is.
-    fn record_transfer(&mut self, event: TransferEvent, upload: bool) {
-        match event {
-            TransferEvent::Started { name, total, .. } => {
-                self.transfer.started(name, total, upload);
-            }
-            TransferEvent::Saved { name, bytes } => {
-                self.transfer
-                    .ended(&name, upload, RecordState::Saved, Some(bytes));
-                let text = format!(
-                    "{}{} · {}",
-                    self.strings().xfer_saved_notice,
-                    name,
-                    human_bytes(bytes)
-                );
-                self.push_notice(Notice {
-                    text,
-                    level: NoticeLevel::Info,
-                });
-            }
-            TransferEvent::Failed { name, reason } => {
-                // A session that failed before any file was opened has no name to
-                // put on a row; the reason is the whole of what is known, and a
-                // row with a blank name would read as a file called "".
-                if !name.is_empty() {
-                    self.transfer
-                        .ended(&name, upload, RecordState::Failed, None);
-                }
-                let text = if name.is_empty() {
-                    format!("{}{reason}", self.strings().xfer_failed_notice)
-                } else {
-                    format!("{}{name} · {reason}", self.strings().xfer_failed_notice)
-                };
-                self.push_notice(Notice {
-                    text,
-                    level: NoticeLevel::Error,
-                });
-            }
+            run.quiet_since = Instant::now();
         }
     }
 }
@@ -1800,44 +1529,74 @@ mod tests {
         assert_eq!(app.notices.len(), before);
     }
 
+    /// A probe that is out, with its clock wound back so the settle rule can be
+    /// exercised without waiting for a real console.
     fn probe_run(app: &mut App, text: &str, ago: Duration) {
         app.transfer.probing = true;
+        let at = Instant::now() - ago;
         app.probe = Some(ProbeRun {
-            started: Instant::now() - ago,
+            started: at,
+            quiet_since: at,
             text: text.to_string(),
         });
     }
 
     #[test]
-    fn the_console_feeds_the_probe_and_its_answer_picks_the_channel() {
+    fn the_console_feeds_the_probe_and_quiet_closes_the_question() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
         probe_run(&mut app, "", Duration::ZERO);
-        app.feed_probe(b"printf 'LINKR_XFER_BEGIN\n'; ...\n");
-        app.feed_probe(b"LINKR_XFER_BEGIN\nLINKR_XTOOL:sz\nLINKR_XTOOL:rz\n");
-        // An unfinished answer is not one: a report read off half a list would
-        // send a board that has `rz` down the slow channel.
+        app.feed_probe(b"$ for t in dd base64 wc tr sha256sum shasum; do ...\r\n");
+        // Still printing. A report read off half a list is a report that a board
+        // lacks `tr` because `tr` had not been printed yet.
         app.fold_probe();
-        assert!(app.transfer.probe.is_none());
-        app.feed_probe(b"LINKR_XFER_END\n");
+        assert!(app.transfer.probe.is_none(), "nothing has settled yet");
+        assert!(app.transfer.probing);
+
+        // The tools arrive; then the console holds still, and that is the whole
+        // of the protocol — the answer has no end marker to wait for.
+        app.feed_probe(b"LINKR_TOOL:dd\r\nLINKR_TOOL:base64\r\nLINKR_TOOL:wc\r\nLINKR_TOOL:tr\r\n");
+        app.probe.as_mut().expect("still out").quiet_since = Instant::now() - PROBE_QUIET;
         app.fold_probe();
-        assert_eq!(
-            app.transfer.channel(),
-            Some(crate::transfer::probe::Channel::Zmodem)
-        );
-        assert!(!app.transfer.probing);
         assert!(app.probe.is_none());
+        assert!(!app.transfer.probing);
+        assert_eq!(app.transfer.usable(), Some(true));
+        assert_eq!(
+            app.transfer.message,
+            "the target can take a file (dd|base64 paging, as on the web)"
+        );
     }
 
     #[test]
-    fn an_unanswered_probe_says_so_once_its_timeout_has_passed() {
+    fn an_echo_with_no_tools_in_it_is_a_board_with_no_tools() {
+        // `command -v` prints nothing for a tool it cannot find, so the echoed
+        // command can be the whole of the answer — and that answer is *none of
+        // them*, which is a real answer rather than silence.
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
-        probe_run(&mut app, "nothing yet", PROBE_TIMEOUT);
+        probe_run(&mut app, &format!("$ {TRANSFER_PROBE}\r\n"), PROBE_QUIET);
+        app.fold_probe();
+        assert_eq!(app.transfer.usable(), Some(false));
+        assert_eq!(
+            app.transfer.message,
+            "the target is missing tools, so a file cannot move:"
+        );
+    }
+
+    #[test]
+    fn a_console_that_never_answered_is_not_a_board_without_tools() {
+        // The two failures look alike on screen and are not alike at all: one is
+        // the board's, the other is the link's, and only one of them is worth
+        // acting on.
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        probe_run(&mut app, "", PROBE_TIMEOUT);
         app.fold_probe();
         assert!(app.transfer.probe.is_none());
         assert!(!app.transfer.probing);
@@ -1852,30 +1611,27 @@ mod tests {
         };
         assert!(!app.run_transfer_probe());
         assert!(!app.transfer.probing);
-        assert_eq!(
-            app.transfer.message,
-            "Not connected — no transfer was started."
-        );
+        assert_eq!(app.transfer.message, "Not connected — nothing was sent.");
     }
 
     #[test]
-    fn a_start_with_no_precheck_is_refused_out_loud() {
+    fn a_second_probe_waits_for_the_first_one() {
+        // Two questions in flight put a second command between the first one's
+        // answer lines, and a reader cannot tell whose line is whose.
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
-        // A real link, so the refusal is the precheck's and not the link's.
         app.dial(&Dial::Stdio("-".to_string()))
             .expect("the loopback opens");
-        app.pump();
-        assert!(app.connected());
-        assert!(!app.start_transfer_from_form());
-        assert!(
-            app.transfer.message.contains("precheck"),
-            "{}",
-            app.transfer.message
+        assert!(pump_until(&mut app, |app| app.connected()));
+        assert!(app.run_transfer_probe());
+        assert!(!app.run_transfer_probe());
+        assert_eq!(
+            app.tx,
+            TRANSFER_PROBE.len() as u64 + 1,
+            "one command went out"
         );
-        assert!(app.live_transfer.is_none());
     }
 
     /// Hanging up deliberately is announced once — and the pump does not
@@ -2478,222 +2234,5 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         app.pump();
         assert!(app.watch.is_empty(), "{:?}", app.watch);
-    }
-
-    /// Somewhere a transfer can write that is not the crate's own directory.
-    fn scratch(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("linkr-xfer-{label}-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
-    }
-
-    /// A transfer with no link is refused *out loud*: the operator picked it
-    /// from a list and is owed an answer, not silence.
-    #[test]
-    fn a_transfer_with_no_link_is_refused_out_loud() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        // Even a frame that claims connected cannot start one: the link decides.
-        app.state = ConnectionState::Connected;
-        assert!(!app.start_receive(scratch("nolink")));
-        assert!(!app.start_send(scratch("nolink").join("nothing.bin")));
-        assert!(!app.transferring());
-        assert_eq!(
-            app.log.last().map(|notice| notice.text.as_str()),
-            Some("Not connected — no transfer was started.")
-        );
-    }
-
-    /// A send wakes the far end's shell before it says anything else, which is
-    /// what makes the direction usable without the operator first typing `rz` on
-    /// the device.
-    #[test]
-    fn a_send_wakes_the_far_ends_shell_first() {
-        let (mut app, wire) = connected(Lang::En);
-        let path = scratch("wakeup").join("fw.bin");
-        std::fs::write(&path, b"payload").unwrap();
-
-        assert!(app.start_send(path.clone()));
-        assert!(app.transferring());
-        assert!(pump_until(&mut app, |_| wire.sent_len() >= 3));
-        let sent = wire.take_sent();
-        assert!(
-            sent.starts_with(b"rz\r"),
-            "the wakeup never went out: {sent:?}"
-        );
-        assert!(
-            app.log
-                .iter()
-                .any(|notice| notice.text.starts_with("sending to the device: ")),
-            "{:?}",
-            app.log
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// While a transfer owns the link the device has no keyboard: a keystroke is
-    /// dropped and a preset is refused, because either would land in the middle
-    /// of a block where nothing checks it.
-    #[test]
-    fn a_transfer_takes_the_keyboard_off_the_device() {
-        let (mut app, wire) = connected(Lang::En);
-        assert!(app.start_receive(scratch("keyboard")));
-        // The announce is on the wire; from here on only the transfer may write.
-        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
-        let _ = wire.take_sent();
-        // The transfer's own announce is already counted; nothing further is.
-        let before_tx = app.tx;
-
-        assert!(!app.send_bytes(b"x"), "a keystroke is dropped");
-        assert!(!app.send_command("reboot"), "a preset is refused");
-        assert_eq!(app.tx, before_tx, "nothing further was counted as sent");
-        assert_eq!(wire.sent_len(), 0, "and nothing reached the wire");
-        assert_eq!(
-            app.log.last().map(|notice| notice.text.as_str()),
-            Some("A transfer is already running."),
-            "and the preset is told what is in the way"
-        );
-    }
-
-    /// Two dialogues on one wire is not two transfers, it is none — so a second
-    /// one is refused rather than interleaved with the first.
-    #[test]
-    fn a_second_transfer_is_refused_while_one_is_running() {
-        let (mut app, _wire) = connected(Lang::En);
-        assert!(app.start_receive(scratch("busy")));
-        assert!(!app.start_receive(scratch("busy")));
-        assert!(!app.start_send(scratch("busy").join("nothing.bin")));
-        assert_eq!(
-            app.log.last().map(|notice| notice.text.as_str()),
-            Some("A transfer is already running.")
-        );
-    }
-
-    /// A send that cannot describe its file says so and starts nothing: an error
-    /// naming the cause is worth more than a session with nothing in it.
-    #[test]
-    fn a_send_of_a_file_that_is_not_there_starts_nothing() {
-        let (mut app, _wire) = connected(Lang::En);
-        let missing = scratch("missing").join("not-here.bin");
-        assert!(!app.start_send(missing));
-        assert!(!app.transferring());
-        assert!(
-            app.log
-                .last()
-                .is_some_and(|notice| notice.text.starts_with("cannot start the transfer: ")),
-            "{:?}",
-            app.log
-        );
-        assert_eq!(
-            app.log.last().map(|notice| notice.level),
-            Some(NoticeLevel::Error)
-        );
-    }
-
-    /// Cancelling says which transfer it was, closes every row still in flight,
-    /// and gives the link back to the device.
-    #[test]
-    fn cancelling_a_transfer_closes_its_rows_and_the_wire() {
-        let (mut app, _wire) = connected(Lang::En);
-        assert!(app.start_receive(scratch("cancel")));
-        app.transfer.started("half.bin".into(), Some(100), false);
-        app.transfer.counted("half.bin", false, 40, Some(100));
-
-        app.cancel_transfer();
-        assert!(!app.transferring(), "the link is the device's again");
-        assert!(
-            app.send_bytes(b"x"),
-            "a keystroke goes to the device once the transfer is over"
-        );
-        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
-        assert!(
-            app.log
-                .last()
-                .is_some_and(|notice| notice.text.starts_with("Transfer cancelled: ")),
-            "{:?}",
-            app.log
-        );
-        // Cancelling twice is not a second announcement.
-        let before = app.log.len();
-        app.cancel_transfer();
-        assert_eq!(app.log.len(), before);
-    }
-
-    /// A link that goes away takes the transfer with it. A session waiting on a
-    /// wire that no longer exists would sit in the view reading "running" for
-    /// ever, and its half file would look like a whole one.
-    #[test]
-    fn a_link_that_ends_cancels_the_transfer() {
-        let (mut app, wire) = connected(Lang::En);
-        assert!(app.start_receive(scratch("dropped")));
-        app.transfer.started("half.bin".into(), Some(100), false);
-        wire.close();
-
-        assert!(pump_until(&mut app, |app| !app.transferring()));
-        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
-        assert!(
-            app.log
-                .iter()
-                .any(|notice| notice.text.starts_with("Transfer cancelled: ")),
-            "{:?}",
-            app.log
-        );
-    }
-
-    /// A transfer that is given up on leaves no half-written download behind.
-    /// The partial file is the one outcome a cancel must not produce.
-    #[test]
-    fn a_cancelled_receive_leaves_no_half_file() {
-        use crate::zmodem::{
-            encode_header, subpacket, Encoding, FileInfo, FrameKind, Framend, Header, Width,
-        };
-
-        let dir = scratch("partial");
-        let (mut app, wire) = connected(Lang::En);
-        assert!(app.start_receive(dir.clone()));
-
-        // A name block and part of the file, with no end-of-file after it: the
-        // transfer is mid-file, which is exactly when a cancel happens. It goes
-        // in over the *link*, so this is the routing the loop really runs and
-        // not a shortcut into the engine.
-        let info = FileInfo::new(*b"half.bin", 4096);
-        let bin32 = |kind, data| encode_header(Header::new(kind, data), Encoding::Bin32);
-        let mut stream = bin32(FrameKind::File, [1, 0, 0, 0]);
-        stream.extend(subpacket::encode(
-            &info.to_block(),
-            Framend::Zcrcw,
-            Width::ThirtyTwo,
-        ));
-        stream.extend(bin32(FrameKind::Data, [0, 0, 0, 0]));
-        stream.extend(subpacket::encode(
-            b"0123456789",
-            Framend::Zcrce,
-            Width::ThirtyTwo,
-        ));
-        wire.feed(&stream);
-
-        let half = dir.join("half.bin");
-        assert!(
-            pump_until(&mut app, |_| half.exists()),
-            "the file never opened"
-        );
-        assert!(
-            app.transfer
-                .records
-                .iter()
-                .any(|record| record.name == "half.bin" && record.bytes == Some(10)),
-            "the row is the far end's name and the bytes that arrived: {:?}",
-            app.transfer.records
-        );
-
-        app.cancel_transfer();
-        assert!(
-            !half.exists(),
-            "a cancelled receive left a file that looks complete"
-        );
-        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -56,8 +56,8 @@ three rules:
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
 | `views/network.rs` | The WiFi and WebDAV form: ten rows the keyboard walks, each action raising an approval card that names the change rather than the command |
-| `transfer/probe.rs` | The question the web client never asks: what file-transfer tools the device has, and therefore whether a run takes ZMODEM or the `dd \| base64` pager |
-| `views/transfer.rs` | The transfer form: direction, the two paths, three actions, and the precheck that decides the channel — plus the history of what has moved |
+| `transfer/probe.rs` | The question the web client never asks: what file-transfer tools the device has, and therefore whether a file can move *at all* |
+| `views/transfer.rs` | The transfer view: one precheck row that reports what the device has, plus the history of what has moved |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -76,12 +76,13 @@ Network is a live form: `@w?`/`@w scan` fill it, `@w=…` and `@d=…` are raise
 as approval cards that name the change, and a scan's answer goes to its own list
 rather than into the status slot.
 
-Transfer is a live form too. Opening it asks the device what it has, once: a
-board with `lrzsz` gets a ZMODEM run, one with only `dd`/`base64` gets the shell
-pager, and one with neither is told so instead of being handed a start button
-that can only fail. The channel is the device's answer and not a setting — the
-web client never asks, because a browser has no `sz` to offer, and this program
-does.
+Transfer is a precheck, not a form. Opening it asks the device what it has,
+once: a board with `dd`/`base64`/`wc`/`tr` can take a file, and one missing any
+of them is told which, instead of being handed a start button that can only
+fail. Files then move over the `dd | base64` shell pager — the same channel the
+web client uses — and a `sha256sum` (or `shasum`) on the target is what turns a
+move into a verified one; without either, the view says up front that a result
+cannot be proved.
 
 Assistant is the next view, and behind it the agent layer.
 
@@ -187,29 +188,30 @@ python3 dev/overlay-sheet.py /tmp/vt.html --sheet vt --lang zh --theme dark
 The previews are generated on demand and deliberately not committed: they are
 large, and everything in them is reproducible from the source.
 
-## File transfer (ZMODEM)
+## File transfer
 
-Both directions run against the reference implementation rather than against
-themselves. `dev/zmodem-send-check.py` wires our sender to the real `rz`, and
-`dev/zmodem-recv-check.py` points the real `sz` at our receiver — over a
-socketpair, recording every byte in both directions, then comparing the file
-that came out against the one that went in:
+There is one channel: the `dd | base64` shell pager that the web client uses.
+Nothing here offers a second one.
 
-```sh
-python3 dev/zmodem-send-check.py --size 0      # our sender -> real rz
-python3 dev/zmodem-recv-check.py --size 0      # real sz   -> our receiver
-```
+A block protocol — ZMODEM — was written for this view and then taken out again.
+The reason is not that it cannot work; it is that it cannot be made to work
+*here*. The bridge pushes bytes from BLE into UART faster than a slow UART
+drains them, and the queue in between drops what it cannot hold. The sender at
+this end never sees those drops, so every one of them is discovered only by a
+timeout, and a run made of timeouts is slow enough to be useless. Making it
+reliable needs hardware flow control on the board, which is firmware this
+program does not own. So the answer was to remove it rather than to ship a
+transfer that quietly corrupts files.
 
-There is no upstream implementation of this for a *wireless bridge*, so there is
-no upstream test to inherit — which is why the real thing is the judge. The
-recordings become golden fixtures in `tests/fixtures/zmodem/`, replayed by
-`tests/zmodem_reference.rs`; a change that breaks the escape set, either CRC, the
-field order or the continuation rule fails there, not at a device.
+What is left is the precheck. Opening the view sends one question — the same
+`command -v` walk the web client's own probe uses — and reports the tools the
+target actually has. `dd`, `base64`, `wc` and `tr` are what a move needs;
+`sha256sum` or `shasum` is what makes a move *provable*, and the view says so
+separately, because a file that landed but cannot be checked is a different
+outcome from one that did not land.
 
-Two things to know. Files land under the *far end's* name reduced to its last
-component, so a malicious name cannot walk out of the directory. And a cancelled
-receive deletes its partial file: half-written and complete look alike, which is
-the one outcome a cancel must not leave behind.
+Files land under the *far end's* name reduced to its last component, so a
+malicious name cannot walk out of the directory.
 
 ## Releasing
 

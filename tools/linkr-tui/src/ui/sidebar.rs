@@ -43,11 +43,15 @@ pub const CURSOR_MARKER: &str = "▸ ";
 /// with it, and it is the difference between a red row and a row the user can
 /// see is red *because it is the dangerous one*.
 ///
-/// U+26A0 is East Asian *ambiguous* — one column in every terminal that
-/// resolves ambiguity to narrow, two in the ones that do not. It is the last
-/// glyph on its row and the row is fitted to the column, so a wide reading
-/// costs at most the marker's right half; it cannot shift a row.
-pub const DANGER_MARKER: &str = "⚠";
+/// The glyph travels with U+FE0E, the text-presentation selector, and that is
+/// the whole point of the second character. U+26A0 is emoji-capable: a terminal
+/// or a browser that resolves it to its *emoji* form draws it from a colour
+/// emoji font, where the glyph is wider than one cell — so the marker came back
+/// clipped down its right side in the rendered previews. U+FE0E asks for the
+/// text form, which every monospace font that has the character at all draws
+/// one cell wide. It costs nothing to measure: the selector is zero columns
+/// wide, so the marker still counts as the single column it paints into.
+pub const DANGER_MARKER: &str = "⚠\u{fe0e}";
 
 /// What a sidebar row means, which decides how it is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -58,12 +58,12 @@ enum OverlayPreview {
     Help,
     Notices,
     Confirm,
-    /// The prompt a send starts from, so the text field and its caret can be
-    /// looked at without a device — which is the only way to look at a dialog
-    /// that is normally raised to *do* something.
-    SendFile,
-    /// The prompt a receive starts from.
-    Receive,
+    /// The prompt the network form's SSID row opens, so the text field and its
+    /// caret can be looked at without a device — which is the only way to look
+    /// at a dialog that is normally raised to *do* something.
+    WifiSsid,
+    /// The prompt the WebDAV row opens.
+    WebdavUrl,
 }
 
 impl OverlayPreview {
@@ -75,8 +75,8 @@ impl OverlayPreview {
             "help" => Some(OverlayPreview::Help),
             "notices" => Some(OverlayPreview::Notices),
             "confirm" => Some(OverlayPreview::Confirm),
-            "send" => Some(OverlayPreview::SendFile),
-            "receive" => Some(OverlayPreview::Receive),
+            "wifi" => Some(OverlayPreview::WifiSsid),
+            "webdav" => Some(OverlayPreview::WebdavUrl),
             _ => None,
         }
     }
@@ -642,8 +642,8 @@ fn main() -> io::Result<()> {
                 .map_or_else(|| "reboot".to_string(), |quick| quick.command.clone());
             dialogs::ask(&mut app, dialogs::ConfirmAction::Send(command));
         }
-        Some(OverlayPreview::SendFile) => dialogs::prompt_send_file(&mut app),
-        Some(OverlayPreview::Receive) => dialogs::prompt_receive(&mut app),
+        Some(OverlayPreview::WifiSsid) => dialogs::prompt_wifi_ssid(&mut app),
+        Some(OverlayPreview::WebdavUrl) => dialogs::prompt_webdav_url(&mut app),
         None => {}
     }
 
@@ -870,13 +870,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         (KeyCode::Char('l'), true) => {
             app.clear_terminal();
-            return false;
-        }
-        // The transfer's own chord, and only while one is running: with nothing
-        // in flight `Ctrl+X` is the device's, like every other control
-        // character, and taking it always would break a program that wants it.
-        (KeyCode::Char('x'), true) if app.transferring() => {
-            app.cancel_transfer();
             return false;
         }
         // F1 is the help, not a view: the view rota starts at F2.
@@ -1503,8 +1496,8 @@ mod tests {
             ("help", OverlayPreview::Help),
             ("notices", OverlayPreview::Notices),
             ("confirm", OverlayPreview::Confirm),
-            ("send", OverlayPreview::SendFile),
-            ("receive", OverlayPreview::Receive),
+            ("wifi", OverlayPreview::WifiSsid),
+            ("webdav", OverlayPreview::WebdavUrl),
         ] {
             assert_eq!(args(&["--overlay", name]).overlay, Some(expected), "{name}");
         }
@@ -1569,8 +1562,8 @@ mod tests {
             (OverlayPreview::Help, "键盘帮助"),
             (OverlayPreview::Notices, "通知记录"),
             (OverlayPreview::Confirm, "请确认"),
-            (OverlayPreview::SendFile, "发送文件"),
-            (OverlayPreview::Receive, "接收文件"),
+            (OverlayPreview::WifiSsid, "加入 WiFi 网络"),
+            (OverlayPreview::WebdavUrl, "日志上传目标"),
         ] {
             let mut app = App::default();
             match overlay {
@@ -1580,49 +1573,12 @@ mod tests {
                 OverlayPreview::Confirm => {
                     dialogs::ask(&mut app, dialogs::ConfirmAction::Send("reboot".into()))
                 }
-                OverlayPreview::SendFile => dialogs::prompt_send_file(&mut app),
-                OverlayPreview::Receive => dialogs::prompt_receive(&mut app),
+                OverlayPreview::WifiSsid => dialogs::prompt_wifi_ssid(&mut app),
+                OverlayPreview::WebdavUrl => dialogs::prompt_webdav_url(&mut app),
             }
             let frame = linkr_tui::ui::render_to_text(&app, 100, 30);
             assert!(frame.contains(needle), "{overlay:?}:\n{frame}");
         }
-    }
-
-    /// Ctrl+X is the transfer's own chord, and only while one is running. With
-    /// nothing in flight it stays a control character for the device, which is
-    /// what a terminal owes a program that wants it.
-    #[test]
-    fn control_x_cancels_a_transfer_and_is_the_devices_otherwise() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        app.dial(&Dial::Stdio("-".into()))
-            .expect("the loopback opens");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline && !app.connected() {
-            app.pump();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert!(app.connected());
-
-        // No transfer: the chord is not consumed, so the byte goes out.
-        assert!(!handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
-        ));
-        assert_eq!(app.tx, 1, "the control character reached the device");
-        assert!(!app.transferring());
-
-        // With one running it is the transfer's, and it cancels.
-        assert!(app.start_receive(std::path::PathBuf::from(".")));
-        assert!(app.transferring());
-        assert!(!handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
-        ));
-        assert!(!app.transferring(), "the chord cancelled the transfer");
-        assert_eq!(app.tx, 1, "and nothing was sent while it was running");
     }
 
     /// `--sample` fills the notice log as well as the grid and the pane, so a

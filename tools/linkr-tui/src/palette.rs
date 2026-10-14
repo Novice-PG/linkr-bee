@@ -50,9 +50,7 @@ const T_FOCUS_TERMINAL: Entry = ["Focus the terminal", "聚焦终端"];
 const T_CONNECT: Entry = ["Connect", "连接"];
 const T_DISCONNECT: Entry = ["Disconnect", "断开连接"];
 const T_TRANSPORT: Entry = ["Switch the transport", "切换传输方式"];
-const T_XFER_SEND: Entry = ["Send a file… (ZMODEM)", "发送文件…（ZMODEM）"];
-const T_XFER_RECEIVE: Entry = ["Receive files… (ZMODEM)", "接收文件…（ZMODEM）"];
-const T_XFER_CANCEL: Entry = ["Cancel the transfer", "取消传输"];
+const T_XFER_CHECK: Entry = ["Check the target's file tools", "预检目标机的文件工具"];
 const T_AUTOSCROLL: Entry = ["Toggle autoscroll", "切换自动滚动"];
 const T_ECHO: Entry = ["Toggle local echo", "切换本地回显"];
 const T_CLEAR: Entry = ["Clear the terminal", "清屏"];
@@ -126,20 +124,12 @@ fn toggle_transport(app: &mut App) {
     app.push_notice(notice);
 }
 
-/// A transfer needs an argument, so these two open the dialog that asks for it
-/// rather than starting anything: *which* file is not something a palette row
-/// can say, and a row that guessed would be a row that transferred the wrong
-/// thing.
-fn send_file(app: &mut App) {
-    crate::dialogs::prompt_send_file(app);
-}
-
-fn receive_files(app: &mut App) {
-    crate::dialogs::prompt_receive(app);
-}
-
-fn cancel_transfer(app: &mut App) {
-    app.cancel_transfer();
+/// Open the view *and* ask the question, because the answer belongs on the
+/// screen that explains what it is: a toast saying a board is missing `base64`
+/// is a sentence with no context, and the context is the view.
+fn transfer_check(app: &mut App) {
+    app.set_view(View::Transfer);
+    app.run_transfer_probe();
 }
 
 fn toggle_autoscroll(app: &mut App) {
@@ -284,25 +274,11 @@ pub const ACTIONS: &[Action] = &[
     },
     // Transfer
     Action {
-        id: "xfer.send",
-        title: T_XFER_SEND,
+        id: "xfer.check",
+        title: T_XFER_CHECK,
         category: CAT_TRANSFER,
         shortcut: "",
-        run: send_file,
-    },
-    Action {
-        id: "xfer.receive",
-        title: T_XFER_RECEIVE,
-        category: CAT_TRANSFER,
-        shortcut: "",
-        run: receive_files,
-    },
-    Action {
-        id: "xfer.cancel",
-        title: T_XFER_CANCEL,
-        category: CAT_TRANSFER,
-        shortcut: "Ctrl+X",
-        run: cancel_transfer,
+        run: transfer_check,
     },
     // Terminal
     Action {
@@ -616,9 +592,7 @@ mod tests {
         "connect",
         "disconnect",
         "transport.toggle",
-        "xfer.send",
-        "xfer.receive",
-        "xfer.cancel",
+        "xfer.check",
         "term.autoscroll",
         "term.echo",
         "term.clear",

@@ -61,45 +61,17 @@ const CONFIRM_SEND_DETAIL: Entry = [
     "设备会立即执行，且无法撤销。",
 ];
 
-// --- the transfer prompt ----------------------------------------------------
+// --- the prompts ----------------------------------------------------
 
 const PROMPT_KEYS: Entry = [
     "type the path · ←→ move · Enter start · Esc cancel",
     "输入路径 · ←→ 移动 · Enter 开始 · Esc 取消",
 ];
-const SEND_TITLE: Entry = [" Send a file ", " 发送文件 "];
-const SEND_LABEL: Entry = ["Local file to send (ZMODEM)", "要发送的本地文件（ZMODEM）"];
-const SEND_PLACEHOLDER: Entry = ["for example firmware.bin", "例如 firmware.bin"];
-const RECEIVE_TITLE: Entry = [" Receive files ", " 接收文件 "];
-const RECEIVE_LABEL: Entry = ["Directory to receive into (ZMODEM)", "接收目录（ZMODEM）"];
-const RECEIVE_PLACEHOLDER: Entry = [
-    "for example . — the current directory",
-    "例如 . —— 当前目录",
-];
-/// The transfer form's own two rows. They are prompts rather than fields: the
-/// row is one line of a form, and a field that owned every printable key would
-/// take the keys the view needs for its own shortcuts.
-const LOCAL_TITLE: Entry = [" Path on this host ", " 本机路径 "];
-const LOCAL_LABEL: Entry = [
-    "File to send, or directory to receive into",
-    "要发送的文件，或接收时写入的目录",
-];
-const LOCAL_PLACEHOLDER: Entry = ["for example firmware.bin", "例如 firmware.bin"];
-const TARGET_TITLE: Entry = [" Path on the device ", " 设备路径 "];
-const TARGET_LABEL: Entry = [
-    "Where the file lands on the device (ZMODEM names it itself)",
-    "文件在设备上的位置（ZMODEM 由设备端命名）",
-];
-const TARGET_PLACEHOLDER: Entry = ["for example /root/firmware.bin", "例如 /root/firmware.bin"];
 // --- the network prompts ----------------------------------------------------
 
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
 const WEBDAV_TITLE: Entry = [" Log upload target ", " 日志上传目标 "];
-
-/// What an empty answer means for a receive. A directory is something the user
-/// is standing in; a file is not something to guess at.
-pub const RECEIVE_DEFAULT: &str = ".";
 
 const LEVEL_INFO: Entry = ["info", "信息"];
 const LEVEL_WARN: Entry = ["warn", "警告"];
@@ -172,10 +144,6 @@ pub struct Prompt {
 /// What agreeing to a prompt does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptAction {
-    /// Offer the named local file to the far end.
-    SendFile,
-    /// Take whatever the far end offers into the named directory.
-    ReceiveInto,
     /// Name the network to join. Answered by a second prompt for its password,
     /// because the two are one command on the wire and a half of that command
     /// is not a thing that can be sent.
@@ -185,12 +153,6 @@ pub enum PromptAction {
     WifiPassword,
     /// Where the device's log is uploaded to.
     WebdavUrl,
-    /// The transfer form's host path: a file to send, a directory to take into.
-    TransferLocal,
-    /// The transfer form's device path. Kept because the pager needs it and
-    /// because what a run is for belongs on the screen; a ZMODEM send does not
-    /// put it on the wire.
-    TransferTarget,
 }
 
 impl Prompt {
@@ -221,16 +183,12 @@ impl Prompt {
     /// The question this action's field asks, in the interface language.
     fn label(action: PromptAction) -> Entry {
         match action {
-            PromptAction::SendFile => SEND_LABEL,
-            PromptAction::ReceiveInto => RECEIVE_LABEL,
             PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
             PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
             PromptAction::WebdavUrl => [
                 "Upload URL (http:// or https://)",
                 "上传地址（http:// 或 https://）",
             ],
-            PromptAction::TransferLocal => LOCAL_LABEL,
-            PromptAction::TransferTarget => TARGET_LABEL,
         }
     }
 
@@ -238,13 +196,9 @@ impl Prompt {
     /// answer it wants.
     fn placeholder(action: PromptAction) -> Entry {
         match action {
-            PromptAction::SendFile => SEND_PLACEHOLDER,
-            PromptAction::ReceiveInto => RECEIVE_PLACEHOLDER,
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
             PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
-            PromptAction::TransferLocal => LOCAL_PLACEHOLDER,
-            PromptAction::TransferTarget => TARGET_PLACEHOLDER,
         }
     }
 
@@ -360,14 +314,6 @@ pub fn open_notices(app: &mut App) {
     app.dialog = Some(Dialog::Notices(0));
 }
 
-/// Ask which local file to offer to the device.
-pub fn prompt_send_file(app: &mut App) {
-    app.dialog = Some(Dialog::Prompt(Prompt::new(
-        SEND_TITLE,
-        PromptAction::SendFile,
-    )));
-}
-
 /// Ask which network to join. The password is asked for next, by the prompt
 /// this one's answer opens.
 pub fn prompt_wifi_ssid(app: &mut App) {
@@ -391,38 +337,6 @@ pub fn prompt_webdav_url(app: &mut App) {
             .unwrap_or_default(),
     );
     app.dialog = Some(Dialog::Prompt(prompt));
-}
-
-/// Ask for the transfer form's host path.
-///
-/// The label follows the form's direction: the same row is a file to send and a
-/// directory to take into, and a prompt that said "file" for a receive would be
-/// asking for the wrong thing.
-pub fn prompt_transfer_local(app: &mut App) {
-    let prompt = Prompt::with_text(
-        LOCAL_TITLE,
-        PromptAction::TransferLocal,
-        &app.transfer.local.clone(),
-    );
-    app.dialog = Some(Dialog::Prompt(prompt));
-}
-
-/// Ask for the transfer form's device path.
-pub fn prompt_transfer_target(app: &mut App) {
-    let prompt = Prompt::with_text(
-        TARGET_TITLE,
-        PromptAction::TransferTarget,
-        &app.transfer.target.clone(),
-    );
-    app.dialog = Some(Dialog::Prompt(prompt));
-}
-
-/// Ask which directory to take the device's files into.
-pub fn prompt_receive(app: &mut App) {
-    app.dialog = Some(Dialog::Prompt(Prompt::new(
-        RECEIVE_TITLE,
-        PromptAction::ReceiveInto,
-    )));
 }
 
 /// A confirmation: what is about to happen, and what agreeing does.
@@ -721,25 +635,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 fn start(app: &mut App, prompt: Prompt) {
     let answer = prompt.answer().to_string();
     match prompt.action {
-        PromptAction::SendFile => {
-            if answer.is_empty() {
-                let text = app.strings().xfer_no_path.to_string();
-                app.push_notice(crate::app::Notice {
-                    text,
-                    level: NoticeLevel::Warn,
-                });
-                return;
-            }
-            app.start_send(std::path::PathBuf::from(answer));
-        }
-        PromptAction::ReceiveInto => {
-            let dir = if answer.is_empty() {
-                RECEIVE_DEFAULT.to_string()
-            } else {
-                answer
-            };
-            app.start_receive(std::path::PathBuf::from(dir));
-        }
         // A network name with no network to name is a refusal rather than a
         // guess: joining "" would send `@w=,` and the firmware would read it as
         // an empty SSID, which is a different failure and a much more confusing
@@ -773,15 +668,6 @@ fn start(app: &mut App, prompt: Prompt) {
                     }
                 };
             ask(app, ConfirmAction::Accessory(command));
-        }
-        // The form's two paths are just recorded: nothing is sent until the
-        // Start action is pressed, and a half-edited path is not something the
-        // device should ever see.
-        PromptAction::TransferLocal => {
-            app.transfer.local = answer.trim().to_string();
-        }
-        PromptAction::TransferTarget => {
-            app.transfer.target = answer.trim().to_string();
         }
         PromptAction::WebdavUrl => {
             if answer.trim().is_empty() {
@@ -889,12 +775,6 @@ mod tests {
             LEVEL_ERROR,
             HELP_NOTE,
             PROMPT_KEYS,
-            SEND_TITLE,
-            SEND_LABEL,
-            SEND_PLACEHOLDER,
-            RECEIVE_TITLE,
-            RECEIVE_LABEL,
-            RECEIVE_PLACEHOLDER,
         ];
         entries.extend(HELP_ROWS.iter().map(|(_, meaning)| *meaning));
         crate::i18n::assert_bilingual(&entries);
@@ -1273,13 +1153,13 @@ mod tests {
         assert_eq!(chips(&yes), (1, 0), "and the highlight moves to confirm");
     }
 
-    // --- the transfer prompt ------------------------------------------------
+    // --- the prompts ------------------------------------------------
 
     /// The field edits *at the caret*, the way a text field does — including in
-    /// the middle of a path, which is the case an append-only field gets wrong.
+    /// the middle of a value, which is the case an append-only field gets wrong.
     #[test]
     fn the_field_edits_at_the_caret() {
-        let mut prompt = Prompt::new(SEND_TITLE, PromptAction::SendFile);
+        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         assert_eq!(
             prompt.split(),
             ("", " ", ""),
@@ -1311,18 +1191,18 @@ mod tests {
         assert_eq!(prompt.answer(), "z");
     }
 
-    /// The answer is trimmed: a trailing space at the end of a path is easy to
-    /// type and never meant, and a leading one hides.
+    /// The answer is trimmed: a trailing space is easy to type and never meant,
+    /// and a leading one hides.
     #[test]
     fn the_answer_is_trimmed() {
-        let mut prompt = Prompt::new(SEND_TITLE, PromptAction::SendFile);
+        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         for c in "  fw.bin ".chars() {
             prompt.insert(c);
         }
         assert_eq!(prompt.text, "  fw.bin ");
         assert_eq!(prompt.answer(), "fw.bin");
 
-        let mut blank = Prompt::new(SEND_TITLE, PromptAction::SendFile);
+        let mut blank = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         for _ in 0..3 {
             blank.insert(' ');
         }
@@ -1330,10 +1210,11 @@ mod tests {
     }
 
     /// The caret moves by whole characters. A caret that split one would panic
-    /// the painter, and a path is the likeliest place to meet a two-byte one.
+    /// the painter, and a network name is a likely place to meet a multi-byte
+    /// one.
     #[test]
     fn the_caret_never_splits_a_character() {
-        let mut prompt = Prompt::new(SEND_TITLE, PromptAction::SendFile);
+        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         for c in "固件.bin".chars() {
             prompt.insert(c);
         }
@@ -1375,10 +1256,10 @@ mod tests {
                 .expect("the field row")
         };
 
-        let empty = row(Prompt::new(SEND_TITLE, PromptAction::SendFile));
+        let empty = row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
         let shown: String = empty.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            shown.contains("for example firmware.bin"),
+            shown.contains("for example BenchNet"),
             "an empty field says what it wants: {shown:?}"
         );
         assert_eq!(
@@ -1387,7 +1268,7 @@ mod tests {
             "the caret is the highlighted cell"
         );
 
-        let mut typed = Prompt::new(SEND_TITLE, PromptAction::SendFile);
+        let mut typed = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         typed.insert('x');
         let shown: String = row(typed)
             .spans
@@ -1400,10 +1281,10 @@ mod tests {
     /// A prompt carries its own title and legend, in the interface language.
     #[test]
     fn a_prompt_carries_its_own_words() {
-        let send = Dialog::Prompt(Prompt::new(SEND_TITLE, PromptAction::SendFile));
-        let receive = Dialog::Prompt(Prompt::new(RECEIVE_TITLE, PromptAction::ReceiveInto));
-        assert_eq!(title(&send, Lang::En), " Send a file ");
-        assert_eq!(title(&receive, Lang::Zh), " 接收文件 ");
+        let send = Dialog::Prompt(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
+        let receive = Dialog::Prompt(Prompt::new(WEBDAV_TITLE, PromptAction::WebdavUrl));
+        assert_eq!(title(&send, Lang::En), " Join a WiFi network ");
+        assert_eq!(title(&receive, Lang::Zh), " 日志上传目标 ");
         assert_ne!(title(&send, Lang::Zh), title(&send, Lang::En));
 
         let theme = Theme::DARK;
@@ -1413,95 +1294,5 @@ mod tests {
         assert!(zh.spans[0].content.contains("Enter 开始"), "{zh:?}");
         // The two prompts do not share their words either.
         assert_ne!(title(&send, Lang::En), title(&receive, Lang::En));
-    }
-
-    /// A prompt owns the keyboard while it is up: a letter is a character in the
-    /// field and not a keystroke for the device.
-    #[test]
-    fn a_prompt_takes_the_keyboard_off_the_device() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        prompt_send_file(&mut app);
-        assert!(app.dialog.is_some());
-        for c in "fw".chars() {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            );
-        }
-        assert_eq!(app.tx, 0, "the device heard nothing");
-        let Some(Dialog::Prompt(prompt)) = &app.dialog else {
-            panic!("the prompt closed on a letter");
-        };
-        assert_eq!(prompt.text, "fw");
-
-        // Escape gives the keyboard back without starting anything.
-        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.dialog.is_none());
-        assert!(!app.transferring());
-        assert!(app.log.is_empty(), "cancelling announced nothing");
-    }
-
-    /// An empty answer is a refusal for a send and a *place* for a receive: a
-    /// file is not something to guess at, and the directory the user is standing
-    /// in is.
-    #[test]
-    fn an_empty_answer_is_a_refusal_for_a_send_and_a_default_for_a_receive() {
-        use crate::session::Dial;
-
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        prompt_send_file(&mut app);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.dialog.is_none(), "the prompt closed");
-        assert!(!app.transferring());
-        assert_eq!(
-            app.log.last().map(|notice| notice.text.as_str()),
-            Some("Name a file to send.")
-        );
-
-        // Answered properly *and* refused by the transfer: the prompt's job is
-        // the answer, not the wiring, and a named file with no link is the
-        // transfer's refusal to make.
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        prompt_send_file(&mut app);
-        for c in "fw.bin".chars() {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            );
-        }
-        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.dialog.is_none());
-        assert_eq!(
-            app.log.last().map(|notice| notice.text.as_str()),
-            Some("Not connected — no transfer was started.")
-        );
-
-        // A receive with an empty answer lands on the working directory.
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        app.dial(&Dial::Stdio("-".into()))
-            .expect("the loopback opens");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline && app.state != ConnectionState::Connected {
-            app.pump();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert_eq!(app.state, ConnectionState::Connected);
-        prompt_receive(&mut app);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let live = app.live_transfer.as_ref().expect("the transfer started");
-        assert_eq!(live.target, ".", "the directory the user is standing in");
-        assert!(!live.upload);
     }
 }

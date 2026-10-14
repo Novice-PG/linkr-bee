@@ -20,9 +20,17 @@ import unicodedata
 
 ESCAPE = re.compile(r"\x1b\[([0-9;]*)m")
 
+# U+FE0E/U+FE0F and the other variation selectors are modifiers, not glyphs:
+# they choose which *form* the character in front of them takes, and they paint
+# no cell of their own. Clustered into the previous cell so a marker like
+# `⚠\ufe0e` stays one column, exactly as the TUI measured it.
+VARIATION_SELECTOR = re.compile("[\ufe00-\ufe0f\U000e0100-\U000e01ef]")
+
 
 def cell_width(ch: str) -> int:
     """One column for most glyphs, two for East Asian wide/fullwidth ones."""
+    if VARIATION_SELECTOR.match(ch):
+        return 0
     if unicodedata.east_asian_width(ch) in ("W", "F"):
         return 2
     return 1
@@ -109,6 +117,10 @@ def parse_rows(dump: str) -> list[list[tuple[str, int, Style]]]:
         if ch == "\n":
             rows.append(row)
             row = []
+        elif VARIATION_SELECTOR.match(ch) and row:
+            # Modifier: rides on the cell in front of it rather than opening one.
+            glyph, span, style = row[-1]
+            row[-1] = (glyph + ch, span, style)
         else:
             row.append((ch, cell_width(ch), Style_with(style)))
         i += 1
@@ -189,7 +201,13 @@ SCREEN_CSS = """  :root {
     font-size:14px; line-height:1.2; letter-spacing:0; white-space:pre;
   }
   .row { display:grid; grid-template-columns:repeat(var(--cols),1ch); }
-  i { font-style:normal; overflow:hidden; }"""
+  /* Every cell is exactly one column of the monospace grid, so a glyph wider
+   * than that column would be shaved off by the overflow rule. `text` is what
+   * keeps an emoji-capable mark (⚠, ✔, …) drawn from the monospace font rather
+   * than from a colour emoji font whose glyph does not fit — the frame's own
+   * U+FE0E already asks for this, and the CSS says it again for the glyphs that
+   * arrive without one. */
+  i { font-style:normal; overflow:hidden; font-variant-emoji:text; }"""
 
 
 def main() -> int:
