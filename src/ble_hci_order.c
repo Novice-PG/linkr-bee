@@ -37,8 +37,16 @@ static int ordered_receive(const struct device *dev, struct net_buf *buf)
 			   sys_get_le16(p + 4) == pending_handle) {
 			complete = true;
 			success = p[3] == 0 && p[6] != 0;
-		} else if (p[1] == BT_HCI_EVT_DISCONN_COMPLETE && buf->len >= 7 &&
-			   sys_get_le16(p + 4) == pending_handle) {
+		} else if (p[1] == BT_HCI_EVT_DISCONN_COMPLETE && buf->len >= 7) {
+			/* One connection only, so a disconnect ends the
+			 * quarantine whatever handle it names. Gating this on
+			 * pending_handle meant a stale handle, a missed event or
+			 * an abnormal disconnect left the held buffers out of the
+			 * pool for the rest of the session — PENDING_MAX of them
+			 * — and a later connection could fail its SMP
+			 * distribution for want of them, with no path back to
+			 * putting them there. The link is gone, so those packets
+			 * can never be used anyway. */
 			clear_pending();
 		}
 	} else if (buf->len >= 5 && p[0] == BT_HCI_H4_ACL &&
