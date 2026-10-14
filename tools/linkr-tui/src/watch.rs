@@ -151,6 +151,20 @@ impl Default for BootLoopOptions {
     }
 }
 
+/// What a `{:?}` of the engine is worth: how much it has seen and what it
+/// thinks is wrong. Hand-written rather than derived so that printing an
+/// engine a hundred thousand lines into a session says something readable
+/// about the target rather than dumping the whole evidence set.
+impl std::fmt::Debug for SerialWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialWatch")
+            .field("lines", &self.lines)
+            .field("findings", &self.findings.len())
+            .field("boot_count", &self.boot_count)
+            .finish()
+    }
+}
+
 /// Watch configuration.
 #[derive(Debug, Clone, Default)]
 pub struct WatchOptions {

@@ -50,6 +50,26 @@ pub const NUS_RX: Uuid = Uuid::from_u128(0x6e400002_b5a3_f393_e0a9_e50e24dcca9e)
 /// What this host subscribes to: bytes coming in from the target.
 pub const NUS_TX: Uuid = Uuid::from_u128(0x6e400003_b5a3_f393_e0a9_e50e24dcca9e);
 
+/// These five belong to the bridge's **management** service, and each is its
+/// own characteristic rather than another byte inside Nordic UART.
+///
+/// That separation is the whole design. A management question — what firmware
+/// is this, what speed is its UART running, has it joined a network — has to
+/// be answered by the bridge *while the target keeps printing*, and an answer
+/// delivered down the same pipe as the target's output could be told apart
+/// from it only by guessing at the shape of the bytes. Guessing is exactly
+/// what a log line containing `wifi=` would defeat. The reference client
+/// (`tools/linkr_ble_terminal.py`) speaks to these same five.
+pub const MGMT_SERVICE: Uuid = Uuid::from_u128(0x4c4b0001_9a7e_4f4e_8b8a_3d6f12a0c001);
+/// Read: the negotiated protocol version, size limits and capability bits.
+pub const MGMT_PROTOCOL: Uuid = Uuid::from_u128(0x4c4b0002_9a7e_4f4e_8b8a_3d6f12a0c001);
+/// Read: this board's stable identifier.
+pub const MGMT_DEVICE_ID: Uuid = Uuid::from_u128(0x4c4b0003_9a7e_4f4e_8b8a_3d6f12a0c001);
+/// Write: one management request, framed as `protocol` encodes it.
+pub const MGMT_COMMAND: Uuid = Uuid::from_u128(0x4c4b0004_9a7e_4f4e_8b8a_3d6f12a0c001);
+/// Notify: the responses, as one `protocol::ManagementReassembler` stream.
+pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12a0c001);
+
 /// Ceiling for one ATT write.
 ///
 /// 250 is the largest attribute value BLE 4.2 can carry and 3 bytes of that
@@ -195,6 +215,20 @@ fn segment(payload: &[u8], limit: usize) -> Vec<Vec<u8>> {
     payload.chunks(limit).map(|piece| piece.to_vec()).collect()
 }
 
+/// One thing the interface asks the radio to send.
+///
+/// Two variants rather than one, because management frames are not longer
+/// keystrokes: they go to a different characteristic and the device answers
+/// them on another. Keeping them apart here is what lets a bridge's answer
+/// never be mistaken for the target's output — see the note above
+/// [`MGMT_SERVICE`].
+enum Frame {
+    /// Characters typed into the target.
+    Stream(Vec<u8>),
+    /// A whole management request, already framed by `protocol`.
+    Management(Vec<u8>),
+}
+
 /// A BLE connection that has not been opened yet.
 ///
 /// Nothing here touches the radio. Describing a connection has to be possible
@@ -244,13 +278,17 @@ impl Link for BleLink {
         // to be a Tokio channel because the thing draining it lives in async
         // code. The bridge thread below meets those two halves.
         let (inbound_tx, inbound_rx) = mpsc::channel::<Option<Vec<u8>>>();
-        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Frame>();
+        // Management responses ride here and nowhere else, so that the
+        // interface can hand them to the pump as management and not as target
+        // output. Their own channel, like their own characteristic.
+        let (management_tx, management_rx) = mpsc::channel::<Vec<u8>>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
-        let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(WRITE_BACKLOG);
+        let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Frame>(WRITE_BACKLOG);
 
         let selection = self.selection.clone();
         thread::spawn(move || {
-            radio(&selection, ready_tx, inbound_tx, to_radio_rx);
+            radio(&selection, ready_tx, inbound_tx, to_radio_rx, management_tx);
         });
         // The bytes this interface writes out are handed across to the reactor
         // by their own thread, because the writer here is a synchronous one
@@ -280,6 +318,7 @@ impl Link for BleLink {
             Ok(Ok(())) => Ok((
                 Box::new(BleReader {
                     inbound: inbound_rx,
+                    management: Some(management_rx),
                     leftover: VecDeque::new(),
                     done: false,
                 }),
@@ -309,7 +348,8 @@ fn radio(
     selection: &Selection,
     ready: Sender<io::Result<()>>,
     inbound: Sender<Option<Vec<u8>>>,
-    outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    outbound: tokio::sync::mpsc::Receiver<Frame>,
+    management: Sender<Vec<u8>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         // Every timer and every BlueZ socket the link uses wants one of these,
@@ -350,7 +390,7 @@ fn radio(
         // and a notify that never arrives looks exactly like a dead target,
         // so "connected" means bytes can already flow both ways.
         let _ = ready.send(Ok(()));
-        carry(&peripheral, &inbound, outbound).await;
+        carry(&peripheral, &inbound, outbound, &management).await;
         // The one signal that means "stop reading" to whoever is waiting on
         // us, sent once the loop above has decided the device went away.
         let _ = inbound.send(None);
@@ -454,17 +494,38 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
     peripheral
         .subscribe(out)
         .await
-        .map_err(|why| format!("notify could not be subscribed to: {why}"))
+        .map_err(|why| format!("notify could not be subscribed to: {why}"))?;
+
+    // The management service is optional and *must stay* optional: a bridge
+    // without it is a bridge that can still carry a terminal, and refusing to
+    // connect to one because it cannot answer `@i?` would turn a firmware
+    // that predates the service into "the board is broken".
+    if characteristics.iter().any(|c| c.uuid == MGMT_RESPONSE) {
+        let responses = characteristics
+            .iter()
+            .find(|c| c.uuid == MGMT_RESPONSE)
+            .ok_or_else(|| "the management notify characteristic vanished".to_string())?;
+        peripheral
+            .subscribe(responses)
+            .await
+            .map_err(|why| format!("the management channel could not be subscribed to: {why}"))?;
+    }
+    Ok(())
 }
 
 /// Move bytes in both directions until one of them stops.
 async fn carry(
     peripheral: &Peripheral,
     inbound: &Sender<Option<Vec<u8>>>,
-    mut outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut outbound: tokio::sync::mpsc::Receiver<Frame>,
+    management: &Sender<Vec<u8>>,
 ) {
     let characteristics = peripheral.characteristics();
     let sink = characteristics.iter().find(|c| c.uuid == NUS_RX).cloned();
+    let command = characteristics
+        .iter()
+        .find(|c| c.uuid == MGMT_COMMAND)
+        .cloned();
     let Ok(mut notifications) = peripheral.notifications().await else {
         return;
     };
@@ -474,10 +535,22 @@ async fn carry(
             notification = notifications.next() => {
                 match notification {
                     Some(notification) => {
-                        if notification.uuid != NUS_TX || notification.value.is_empty() {
+                        if notification.value.is_empty() {
                             continue;
                         }
-                        if inbound.send(Some(notification.value)).is_err() {
+                        // Two notify characteristics now feed this loop, and
+                        // which one a packet came in on is the only reliable
+                        // way to know what it is: both carry plain bytes and
+                        // neither carries a hint. Sending a management
+                        // response down the target's stream would type the
+                        // bridge's answer into somebody's shell prompt.
+                        if notification.uuid == MGMT_RESPONSE {
+                            if management.send(notification.value).is_err() {
+                                return;
+                            }
+                        } else if notification.uuid == NUS_TX
+                            && inbound.send(Some(notification.value)).is_err()
+                        {
                             return;
                         }
                     }
@@ -485,9 +558,9 @@ async fn carry(
                     None => return,
                 }
             }
-            bytes = outbound.recv() => {
-                match bytes {
-                    Some(bytes) => {
+            frame = outbound.recv() => {
+                match frame {
+                    Some(Frame::Stream(bytes)) => {
                         let Some(sink) = sink.as_ref() else { continue };
                         for piece in segment(&bytes, MTU_WRITE_LIMIT) {
                             // Without response is the throughput choice: NUS is
@@ -496,6 +569,22 @@ async fn carry(
                             // would cap the link well under the radio's rate.
                             if peripheral
                                 .write(sink, &piece, WriteType::WithoutResponse)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    // With response, unlike the stream above. A management
+                    // request asks something worth waiting for and its answer
+                    // is worth losing nothing of; there are a handful of these
+                    // per session and none on the path a keystroke takes.
+                    Some(Frame::Management(frame)) => {
+                        let Some(command) = command.as_ref() else { continue };
+                        for piece in segment(&frame, MTU_WRITE_LIMIT) {
+                            if peripheral
+                                .write(command, &piece, WriteType::WithResponse)
                                 .await
                                 .is_err()
                             {
@@ -514,12 +603,37 @@ async fn carry(
 /// Bytes from the device, in order.
 struct BleReader {
     inbound: Receiver<Option<Vec<u8>>>,
+    /// Responses from the bridge's management channel, until [`Self::
+    /// side_channel`] takes them over. `Option` because that happens exactly
+    /// once and must not be able to happen twice.
+    management: Option<Receiver<Vec<u8>>>,
     /// What a notification that did not fit in the caller's buffer left over.
     leftover: VecDeque<u8>,
     done: bool,
 }
 
 impl LinkReader for BleReader {
+    /// Management responses are not target output, so they leave by the side
+    /// channel rather than by [`Self::read`].
+    ///
+    /// The forwarding thread exists because the radio speaks in Tokio time and
+    /// this reader is read synchronously on a thread of its own: merging the
+    /// two would mean polling for management bytes inside `read`, and a
+    /// `read` that returns early looking for them would look exactly like a
+    /// link that hung up.
+    fn side_channel(&mut self, events: Sender<super::LinkEvent>) {
+        let Some(management) = self.management.take() else {
+            return;
+        };
+        thread::spawn(move || {
+            while let Ok(bytes) = management.recv() {
+                if events.send(super::LinkEvent::Management(bytes)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.done {
             return Ok(0);
@@ -549,13 +663,24 @@ impl LinkReader for BleReader {
 
 /// Bytes towards the device.
 struct BleWriter {
-    outbound: Sender<Vec<u8>>,
+    outbound: Sender<Frame>,
 }
 
 impl LinkWriter for BleWriter {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.outbound
-            .send(buf.to_vec())
+            .send(Frame::Stream(buf.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the BLE link is no longer up"))
+    }
+
+    /// Queue a management frame for the bridge.
+    ///
+    /// Framing belongs to `protocol`, not here: this knows only which
+    /// characteristic the bytes go to, which is the one piece of the answer a
+    /// bearer cannot get from anywhere else.
+    fn write_management(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.outbound
+            .send(Frame::Management(frame.to_vec()))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the BLE link is no longer up"))
     }
 
@@ -686,6 +811,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
             inbound: rx,
+            management: None,
             leftover: VecDeque::new(),
             done: false,
         };
@@ -708,6 +834,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
             inbound: rx,
+            management: None,
             leftover: VecDeque::new(),
             done: false,
         };

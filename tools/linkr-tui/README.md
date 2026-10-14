@@ -49,7 +49,13 @@ three rules:
 | `vt/mod.rs` | The emulator over the screen: which private modes do what, the alternate screen, the title, and the few sequences a host must *answer* |
 | `views/terminal.rs` | The pane: a streaming UTF-8 decoder and a streaming parser in front of the emulator, plus the painter |
 | `palette.rs` | The `Ctrl+P` command palette: twenty actions, each one a function pointer so the palette runs the same code the chord does |
-| `dialogs.rs` | Help, the notice log, and the guarded-command confirmation |
+| `dialogs.rs` | Help, the notice log, the guarded-command confirmation, and the prompts that ask for a file, a network name, a password or an upload URL |
+| `protocol.rs` | The management service's framing: request and response headers, the version and capability handshake, the Reliable UART scheme, and the reassembler that puts a fragmented answer back together |
+| `device.rs` | The request/response bookkeeping over that service: one question at a time, an answer claimed only by the id that asked for it, and a timeout that reports a slow bridge as slow rather than as silent |
+| `accessory.rs` | The bridge's own settings as commands and as parsed data: `@u=…`, `@w=…`, `@d=…`, their limits, and the redaction that keeps a password off every screen but the wire |
+| `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
+| `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
+| `views/network.rs` | The WiFi and WebDAV form: ten rows the keyboard walks, each action raising an approval card that names the change rather than the command |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -64,16 +70,64 @@ the pane emulates rather than lays out. `vt/` holds the emulator and
 emulator by the event loop, never by a paint, because a frame is a pure function
 of the state and may not reshape what it is drawing.
 
-Network, Assistant and Transfer still say so in their body rather than showing
-an empty frame. They are the next views, followed by the file-transfer and agent
-layers.
+Network is a live form: `@w?`/`@w scan` fill it, `@w=…` and `@d=…` are raised
+as approval cards that name the change, and a scan's answer goes to its own list
+rather than into the status slot. Assistant and Transfer still say so in their
+body rather than showing an empty frame; they are the next views, followed by the
+agent layer.
+
+Every management question — `@i?`, `@u?`, `@w?`, `@d?` — is asked on the
+bridge's own GATT service and not down the pipe the target prints to. That is
+not a preference: an answer delivered on the same stream as the target's output
+can be told apart from it only by guessing at the shape of the bytes, and a
+guess that fails types the bridge's answer into somebody's shell prompt.
+
+## Asking the bridge things from a shell
+
+Everything the terminal can do to the bridge can also be done and exited:
+
+```sh
+cargo run -- --ble-name Linkr --query-info --query-uart --json
+cargo run -- --ble-name Linkr --uart 921600,8,n,1,none
+cargo run -- --ble-name Linkr --wifi BenchNet --wifi-key-file ~/.wifi
+cargo run -- --ble-name Linkr --wifi-scan --loopback-test --no-terminal
+cargo run -- --print-completion zsh
+cargo run -- --scan --timeout 5
+```
+
+`--no-terminal` is implied by any flag that asks for something: a command line
+naming `--query-info` wants an answer, not an interface. Each request is sent
+and waited for rather than fired off together, because the bridge answers one
+question at a time and two outstanding ones would have two `OK`s arriving in no
+order anyone can rely on. `--wifi-scan` is given the long timeout on its own: a
+scan is the board's radio working through every channel, and the ordinary reply
+timeout would call a running scan a silent bridge.
+
+`--loopback-test` is the one check that proves the round trip. Everything else
+is answered by the bridge, so a board that accepts writes and never sends
+anything looks healthy to all of them; the loopback is answered by the target's
+own UART with its TX and RX joined.
+
+`--log-file` appends what the device sent, and `--debug-io` traces both
+directions on stderr. Neither is buffered, because a log missing its last line
+is a log missing exactly the moment that mattered — and a management command is
+traced redacted, since stderr is scrollback, a terminal recording or a CI log.
+
+`--escape` reserves one byte for "stop" (`^]` by default, as `0x1d`, or the
+byte itself). A byte stream has no out-of-band signal, so the reservation has to
+be a byte — and it is checked *before* the keystroke is sent, because sending it
+and then leaving would put a stray control character into the device's input.
+`--line-mode` holds a typed line until Enter, which is what a target with a line
+discipline wants, and `--enter` names what Enter actually puts on the wire
+(`raw`, `cr`, `lf`, `crlf`) — a target that wants `\r` and is given `\n`
+simply never answers, and the symptom looks exactly like a dead link.
 
 ## Gates — all four must pass before a commit
 
 ```sh
 cargo fmt --check                                   # style
 cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
-cargo test                                          # 464 tests, headless
+cargo test                                          # 679 tests, headless
 for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
          x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-pc-windows-msvc \
          x86_64-apple-darwin aarch64-apple-darwin; do

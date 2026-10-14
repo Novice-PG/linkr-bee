@@ -66,15 +66,24 @@ pub fn set_uart_command(s: &UartSettings) -> Result<String, String> {
     ))
 }
 
-/// Build `@w=<ssid>,<password>` or `@w off`. A comma in an SSID would move the
-/// rest of the name into the password in the firmware parser, so it is refused.
+/// Build `@w=<ssid>,<password>`, `@w off` or `@w scan`. A comma in an SSID
+/// would move the rest of the name into the password in the firmware parser,
+/// so it is refused.
+///
+/// `scan` is a third shape rather than a `connect` with an empty name: the
+/// firmware's parser reads `off` and `scan` as words and anything else as a
+/// network to join, so "join the network called `scan`" is not expressible —
+/// which is why an SSID is never silently turned into one.
 pub fn wifi_command(action: &str, ssid: &str, password: &str) -> Result<String, String> {
     let mode = action.to_ascii_lowercase();
     if mode == "off" {
         return Ok("@w off".to_string());
     }
+    if mode == "scan" {
+        return Ok("@w scan".to_string());
+    }
     if mode != "connect" {
-        return Err("action must be connect or off".to_string());
+        return Err("action must be connect, scan or off".to_string());
     }
     if ssid.trim().is_empty() {
         return Err("ssid is required".to_string());
@@ -163,7 +172,7 @@ pub struct ReplyStatus {
 
 /// Whether a line begins with `word` followed by a word boundary (`\b`): a
 /// non-word character or the end of the line.
-fn starts_with_word(line: &str, word: &str) -> bool {
+pub fn starts_with_word(line: &str, word: &str) -> bool {
     if line.len() < word.len() || !line[..word.len()].eq_ignore_ascii_case(word) {
         return false;
     }
@@ -261,7 +270,7 @@ pub fn parse_wifi_status(text: &str) -> Option<WifiStatus> {
 }
 
 /// Word-delimited substring search, so `wifi off` does not match `twifi off`.
-fn contains_word(haystack: &str, needle: &str) -> bool {
+pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
     let mut search = 0;
     while let Some(rel) = haystack[search..].find(needle) {
         let start = search + rel;
@@ -406,6 +415,10 @@ mod tests {
             "@w=MyNet,pw"
         );
         assert_eq!(wifi_command("off", "", "").unwrap(), "@w off");
+        // `scan` is a word of its own and not a network called "scan": the
+        // firmware reads the words `off` and `scan` before it reads anything
+        // else, so an SSID is never silently turned into one.
+        assert_eq!(wifi_command("scan", "", "").unwrap(), "@w scan");
         assert!(wifi_command("connect", "", "pw").is_err());
         assert!(wifi_command("connect", "a,b", "pw").is_err());
         assert!(wifi_command("connect", "x".repeat(33).as_str(), "").is_err());

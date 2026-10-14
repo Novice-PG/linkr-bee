@@ -89,16 +89,20 @@ pub trait LinkReader: Send {
     /// Read into `buf`. `Ok(0)` means the far end closed cleanly.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// Where a link with a side channel says something that is not target
+    /// Where a link with a side channel reports anything that is not target
     /// output. Called once, before the read loop starts.
     ///
     /// Almost every bearer is a pipe and takes the default, which is to have
-    /// nothing to say out of band. A WebSocket is the exception: the bridge
-    /// sends the target's bytes as binary frames and its own announcements as
-    /// text, and a text frame is a sentence for the user rather than a
-    /// keystroke for the device. Routing it through `read` would type it into
-    /// the terminal, so it comes out here instead — see [`lan`].
-    fn notice_sink(&mut self, _events: Sender<LinkEvent>) {}
+    /// nothing to say out of band. Two are not: a WebSocket sends the target's
+    /// bytes as binary frames and its own announcements as text, and BLE keeps
+    /// its management service on characteristics of its own. Routing either
+    /// through `read` would type it into the terminal, so it comes out here
+    /// instead — see [`lan`] and [`ble`].
+    ///
+    /// One sink rather than one per kind of thing, because a link that has a
+    /// side channel tends to grow a second use for it, and adding a method per
+    /// use is how the same event ends up arriving by two doors.
+    fn side_channel(&mut self, _events: Sender<LinkEvent>) {}
 }
 
 /// The sending half of a link.
@@ -107,6 +111,22 @@ pub trait LinkWriter: Send {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
     /// Push what was buffered to the far end.
     fn flush(&mut self) -> io::Result<()>;
+
+    /// Send one management frame — a question about the bridge itself rather
+    /// than a keystroke for the target.
+    ///
+    /// Only Bluetooth answers this today, because only Bluetooth has a channel
+    /// to carry it: the management service sits beside Nordic UART rather than
+    /// inside it, and its replies would otherwise have to be told apart from
+    /// whatever the target was printing at the time. The default is therefore
+    /// a refusal that says exactly that, which is what a caller shows when
+    /// somebody asks a bridge over the wrong bearer for its firmware version.
+    fn write_management(&mut self, _frame: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this link has no management channel",
+        ))
+    }
 }
 
 /// A link that has not been opened yet.
@@ -137,6 +157,16 @@ pub enum LinkEvent {
     /// announcement over a channel that has one. Never empty, and never
     /// target output: it is shown as a notice and typed nowhere.
     Notice(String),
+    /// Bytes from the bridge's *management* channel: an answer to a question
+    /// this host asked it about itself.
+    ///
+    /// Never target output, and never mixed with it — which is the whole
+    /// reason this variant exists rather than the bytes going through
+    /// [`LinkEvent::Data`]. A response that had to be recognised inside the
+    /// target's own output could only be guessed apart from it, and the guess
+    /// would be wrong exactly when the target happened to print something
+    /// shaped like a reply. See `device`.
+    Management(Vec<u8>),
     /// The link ended. The string is what the notice says happened; nothing
     /// after a `Closed` is delivered.
     Closed(String),
@@ -144,7 +174,10 @@ pub enum LinkEvent {
 
 /// A command from the event loop to the writer thread.
 enum Outgoing {
+    /// Keystrokes and whatever else is typed into the target.
     Bytes(Vec<u8>),
+    /// A whole management frame, split into writes by the link itself.
+    Management(Vec<u8>),
     Close,
 }
 
@@ -206,6 +239,15 @@ impl LinkHandle {
         self.outgoing.send(Outgoing::Bytes(bytes)).is_ok()
     }
 
+    /// Queue a management frame. `false` means the writer thread is gone.
+    ///
+    /// Separate from [`Self::send`] because these bytes are not typed into the
+    /// target and must not be counted as though they were: they ask the bridge
+    /// something about itself and are answered on another characteristic.
+    pub fn send_management(&self, frame: Vec<u8>) -> bool {
+        self.outgoing.send(Outgoing::Management(frame)).is_ok()
+    }
+
     /// Take every event that has arrived, without blocking. Stops as soon as
     /// nothing is left so the frame is never delayed by the link.
     pub fn drain(&self) -> Vec<LinkEvent> {
@@ -233,7 +275,7 @@ fn spawn_reader(mut reader: Box<dyn LinkReader>, events: Sender<LinkEvent>) -> J
     // Offered before the loop, so a link with a side channel can announce
     // something on its first read — and so the reads it does make are the only
     // thing this thread ever waits on.
-    reader.notice_sink(events.clone());
+    reader.side_channel(events.clone());
     thread::spawn(move || {
         if events.send(LinkEvent::Opened).is_err() {
             return;
@@ -276,6 +318,15 @@ fn spawn_writer(
                         return;
                     }
                 }
+                Outgoing::Management(frame) => {
+                    // A write the link does not carry is reported rather than
+                    // swallowed: asking for management over a bearer that has
+                    // none must read as "this link has no management channel",
+                    // not as a request that went unanswered.
+                    if let Err(err) = writer.write_management(&frame) {
+                        let _ = events.send(LinkEvent::Notice(err.to_string()));
+                    }
+                }
             }
         }
     })
@@ -289,17 +340,43 @@ pub mod testing {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    /// The two ends of one in-memory pair.
-    ///
-    /// `to_device` is what the host writes; `from_device` is what the device
-    /// sends. A test pushes on `device_end` and reads what the host sent.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     pub struct MemoryLink {
         to_device: Arc<Mutex<VecDeque<u8>>>,
         from_device: Arc<Mutex<VecDeque<u8>>>,
+        /// What the host has sent on the management channel, kept apart from
+        /// `to_device` because these bytes were never typed into the target and
+        /// a test that found them mixed in would be reading a conversation the
+        /// target never had.
+        management_to_device: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        /// Management responses waiting to be delivered to the host. Each entry
+        /// is one notification, because that is how they arrive.
+        management_from_device: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        /// Which link this memory pair claims to be. Almost every test wants
+        /// `Stdio`; the management channel is Bluetooth-only, so anything
+        /// asking the bridge about itself needs a link that says it is.
+        kind: LinkKind,
         /// Set when the host's writer is dropped, so a test can tell the
         /// difference between "nothing yet" and "the host hung up".
         closed: Arc<Mutex<bool>>,
+    }
+
+    /// A memory pair announces itself as `Stdio` rather than taking
+    /// `LinkKind`'s own default, because "in memory" is closer to a pipe than
+    /// to a radio: most tests are about bytes in one end and out the other, and
+    /// the Bluetooth-specific behaviour — the management channel — is what
+    /// [`MemoryLink::ble`] exists to ask for.
+    impl Default for MemoryLink {
+        fn default() -> MemoryLink {
+            MemoryLink {
+                to_device: Arc::new(Mutex::new(VecDeque::new())),
+                from_device: Arc::new(Mutex::new(VecDeque::new())),
+                management_to_device: Arc::new(Mutex::new(VecDeque::new())),
+                management_from_device: Arc::new(Mutex::new(VecDeque::new())),
+                kind: LinkKind::Stdio,
+                closed: Arc::new(Mutex::new(false)),
+            }
+        }
     }
 
     impl MemoryLink {
@@ -307,9 +384,30 @@ pub mod testing {
             MemoryLink::default()
         }
 
+        /// A memory pair standing in for a Bluetooth link, which is the one
+        /// bearer that has a management channel.
+        pub fn ble() -> MemoryLink {
+            MemoryLink {
+                kind: LinkKind::Ble,
+                ..MemoryLink::default()
+            }
+        }
+
         /// Build the `Link` the session opens.
         pub fn link(&self) -> Box<dyn Link> {
             Box::new(self.clone())
+        }
+
+        /// Feed the host one management notification.
+        pub fn feed_management(&self, bytes: Vec<u8>) {
+            let mut queue = self.management_from_device.lock().expect("link lock");
+            queue.push_back(bytes);
+        }
+
+        /// Everything the host has asked on the management channel, drained.
+        pub fn take_management(&self) -> Vec<Vec<u8>> {
+            let mut queue = self.management_to_device.lock().expect("link lock");
+            queue.drain(..).collect()
         }
 
         /// Bytes the host has written, drained.
@@ -345,11 +443,50 @@ pub mod testing {
 
     struct MemoryReader {
         link: MemoryLink,
+        events: Option<Sender<LinkEvent>>,
+    }
+
+    impl MemoryReader {
+        /// Hand every waiting management notification to the loop.
+        ///
+        /// Done here rather than in its own thread, because a memory link has
+        /// no reactor to run one on — and because `read` is called continuously
+        /// for as long as the link is open, so this costs a test nothing.
+        fn deliver_management(&self) {
+            let Some(events) = &self.events else {
+                return;
+            };
+            loop {
+                let next = {
+                    let mut queue = self.link.management_from_device.lock().expect("link lock");
+                    queue.pop_front()
+                };
+                match next {
+                    Some(bytes) => {
+                        if events.send(LinkEvent::Management(bytes)).is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+            }
+        }
     }
 
     impl LinkReader for MemoryReader {
+        fn side_channel(&mut self, events: Sender<LinkEvent>) {
+            self.events = Some(events);
+        }
+
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             loop {
+                // Checked on every turn of the wait and not once per `read`,
+                // because `read` is called once and then blocks: whatever waits
+                // inside this loop is waiting *instead of* returning, and a
+                // delivery that happened only at its top would wait for data
+                // that may never come. A real link does this on a thread of its
+                // own; a memory link has nowhere else to do it.
+                self.deliver_management();
                 {
                     let mut queue = self.link.from_device.lock().expect("link lock");
                     if !queue.is_empty() {
@@ -384,19 +521,28 @@ pub mod testing {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+
+        fn write_management(&mut self, frame: &[u8]) -> io::Result<()> {
+            let mut queue = self.link.management_to_device.lock().expect("link lock");
+            queue.push_back(frame.to_vec());
+            Ok(())
+        }
     }
 
     impl Link for MemoryLink {
         fn open(self: Box<Self>) -> io::Result<(Box<dyn LinkReader>, Box<dyn LinkWriter>)> {
             let link = *self;
             Ok((
-                Box::new(MemoryReader { link: link.clone() }),
+                Box::new(MemoryReader {
+                    link: link.clone(),
+                    events: None,
+                }),
                 Box::new(MemoryWriter { link }),
             ))
         }
 
         fn kind(&self) -> LinkKind {
-            LinkKind::Stdio
+            self.kind
         }
 
         fn describe(&self) -> String {

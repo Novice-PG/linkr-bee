@@ -7,6 +7,8 @@
 pub mod accessory;
 pub mod agent;
 pub mod app;
+pub mod cli;
+pub mod device;
 pub mod dialogs;
 pub mod event;
 pub mod exec;
@@ -18,6 +20,7 @@ pub mod serial;
 pub mod session;
 pub mod text;
 pub mod theme;
+pub mod trace;
 pub mod transfer;
 pub mod transport;
 pub mod ui;

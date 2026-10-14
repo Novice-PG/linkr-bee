@@ -19,10 +19,12 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use linkr_tui::app::{App, Focus, Transport};
+use linkr_tui::cli;
+use linkr_tui::device;
 use linkr_tui::event::{ConnectionState, View};
 use linkr_tui::i18n::Lang;
 use linkr_tui::lan_token_store::{self, TokenStore};
-use linkr_tui::serial::keys::{self, KeyModifiers as TerminalModifiers};
+use linkr_tui::serial::keys::{self, EnterMode, KeyModifiers as TerminalModifiers};
 use linkr_tui::session::Dial;
 use linkr_tui::theme::ThemeChoice;
 use linkr_tui::transport::ble::Selection;
@@ -36,69 +38,13 @@ const TICK: Duration = Duration::from_millis(250);
 
 const ABOUT: &str = "Terminal over BLE Nordic UART Service for Linkr Bee bridge";
 
+/// The help text, generated from the one table `cli` keeps.
+///
+/// It used to be written out here by hand, which is how a flag comes to exist
+/// in the parser but not in the help — the last flag added is the one nobody
+/// can find out about.
 fn usage(prog: &str) -> String {
-    format!(
-        "{ABOUT}\n\
-         \n\
-         Usage: {prog} [OPTIONS]\n\
-         \n\
-         Options:\n\
-         \x20     --lang <LANG>\n\
-         \x20         interface language: zh or en [default: zh]\n\
-         \x20     --theme <THEME>\n\
-         \x20         colour theme: dark or light [default: dark]\n\
-         \x20     --bridge <COMMAND>\n\
-         \x20         run the session over a child process's standard input and\n\
-         \x20         output; `-` is the built-in loopback device\n\
-         \x20     --ble-address <MAC>\n\
-         \x20         connect to the board at this Bluetooth address, as in\n\
-         \x20         EE:C7:42:34:48:CF\n\
-         \x20     --ble-name <NAME>\n\
-         \x20         connect to the board whose advertised name contains this\n\
-         \x20         fragment (case ignored), e.g. Linkr\n\
-         \x20     --lan-host <HOST>\n\
-         \x20         dial the bridge's WebSocket over the LAN: a hostname, a\n\
-         \x20         host:port pair or a ws:// URL\n\
-         \x20     --lan-token <TOKEN>\n\
-         \x20         the access token this bridge asks for, as @s? over BLE\n\
-         \x20         prints it\n\
-         \x20     --lan-token-file <PATH>\n\
-         \x20         read that token from a file instead\n\
-         \x20     --transport <LINK>\n\
-         \x20         pin the transport and report it as locked: ble, lan\n\
-         \x20         or stdio\n\
-         \x20     --print-frame [<COLSxROWS>]\n\
-         \x20         render one frame as text and exit (no terminal needed)\n\
-         \x20     --ansi\n\
-         \x20         with --print-frame, emit true-colour escapes\n\
-         \x20     --state <STATE>\n\
-         \x20         preview a connection state: disconnected, connecting,\n\
-         \x20         connected or failed [default: connecting]\n\
-         \x20     --view <VIEW>\n\
-         \x20         open on a view: terminal, diagnostics, network, assistant\n\
-         \x20         or transfer [default: terminal]\n\
-         \x20     --sample\n\
-         \x20         fill the frame with the documented sample reply and a\n\
-         \x20         sample terminal transcript, so a --print-frame shows a\n\
-         \x20         populated view instead of an empty one\n\
-         \x20     --overlay <NAME>\n\
-         \x20         open on a modal: palette, help, notices, confirm, send\n\
-         \x20         or receive\n\
-         \x20     --feed <TEXT>\n\
-         \x20         feed TEXT into the terminal pane before the frame is\n\
-         \x20         drawn, so the emulator can be looked at without a\n\
-         \x20         device; escapes are interpreted, so `$'\\e[31mred'`\n\
-         \x20         arrives red\n\
-         \x20 -h, --help\n\
-         \x20         Print help\n\
-         \x20 -V, --version\n\
-         \x20         Print version\n\
-         \n\
-         A LAN token may also come from $LINKR_LAN_TOKEN, or from a token\n\
-         remembered for that bridge. It is never echoed: anything the bridge\n\
-         says about itself has the token scrubbed before it reaches the\n\
-         screen or the notice log.\n"
-    )
+    cli::usage(prog, ABOUT)
 }
 
 /// A modal to open on, so `--print-frame` can show one without a TTY.
@@ -175,6 +121,40 @@ struct Args {
     /// inspection: the emulator is the one view whose content comes from the
     /// wire, so without this it cannot be looked at without a device.
     feed: Option<String>,
+    /// List the nearby boards and stop.
+    scan: bool,
+    /// How long `--scan` listens, in seconds.
+    scan_timeout: Duration,
+    /// Connect, do what was asked, hang up — no terminal is taken over.
+    no_terminal: bool,
+    /// Report what happened as JSON lines rather than as sentences.
+    json: bool,
+    /// Say nothing on stderr that is not an error.
+    quiet: bool,
+    /// What the bridge was asked to do or report, when it was asked anything.
+    requests: cli::Requests,
+    /// A file the WiFi password is read from, so it never reaches `argv` —
+    /// where every other process on the machine can see it.
+    wifi_key_file: Option<PathBuf>,
+    /// How the Enter key is sent on the wire.
+    enter: EnterMode,
+    /// Echo what is typed into the pane, for a link that does not echo.
+    local_echo: bool,
+    /// Hold a typed line until Enter arrives, rather than sending it a key at
+    /// a time.
+    line_mode: bool,
+    /// The byte that ends the session when it is typed: the wire's own "get me
+    /// out of here", which has to exist because a byte stream has no other way
+    /// to say it.
+    escape: u8,
+    /// Where every byte the device sends is appended.
+    log_file: Option<PathBuf>,
+    /// Whether both directions are traced to standard error.
+    debug_io: bool,
+    /// `--loopback-test`: send these bytes and require the same back.
+    loopback: Option<String>,
+    /// How long that echo is waited for.
+    loopback_timeout: Duration,
 }
 
 impl Args {
@@ -264,6 +244,21 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         lan_token_file: None,
         overlay: None,
         feed: None,
+        scan: false,
+        scan_timeout: Duration::from_secs(10),
+        no_terminal: false,
+        json: bool::default(),
+        quiet: false,
+        requests: cli::Requests::default(),
+        wifi_key_file: None,
+        enter: EnterMode::default(),
+        local_echo: false,
+        line_mode: false,
+        escape: cli::parse_escape("^]").expect("the documented default parses"),
+        log_file: None,
+        debug_io: false,
+        loopback: None,
+        loopback_timeout: Duration::from_secs(3),
     };
     let mut i = 0;
     while i < argv.len() {
@@ -287,6 +282,95 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 println!("linkr {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
+            "--print-completion" => {
+                let raw = value("--print-completion");
+                let script = match cli::completion_script(&raw, prog) {
+                    Some(script) => script,
+                    None => fail(
+                        prog,
+                        &format!("invalid value '{raw}' for '--print-completion <SHELL>'"),
+                    ),
+                };
+                print!("{script}");
+                std::process::exit(0);
+            }
+            "--scan" => args.scan = true,
+            "--timeout" => {
+                let raw = value("--timeout");
+                let seconds: f64 = raw.parse().ok().filter(|s| *s > 0.0).unwrap_or_else(|| {
+                    fail(
+                        prog,
+                        &format!("invalid value '{raw}' for '--timeout <SECONDS>'"),
+                    )
+                });
+                args.scan_timeout = Duration::from_secs_f64(seconds);
+            }
+            "--no-terminal" => args.no_terminal = true,
+            "--json" => args.json = true,
+            "--quiet" => args.quiet = true,
+            "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
+            "--query-uart" => args.requests.queries.push(device::Query::Uart),
+            "--query-wifi" => args.requests.queries.push(device::Query::Wifi),
+            "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
+            "--uart" => args.requests.uart = Some(value("--uart")),
+            "--wifi" => {
+                let raw = value("--wifi");
+                // `SSID[,PASSWORD]`: the password is optional here so that it
+                // can come from --wifi-key-file instead, and stay out of argv.
+                let (ssid, password) = match raw.split_once(',') {
+                    Some((ssid, password)) => (ssid.to_string(), password.to_string()),
+                    None => (raw, String::new()),
+                };
+                args.requests.wifi = Some((ssid, password));
+            }
+            "--wifi-key-file" => args.wifi_key_file = Some(PathBuf::from(value("--wifi-key-file"))),
+            "--wifi-off" => args.requests.wifi_off = true,
+            "--wifi-scan" => args.requests.wifi_scan = true,
+            "--webdav" => args.requests.webdav = Some(value("--webdav")),
+            "--webdav-off" => args.requests.webdav_off = true,
+            "--loopback-test" => {
+                // `nargs="?"` in the reference client: `--loopback-test` alone
+                // sends `A`, which is the shortest thing that can fail in an
+                // interesting way and the least likely to be swallowed by a
+                // target that is doing something else.
+                let mut payload = "A".to_string();
+                if let Some(next) = argv.get(i + 1) {
+                    if !next.starts_with('-') {
+                        payload = next.clone();
+                        i += 1;
+                    }
+                }
+                args.loopback = Some(payload);
+            }
+            "--loopback-timeout" => {
+                let raw = value("--loopback-timeout");
+                let seconds: f64 = raw.parse().ok().filter(|s| *s > 0.0).unwrap_or_else(|| {
+                    fail(
+                        prog,
+                        &format!("invalid value '{raw}' for '--loopback-timeout <SECONDS>'"),
+                    )
+                });
+                args.loopback_timeout = Duration::from_secs_f64(seconds);
+            }
+            "--enter" => {
+                let raw = value("--enter");
+                args.enter = EnterMode::from_name(&raw).unwrap_or_else(|| {
+                    fail(prog, &format!("invalid value '{raw}' for '--enter <MODE>'"))
+                });
+            }
+            "--local-echo" => args.local_echo = true,
+            "--line-mode" => args.line_mode = true,
+            "--escape" => {
+                let raw = value("--escape");
+                args.escape = cli::parse_escape(&raw).unwrap_or_else(|why| {
+                    fail(
+                        prog,
+                        &format!("invalid value '{raw}' for '--escape <BYTE>': {why}"),
+                    )
+                });
+            }
+            "--log-file" => args.log_file = Some(PathBuf::from(value("--log-file"))),
+            "--debug-io" => args.debug_io = true,
             "--lang" => {
                 let raw = value("--lang");
                 args.lang = match raw.as_str() {
@@ -440,7 +524,59 @@ fn main() -> io::Result<()> {
         })
         .unwrap_or_else(|| "linkr".to_string());
 
-    let args = parse_args(&prog, &argv);
+    let mut args = parse_args(&prog, &argv);
+    // The password is read as late as possible and never put back: the point of
+    // `--wifi-key-file` is that `argv` is visible to every process on the
+    // machine, and a password copied from the command line into a struct is a
+    // password that travelled anyway.
+    if let Some(path) = &args.wifi_key_file {
+        let password = match read_first_line(path) {
+            Ok(password) => password,
+            Err(why) => {
+                eprintln!("error: {why}");
+                std::process::exit(2);
+            }
+        };
+        let ssid = args
+            .requests
+            .wifi
+            .as_ref()
+            .map_or("", |pair| pair.0.as_str());
+        if ssid.trim().is_empty() {
+            eprintln!("error: --wifi-key-file needs --wifi to name the network too");
+            std::process::exit(2);
+        }
+        args.requests.wifi = Some((ssid.to_string(), password));
+    }
+
+    // A scan answers a question nothing else can — is the board on the air at
+    // all — so it runs before a dial is even considered and stops afterwards.
+    if args.scan {
+        match cli::scan_devices(args.scan_timeout) {
+            Ok(devices) => {
+                for device in &devices {
+                    let name = device.name.as_deref().unwrap_or("(no name advertised)");
+                    // Marked, because a board that is advertising but not
+                    // offering the serial service is a firmware problem and not
+                    // a radio one, and the difference is what to do next.
+                    let kind = if device.nus { "nus" } else { "-" };
+                    println!("{kind:>3}  {name}  {}", device.id);
+                }
+                if devices.is_empty() && !args.quiet {
+                    eprintln!(
+                        "no Bluetooth device was seen in {} s",
+                        args.scan_timeout.as_secs()
+                    );
+                }
+                return Ok(());
+            }
+            Err(why) => {
+                eprintln!("error: {why}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // A dial that cannot be *asked for* — an unreadable token file, a
     // mis-shaped token — is said here rather than after a socket is opened:
     // it is a fact about the command line, not about the network.
@@ -547,7 +683,75 @@ fn main() -> io::Result<()> {
         app.state = ConnectionState::Disconnected;
     }
 
+    // Wire settings the command line named, applied to the state rather than
+    // read back from it: the pane asks `app` what to do with a keystroke, and
+    // a flag that only changed a variable here would leave the pane using its
+    // own default.
+    app.enter = args.enter;
+    app.escape = args.escape;
+    app.line_mode = args.line_mode;
+    if args.local_echo {
+        app.terminal.echo = true;
+    }
+    // The trace is opened before anything is dialled, so the bytes of the dial
+    // itself are in it: a log that starts after the handshake is a log missing
+    // the part where the handshake is negotiated, which is the part that fails.
+    if let Some(path) = &args.log_file {
+        app.trace = match linkr_tui::trace::ByteTrace::to_file(path) {
+            Ok(trace) => trace,
+            Err(why) => {
+                eprintln!(
+                    "error: {} could not be opened for appending: {why}",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+        };
+    }
+    if args.debug_io {
+        app.trace = std::mem::take(&mut app.trace).with_stderr();
+    }
+
+    // A script run: connect, ask, report, hang up. It is reached when
+    // `--no-terminal` was given *or* when something was asked for, because a
+    // command line that names `--query-info` is asking for an answer and not
+    // for an interface — printing the answer and leaving is what it meant.
+    if args.no_terminal || !args.requests.is_empty() || args.loopback.is_some() {
+        if !args.quiet && app.session.is_live() {
+            eprintln!("connected to {}", app.session.describe());
+        }
+        let format = if args.json {
+            cli::Format::Json
+        } else {
+            cli::Format::Text
+        };
+        let mut failed = cli::run_requests(&mut app, &args.requests, format);
+        // The loopback goes last and stands alone: it is answered by the
+        // target's UART rather than by the bridge, so running it before the
+        // management requests would put its echo in what they read back.
+        if let Some(payload) = &args.loopback {
+            if !cli::loopback_test(&mut app, payload.as_bytes(), args.loopback_timeout, format) {
+                failed += 1;
+            }
+        }
+        app.session.close();
+        if failed > 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     run(&mut app)
+}
+
+/// The first line of `path`, which is how a secret is handed over: a file the
+/// shell cannot put in `argv` and `ps` cannot read back.
+fn read_first_line(path: &std::path::Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
+    // The reference client takes the first line and ignores the rest, so a
+    // file with a trailing newline behaves the way a key file is expected to.
+    Ok(text.lines().next().unwrap_or("").trim().to_string())
 }
 
 /// The centre region — the terminal pane's area — for a frame of this size.
@@ -708,6 +912,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    // The network view is a form and takes the keyboard first: its rows are
+    // what Enter means there, and falling through to "the device's" would type
+    // a newline into the console every time somebody pressed an action.
+    if app.view == View::Network && linkr_tui::views::network::handle_key(app, key) {
+        return false;
+    }
+
     // The keyboard is on the pane: everything left is the device's.
     match key.code {
         // PageUp/PageDown walk the pane's own history rather than the device's
@@ -722,8 +933,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::End => app.scroll_terminal_to_bottom(),
         _ => {
-            if let Some(bytes) = key_bytes(key) {
-                app.send_bytes(bytes.as_bytes());
+            if let Some(bytes) = key_bytes(key, app.enter) {
+                // The escape byte is the wire's way out, and it is checked
+                // before the keystroke is sent: sending it and *then* leaving
+                // would put a stray control character into the device's input,
+                // which is the one thing an escape key must never do.
+                if bytes.as_bytes() == [app.escape] {
+                    app.request_quit();
+                    return true;
+                }
+                app.type_bytes(key.code == KeyCode::Enter, &bytes);
             }
         }
     }
@@ -734,7 +953,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 /// has no use for. The named keys go through the ported `terminal_keys.js`
 /// table, so the two clients cannot drift apart on what `F5` or `ArrowUp`
 /// means.
-fn key_bytes(key: KeyEvent) -> Option<String> {
+fn key_bytes(key: KeyEvent, enter: EnterMode) -> Option<String> {
     let modifiers = TerminalModifiers {
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
         ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
@@ -746,7 +965,13 @@ fn key_bytes(key: KeyEvent) -> Option<String> {
     let named = |name: &str| keys::terminal_key_sequence(name, application_cursor_keys, &modifiers);
     let bytes = match key.code {
         KeyCode::Char(c) => keys::apply_input_modifiers(&c.to_string(), &modifiers),
-        KeyCode::Enter => named("Enter"),
+        // Enter is the one key the command line may re-wire, because a target
+        // that wants `\r` and is given `\n` simply never answers — and the
+        // symptom looks exactly like a dead link.
+        KeyCode::Enter => match enter.bytes() {
+            Some(bytes) => bytes.to_string(),
+            None => named("Enter"),
+        },
         KeyCode::Backspace => named("Backspace"),
         KeyCode::Tab => named("Tab"),
         KeyCode::BackTab => named("Tab"),
@@ -782,6 +1007,56 @@ mod tests {
     fn args(list: &[&str]) -> Args {
         let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
         parse_args("linkr", &owned)
+    }
+
+    /// The wire settings are read off the command line in the forms the
+    /// reference client takes, and the escape byte defaults to the one it
+    /// reserves.
+    #[test]
+    fn the_wire_settings_parse_and_default_to_the_reference_clients() {
+        assert_eq!(args(&[]).escape, 0x1d, "^] by default");
+        assert_eq!(args(&["--escape", "^]"]).escape, 0x1d);
+        assert_eq!(args(&["--escape", "0x02"]).escape, 0x02);
+        assert!(!args(&[]).line_mode);
+        assert!(args(&["--line-mode"]).line_mode);
+        assert!(!args(&[]).debug_io);
+        assert!(args(&["--debug-io"]).debug_io);
+        assert_eq!(
+            args(&["--log-file", "/tmp/rx.log"]).log_file.as_deref(),
+            Some(std::path::Path::new("/tmp/rx.log"))
+        );
+    }
+
+    /// `--loopback-test` takes its payload or falls back to `A`, and the next
+    /// flag is never eaten as a payload — `--loopback-test --json` is a test
+    /// with the default payload.
+    #[test]
+    fn the_loopback_payload_is_optional_and_never_a_flag() {
+        assert_eq!(args(&[]).loopback, None);
+        assert_eq!(args(&["--loopback-test"]).loopback.as_deref(), Some("A"));
+        assert_eq!(
+            args(&["--loopback-test", "hello"]).loopback.as_deref(),
+            Some("hello")
+        );
+        let parsed = args(&["--loopback-test", "--json"]);
+        assert_eq!(parsed.loopback.as_deref(), Some("A"));
+        assert!(parsed.json, "--json was still read as a flag");
+        assert_eq!(
+            args(&["--loopback-timeout", "1.5"])
+                .loopback_timeout
+                .as_millis(),
+            1500
+        );
+    }
+
+    /// A WiFi scan is one of the things the bridge can be asked for, and it is
+    /// what makes a script run rather than a terminal.
+    #[test]
+    fn a_wifi_scan_is_a_request_and_not_a_view() {
+        let parsed = args(&["--wifi-scan"]);
+        assert!(parsed.requests.wifi_scan);
+        assert!(!parsed.requests.is_empty(), "so it runs and exits");
+        assert!(args(&[]).requests.is_empty());
     }
 
     /// The defaults are the designed first frame: Chinese, dark, connecting.
@@ -983,51 +1258,84 @@ mod tests {
     #[test]
     fn the_pane_keys_send_the_ported_sequences() {
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("a".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\r".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\u{7f}".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\t".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\u{1b}".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\u{1b}[A".into())
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             Some("\u{1b}[3~".into())
         );
         // Ctrl+C on the pane is the interrupt, not a quit: the chord is the
         // device's once the global binding has been checked.
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                EnterMode::Raw
+            ),
             Some("\u{3}".into())
         );
         // Shift+Tab is the back-tab the device expects.
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+                EnterMode::Raw
+            ),
             Some("\u{1b}[Z".into())
         );
         // A key the device has no use for sends nothing at all.
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             None
         );
         assert_eq!(
-            key_bytes(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            key_bytes(
+                KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+                EnterMode::Raw
+            ),
             None
         );
     }

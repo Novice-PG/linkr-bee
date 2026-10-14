@@ -176,6 +176,12 @@ impl Session {
                 LinkEvent::Opened => self.state = Some(ConnectionState::Connected),
                 LinkEvent::Data(bytes) => self.rx += bytes.len() as u64,
                 LinkEvent::Notice(_) => {}
+                // Deliberately *not* counted. The receive counter is how much
+                // the *target* has said, which is what the user asked to see
+                // when they opened a terminal; folding the bridge's own
+                // answers about itself into it would make the top bar drift
+                // every time somebody asked for the firmware version.
+                LinkEvent::Management(_) => {}
                 LinkEvent::Closed(reason) => {
                     ended = true;
                     // A clean end is a hang-up; anything else is a failure.
@@ -217,6 +223,19 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// Send one management frame — a question for the bridge rather than a
+    /// keystroke for the target. `false` means there is no link.
+    ///
+    /// Not counted against `tx`, for the same reason a management answer is not
+    /// counted against `rx`: the counters describe the target conversation, and
+    /// a question sent to the bridge is not part of it.
+    pub fn send_management(&mut self, frame: Vec<u8>) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        handle.send_management(frame)
     }
 }
 

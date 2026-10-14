@@ -163,6 +163,25 @@ pub struct Strings {
     /// The WebDAV state prefix (`on`/`off`).
     pub net_state_on: &'static str,
     pub net_state_off: &'static str,
+    /// The keys the network view answers, so a form that looks like a form
+    /// says how it is driven.
+    pub net_keys_hint: &'static str,
+    /// What agreeing to a network change means, on the approval card.
+    pub net_confirm_detail: &'static str,
+    /// Refusing to join a network nobody named.
+    pub net_no_ssid: &'static str,
+    /// Refusing to point log upload at nowhere.
+    pub net_no_url: &'static str,
+    /// A command that is not one the bridge takes, which is a bug in the caller
+    /// rather than something the user did.
+    pub net_bad_command: &'static str,
+    /// What the diagnostics and network surfaces say when the bridge was asked
+    /// something and never answered it.
+    ///
+    /// Not "failed": a question that timed out may have been understood and
+    /// acted on slowly. The wording has to leave that open, because whether to
+    /// press the button again depends on it.
+    pub mgmt_no_answer: &'static str,
 
     // --- transfer view ----------------------------------------------------
     /// The outgoing-files section heading.
@@ -337,6 +356,12 @@ const ZH: Strings = Strings {
     net_disable: "[关闭]",
     net_state_on: "开启",
     net_state_off: "关闭",
+    net_keys_hint: "↑↓ 选择 · Enter 执行",
+    net_confirm_detail: "该配置会写入设备，重启后仍然生效",
+    net_no_ssid: "先输入网络名称",
+    net_no_url: "先填写上传地址",
+    net_bad_command: "不是桥接能识别的命令",
+    mgmt_no_answer: "桥接没有应答：它可能正忙，请稍后重试",
     xfer_out_section: "发送到设备",
     xfer_in_section: "从设备取回",
     xfer_empty: "暂无传输记录。",
@@ -453,6 +478,12 @@ const EN: Strings = Strings {
     net_disable: "[Disable]",
     net_state_on: "on",
     net_state_off: "off",
+    net_keys_hint: "up/down choose · Enter run",
+    net_confirm_detail: "This is written to the device and survives a reboot",
+    net_no_ssid: "name the network first",
+    net_no_url: "name the upload URL first",
+    net_bad_command: "not a command the bridge understands",
+    mgmt_no_answer: "the bridge did not answer — it may be busy, try again",
     xfer_out_section: "To the device",
     xfer_in_section: "From the device",
     xfer_empty: "No transfers yet.",
@@ -640,6 +671,11 @@ mod tests {
                 s.net_disable,
                 s.net_state_on,
                 s.net_state_off,
+                s.net_keys_hint,
+                s.net_confirm_detail,
+                s.net_no_ssid,
+                s.net_no_url,
+                s.net_bad_command,
                 s.xfer_out_section,
                 s.xfer_in_section,
                 s.xfer_empty,

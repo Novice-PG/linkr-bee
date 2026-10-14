@@ -741,7 +741,7 @@ impl LinkReader for LanReader {
         Ok(n)
     }
 
-    fn notice_sink(&mut self, events: Sender<LinkEvent>) {
+    fn side_channel(&mut self, events: Sender<LinkEvent>) {
         self.notices = Some(events);
     }
 }
@@ -998,7 +998,7 @@ mod tests {
             leftover: VecDeque::new(),
             done: false,
         };
-        reader.notice_sink(events_tx);
+        reader.side_channel(events_tx);
         let _ = tx.send(Inbound::Notice("the bridge is at 192.168.0.44".to_string()));
         let _ = tx.send(Inbound::Data(b"uptime\n".to_vec()));
         let _ = tx.send(Inbound::End);

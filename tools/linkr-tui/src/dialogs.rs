@@ -76,6 +76,12 @@ const RECEIVE_PLACEHOLDER: Entry = [
     "for example . — the current directory",
     "例如 . —— 当前目录",
 ];
+// --- the network prompts ----------------------------------------------------
+
+const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
+const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
+const WEBDAV_TITLE: Entry = [" Log upload target ", " 日志上传目标 "];
+
 /// What an empty answer means for a receive. A directory is something the user
 /// is standing in; a file is not something to guess at.
 const RECEIVE_DEFAULT: &str = ".";
@@ -155,6 +161,15 @@ pub enum PromptAction {
     SendFile,
     /// Take whatever the far end offers into the named directory.
     ReceiveInto,
+    /// Name the network to join. Answered by a second prompt for its password,
+    /// because the two are one command on the wire and a half of that command
+    /// is not a thing that can be sent.
+    WifiSsid,
+    /// The password for the network just named. Held nowhere: it goes straight
+    /// from the field into the command and out of the process.
+    WifiPassword,
+    /// Where the device's log is uploaded to.
+    WebdavUrl,
 }
 
 impl Prompt {
@@ -162,17 +177,49 @@ impl Prompt {
     pub fn new(title: Entry, action: PromptAction) -> Prompt {
         Prompt {
             title,
-            label: match action {
-                PromptAction::SendFile => SEND_LABEL,
-                PromptAction::ReceiveInto => RECEIVE_LABEL,
-            },
-            placeholder: match action {
-                PromptAction::SendFile => SEND_PLACEHOLDER,
-                PromptAction::ReceiveInto => RECEIVE_PLACEHOLDER,
-            },
+            label: Self::label(action),
+            placeholder: Self::placeholder(action),
             text: String::new(),
             cursor: 0,
             action,
+        }
+    }
+
+    /// A prompt already holding `text`, with the caret after it.
+    ///
+    /// Used when the answer is a change to one already given — renaming a
+    /// network that is half typed — so that correcting one character does not
+    /// mean typing the whole name again.
+    pub fn with_text(title: Entry, action: PromptAction, text: &str) -> Prompt {
+        let mut prompt = Prompt::new(title, action);
+        prompt.text = text.to_string();
+        prompt.cursor = prompt.text.len();
+        prompt
+    }
+
+    /// The question this action's field asks, in the interface language.
+    fn label(action: PromptAction) -> Entry {
+        match action {
+            PromptAction::SendFile => SEND_LABEL,
+            PromptAction::ReceiveInto => RECEIVE_LABEL,
+            PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
+            PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
+            PromptAction::WebdavUrl => [
+                "Upload URL (http:// or https://)",
+                "上传地址（http:// 或 https://）",
+            ],
+        }
+    }
+
+    /// What the empty field says, which is how it tells you the shape of
+    /// answer it wants.
+    fn placeholder(action: PromptAction) -> Entry {
+        match action {
+            PromptAction::SendFile => SEND_PLACEHOLDER,
+            PromptAction::ReceiveInto => RECEIVE_PLACEHOLDER,
+            PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
+            PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
+            PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
         }
     }
 
@@ -296,6 +343,31 @@ pub fn prompt_send_file(app: &mut App) {
     )));
 }
 
+/// Ask which network to join. The password is asked for next, by the prompt
+/// this one's answer opens.
+pub fn prompt_wifi_ssid(app: &mut App) {
+    let prompt = Prompt::with_text(
+        WIFI_TITLE,
+        PromptAction::WifiSsid,
+        &app.network.ssid_input.clone(),
+    );
+    app.dialog = Some(Dialog::Prompt(prompt));
+}
+
+/// Ask where the device's log should be uploaded to.
+pub fn prompt_webdav_url(app: &mut App) {
+    let prompt = Prompt::with_text(
+        WEBDAV_TITLE,
+        PromptAction::WebdavUrl,
+        &app.network
+            .webdav
+            .as_ref()
+            .map(|d| d.url.clone())
+            .unwrap_or_default(),
+    );
+    app.dialog = Some(Dialog::Prompt(prompt));
+}
+
 /// Ask which directory to take the device's files into.
 pub fn prompt_receive(app: &mut App) {
     app.dialog = Some(Dialog::Prompt(Prompt::new(
@@ -323,6 +395,13 @@ pub struct Confirm {
 pub enum ConfirmAction {
     /// Send this line to the device.
     Send(String),
+    /// Change how the bridge itself is set up: `@u=…`, `@w=…`, `@d=…`.
+    ///
+    /// Kept as the command rather than as parsed fields because the command is
+    /// what the card shows, what the wire takes, and what the summary words —
+    /// and a password parsed into a struct here would be a password with a
+    /// longer life than it needs.
+    Accessory(String),
 }
 
 /// Ask before doing something that cannot be taken back.
@@ -332,6 +411,13 @@ pub fn ask(app: &mut App, action: ConfirmAction) {
         ConfirmAction::Send(command) => (
             fill(entry(CONFIRM_SEND, lang), std::slice::from_ref(command)),
             entry(CONFIRM_SEND_DETAIL, lang).to_string(),
+        ),
+        // Summarised rather than quoted: the command carries the WiFi password,
+        // and a card that showed it would put it on the screen in front of
+        // whoever is looking. The summary names the network and hides the rest.
+        ConfirmAction::Accessory(command) => (
+            crate::accessory::accessory_change_summary(command, lang == Lang::Zh),
+            app.strings().net_confirm_detail.to_string(),
         ),
     };
     app.dialog = Some(Dialog::Confirm(Confirm {
@@ -605,6 +691,61 @@ fn start(app: &mut App, prompt: Prompt) {
             };
             app.start_receive(std::path::PathBuf::from(dir));
         }
+        // A network name with no network to name is a refusal rather than a
+        // guess: joining "" would send `@w=,` and the firmware would read it as
+        // an empty SSID, which is a different failure and a much more confusing
+        // one.
+        PromptAction::WifiSsid => {
+            if answer.trim().is_empty() {
+                let text = app.strings().net_no_ssid.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: NoticeLevel::Warn,
+                });
+                return;
+            }
+            app.network.ssid_input = answer.trim().to_string();
+            let prompt = Prompt::new(WIFI_PASSWORD_TITLE, PromptAction::WifiPassword);
+            app.dialog = Some(Dialog::Prompt(prompt));
+        }
+        // The password is never stored: it goes from the field into the command
+        // and out of the process, and the approval card that follows shows the
+        // network's name and not its key.
+        PromptAction::WifiPassword => {
+            let command =
+                match crate::accessory::wifi_command("connect", &app.network.ssid_input, &answer) {
+                    Ok(command) => command,
+                    Err(why) => {
+                        app.push_notice(crate::app::Notice {
+                            text: why,
+                            level: NoticeLevel::Error,
+                        });
+                        return;
+                    }
+                };
+            ask(app, ConfirmAction::Accessory(command));
+        }
+        PromptAction::WebdavUrl => {
+            if answer.trim().is_empty() {
+                let text = app.strings().net_no_url.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: NoticeLevel::Warn,
+                });
+                return;
+            }
+            let command = match crate::accessory::webdav_command("on", answer.trim()) {
+                Ok(command) => command,
+                Err(why) => {
+                    app.push_notice(crate::app::Notice {
+                        text: why,
+                        level: NoticeLevel::Error,
+                    });
+                    return;
+                }
+            };
+            ask(app, ConfirmAction::Accessory(command));
+        }
     }
 }
 
@@ -633,6 +774,17 @@ fn run(app: &mut App, action: ConfirmAction) {
     match action {
         ConfirmAction::Send(command) => {
             app.send_command(&command);
+        }
+        // Says so when it cannot be sent, which `send_command` does not: a
+        // keystroke refused in silence is right, but a command the user just
+        // approved in a dialog is owed an answer.
+        ConfirmAction::Accessory(command) => {
+            if let Err(why) = app.run_accessory(&command) {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: NoticeLevel::Error,
+                });
+            }
         }
     }
 }
@@ -911,6 +1063,74 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
         );
         assert_eq!(app.tx, 8, "the carriage return is part of what was sent");
+    }
+
+    /// Joining a network is two questions and one command: the name is asked,
+    /// then the password, and only then is the change put in front of the user.
+    /// A half of that command is not a thing that can be sent.
+    #[test]
+    fn joining_a_network_asks_for_the_name_then_the_password_then_agreement() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        prompt_wifi_ssid(&mut app);
+        for ch in "BenchNet".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // The password, not the wire.
+        let Some(Dialog::Prompt(prompt)) = &app.dialog else {
+            panic!("the password was asked for: {:?}", app.dialog);
+        };
+        assert_eq!(prompt.action, PromptAction::WifiPassword);
+        assert_eq!(app.network.ssid_input, "BenchNet", "the name was kept");
+
+        for ch in "s3cret".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let Some(Dialog::Confirm(card)) = &app.dialog else {
+            panic!("and then the approval card: {:?}", app.dialog);
+        };
+        assert_eq!(
+            card.action,
+            ConfirmAction::Accessory("@w=BenchNet,s3cret".to_string())
+        );
+        // The card says what it is doing without saying the password: it is on
+        // a screen somebody may be looking at.
+        assert!(!card.prompt.contains("s3cret"), "{:?}", card.prompt);
+        assert!(card.prompt.contains("BenchNet"), "{:?}", card.prompt);
+    }
+
+    /// Naming no network is a stop, not a join: `@w=,` would be read by the
+    /// firmware as an empty SSID, which is a different and much more confusing
+    /// failure than the one worth reporting.
+    #[test]
+    fn joining_a_network_nobody_named_is_refused() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        prompt_wifi_ssid(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "and nothing else was asked");
+        assert!(app.network.ssid_input.is_empty());
+        assert!(
+            app.notices
+                .iter()
+                .any(|n| n.level == NoticeLevel::Warn && !n.text.is_empty()),
+            "it said why: {:?}",
+            app.notices
+        );
     }
 
     /// A control chord is not consumed: the global handler still owns `Ctrl+Q`

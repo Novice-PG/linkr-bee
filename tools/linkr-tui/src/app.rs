@@ -5,9 +5,13 @@
 //! mutates it, and every mutation is a method here so it can be tested without
 //! a terminal.
 
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::accessory::{self, UartSettings};
+use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::session::{Dial, Session};
@@ -18,6 +22,7 @@ use crate::transport::{Link, LinkEvent};
 use crate::views::diagnostics::DiagnosticsState;
 use crate::views::terminal::TerminalPane;
 use crate::views::transfer::TransferState;
+use crate::watch::{SerialWatch, WatchOptions};
 use crate::{dialogs, palette};
 
 /// Which link carries the session.
@@ -135,6 +140,55 @@ pub struct App {
     pub assistant: crate::views::assistant::AssistantState,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
+    /// The questions asked of the bridge about itself, and their answers.
+    ///
+    /// The bridge answers these on a channel of its own, so they are never
+    /// mixed with the target's output — but something still has to remember
+    /// which question is out, and what to do with an answer that never comes.
+    /// See `device`.
+    pub talk: Conversation,
+    /// Management responses arrive as separately notified fragments, and one
+    /// answer is often several; this is what puts them back together.
+    ///
+    /// Kept in the state rather than rebuilt per event for the same reason a
+    /// `String` is: a fragment belonging to a message already half-read cannot
+    /// survive a local variable.
+    pub management: crate::protocol::ManagementReassembler,
+    /// The watch that reads the target's output for a target that is not well:
+    /// kernel panics, OOM kills, a board that boots and reboots before it ever
+    /// settles. Held here rather than rebuilt per line because a reboot loop
+    /// is only visible over a *window* of output, not at any one line of it.
+    pub watch_engine: SerialWatch,
+    /// How the Enter key is sent on the wire, when the command line named a
+    /// translation. The pane asks for this per keystroke, so it belongs to the
+    /// state and not to the event loop that set it.
+    pub enter: crate::serial::keys::EnterMode,
+    /// The byte that ends the session when it is typed, `^]` by default.
+    ///
+    /// A byte stream has no out-of-band signal, so one byte has to be reserved
+    /// for "stop listening" — and it has to be a *byte* rather than a key,
+    /// because what arrives at the device is bytes and the reservation has to
+    /// hold on the far side of the wire too.
+    pub escape: u8,
+    /// Where the bytes on the wire are recorded, when the command line asked
+    /// for them. See `trace`.
+    pub trace: crate::trace::ByteTrace,
+    /// Whether a typed line is held until Enter, as `--line-mode` asks.
+    pub line_mode: bool,
+    /// The line being held. Empty unless line mode is on, and cleared when the
+    /// link goes down: a half-typed command belongs to the session that typed
+    /// it, and carrying it into the next one would send a stranger your
+    /// keystrokes.
+    pub pending_line: String,
+    /// Whether the target's output is kept as well as painted.
+    ///
+    /// Off by default, because a terminal pane is already a copy of everything
+    /// the target has said and a second one is a leak. On for the script mode,
+    /// which has no pane and would otherwise have no way to print what came
+    /// back.
+    pub collect_output: bool,
+    /// What the target has said, kept only while [`Self::collect_output`] is on.
+    pub output: VecDeque<Vec<u8>>,
     /// The live link, when one is open. Owns the threads and the counters; the
     /// frame only ever reads what the pump folded out of it.
     pub session: Session,
@@ -190,6 +244,16 @@ impl Default for App {
             live_transfer: None,
             assistant: crate::views::assistant::AssistantState::default(),
             terminal: TerminalPane::new(),
+            enter: crate::serial::keys::EnterMode::default(),
+            escape: 0x1d,
+            line_mode: false,
+            pending_line: String::new(),
+            trace: crate::trace::ByteTrace::none(),
+            collect_output: false,
+            output: VecDeque::new(),
+            talk: Conversation::new(),
+            management: crate::protocol::ManagementReassembler::default(),
+            watch_engine: SerialWatch::new(WatchOptions::default()),
             session: Session::new(),
             log: Vec::new(),
             palette: None,
@@ -516,12 +580,26 @@ impl App {
         // back out; a pane that also painted them would show a screenful of
         // escapes, and a pane that answered one of the emulator's own questions
         // would inject a report into the middle of a block.
+        let now = Instant::now();
         let mut outbound = Vec::new();
         for event in self.session.pump() {
             match event {
                 LinkEvent::Data(bytes) => match self.live_transfer.as_mut() {
                     Some(live) => outbound.extend(live.feed(&bytes)),
-                    None => self.terminal.push(&bytes),
+                    None => {
+                        self.terminal.push(&bytes);
+                        self.trace.rx(&bytes);
+                        if self.collect_output {
+                            self.output.push_back(bytes.clone());
+                        }
+                        // The same bytes, read a second time by the watch. It
+                        // looks for a line saying `Kernel panic` or `Out of
+                        // memory`, and where lines end is its own business — a
+                        // bootloader that ends them with `\r` alone must not be
+                        // invisible to it. The pane keeps the bytes whole.
+                        let at = wall_clock_ms();
+                        self.observe(&bytes, at);
+                    }
                 },
                 // Something the far end said in words: a bridge announcement,
                 // not target output. It is shown and never typed, and it is
@@ -534,8 +612,49 @@ impl App {
                     };
                     self.push_notice(notice);
                 }
+                // An answer from the bridge about itself. Reassembled here and
+                // handed to whoever asked; nothing about it reaches the pane,
+                // because it is not something the target said.
+                LinkEvent::Management(fragment) => {
+                    let decision = self.management.push(&fragment);
+                    let outcome = match decision {
+                        crate::protocol::Reassembly::Incomplete => None,
+                        crate::protocol::Reassembly::Complete { payload, meta } => {
+                            Some((meta, payload))
+                        }
+                        crate::protocol::Reassembly::Error(why) => {
+                            let text = why.message(false).to_string();
+                            self.push_notice(Notice {
+                                text,
+                                level: NoticeLevel::Error,
+                            });
+                            None
+                        }
+                    };
+                    if let Some((header, payload)) = outcome {
+                        if !self.talk.offer(&header, &payload) {
+                            // An answer nobody asked for: a notification from
+                            // the bridge, or a reply to a question a previous
+                            // session left open. Neither is this session's to
+                            // interpret, and both would otherwise be dropped
+                            // with no trace of having arrived.
+                            let _ = (header, payload);
+                        }
+                    }
+                }
                 LinkEvent::Opened | LinkEvent::Closed(_) => {}
             }
+        }
+        // Answers are collected between ticks and read here, because the tick
+        // that asked is never the tick that was answered. A timeout is not an
+        // error until it is reported, and reporting it here is what stops a
+        // grid reading "loading…" for want of a reply that is not coming.
+        if let Some(reply) = self.talk.take_reply() {
+            let stamp = App::clock_now();
+            self.apply_reply(reply, &stamp);
+        }
+        if let Some(query) = self.talk.abandon(now) {
+            self.report_unanswered(query);
         }
         if self.live_transfer.is_none() {
             // A program that asks a question — where is the cursor, how wide is
@@ -584,8 +703,262 @@ impl App {
             let prefix = self.strings().xfer_cancelled;
             self.end_transfer(prefix, NoticeLevel::Warn);
         }
+        if was_live && !now_live {
+            // The last thing a target says very often has no newline after it —
+            // a prompt waiting for a command that will not come — and the watch
+            // holds such a line until one arrives. Ending it here is what lets
+            // it report what happened at the moment the link died, which is
+            // when a report matters most.
+            self.observe(b"\n", wall_clock_ms());
+            // Nothing else can arrive on this link, so a question left open
+            // would otherwise be abandoned only at its timeout — reporting a
+            // hang-up as a slow bridge.
+            self.talk.reset();
+            self.management.reset();
+            // And the half-typed line goes with it.
+            self.pending_line.clear();
+        }
         self.rx = self.session.rx();
         self.tx = self.session.tx();
+    }
+
+    /// What the target has printed since the last call, for a caller with no
+    /// pane of its own. See [`App::collect_output`].
+    pub fn take_output(&mut self) -> Vec<Vec<u8>> {
+        self.output.drain(..).collect()
+    }
+
+    /// Whether a question is still waiting for its answer.
+    ///
+    /// Asked by the script mode, which has to know when to stop pumping; the
+    /// frame never needs to, because a tick is always followed by another.
+    pub fn waiting_on_device(&self) -> bool {
+        self.talk.waiting().is_some()
+    }
+
+    /// The wall clock, `HH:MM:SS`, local time.
+    ///
+    /// Free rather than a method, because it is not about the state: a read's
+    /// stamp answers "when did the device tell you this", which is a question
+    /// about the world and not about `App`.
+    pub fn clock_now() -> String {
+        let now = chrono::Local::now();
+        now.format("%H:%M:%S").to_string()
+    }
+
+    /// Hand target output to everything that reads rather than paints.
+    fn observe(&mut self, bytes: &[u8], at: i64) {
+        if self.watch_engine.feed_bytes(bytes, at).is_empty() {
+            return;
+        }
+        // Re-described from the whole set rather than appended to, because a
+        // boot loop is one finding replacing several banners: what the sidebar
+        // shows has to be the engine's current opinion and not a history of its
+        // changing mind.
+        let language = if self.lang == Lang::Zh { "zh" } else { "en" };
+        self.watch = crate::watch::describe_findings(&self.watch_engine.findings(), language);
+    }
+
+    /// Ask the bridge about itself. Returns why the question could not go out.
+    ///
+    /// The answers land in `self.diagnostics` and `self.network` on whichever
+    /// pump they arrive on, so this does not block and does not return them:
+    /// asking is one tick's work and being answered is another's.
+    pub fn ask_device(&mut self, query: Query) -> Result<(), String> {
+        if !self.connected() {
+            return Err(self.strings().not_connected.to_string());
+        }
+        if !self.ble_connected() {
+            // Asked of a LAN session this is not a failure to report later; it
+            // is the wrong bearer, and the answer should say which before the
+            // user waits for a reply that was never going to come.
+            return Err(self.strings().diag_no_ble.to_string());
+        }
+        let (id, body) = self.talk.ask(query, Instant::now());
+        let frame = crate::protocol::encode_management_request(id, body.as_bytes())
+            .map_err(|why| why.message(false).to_string())?;
+        if !self.session.send_management(frame) {
+            return Err(self.strings().not_connected.to_string());
+        }
+        // A read that has gone out owns its own view slot: nothing else will
+        // fill it, and leaving it untouched would let a stale answer look like
+        // the one just asked for.
+        match query {
+            Query::Diagnostics => {
+                self.diagnostics.loading = true;
+                self.diagnostics.error = None;
+            }
+            Query::Uart | Query::Wifi | Query::Webdav => {
+                self.network.loading = true;
+                self.network.error = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Change the bridge's UART — baud, framing, flow control.
+    ///
+    /// The write and its confirmation are one act: the bridge is asked again
+    /// what it ended up at, so the frame's own baud comes from the bridge
+    /// rather than from what we meant to set. A target that refuses the rate
+    /// therefore shows the rate it kept.
+    pub fn set_uart(&mut self, settings: &UartSettings) -> Result<(), String> {
+        let command = accessory::set_uart_command(settings)?;
+        self.send_accessory(&command, Query::Uart)
+    }
+
+    /// Join a network, or forget the one it joined (`@w off` with no SSID).
+    pub fn set_wifi(&mut self, ssid: &str, password: &str) -> Result<(), String> {
+        let action = if ssid.trim().is_empty() {
+            "off"
+        } else {
+            "connect"
+        };
+        let command = accessory::wifi_command(action, ssid, password)?;
+        self.send_accessory(&command, Query::Wifi)
+    }
+
+    /// Send one management command the caller has already built, and wait for
+    /// the read that confirms it.
+    ///
+    /// Which read follows is read off the command rather than passed in,
+    /// because the command *is* the statement of what is being changed — and a
+    /// caller that could name the read separately could name the wrong one.
+    pub fn run_accessory(&mut self, command: &str) -> Result<(), String> {
+        let query = match command.split([' ', '=']).next().unwrap_or("").as_bytes() {
+            b"@u" => Query::Uart,
+            b"@w" => Query::Wifi,
+            b"@d" => Query::Webdav,
+            _ => return Err(self.strings().net_bad_command.to_string()),
+        };
+        self.send_accessory(command, query)
+    }
+
+    /// Ask the bridge what networks it can see.
+    ///
+    /// This is the bridge scanning, not this host: the radio on this machine
+    /// and the one on the board are in different places, and a laptop's list
+    /// of networks says nothing about what the board can reach from where it
+    /// is bolted down.
+    pub fn scan_wifi(&mut self) -> Result<(), String> {
+        let command = accessory::wifi_command("scan", "", "")?;
+        self.send_accessory(&command, Query::Wifi)
+    }
+
+    /// Point log upload at `url`, or turn it off when there is none.
+    pub fn set_webdav(&mut self, url: &str) -> Result<(), String> {
+        let action = if url.trim().is_empty() { "off" } else { "on" };
+        let command = accessory::webdav_command(action, url)?;
+        self.send_accessory(&command, Query::Webdav)
+    }
+
+    /// Send an accessory command and wait for the answer to the question that
+    /// follows it.
+    ///
+    /// The write and the read are one operation on purpose. `OK` alone is not
+    /// enough to put anything in a view: it says the bridge accepted the
+    /// command, not what it is doing now, and the two disagree whenever the
+    /// firmware clamps a value — which is exactly when showing the command you
+    /// sent rather than the state the bridge is in would mislead.
+    fn send_accessory(&mut self, command: &str, query: Query) -> Result<(), String> {
+        if !self.connected() {
+            return Err(self.strings().not_connected.to_string());
+        }
+        if !self.ble_connected() {
+            return Err(self.strings().net_wifi_needs_ble.to_string());
+        }
+        // Secrets never leave this function unredeacted, but the command *is*
+        // the thing going to the bridge: only what is remembered and shown
+        // goes through the scrubber.
+        let shown = accessory::redact_command(command);
+        let (id, _) = self.talk.ask(query, Instant::now());
+        let frame = crate::protocol::encode_management_request(id, command.as_bytes())
+            .map_err(|why| why.message(false).to_string())?;
+        if !self.session.send_management(frame) {
+            return Err(self.strings().not_connected.to_string());
+        }
+        self.trace.tx_command(&shown);
+        self.network.loading = true;
+        self.network.error = None;
+        self.push_notice(Notice {
+            text: format!("{} {shown}", self.strings().net_status),
+            level: NoticeLevel::Info,
+        });
+        Ok(())
+    }
+
+    /// Fold one answer in, whatever it answered.
+    fn apply_reply(&mut self, reply: Reply, stamp: &str) {
+        // Whatever happened, nothing is waiting for it any more — and clearing
+        // that first is what stops a failed read from leaving its view reading
+        // "loading…" underneath an error.
+        self.stop_waiting(reply.query);
+        if !reply.status.ok {
+            let error = reply.status.error.clone();
+            match reply.query {
+                Query::Diagnostics => self.diagnostics.error = Some(error.clone()),
+                _ => self.network.error = Some(error.clone()),
+            }
+            self.push_notice(Notice {
+                text: error,
+                level: NoticeLevel::Error,
+            });
+            return;
+        }
+        let text = reply.lines.join("\n");
+        match reply.query {
+            Query::Diagnostics => self.diagnostics.apply(&reply.lines, stamp.to_string()),
+            // A read is how the frame learns the wire's own rate. Asking the
+            // target would be asking somebody who does not know: this is the
+            // bridge's UART, not the target's console.
+            Query::Uart => {
+                if let Some(settings) = accessory::parse_uart_settings(&text) {
+                    self.baud = Some(settings.baud);
+                }
+            }
+            // `@w?` and `@w scan` are the same question on the wire and two
+            // different answers to read. A status names one network; a scan
+            // lists many, and a list is not something to squeeze into the
+            // status slot — it goes to its own section of the view.
+            Query::Wifi => {
+                if let Some(status) = accessory::parse_wifi_status(&text) {
+                    self.network.wifi = Some(status);
+                } else {
+                    let results = scan_results(&reply.lines);
+                    if !results.is_empty() {
+                        self.network.scan_results = results;
+                    }
+                }
+            }
+            Query::Webdav => {
+                if let Some(status) = accessory::parse_webdav_status(&text) {
+                    self.network.webdav = Some(status);
+                }
+            }
+        }
+    }
+
+    /// Say that a question went unanswered, and stop the view waiting on it.
+    fn report_unanswered(&mut self, query: Query) {
+        self.stop_waiting(query);
+        let s = self.strings();
+        let text = s.mgmt_no_answer.to_string();
+        match query {
+            Query::Diagnostics => self.diagnostics.error = Some(text.clone()),
+            _ => self.network.error = Some(text.clone()),
+        }
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Warn,
+        });
+    }
+
+    /// Clear the in-flight flag this question set, whichever view it set it on.
+    fn stop_waiting(&mut self, query: Query) {
+        match query {
+            Query::Diagnostics => self.diagnostics.loading = false,
+            Query::Uart | Query::Wifi | Query::Webdav => self.network.loading = false,
+        }
     }
 
     /// Send raw bytes. Silent when there is no link, because this is the path a
@@ -601,6 +974,7 @@ impl App {
         if !self.session.send(bytes) {
             return false;
         }
+        self.trace.tx(bytes);
         // The counter is part of the *frame*, so it moves here rather than at
         // the next pump: a keystroke's byte should show in the top bar on the
         // same repaint as the character it produced.
@@ -609,6 +983,35 @@ impl App {
             self.terminal.push(bytes);
         }
         true
+    }
+
+    /// Type one keystroke, holding it until the line ends when line mode is on.
+    ///
+    /// Line mode is `--line-mode`, and it exists because a key at a time is not
+    /// what every target wants: a shell with a line discipline reads a whole
+    /// line, and a half-finished command sent a character at a time cannot be
+    /// taken back by the time you notice the typo in it.
+    ///
+    /// Only the *stream* is held. Named keys — arrows, function keys, Tab —
+    /// still go straight out, because holding an arrow key until Enter would
+    /// make a target's own line editor unusable.
+    pub fn type_bytes(&mut self, ends_line: bool, bytes: &str) -> bool {
+        if !self.line_mode {
+            return self.send_bytes(bytes.as_bytes());
+        }
+        if !ends_line && !bytes.is_empty() {
+            self.pending_line.push_str(bytes);
+            // Echoed as it is held, so the line can be read back before it is
+            // sent: local echo is the point of line mode, and a held line that
+            // only appears once it is gone would be worse than neither.
+            if self.terminal.echo {
+                self.terminal.push(bytes.as_bytes());
+            }
+            return true;
+        }
+        let mut line = std::mem::take(&mut self.pending_line);
+        line.push_str(bytes);
+        self.send_bytes(line.as_bytes())
     }
 
     /// Send a whole command, and say so when there is nothing to send it over.
@@ -853,9 +1256,45 @@ impl App {
     }
 }
 
+/// The networks out of a `@w scan` reply.
+///
+/// The status line is dropped rather than shown: `OK scan` is an answer to a
+/// question nobody asked out loud, and listing it among the networks would put
+/// a word where a network name belongs. Everything else is taken as it came,
+/// which is the honest thing to do with a list whose shape is the firmware's
+/// to choose.
+fn scan_results(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !accessory::starts_with_word(&lower, "ok")
+                && !accessory::starts_with_word(&lower, "err")
+        })
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Milliseconds since the epoch, which is the clock the watch measures a
+/// reboot loop in.
+///
+/// Wall time rather than the process's own: a board that rebooted three times
+/// before this program started is still rebooting, and restarting the window
+/// at every launch would hide exactly the failure the watch exists to report.
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Duration;
 
     /// The defaults are the frame the screenshots show: the serial terminal
     /// selected, autoscroll on, the five quick sends with only `reboot` guarded.
@@ -1429,6 +1868,354 @@ mod tests {
         app.connect(wire.link()).expect("the memory link opens");
         assert!(pump_until(&mut app, |app| app.connected()));
         (app, wire)
+    }
+
+    /// A session standing in for a Bluetooth one, because the management
+    /// channel — and therefore diagnostics, UART, WiFi and WebDAV — exists on
+    /// no other link.
+    fn connected_over_ble(lang: Lang) -> (App, crate::transport::testing::MemoryLink) {
+        let mut app = App {
+            lang,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::ble();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        assert_eq!(app.transport, Transport::Ble);
+        (app, wire)
+    }
+
+    /// Build one management response for `id`, framed the way the bridge
+    /// frames them, ending with the flag that says the answer is complete.
+    fn answer(id: u32, body: &str) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"LK");
+        frame.push(crate::protocol::MGMT_API_MAJOR);
+        frame.push(2);
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&crate::protocol::MGMT_FLAG_FINAL.to_le_bytes());
+        frame.extend_from_slice(body.as_bytes());
+        frame
+    }
+
+    /// The management frames the host sent, once they have left for the wire.
+    ///
+    /// Polled rather than read once, because the bytes cross a thread on their
+    /// way out and asking immediately is asking before they have arrived.
+    fn asked_frames(wire: &crate::transport::testing::MemoryLink) -> Vec<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let frames = wire.take_management();
+            if !frames.is_empty() || Instant::now() > deadline {
+                return frames;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The id the host just asked with, read out of the frame it sent.
+    ///
+    /// Read from the bytes rather than parsed, because the header parser
+    /// accepts *responses* only — a request's own header is deliberately not
+    /// something it accepts, so that a reply can never be mistaken for the
+    /// question that caused it.
+    fn asked_id(wire: &crate::transport::testing::MemoryLink) -> u32 {
+        let frames = asked_frames(wire);
+        assert_eq!(frames.len(), 1, "one question, one frame");
+        let bytes = &frames[0];
+        assert_eq!(&bytes[..2], b"LK", "the magic");
+        assert_eq!(bytes[3], crate::protocol::MGMT_REQUEST_TYPE);
+        let expected = u16::from_le_bytes([bytes[8], bytes[9]]);
+        assert!(expected > 0, "nothing was asked");
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+    }
+
+    /// Asking the bridge what it is must fill the grid it is drawn from.
+    ///
+    /// This is the whole point of the management channel, and it is worth an
+    /// end-to-end test because every layer it touches — the ask, the frame, the
+    /// reassembly, the parse, the grid — can be right alone and still leave the
+    /// view empty.
+    #[test]
+    fn asking_the_bridge_about_itself_fills_the_diagnostics_grid() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::Diagnostics).expect("the link is up");
+        assert!(app.diagnostics.loading, "the grid says it is waiting");
+
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "@info fw version=0.2.0 zephyr=4.4.1\n@info sys uptime_ms=123456\n@info done",
+        ));
+
+        assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
+        assert!(!app.diagnostics.loading);
+        assert_eq!(
+            app.diagnostics.groups["fw"]["version"], "0.2.0",
+            "the firmware version came from the device, not from anywhere else"
+        );
+        assert_eq!(app.diagnostics.groups["sys"]["uptime_ms"], "123456");
+        assert!(
+            app.diagnostics.updated.is_some(),
+            "and it is stamped with when it was read"
+        );
+        // And the answer is not also typed into the target's terminal.
+        assert!(!app.terminal.visible_text().contains("@info"));
+    }
+
+    /// The UART read is where the top bar's own speed number comes from.
+    #[test]
+    fn reading_the_uart_fills_the_baud_the_chrome_shows() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::Uart).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK uart=230400,8,N,1,none"));
+        assert!(pump_until(&mut app, |app| app.baud == Some(230400)));
+        assert!(!app.network.loading);
+    }
+
+    /// A WiFi read lands in the network view rather than in a toast nobody
+    /// asked for.
+    #[test]
+    fn reading_wifi_fills_the_network_view() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.ask_device(Query::Wifi).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK wifi=connected,ssid=BenchNet,ip=192.168.1.44",
+        ));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+        let wifi = app.network.wifi.clone().expect("reported");
+        assert_eq!(wifi.ssid, "BenchNet");
+        assert_eq!(wifi.ip, "192.168.1.44");
+    }
+
+    /// Setting the UART asks for the setting back, so the frame shows what the
+    /// bridge is running rather than what was meant. A firmware that clamps
+    /// 1000000 to something it can reach must therefore be believed.
+    #[test]
+    fn setting_the_uart_shows_the_rate_the_bridge_kept() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        let requested = accessory::UartSettings {
+            baud: 1_000_000,
+            data_bits: 8,
+            parity: "n".to_string(),
+            stop_bits: 1,
+            flow: "none".to_string(),
+        };
+        app.set_uart(&requested).expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK uart=921600,8,N,1,none"));
+        assert!(pump_until(&mut app, |app| app.baud == Some(921_600)));
+        assert_ne!(app.baud, Some(requested.baud), "the bridge wins");
+    }
+
+    /// An answer that never comes is reported as one, rather than leaving the
+    /// view reading "loading…" until somebody notices.
+    #[test]
+    fn a_question_the_bridge_ignores_says_so() {
+        let (mut app, _wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::Diagnostics).expect("asked");
+        assert!(app.diagnostics.loading);
+        // Nothing answers. Wait past the conversation's own patience.
+        thread::sleep(crate::device::REPLY_TIMEOUT + Duration::from_millis(50));
+        app.pump();
+        assert!(!app.diagnostics.loading, "it stopped waiting");
+        assert!(app.diagnostics.error.is_some(), "and said why");
+        assert!(app.notices.iter().any(|n| n.level == NoticeLevel::Warn));
+    }
+
+    /// A bridge that answers with an error keeps the last good grid: replacing
+    /// a working reading with a failure puts numbers on screen that were never
+    /// measured, which is worse than showing none.
+    #[test]
+    fn a_failed_read_leaves_the_last_good_reading_alone() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::Diagnostics).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "@info fw version=0.2.0\n@info done"));
+        assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
+
+        app.ask_device(Query::Diagnostics).expect("asked again");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR busy"));
+        assert!(pump_until(&mut app, |app| app.diagnostics.error.is_some()));
+        assert!(app.diagnostics.has_data(), "the earlier reading survives");
+        assert_eq!(app.diagnostics.groups["fw"]["version"], "0.2.0");
+    }
+
+    /// Asking over a link with no management channel is refused here, with the
+    /// reason, rather than sent nowhere: waiting three seconds to be told the
+    /// bearer cannot do it is the wrong order.
+    #[test]
+    fn management_over_a_link_that_has_none_is_refused_by_name() {
+        let (mut app, wire) = connected(Lang::Zh);
+        let err = app
+            .ask_device(Query::Diagnostics)
+            .expect_err("stdio has none");
+        assert!(
+            err.contains("BLE"),
+            "the refusal names the bearer it needs: {err}"
+        );
+        assert!(!app.diagnostics.loading, "so nothing is left waiting");
+        assert!(wire.take_management().is_empty(), "and nothing went out");
+    }
+
+    /// A WiFi scan is the board's radio listening, not this host's — and the
+    /// command is the third shape `@w` takes, which is why it has its own door
+    /// rather than being `set_wifi` with an empty name.
+    #[test]
+    fn a_wifi_scan_is_asked_of_the_bridge_and_not_of_this_host() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.scan_wifi().expect("asked");
+        let frames = asked_frames(&wire);
+        assert_eq!(frames.len(), 1, "one scan, one frame");
+        let body = &frames[0][crate::protocol::MGMT_HEADER_SIZE..];
+        assert_eq!(body, b"@w scan", "the whole command, nothing guessed at");
+    }
+
+    /// A scan's answer is a list, and it goes to the view's own list rather
+    /// than into the status slot: squeezing nine networks into "the network you
+    /// are on" would show one where the board saw nine.
+    #[test]
+    fn a_wifi_scan_answer_fills_the_results_list() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.scan_wifi().expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK scan=9\nBenchNet -58 6\nGuest -71 11"));
+        assert!(pump_until(&mut app, |app| !app
+            .network
+            .scan_results
+            .is_empty()));
+        assert_eq!(
+            app.network.scan_results,
+            vec!["BenchNet -58 6".to_string(), "Guest -71 11".to_string()],
+            "the status line is dropped and the networks are kept"
+        );
+        assert!(app.network.wifi.is_none(), "a list is not a status");
+    }
+
+    /// An approved change is the command, and the read that confirms it follows
+    /// from the command rather than from whoever asked for it.
+    #[test]
+    fn an_approved_change_sends_the_command_the_card_showed() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let frames = asked_frames(&wire);
+        assert_eq!(frames.len(), 1, "one command, one frame");
+        let body = &frames[0][crate::protocol::MGMT_HEADER_SIZE..];
+        assert_eq!(body, b"@w=BenchNet,secret", "the password goes to the wire");
+        assert!(
+            app.waiting_on_device(),
+            "and the read that confirms it is out"
+        );
+    }
+
+    /// A command that is not one the bridge takes is refused rather than sent;
+    /// the refusal is what keeps a bug in a caller from becoming traffic on the
+    /// wire.
+    #[test]
+    fn a_command_the_bridge_does_not_take_is_refused() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        let err = app
+            .run_accessory("reboot")
+            .expect_err("not a bridge command");
+        assert!(!err.is_empty());
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while wire.take_management().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(wire.take_management().is_empty(), "nothing went out for it");
+    }
+
+    /// Line mode holds a typed line until Enter, which is what a target with a
+    /// line discipline wants — and it is echoed as it is held, so the line can
+    /// be read before it is sent.
+    #[test]
+    fn a_line_is_held_until_enter_and_only_then_written() {
+        let (mut app, wire) = connected(Lang::Zh);
+        app.line_mode = true;
+        app.terminal.echo = true;
+
+        assert!(app.type_bytes(false, "ls"));
+        assert!(app.type_bytes(false, " -l"));
+        // Nothing has gone out yet, but the line can be read back.
+        assert_eq!(app.pending_line, "ls -l");
+        assert!(
+            app.terminal.visible_text().contains("ls -l"),
+            "what was typed is on the screen"
+        );
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while wire.sent_len() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(wire.sent_len(), 0, "nothing went out before Enter");
+
+        assert!(app.type_bytes(true, "\n"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut sent = Vec::new();
+        while sent.len() < 6 && Instant::now() < deadline {
+            sent.extend(wire.take_sent());
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(String::from_utf8_lossy(&sent), "ls -l\n");
+        assert!(app.pending_line.is_empty(), "the line went with it");
+    }
+
+    /// Without line mode a keystroke goes out at once: holding it would break
+    /// every target that is doing its own editing, which is most of them.
+    #[test]
+    fn without_line_mode_a_keystroke_goes_straight_out() {
+        let (mut app, wire) = connected(Lang::Zh);
+        assert!(app.type_bytes(false, "x"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut sent = Vec::new();
+        while sent.is_empty() && Instant::now() < deadline {
+            sent.extend(wire.take_sent());
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(sent, b"x");
+    }
+
+    /// A half-typed line belongs to the session that typed it: carrying it into
+    /// the next session would send a stranger your keystrokes.
+    #[test]
+    fn a_half_typed_line_does_not_survive_the_link() {
+        let (mut app, wire) = connected(Lang::Zh);
+        app.line_mode = true;
+        assert!(app.type_bytes(false, "rm -rf"));
+        assert_eq!(app.pending_line, "rm -rf");
+        wire.close();
+        assert!(pump_until(&mut app, |app| !app.connected()));
+        assert!(app.pending_line.is_empty(), "the wire took it with it");
+    }
+
+    /// The watch reads every line the target prints, including the ones that
+    /// arrive without a newline — which is exactly how a board dies: mid-line,
+    /// with its prompt half written.
+    #[test]
+    fn the_watch_reports_a_panic_and_a_hanging_prompt_alike() {
+        let (mut app, wire) = connected(Lang::Zh);
+        assert!(app.watch.is_empty());
+        wire.feed(b"Booting Linux on physical CPU 0x0\nKernel panic - not syncing\n");
+        assert!(pump_until(&mut app, |app| !app.watch.is_empty()));
+        let joined = app.watch.join(" | ");
+        assert!(joined.contains("panic"), "{joined}");
+    }
+
+    /// A transfer's binary must not be read as though it were text: the watch
+    /// looking for a word cannot be the thing that corrupts a file.
+    #[test]
+    fn binary_output_is_not_mistaken_for_a_finding() {
+        let (mut app, wire) = connected(Lang::Zh);
+        wire.feed(&[0x00, 0xff, 0xfe, b'\n', 0x80, 0x81, b'\n']);
+        app.pump();
+        thread::sleep(Duration::from_millis(10));
+        app.pump();
+        assert!(app.watch.is_empty(), "{:?}", app.watch);
     }
 
     /// Somewhere a transfer can write that is not the crate's own directory.

@@ -22,6 +22,13 @@ pub const MGMT_HEADER_SIZE: usize = 12;
 /// The management API major version the host speaks.
 pub const MGMT_API_MAJOR: u8 = 1;
 
+/// The message type of a request: host to bridge.
+///
+/// Responses come back as `2` and unsolicited progress events as `3`, both of
+/// which [`parse_management_header`] accepts. This side only ever *sends* the
+/// one type, and naming it is what keeps the encoder from inventing another.
+pub const MGMT_REQUEST_TYPE: u8 = 1;
+
 /// The Reliable UART header is 12 bytes.
 pub const RELIABLE_UART_HEADER_SIZE: usize = 12;
 /// The Reliable UART API major version.
@@ -113,6 +120,43 @@ pub fn parse_management_header(bytes: &[u8]) -> Result<ManagementHeader, FrameEr
         expected: u16::from_le_bytes([bytes[8], bytes[9]]),
         flags: u16::from_le_bytes([bytes[10], bytes[11]]),
     })
+}
+
+/// Encode one management request: header plus payload, as one logical frame.
+///
+/// The result is what the *bearer* then cuts into GATT writes; this function
+/// knows nothing about MTUs, because the device's reassembly does not either —
+/// it expects the header once, in the first write, and the payload to continue
+/// across the writes that follow. Producing the whole frame here and segmenting
+/// it elsewhere is what lets those two halves be tested apart.
+pub fn encode_management_request(request_id: u32, body: &[u8]) -> Result<Vec<u8>, FrameError> {
+    if body.is_empty() {
+        return Err(FrameError::BadLength);
+    }
+    if body.len() > u16::MAX as usize {
+        return Err(FrameError::Oversized);
+    }
+    let mut frame = Vec::with_capacity(MGMT_HEADER_SIZE + body.len());
+    frame.extend_from_slice(&MGMT_MAGIC);
+    frame.push(MGMT_API_MAJOR);
+    frame.push(MGMT_REQUEST_TYPE);
+    frame.extend_from_slice(&request_id.to_le_bytes());
+    frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    // No flags: a request is one message, and `FINAL` is the device's own word
+    // for the last piece of a long *response*.
+    frame.extend_from_slice(&0u16.to_le_bytes());
+    frame.extend_from_slice(body);
+    Ok(frame)
+}
+
+/// Whether fragments carrying this header end the message they belong to.
+///
+/// A response may be split across several notifications, and while it is split
+/// the answer is incomplete however much of it has arrived — printing half of
+/// an `@info` blob as if it were the whole read is a wrong number rather than a
+/// partial one.
+pub fn management_fragment_is_final(header: &ManagementHeader) -> bool {
+    header.flags & MGMT_FLAG_FINAL != 0
 }
 
 /// A parsed Reliable UART header.
@@ -334,6 +378,19 @@ impl ManagementReassembler {
             Reassembly::Complete { payload, meta } => Reassembly::Complete { payload, meta },
             Reassembly::Error(e) => Reassembly::Error(e),
         }
+    }
+}
+
+/// A reassembler's whole interesting state is whether one is half-read, and
+/// that is all a `{:?}` needs to say. Hand-written rather than derived because
+/// the machine carries a parser function, and printing a function pointer
+/// would tell a reader about this library rather than about the messages it
+/// failed to finish.
+impl std::fmt::Debug for ManagementReassembler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagementReassembler")
+            .field("pending", &self.pending())
+            .finish()
     }
 }
 

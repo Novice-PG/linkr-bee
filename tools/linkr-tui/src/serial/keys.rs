@@ -73,6 +73,48 @@ pub fn apply_input_modifiers(data: &str, modifiers: &KeyModifiers) -> String {
     out
 }
 
+/// How the Enter key reaches the device.
+///
+/// `Raw` sends the byte the key produces and nothing else, which is right for
+/// a shell that has already told the line discipline what it wants. A target
+/// that wants a bare `\r`, or the pair, is a target whose prompt otherwise
+/// never comes back — so this is a fact about the wire rather than a
+/// preference, and the reference client offers the same four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnterMode {
+    #[default]
+    Raw,
+    Cr,
+    Lf,
+    Crlf,
+}
+
+impl EnterMode {
+    /// The mode a command line names, or `None` so the caller can report the
+    /// bad value instead of quietly sending the wrong byte.
+    pub fn from_name(name: &str) -> Option<EnterMode> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "raw" => Some(EnterMode::Raw),
+            "cr" => Some(EnterMode::Cr),
+            "lf" => Some(EnterMode::Lf),
+            "crlf" => Some(EnterMode::Crlf),
+            _ => None,
+        }
+    }
+
+    /// The bytes Enter becomes. `None` means "leave the key alone", because
+    /// raw is not a translation — it is the absence of one, and inventing a
+    /// byte for it would change what a modified Enter (Ctrl+Enter) sends.
+    pub fn bytes(self) -> Option<&'static str> {
+        match self {
+            EnterMode::Raw => None,
+            EnterMode::Cr => Some("\r"),
+            EnterMode::Lf => Some("\n"),
+            EnterMode::Crlf => Some("\r\n"),
+        }
+    }
+}
+
 /// The byte sequence for a named key, with optional application-cursor mode and
 /// modifiers. `key` is the browser `KeyboardEvent.key` spelling (`ArrowUp`,
 /// `Tab`, `Enter`, `Backspace`, …).
