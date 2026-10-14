@@ -17,6 +17,20 @@ crossterm = "0.29.0"
 unicode-width = "0.2.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+# The radio. `btleplug` is the only cross-platform GATT library there is, and it
+# needs a Tokio reactor — so the BLE link runs its own reactor on a thread of
+# its own and hands bytes back over a channel, rather than asking the whole
+# interface to become async. See `transport::ble`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+btleplug = "0.13.5"
+# The LAN bridge is a WebSocket; this is the client half. It rides the same
+# Tokio reactor the BLE link already builds, so the second link costs a
+# dependency and no new threading model. See `transport::lan`.
+tokio-tungstenite = "0.30"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+
+
 [profile.release]
 opt-level = "z"
 lto = true

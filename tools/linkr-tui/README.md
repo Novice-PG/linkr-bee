@@ -39,24 +39,41 @@ three rules:
 | `ui/sidebar.rs` | The four sidebar sections, the accent-chip selection, and the display-width wrap that keeps a long row inside its column |
 | `ui/body.rs` | The centre column: which view's content goes in it, and the frame that does or does not wrap it |
 | `ui/toast.rs` | The notice stack in the top-right corner |
+| `ui/overlay.rs` | The modal layer: where a palette or a dialog is measured and centred, and the only place that knows a `Rect` |
 | `views/diagnostics.rs` | The `@i?` read, end to end: `@info` parsing, the six web-client formatters, the read's state machine, and the grid |
+| `transport/` | The wire: `LinkKind` (stdio, BLE, LAN), a `Link` split into a reader and a writer because the two must run at once, `LinkEvent`, and the threads that join them. There is deliberately no serial link: the device *is* the far end of every one of these — see `transport/mod.rs` |
+| `transport/stdio.rs` | The process bridge — `--bridge <command>` — and the built-in loopback device, so the whole path runs on a laptop with no radio |
+| `session.rs` | `Dial` (what the command line asked for) and `Session`: the counters, the connection state, and the pump that folds the link's events into the frame |
+| `vt/parser.rs` | The escape-sequence state machine: CSI, OSC, ESC, and the parameter list |
+| `vt/screen.rs` | The screen itself: a styled cell grid with a cursor, erase, insert/delete, a scroll region, the alternate screen and a bounded scrollback |
+| `vt/mod.rs` | The emulator over the screen: which private modes do what, the alternate screen, the title, and the few sequences a host must *answer* |
+| `views/terminal.rs` | The pane: a streaming UTF-8 decoder and a streaming parser in front of the emulator, plus the painter |
+| `palette.rs` | The `Ctrl+P` command palette: twenty actions, each one a function pointer so the palette runs the same code the chord does |
+| `dialogs.rs` | Help, the notice log, and the guarded-command confirmation |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
 split is the reason a whole view can be pinned to the documented sample reply
 without a socket, a clock or a terminal.
 
+The terminal pane is the exception, and deliberately so: it is not a document
+but a *screen*. A device paints with escape sequences — it moves the cursor,
+colours the next glyph, erases a line and repaints one cell for a spinner — so
+the pane emulates rather than lays out. `vt/` holds the emulator and
+`views/terminal.rs` the wiring around it; the pane's size is told to the
+emulator by the event loop, never by a paint, because a frame is a pure function
+of the state and may not reshape what it is drawing.
+
 Network, Assistant and Transfer still say so in their body rather than showing
-an empty frame. They are the next steps, followed by the command palette, the
-help overlay and the dialogs; the transport, protocol, terminal emulation and
-agent layers follow behind them.
+an empty frame. They are the next views, followed by the file-transfer and agent
+layers.
 
 ## Gates — all four must pass before a commit
 
 ```sh
 cargo fmt --check                                   # style
 cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
-cargo test                                          # 111 tests, headless
+cargo test                                          # 464 tests, headless
 for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
          x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-pc-windows-msvc \
          x86_64-apple-darwin aarch64-apple-darwin; do
@@ -68,6 +85,11 @@ Every target is checked because the crate ships to Linux, macOS and Windows on
 both x86-64 and ARM. There are no C dependencies: the only runtime requirement
 on Linux is glibc's base libraries.
 
+The toolchain is declared, not assumed: `rust-toolchain.toml` names the channel,
+the `clippy`/`rustfmt` components and those seven targets, so rustup installs
+exactly what the gates need and a laptop, CI and the packaging script cannot
+disagree about the compiler.
+
 ## Looking at a frame without a terminal
 
 ```sh
@@ -76,25 +98,75 @@ cargo run -- --print-frame 100x30 --ansi              # with true-colour escapes
 cargo run -- --print-frame 100x30 --ansi --theme light --lang en
 cargo run -- --print-frame 100x30 --ansi --transport ble   # transport reported as locked
 cargo run -- --print-frame 110x32 --view diagnostics --state connected --sample
+cargo run -- --print-frame 110x32 --overlay palette   # palette, help, notices, confirm
+cargo run -- --print-frame 110x32 --feed $'\e[31mred\e[0m ok'   # the emulator, no device
 ```
 
 `--view` opens on a named view, `--state` previews a connection state, and
 `--sample` loads the documented `@info` reply, so a content view can be inspected
-with real data instead of its empty state.
+with real data instead of its empty state. `--overlay` opens the modal layer, and
+`--feed` pushes text through the pane's own decoder and parser — escapes
+included — which is how the emulator is reviewed with no device attached. All of
+them are previews of *state*: `--print-frame` draws one frame and exits without
+dialling, so a preview cannot start a session behind the user's back.
 
 The frame is rendered through ratatui's test backend, so this works over SSH,
 in CI, and with no TTY at all. `dev/frame-to-html.py` turns an `--ansi` dump
 into a standalone HTML preview with exact column alignment (wide CJK glyphs span
-two columns), which is how the design reference and the implementation are
-compared side by side:
+two columns), and `dev/overlay-sheet.py` runs the real binary once per surface to
+put a whole set on one page — `--sheet overlays` for the modal layer, `--sheet
+vt` for the emulator:
 
 ```sh
-cargo run --quiet -- --print-frame 100x30 --ansi > /tmp/frame.ansi
-python3 dev/frame-to-html.py /tmp/frame.ansi preview.html "linkr TUI"
+python3 dev/overlay-sheet.py /tmp/vt.html --sheet vt --lang zh --theme dark
 ```
 
 The previews are generated on demand and deliberately not committed: they are
 large, and everything in them is reproducible from the source.
+
+## File transfer (ZMODEM)
+
+Both directions run against the reference implementation rather than against
+themselves. `dev/zmodem-send-check.py` wires our sender to the real `rz`, and
+`dev/zmodem-recv-check.py` points the real `sz` at our receiver — over a
+socketpair, recording every byte in both directions, then comparing the file
+that came out against the one that went in:
+
+```sh
+python3 dev/zmodem-send-check.py --size 0      # our sender -> real rz
+python3 dev/zmodem-recv-check.py --size 0      # real sz   -> our receiver
+```
+
+There is no upstream implementation of this for a *wireless bridge*, so there is
+no upstream test to inherit — which is why the real thing is the judge. The
+recordings become golden fixtures in `tests/fixtures/zmodem/`, replayed by
+`tests/zmodem_reference.rs`; a change that breaks the escape set, either CRC, the
+field order or the continuation rule fails there, not at a device.
+
+Two things to know. Files land under the *far end's* name reduced to its last
+component, so a malicious name cannot walk out of the directory. And a cancelled
+receive deletes its partial file: half-written and complete look alike, which is
+the one outcome a cancel must not leave behind.
+
+## Releasing
+
+`dev/package.sh <target>` builds the release binary and lays out the archive — the
+binary, this README and the licence, in `linkr-<version>-<target>.tar.gz`. It is
+the *only* definition of that layout: the CI matrix and a developer's shell call
+the same script, so a release cannot be assembled two ways.
+
+```sh
+cd tools/linkr-tui
+dev/package.sh x86_64-unknown-linux-gnu     # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
+`.github/workflows/linkr-tui.yml` runs the four gates, then packages all seven
+targets — Linux on x86-64 and ARM, Windows on both ABIs, macOS on both
+architectures — and on a `linkr-tui-v<version>` tag it attaches the archives and
+a `SHA256SUMS` to the release. The archives for the host's own targets are
+*executed* before they are uploaded (`--version`, one frame, and a bridge to a
+missing program that must exit `2`), because linking is not the same as running.
+The tag is namespaced so it cannot collide with the firmware's `v*` releases.
 
 ## Deliberate differences from the previous TUI
 
@@ -116,6 +188,18 @@ large, and everything in them is reproducible from the source.
 - **The status dot is filled whenever there is anything to report** (connected,
   dialling, failed) and hollow only at rest, which is what the design's frames
   show; the colour carries which state it is.
+- **The emulator is ours, because upstream has none.** The web client hands its
+  terminal pane to a bundled xterm.js, so there is no emulator in this repository
+  to port: `vt/` is written against the VT sequences and xterm's behaviour, and
+  it is tested the way a screen can be tested — cells, cursor, scroll region,
+  scrollback — rather than by comparing screenshots.
+- **The device is answered, not just drawn.** `ESC [ 6 n` is a *blocking* read
+  for the program that sends it and `CSI 18 t` is how a pager sizes itself, so
+  the emulator generates those replies and the pump puts them back on the wire on
+  the same tick. An emulator that only paints looks right until a program hangs.
+- **The link is split, not guarded.** Reading and writing run on their own
+  threads and hand the frame events over a channel, so a device that stops
+  answering cannot freeze the keyboard, and a repaint never waits on a `read`.
 
 ## Layout constants
 
