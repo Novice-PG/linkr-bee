@@ -1581,14 +1581,21 @@ static int reliable_send_chunk(const uint8_t *data, uint16_t len)
 }
 
 static int uart_forward_chunk(const uint8_t *data, uint16_t len,
-			      bool *accounted)
+			      size_t *accounted)
 {
 	int err;
 
-	if (!*accounted) {
-		linkr_log_feed(data, len);
-		linkr_ws_feed(data, len);
-		*accounted = true;
+	/* Staged up to `*accounted` rather than "staged or not". A chunk the
+	 * reliable path could not deliver stays in the caller's buffer and the
+	 * drain loop appends the next bytes to it, so the part added since the
+	 * last successful stage still has to reach both sinks below. A yes/no
+	 * flag set once would strand exactly that part: the BLE peer would get
+	 * the whole buffer while the log ring and the LAN stream never saw its
+	 * tail, and nothing would count the loss. */
+	if (*accounted < len) {
+		linkr_log_feed(data + *accounted, len - *accounted);
+		linkr_ws_feed(data + *accounted, len - *accounted);
+		*accounted = len;
 	}
 	if (!linkr_uart_reliable_mode()) {
 		/* NUS is the compatibility, best-effort path. Preserve its previous
@@ -1646,7 +1653,7 @@ static void uart_to_ble_thread(void)
 	uint8_t buf[UART_RX_CHUNK];
 	size_t len = 0;
 	int64_t last_rx = 0;
-	bool accounted = false;
+	size_t accounted = 0;
 
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
@@ -1664,7 +1671,7 @@ static void uart_to_ble_thread(void)
 		if (len == sizeof(buf)) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
-				accounted = false;
+				accounted = 0;
 			} else {
 				k_sleep(K_MSEC(10));
 			}
@@ -1687,7 +1694,7 @@ static void uart_to_ble_thread(void)
 		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
-				accounted = false;
+				accounted = 0;
 			}
 		}
 
