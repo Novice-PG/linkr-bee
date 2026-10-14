@@ -43,7 +43,10 @@ void linkr_uart_reliable_disconnected(struct bt_conn *conn);
 
 /* True while reliable mode owns UART-to-BLE delivery. It intentionally stays
  * true across a disconnect so an unconfirmed chunk can be retried after the
- * same client reconnects. A later NUS-only subscription selects raw mode. */
+ * same client reconnects; a live peer that withdraws the indication while
+ * still connected does not keep it, because that is a request to stop the
+ * feed rather than a link change. A later NUS-only subscription selects raw
+ * mode. */
 bool linkr_uart_reliable_mode(void);
 void linkr_uart_reliable_nus_selected(void);
 

@@ -183,6 +183,19 @@ static void tx_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 		   value == BT_GATT_CCC_INDICATE ? 1 : 0);
 	if (atomic_get(&indication_enabled)) {
 		atomic_set(&reliable_mode, 1);
+	} else {
+		/* The client withdrew the channel this mode delivers on, while
+		 * staying connected. That is not a disconnect — the header
+		 * keeps the mode sticky across those, so that an unconfirmed
+		 * chunk can be retried when the same client returns — but a
+		 * live peer asking for the feed to stop. Leaving the mode set
+		 * takes every following chunk down the reliable path, where
+		 * indicate_fragment() sees no subscription and returns
+		 * -ENOTCONN, and uart_forward_chunk drops it silently: the
+		 * stream goes quiet for the rest of the connection even
+		 * though the client is almost certainly still subscribed to
+		 * NUS. Raw mode is what it asked for. */
+		atomic_clear(&reliable_mode);
 	}
 	LOG_INF("Reliable UART indications %s",
 		 atomic_get(&indication_enabled) ? "enabled" : "disabled");
