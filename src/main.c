@@ -1471,17 +1471,23 @@ static void ble_to_uart_thread(void)
 		k_msgq_get(&ble_to_uart_queue, &packet, K_FOREVER);
 
 		/*
-		 * Write in bulk where the driver allows it and fall back to the
-		 * blocking single-byte writer only when the port has no room.
+		 * Fill the FIFO in one driver call, and fall back to the
+		 * single-byte writer only when the port has no room.
 		 *
-		 * This matters once the bytes are a file rather than a typed
-		 * line. A ZMODEM upload is hundreds of back-to-back 1 KiB blocks
-		 * with the far end waiting on each one, and uart_poll_out() per
-		 * byte pays a function call and a FIFO depth check for every
-		 * single byte of it. Falling back one byte at a time keeps this
-		 * thread asleep instead of spinning on a full FIFO: poll_out
-		 * blocks until there is room, which is exactly the wait we want,
-		 * and the next pass fills whatever just opened up.
+		 * A packet runs to 244 bytes, and uart_poll_out() charges a
+		 * driver call plus a FIFO-depth check for every single byte of
+		 * it. Going through uart_fifo_fill() first hands the driver as
+		 * much of the packet as the FIFO will hold in one call;
+		 * poll_out() is then only reached with a full FIFO, where it
+		 * waits for room before placing one byte, and the next pass of
+		 * this loop fills whatever space opened up in the meantime. The
+		 * batching is what keeps a long packet down to a handful of
+		 * driver calls instead of one per byte.
+		 *
+		 * The single-byte writer waits rather than sleeping — for this
+		 * driver it spins until the FIFO drains — and this loop is what
+		 * stops that from being a hot spin over an empty call, since it
+		 * refills the FIFO as soon as room exists.
 		 */
 		while (sent < packet.len) {
 			int wrote = uart_fifo_fill(bridge_uart,
