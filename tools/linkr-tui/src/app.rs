@@ -298,6 +298,37 @@ impl Default for App {
     }
 }
 
+/// The most characters of screen an OSC 52 copy will carry.
+///
+/// A full scrollback is far more than any emulator accepts in one sequence,
+/// and an over-long OSC 52 is not truncated — it is discarded whole. Trimming
+/// before the base64 turns "nothing arrives" into "the last of it arrives",
+/// which is what a capped copy means: keep the end, which is where the answer
+/// the user just read always is.
+const MAX_OSC52_CHARS: usize = 64 * 1024;
+
+/// Put `text` on the terminal's clipboard with OSC 52.
+///
+/// Written straight to stdout rather than through the frame: a clipboard copy
+/// is not a cell, and routing it through the buffer would either double it or
+/// put it inside a frame's diff. One long escape sequence, flushed, and the
+/// screen is untouched — the sequence carries no glyphs.
+///
+/// No ST terminator on purpose. The BEL form is the one every emulator that
+/// supports the sequence accepts, and the ST form ends in a byte that some
+/// terminals mistake for text.
+fn osc52_copy(text: &str) {
+    use std::io::Write;
+
+    if text.is_empty() {
+        return;
+    }
+    let payload = crate::transfer::base64::encode_base64(text.as_bytes());
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "\x1b]52;c;{payload}\x07");
+    let _ = out.flush();
+}
+
 impl App {
     /// The theme in force.
     pub fn theme(&self) -> Theme {
@@ -1039,6 +1070,37 @@ impl App {
         self.type_bytes(normalised.ends_with('\n'), &normalised)
     }
 
+    /// Put the emulator's contents on the terminal's clipboard, and say so.
+    ///
+    /// Returns the notice rather than pushing it, so the wording stays in one
+    /// place with every other notice this key produces — `toggle_sidebar()` and
+    /// `toggle_theme()` do the same, and a caller that formats its own is a
+    /// caller whose wording can drift from the language table.
+    ///
+    /// An empty screen is not a copy: the terminal is blank until the target
+    /// has said something, and "copied 0 chars" is worse than silence.
+    pub fn copy_screen(&mut self) -> Notice {
+        let text = self.terminal.visible_text();
+        let kept: String = text
+            .chars()
+            .take(MAX_OSC52_CHARS)
+            .collect();
+        let copied = kept.chars().count();
+        if copied > 0 {
+            osc52_copy(&kept);
+        }
+        let s = self.strings();
+        Notice {
+            text: format!(
+                "{} {} {}",
+                s.copy_done_prefix,
+                copied,
+                s.copy_done_suffix
+            ),
+            level: NoticeLevel::Info,
+        }
+    }
+
     /// Send raw bytes. Silent when there is no link, because this is the path a
     /// *keystroke* takes and a toast per character would bury the screen.
     pub fn send_bytes(&mut self, bytes: &[u8]) -> bool {
@@ -1409,6 +1471,57 @@ mod tests {
         };
         assert!(app.paste(""), "an empty paste should be accepted");
         assert!(app.pending_line.is_empty(), "an empty paste held something");
+    }
+
+    /// The copy cap keeps the END of the screen, not the beginning.
+    ///
+    /// OSC 52 that is too long is discarded whole by the emulator rather than
+    /// truncated, so a copy that cannot fit has to decide which end to keep.
+    /// The end is where the thing the user just read lives; the beginning is
+    /// hours-old boot noise they have long scrolled past.
+    #[test]
+    fn the_copy_keeps_the_end_of_the_screen() {
+        let mut pane = TerminalPane::new();
+        pane.set_size(40, 8);
+        // More than the cap, so the trimming actually has to choose.
+        let mut text = String::new();
+        for _ in 0..(MAX_OSC52_CHARS + 64) {
+            text.push('x');
+        }
+        text.push_str("TAIL");
+        pane.push_text(&text);
+
+        let app = &mut App {
+            terminal: pane,
+            ..App::default()
+        };
+        let notice = app.copy_screen();
+        let copied = notice
+            .text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+            .expect("the notice names the count");
+        assert_eq!(copied, MAX_OSC52_CHARS, "the cap is what was copied");
+    }
+
+    /// Copying a screen that has said nothing still reports — and reports the
+    /// truth about what was on it, which for a fresh pane is its blank screen
+    /// and not a lie about zero.
+    #[test]
+    fn copying_a_blank_screen_reports_what_was_there() {
+        let mut app = App::default();
+        let notice = app.copy_screen();
+        let copied = notice
+            .text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|n| n.parse::<usize>().ok())
+            .expect("the notice names the count");
+        // A fresh emulator dumps its blank screen, which is not zero, and
+        // claiming otherwise would make the number meaningless.
+        assert!(copied > 0, "a blank screen reported {copied}");
+        assert_eq!(copied, app.terminal.visible_text().chars().count());
     }
 
     /// With no link the paste is refused in the same silence `send_bytes` gives

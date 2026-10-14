@@ -253,6 +253,10 @@ pub struct Strings {
     pub sidebar_shown: &'static str,
     /// "Sidebar hidden" — the same toggle, the other way.
     pub sidebar_hidden: &'static str,
+    /// The head of the copy confirmation: "Copied 1234 chars".
+    pub copy_done_prefix: &'static str,
+    /// The tail of the copy confirmation.
+    pub copy_done_suffix: &'static str,
     /// The word for a finding awaiting review.
     pub pending_review: &'static str,
 
@@ -336,6 +340,8 @@ const ZH: Strings = Strings {
     theme_light: "浅色",
     sidebar_shown: "侧栏已显示",
     sidebar_hidden: "侧栏已隐藏",
+    copy_done_prefix: "已复制",
+    copy_done_suffix: "字符",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
@@ -457,6 +463,8 @@ const EN: Strings = Strings {
     theme_light: "light",
     sidebar_shown: "Sidebar shown",
     sidebar_hidden: "Sidebar hidden",
+    copy_done_prefix: "Copied",
+    copy_done_suffix: "chars",
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
@@ -651,6 +659,8 @@ mod tests {
                 s.theme_light,
                 s.sidebar_shown,
                 s.sidebar_hidden,
+                s.copy_done_prefix,
+                s.copy_done_suffix,
                 s.pending_review,
                 s.net_wifi_section,
                 s.net_wifi_needs_ble,

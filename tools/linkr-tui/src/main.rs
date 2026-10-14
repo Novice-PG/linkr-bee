@@ -897,6 +897,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.push_notice(notice);
             return false;
         }
+        // Ctrl+Shift+C puts the screen on the terminal's clipboard. Not the
+        // plain Ctrl+C, which is the quit chord and has been since the first
+        // version: a paste's counterpart must not be next to the key that
+        // ends the program.
+        (KeyCode::Char('C'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let notice = app.copy_screen();
+            app.push_notice(notice);
+            return false;
+        }
         (KeyCode::Char('l'), true) => {
             app.clear_terminal();
             return false;
