@@ -304,9 +304,20 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	if (!conn || !data || !len || len > LINKR_UART_RELIABLE_MAX_PAYLOAD) {
 		return -EINVAL;
 	}
-	mtu_payload = MIN((uint16_t)(bt_gatt_get_mtu(conn) - 3),
-			  (uint16_t)sizeof(fragment));
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+
+	/* Clamp before subtracting: an unexchanged MTU reads back as 0 and
+	 * `0 - 3` in uint16_t wraps to 65533, which the MIN below would then
+	 * carry into the fragment size and make a single write claim to hold
+	 * more than the link has ever agreed to. */
+	mtu_payload = MIN(mtu > 3 ? mtu - 3 : 1, (uint16_t)sizeof(fragment));
 	if (mtu_payload <= sizeof(*header)) {
+		/* With the clamp in place this is how "the peer has not
+		 * exchanged an MTU yet" is reported: a payload of 1 cannot
+		 * hold the 12-byte header. It is a refusal to send, not a
+		 * failure to deliver, so uart_forward_chunk drops the chunk
+		 * rather than retrying it — the caller would otherwise sit on
+		 * the same chunk forever. */
 		return -EMSGSIZE;
 	}
 

@@ -1509,7 +1509,13 @@ static void ble_to_uart_thread(void)
 
 static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
-	uint16_t mtu_payload = bt_gatt_get_mtu(conn) - 3;
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+	/* An unexchanged MTU reads back as 0, and `0 - 3` in uint16_t wraps to
+	 * 65533; clamp before subtracting so the chunk size is never taken from
+	 * the wrapped value. Without this the MIN below picks the wrapped one
+	 * against the ACL size, which is smaller but still several times the
+	 * ATT payload the peer has actually agreed to. */
+	uint16_t mtu_payload = mtu > 3 ? mtu - 3 : 1;
 	uint16_t acl_payload = CONFIG_BT_BUF_ACL_TX_SIZE > 7 ?
 			       CONFIG_BT_BUF_ACL_TX_SIZE - 7 : 1;
 
