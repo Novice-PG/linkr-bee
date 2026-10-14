@@ -49,7 +49,11 @@ pub struct Regions {
 }
 
 /// Resolve the designed layout for an area.
-pub fn regions(area: Rect) -> Regions {
+///
+/// `sidebar` decides whether the rail takes its column. With it closed the
+/// centre gets the whole middle band, so a narrow terminal or a user who
+/// wants the view full width both get the same thing.
+pub fn regions(area: Rect, sidebar: bool) -> Regions {
     let [top_bar, middle, bottom_bar] = Layout::vertical([
         Constraint::Length(BAR_HEIGHT),
         Constraint::Min(0),
@@ -57,16 +61,28 @@ pub fn regions(area: Rect) -> Regions {
     ])
     .areas(area);
 
+    if !sidebar {
+        return Regions {
+            top_bar,
+            sidebar: Rect {
+                width: 0,
+                ..middle
+            },
+            centre: middle,
+            bottom_bar,
+        };
+    }
+
     // A terminal narrower than the sidebar plus a usable centre would leave the
     // centre at zero width; the sidebar yields instead, so a tiny window still
     // shows the view rather than a wall of sidebar.
     let sidebar_width = SIDEBAR_WIDTH.min(middle.width.saturating_sub(1));
-    let [sidebar, centre] =
+    let [sidebar_area, centre] =
         Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).areas(middle);
 
     Regions {
         top_bar,
-        sidebar,
+        sidebar: sidebar_area,
         centre,
         bottom_bar,
     }
@@ -80,7 +96,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // The page ground first, so no cell keeps the emulator's default background.
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    let regions = regions(area);
+    let regions = regions(area, app.sidebar_visible);
 
     draw_bar(
         frame,
@@ -89,7 +105,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         chrome::top_left(app, &theme),
         chrome::top_right(app, &theme),
     );
-    draw_sidebar(frame, app, regions.sidebar);
+    // Closed, the rail is a zero-width strip and the centre already owns the
+    // band, so there is nothing to paint and no divider to draw.
+    if app.sidebar_visible {
+        draw_sidebar(frame, app, regions.sidebar);
+    }
     draw_centre(frame, app, regions.centre);
     draw_bar(
         frame,
@@ -397,7 +417,7 @@ mod tests {
     /// taking the remainder, and the three regions tile the area exactly.
     #[test]
     fn the_regions_tile_the_area() {
-        let regions = regions(area(120, 40));
+        let regions = regions(area(120, 40), true);
         assert_eq!(regions.top_bar, area(120, 1));
         assert_eq!(
             regions.bottom_bar,
@@ -427,14 +447,44 @@ mod tests {
         }
     }
 
+    /// With the rail closed the centre takes the whole middle band: same bottom
+    /// bar, same top bar, and the width the sidebar used to hold. Nothing is
+    /// reserved for a rail the user asked to be rid of.
+    #[test]
+    fn a_closed_rail_gives_the_centre_the_band() {
+        for (w, h) in [(120u16, 40u16), (80, 24), (40, 10), (10, 3)] {
+            let open = regions(area(w, h), true);
+            let closed = regions(area(w, h), false);
+            assert_eq!(closed.top_bar, open.top_bar, "{w}x{h}: top bar moved");
+            assert_eq!(closed.bottom_bar, open.bottom_bar, "{w}x{h}: bottom bar moved");
+            assert_eq!(closed.sidebar.width, 0, "{w}x{h}: rail kept width");
+            assert_eq!(
+                closed.centre.width, open.sidebar.width + open.centre.width,
+                "{w}x{h}: centre did not gain the rail's column"
+            );
+            assert_eq!(closed.centre.height, open.centre.height, "{w}x{h}: height moved");
+        }
+    }
+
+    /// A closed rail leaves a zero-width strip at the origin, so a caller that
+    /// still hands it to a painter draws nothing rather than panicking, and it
+    /// never overlaps the centre it just gave up.
+    #[test]
+    fn a_closed_rail_is_a_zero_width_strip() {
+        let r = regions(area(120, 40), false);
+        assert_eq!(r.sidebar.width, 0);
+        assert_eq!(r.sidebar.x, 0);
+        assert_eq!(r.sidebar.right(), r.centre.x, "the strip reaches into the centre");
+    }
+
     /// A window too narrow for both halves yields sidebar width to the centre:
     /// a view is never squeezed to nothing to keep an empty strip.
     #[test]
     fn a_narrow_window_gives_the_sidebar_less_room() {
-        let wide = regions(area(20, 10));
+        let wide = regions(area(20, 10), true);
         assert_eq!(wide.sidebar.width, 19);
         assert_eq!(wide.centre.width, 1);
-        let narrow = regions(area(10, 10));
+        let narrow = regions(area(10, 10), true);
         assert_eq!(narrow.sidebar.width, 9);
         assert_eq!(narrow.centre.width, 1);
     }
@@ -444,7 +494,7 @@ mod tests {
     #[test]
     fn degenerate_areas_do_not_panic() {
         for (w, h) in [(0, 0), (1, 1), (0, 20), (20, 0), (3, 2)] {
-            let regions = regions(area(w, h));
+            let regions = regions(area(w, h), true);
             for region in [
                 regions.top_bar,
                 regions.sidebar,

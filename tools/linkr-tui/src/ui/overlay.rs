@@ -46,7 +46,7 @@ const MAX_WIDTH: u16 = 96;
 /// rail, the counters and the key hints stay visible, which is the point of a
 /// palette that can be read while the session is still running.
 pub fn paint(frame: &mut Frame, app: &App, area: Rect) {
-    let region = super::regions(area).centre;
+    let region = super::regions(area, app.sidebar_visible).centre;
     if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
         return;
     }
@@ -149,7 +149,7 @@ mod tests {
             let frame = area(w, h);
             // Sized against the centre column, which is what the painter passes
             // in — the rail is not the modal's to use.
-            let region = crate::ui::regions(frame).centre;
+            let region = crate::ui::regions(frame, true).centre;
             let (bw, bh) = wanted(region, PALETTE_WIDTH_PERCENT, region.height);
             assert!(bw <= MAX_WIDTH.min(region.width), "{w}x{h}: width {bw}");
             assert!(

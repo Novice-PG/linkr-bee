@@ -249,6 +249,10 @@ pub struct Strings {
     pub theme_dark: &'static str,
     /// The word for the light theme in a notice.
     pub theme_light: &'static str,
+    /// "Sidebar shown" — the toast for the rail toggle.
+    pub sidebar_shown: &'static str,
+    /// "Sidebar hidden" — the same toggle, the other way.
+    pub sidebar_hidden: &'static str,
     /// The word for a finding awaiting review.
     pub pending_review: &'static str,
 
@@ -330,6 +334,8 @@ const ZH: Strings = Strings {
     theme_switched_prefix: "主题",
     theme_dark: "深色",
     theme_light: "浅色",
+    sidebar_shown: "侧栏已显示",
+    sidebar_hidden: "侧栏已隐藏",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
@@ -449,6 +455,8 @@ const EN: Strings = Strings {
     theme_switched_prefix: "Theme",
     theme_dark: "dark",
     theme_light: "light",
+    sidebar_shown: "Sidebar shown",
+    sidebar_hidden: "Sidebar hidden",
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
@@ -641,6 +649,8 @@ mod tests {
                 s.theme_switched_prefix,
                 s.theme_dark,
                 s.theme_light,
+                s.sidebar_shown,
+                s.sidebar_hidden,
                 s.pending_review,
                 s.net_wifi_section,
                 s.net_wifi_needs_ble,

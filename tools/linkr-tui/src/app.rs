@@ -125,6 +125,12 @@ pub struct App {
     pub view: View,
     pub state: ConnectionState,
     pub focus: Focus,
+    /// Whether the rail occupies its column. Ctrl+Up closes it to give the
+    /// centre the whole band, and opens it again. It starts open, which is the
+    /// designed layout; closing it is the user's call, never a response to a
+    /// narrow terminal — that case is handled inside [`crate::ui::regions`],
+    /// which shrinks the rail rather than dropping it.
+    pub sidebar_visible: bool,
     pub transport: Transport,
     /// True when a CLI flag pinned the transport, so the sidebar says `locked`.
     pub transport_locked: bool,
@@ -244,6 +250,7 @@ impl Default for App {
             view: View::Terminal,
             state: ConnectionState::Disconnected,
             focus: Focus::default(),
+            sidebar_visible: true,
             transport: Transport::default(),
             transport_locked: false,
             device_name: "Linkr BLE UART".to_string(),
@@ -382,6 +389,29 @@ impl App {
         };
         Notice {
             text: format!("{}: {}", s.theme_switched_prefix, name),
+            level: NoticeLevel::Info,
+        }
+    }
+
+    /// Open or close the rail, and say so.
+    ///
+    /// Closing it while the keyboard is on a sidebar row would leave the arrows
+    /// driving a rail the user cannot see, so focus follows the rail to the
+    /// terminal. Opening it leaves the focus alone: whichever pane was last used
+    /// is usually the one being returned to.
+    pub fn toggle_sidebar(&mut self) -> Notice {
+        self.sidebar_visible = !self.sidebar_visible;
+        let s = self.strings();
+        let text = if self.sidebar_visible {
+            s.sidebar_shown.to_string()
+        } else {
+            s.sidebar_hidden.to_string()
+        };
+        if !self.sidebar_visible && self.focus == Focus::Sidebar {
+            self.focus = Focus::Terminal;
+        }
+        Notice {
+            text,
             level: NoticeLevel::Info,
         }
     }
@@ -1283,6 +1313,32 @@ mod tests {
         app.lang = Lang::En;
         let notice = app.toggle_theme();
         assert_eq!(notice.text, "Theme: light");
+    }
+
+    /// Closing the rail moves the focus with it. Otherwise the arrows would
+    /// drive a rail the user cannot see, and the row they were on would still
+    /// be highlighted somewhere off-screen.
+    #[test]
+    fn closing_the_rail_moves_the_focus_to_the_terminal() {
+        let mut app = App::default();
+        assert!(app.sidebar_visible, "the rail starts open");
+        app.focus = Focus::Sidebar;
+        app.sidebar_cursor = 2;
+
+        let notice = app.toggle_sidebar();
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.focus, Focus::Terminal);
+        assert_eq!(notice.text, app.strings().sidebar_hidden);
+        assert_eq!(notice.level, NoticeLevel::Info);
+        // The cursor survives: reopening the rail should land back where it was.
+        assert_eq!(app.sidebar_cursor, 2);
+
+        // Opening it again leaves the focus wherever the user put it.
+        app.focus = Focus::Sidebar;
+        let notice = app.toggle_sidebar();
+        assert!(app.sidebar_visible);
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(notice.text, app.strings().sidebar_shown);
     }
 
     /// Toasts are bounded: the stack never grows past the cap, and the oldest

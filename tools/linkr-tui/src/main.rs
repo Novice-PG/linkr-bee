@@ -756,7 +756,7 @@ fn read_first_line(path: &std::path::Path) -> Result<String, String> {
 
 /// The centre region — the terminal pane's area — for a frame of this size.
 fn pane_area(cols: u16, rows: u16) -> Rect {
-    ui::regions(Rect::new(0, 0, cols, rows)).centre
+    ui::regions(Rect::new(0, 0, cols, rows), true).centre
 }
 
 /// Size the emulator for a frame of `cols`×`rows`, and hand back the pane it
@@ -870,6 +870,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         (KeyCode::Char('l'), true) => {
             app.clear_terminal();
+            return false;
+        }
+        // Ctrl+Up opens or closes the rail. A chord rather than a plain key
+        // because Up alone is the cursor or scrollback in every focus, and a
+        // toggle the user can hit by accident is worse than one they cannot.
+        (KeyCode::Up, true) => {
+            let notice = app.toggle_sidebar();
+            app.push_notice(notice);
             return false;
         }
         // F1 is the help, not a view: the view rota starts at F2.
