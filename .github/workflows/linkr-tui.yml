@@ -76,6 +76,14 @@ jobs:
         # it would be testing a dependency set nobody reviewed.
         run: cargo test --locked
 
+      - name: Firmware rate arithmetic
+        # No Zephyr, no toolchain: src/uart_autobaud_math.h is plain integers,
+        # and this is the only part of the firmware a host compiler can judge.
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -o /tmp/test_uart_autobaud tests/test_uart_autobaud.c
+          /tmp/test_uart_autobaud
+
   targets:
     name: Seven targets
     runs-on: ubuntu-latest

@@ -33,6 +33,7 @@
 #include "target_binding.h"
 #include "ble_mgmt.h"
 #include "ble_uart_reliable.h"
+#include "uart_autobaud.h"
 #include "wifi.h"
 #include "ws_bridge.h"
 
@@ -907,6 +908,48 @@ static int apply_uart_config(const struct uart_config *cfg)
 	return err;
 }
 
+/*
+ * Adaptive baud detection needs two things only main.c can give it: the rate
+ * this port is set to right now, and the one locked door through which it may
+ * be changed. Reconfiguring resets the RX ring, so the driver above is the
+ * only way in — reaching for uart_configure() here would drop whatever the
+ * peer has mid-word.
+ */
+#if LINKR_UART_AUTOBAUD
+
+uint32_t linkr_uart_config_current(void)
+{
+	struct uart_config cfg;
+
+	k_mutex_lock(&uart_config_lock, K_FOREVER);
+	cfg = active_uart_config;
+	k_mutex_unlock(&uart_config_lock);
+
+	return cfg.baudrate;
+}
+
+int linkr_uart_config_reconfigure(uint32_t baudrate)
+{
+	struct uart_config cfg;
+
+	k_mutex_lock(&uart_config_lock, K_FOREVER);
+	cfg = active_uart_config;
+	k_mutex_unlock(&uart_config_lock);
+
+	if (cfg.baudrate == baudrate) {
+		return 0;
+	}
+
+	/* Framing, parity and flow control are carried over untouched: the
+	 * detector measures a bit time, and that is the only thing it can speak
+	 * about. Guessing the rest would be a second guess with no evidence. */
+	cfg.baudrate = baudrate;
+
+	return apply_uart_config(&cfg);
+}
+
+#endif /* LINKR_UART_AUTOBAUD */
+
 static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
@@ -1042,6 +1085,11 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 						    err);
 			return true;
 		}
+
+		/* A rate somebody typed wins for the next few seconds. Without
+		 * this, detection would measure the peer and move the port back,
+		 * and "@u=..." would look like a command that does nothing. */
+		linkr_uart_autobaud_suspend();
 
 		(void)uart_status_response(conn, "OK");
 		return true;
@@ -1416,10 +1464,35 @@ static void ble_to_uart_thread(void)
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
 	for (;;) {
+		uint16_t sent = 0;
+
 		k_msgq_get(&ble_to_uart_queue, &packet, K_FOREVER);
 
-		for (uint16_t i = 0; i < packet.len; i++) {
-			uart_poll_out(bridge_uart, packet.data[i]);
+		/*
+		 * Write in bulk where the driver allows it and fall back to the
+		 * blocking single-byte writer only when the port has no room.
+		 *
+		 * This matters once the bytes are a file rather than a typed
+		 * line. A ZMODEM upload is hundreds of back-to-back 1 KiB blocks
+		 * with the far end waiting on each one, and uart_poll_out() per
+		 * byte pays a function call and a FIFO depth check for every
+		 * single byte of it. Falling back one byte at a time keeps this
+		 * thread asleep instead of spinning on a full FIFO: poll_out
+		 * blocks until there is room, which is exactly the wait we want,
+		 * and the next pass fills whatever just opened up.
+		 */
+		while (sent < packet.len) {
+			int wrote = uart_fifo_fill(bridge_uart,
+						   &packet.data[sent],
+						   packet.len - sent);
+
+			if (wrote > 0) {
+				sent += (uint16_t)wrote;
+				continue;
+			}
+
+			uart_poll_out(bridge_uart, packet.data[sent]);
+			sent++;
 		}
 
 		signal_uart_activity();
@@ -1753,6 +1826,10 @@ int main(void)
 		LOG_ERR("Bridge UART configuration failed: %d", err);
 		return err;
 	}
+
+	/* Armed after the port is configured, never before: it calls back into
+	 * this file to move the rate, and there is no rate to move until now. */
+	linkr_uart_autobaud_init(DT_REG_ADDR(LINKR_UART_NODE));
 
 #if defined(ACTIVITY_LED_NODE)
 	if (!device_is_ready(activity_led.port)) {
