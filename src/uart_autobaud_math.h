@@ -104,11 +104,20 @@ static inline uint32_t linkr_autobaud_rate(uint32_t min_cycles, uint32_t clock_h
  */
 static inline uint32_t linkr_autobaud_snap(uint32_t rate)
 {
+	/*
+	 * 14400 and 74880 are the two that are easy to leave out of a table
+	 * built from what a terminal program offers. 14400 is a real standard
+	 * rate sitting between 9600 and 19200; 74880 is the ESP32's own ROM
+	 * loader rate, so a peer still in its bootloader announces itself there
+	 * before anything has configured it, and refusing it would turn that
+	 * announcement into noise. Neither can be confused with a neighbour:
+	 * the closest new pair is 57600/74880, 30% apart.
+	 */
 	static const uint32_t rates[] = {
 		300u,     600u,     1200u,    2400u,    4800u,
-		9600u,    19200u,   38400u,   57600u,   115200u,
-		230400u,  460800u,  500000u,  921600u,  1000000u,
-		1500000u, 2000000u, 3000000u,
+		9600u,    14400u,   19200u,   38400u,   57600u,
+		74880u,   115200u,  230400u,  460800u,  500000u,
+		921600u,  1000000u, 1500000u, 2000000u, 3000000u,
 	};
 
 	if (rate < LINKR_AUTOBAUD_MIN_RATE || rate > LINKR_AUTOBAUD_MAX_RATE) {

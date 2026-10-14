@@ -89,6 +89,26 @@ static void snapping_names_one_rate_or_none(void)
 	check(linkr_autobaud_snap(1490000u) == 1500000u, "0.7% low still 1.5M",
 	      linkr_autobaud_snap(1490000u), 1500000u);
 
+	/* 74880 is what an ESP32 prints from its ROM loader and 14400 is a rate
+	 * between the ones a terminal program offers; both were missing from
+	 * the table, so a peer running either would have been refused instead
+	 * of followed. */
+	check(linkr_autobaud_snap(74880u) == 74880u, "exact 74880",
+	      linkr_autobaud_snap(74880u), 74880u);
+	check(linkr_autobaud_snap(74000u) == 74880u, "1.2% low still 74880",
+	      linkr_autobaud_snap(74000u), 74880u);
+	check(linkr_autobaud_snap(14400u) == 14400u, "exact 14400",
+	      linkr_autobaud_snap(14400u), 14400u);
+	check(linkr_autobaud_snap(14000u) == 14400u, "2.8% low still 14400",
+	      linkr_autobaud_snap(14000u), 14400u);
+
+	/* The new entry must not reach up and take 115200, and the gap it
+	 * opened between itself and 115200 must be a place a measurement can
+	 * land and still be refused. */
+	check(linkr_autobaud_snap(90000u) == 0u,
+	      "between 74880 and 115200 is refused", linkr_autobaud_snap(90000u),
+	      0u);
+
 	/* Deliberately between two entries: 480000 sits between 460800 and
 	 * 500000, 4.2% from the first and 4.2% from the second. Neither is
 	 * "nearest" in any meaningful sense, so refuse. */
