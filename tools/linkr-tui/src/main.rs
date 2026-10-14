@@ -128,6 +128,10 @@ struct Args {
     scan_timeout: Duration,
     /// Connect, do what was asked, hang up — no terminal is taken over.
     no_terminal: bool,
+    /// Run the asked-for commands first, then take the terminal over. The
+    /// middle of the three modes, and the one nothing had a way to ask for:
+    /// the command line either exited when it was done or never ran anything.
+    cli_then_tui: bool,
     /// Report what happened as JSON lines rather than as sentences.
     json: bool,
     /// Say nothing on stderr that is not an error.
@@ -219,6 +223,56 @@ impl Args {
     }
 }
 
+/// The three ways the command line can be used, and the one thing that
+/// decides between them.
+///
+/// A tool that is both a terminal and a script has to know which of the two it
+/// is this time. The answer has always been one of three, but until now only
+/// two were reachable: a command line that asked for something exited when it
+/// was done, and one that asked for nothing opened the terminal. The middle —
+/// configure the board, then *watch it* — had no spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Take the terminal over and stay there.
+    Tui,
+    /// Configure and report, then leave.
+    Cli,
+    /// Configure and report, then take the terminal over and stay there.
+    CliThenTui,
+}
+
+impl Mode {
+    /// Which mode the command line meant.
+    ///
+    /// `--no-terminal` and `--cli-then-tui` name a mode directly. The rest is
+    /// inferred, because a command line that names `--query-info` is asking a
+    /// question and not asking for an interface, and printing the answer and
+    /// leaving is what it meant.
+    fn from(args: &Args, prog: &str) -> Mode {
+        if args.no_terminal && args.cli_then_tui {
+            fail(
+                prog,
+                "the script mode and the configure-then-watch mode ask for \
+                 opposite things; pick one",
+            );
+        }
+        if args.no_terminal || args.cli_then_tui {
+            return if args.cli_then_tui {
+                Mode::CliThenTui
+            } else {
+                Mode::Cli
+            };
+        }
+        // Nothing asked for, or a plain launch: the terminal is the answer.
+        if args.requests.is_empty() && args.loopback.is_none() {
+            return Mode::Tui;
+        }
+        // Something was asked for, so the answer is the thing being asked
+        // for. This is the inference that has always been made.
+        Mode::Cli
+    }
+}
+
 /// A command-line error, printed in the shape the rest of the toolchain uses.
 fn fail(prog: &str, message: &str) -> ! {
     eprintln!("error: {message}\n");
@@ -248,6 +302,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         scan: false,
         scan_timeout: Duration::from_secs(10),
         no_terminal: false,
+        cli_then_tui: false,
         json: bool::default(),
         quiet: false,
         requests: cli::Requests::default(),
@@ -307,6 +362,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 args.scan_timeout = Duration::from_secs_f64(seconds);
             }
             "--no-terminal" => args.no_terminal = true,
+            "--cli-then-tui" => args.cli_then_tui = true,
             "--json" => args.json = true,
             "--quiet" => args.quiet = true,
             "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
@@ -725,11 +781,12 @@ fn main() -> io::Result<()> {
         app.trace = std::mem::take(&mut app.trace).with_stderr();
     }
 
-    // A script run: connect, ask, report, hang up. It is reached when
-    // `--no-terminal` was given *or* when something was asked for, because a
-    // command line that names `--query-info` is asking for an answer and not
-    // for an interface — printing the answer and leaving is what it meant.
-    if args.no_terminal || !args.requests.is_empty() || args.loopback.is_some() {
+    // A script run: connect, ask, report, hang up. Reached for the two modes
+    // that do the asking first, which is `--no-terminal` and
+    // `--cli-then-tui` alike — what separates them is what happens *after*,
+    // and that belongs below rather than in the condition here.
+    let mode = Mode::from(&args, &prog);
+    if mode != Mode::Tui {
         if !args.quiet && app.session.is_live() {
             eprintln!("connected to {}", app.session.describe());
         }
@@ -747,11 +804,27 @@ fn main() -> io::Result<()> {
                 failed += 1;
             }
         }
-        app.session.close();
-        if failed > 0 {
-            std::process::exit(1);
+        // Only the pure script mode hangs up. The middle mode keeps the link
+        // it just configured and takes the terminal over on it: a board whose
+        // serial settings were just changed is exactly the board the user now
+        // wants to watch.
+        if mode == Mode::Cli {
+            app.session.close();
+            if failed > 0 {
+                std::process::exit(1);
+            }
+            return Ok(());
         }
-        return Ok(());
+        if failed > 0 {
+            // The link stays up either way: a failed request is a report, not
+            // a disconnection, and the terminal is still the better way to
+            // find out what went wrong.
+            eprintln!(
+                "note: {} request{} failed; opening the terminal anyway",
+                failed,
+                if failed == 1 { "" } else { "s" }
+            );
+        }
     }
 
     run(&mut app)
@@ -1103,6 +1176,61 @@ mod tests {
         assert!(parsed.requests.wifi_scan);
         assert!(!parsed.requests.is_empty(), "so it runs and exits");
         assert!(args(&[]).requests.is_empty());
+    }
+
+    /// The three modes, and the one thing that tells them apart.
+    ///
+    /// Nothing else in the tool has had three reachable states: a command line
+    /// either exited when it was done or never ran anything, and the configure
+    /// a board and then watch it case had no spelling at all.
+    #[test]
+    fn the_three_modes_are_reachable_and_distinguishable() {
+        // A plain launch is the terminal.
+        assert_eq!(Mode::from(&args(&[]), "linkr"), Mode::Tui);
+
+        // Asking a question is asking for an answer, so the answer is what
+        // arrives and then the program leaves.
+        assert_eq!(
+            Mode::from(&args(&["--query-info"]), "linkr"),
+            Mode::Cli,
+            "a query asked and left"
+        );
+
+        // The script mode says so.
+        assert_eq!(Mode::from(&args(&["--no-terminal"]), "linkr"), Mode::Cli);
+        // And it wins even with nothing asked for, which is the point: a
+        // dial with no questions is still a script run.
+        assert_eq!(
+            Mode::from(&args(&["--no-terminal"]), "linkr"),
+            Mode::Cli,
+            "a bare --no-terminal is a script run"
+        );
+
+        // The middle mode: leave the terminal until the questions are
+        // answered, then take it over on the link that answered them.
+        assert_eq!(
+            Mode::from(&args(&["--cli-then-tui", "--query-uart"]), "linkr"),
+            Mode::CliThenTui
+        );
+        // And with nothing asked for, it is still the middle mode — that is a
+        // way to open the terminal only, which the terminal alone cannot say.
+        assert_eq!(
+            Mode::from(&args(&["--cli-then-tui"]), "linkr"),
+            Mode::CliThenTui
+        );
+    }
+
+    /// The two flags that name a mode are mutually exclusive, and a user who
+    /// typed both has two sessions in mind and would get the wrong one. Saying
+    /// so beats guessing which — and saying so exits, so what is checked here
+    /// is that neither flag on its own is treated as the conflict.
+    #[test]
+    fn the_two_mode_flags_are_not_a_conflict_on_their_own() {
+        assert_eq!(Mode::from(&args(&["--no-terminal"]), "linkr"), Mode::Cli);
+        assert_eq!(
+            Mode::from(&args(&["--cli-then-tui"]), "linkr"),
+            Mode::CliThenTui
+        );
     }
 
     /// The defaults are the designed first frame: Chinese, dark, connecting.

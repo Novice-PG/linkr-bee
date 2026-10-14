@@ -182,6 +182,11 @@ pub const FLAGS: &[Flag] = &[
         "connect, run the asked-for commands, exit",
     ),
     Flag::new(
+        "--cli-then-tui",
+        Value::None,
+        "run the asked-for commands, then open the terminal",
+    ),
+    Flag::new(
         "--json",
         Value::None,
         "write events to stdout as JSON lines",
