@@ -919,6 +919,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    // The transfer form is the same kind of thing, and it owns the arrow keys
+    // too: its rows are walked with them, and a device being typed at with the
+    // arrows of a form would see escape sequences it never asked for.
+    if app.view == View::Transfer && linkr_tui::views::transfer::handle_key(app, key) {
+        return false;
+    }
+
     // The keyboard is on the pane: everything left is the device's.
     match key.code {
         // PageUp/PageDown walk the pane's own history rather than the device's

@@ -20,6 +20,7 @@ pub mod base64;
 pub mod binding;
 pub mod download;
 pub mod files;
+pub mod probe;
 pub mod profile;
 pub mod verify;
 pub mod zmodem;

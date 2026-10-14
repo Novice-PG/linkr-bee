@@ -76,6 +76,21 @@ const RECEIVE_PLACEHOLDER: Entry = [
     "for example . — the current directory",
     "例如 . —— 当前目录",
 ];
+/// The transfer form's own two rows. They are prompts rather than fields: the
+/// row is one line of a form, and a field that owned every printable key would
+/// take the keys the view needs for its own shortcuts.
+const LOCAL_TITLE: Entry = [" Path on this host ", " 本机路径 "];
+const LOCAL_LABEL: Entry = [
+    "File to send, or directory to receive into",
+    "要发送的文件，或接收时写入的目录",
+];
+const LOCAL_PLACEHOLDER: Entry = ["for example firmware.bin", "例如 firmware.bin"];
+const TARGET_TITLE: Entry = [" Path on the device ", " 设备路径 "];
+const TARGET_LABEL: Entry = [
+    "Where the file lands on the device (ZMODEM names it itself)",
+    "文件在设备上的位置（ZMODEM 由设备端命名）",
+];
+const TARGET_PLACEHOLDER: Entry = ["for example /root/firmware.bin", "例如 /root/firmware.bin"];
 // --- the network prompts ----------------------------------------------------
 
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
@@ -84,7 +99,7 @@ const WEBDAV_TITLE: Entry = [" Log upload target ", " 日志上传目标 "];
 
 /// What an empty answer means for a receive. A directory is something the user
 /// is standing in; a file is not something to guess at.
-const RECEIVE_DEFAULT: &str = ".";
+pub const RECEIVE_DEFAULT: &str = ".";
 
 const LEVEL_INFO: Entry = ["info", "信息"];
 const LEVEL_WARN: Entry = ["warn", "警告"];
@@ -170,6 +185,12 @@ pub enum PromptAction {
     WifiPassword,
     /// Where the device's log is uploaded to.
     WebdavUrl,
+    /// The transfer form's host path: a file to send, a directory to take into.
+    TransferLocal,
+    /// The transfer form's device path. Kept because the pager needs it and
+    /// because what a run is for belongs on the screen; a ZMODEM send does not
+    /// put it on the wire.
+    TransferTarget,
 }
 
 impl Prompt {
@@ -208,6 +229,8 @@ impl Prompt {
                 "Upload URL (http:// or https://)",
                 "上传地址（http:// 或 https://）",
             ],
+            PromptAction::TransferLocal => LOCAL_LABEL,
+            PromptAction::TransferTarget => TARGET_LABEL,
         }
     }
 
@@ -220,6 +243,8 @@ impl Prompt {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
             PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
+            PromptAction::TransferLocal => LOCAL_PLACEHOLDER,
+            PromptAction::TransferTarget => TARGET_PLACEHOLDER,
         }
     }
 
@@ -364,6 +389,30 @@ pub fn prompt_webdav_url(app: &mut App) {
             .as_ref()
             .map(|d| d.url.clone())
             .unwrap_or_default(),
+    );
+    app.dialog = Some(Dialog::Prompt(prompt));
+}
+
+/// Ask for the transfer form's host path.
+///
+/// The label follows the form's direction: the same row is a file to send and a
+/// directory to take into, and a prompt that said "file" for a receive would be
+/// asking for the wrong thing.
+pub fn prompt_transfer_local(app: &mut App) {
+    let prompt = Prompt::with_text(
+        LOCAL_TITLE,
+        PromptAction::TransferLocal,
+        &app.transfer.local.clone(),
+    );
+    app.dialog = Some(Dialog::Prompt(prompt));
+}
+
+/// Ask for the transfer form's device path.
+pub fn prompt_transfer_target(app: &mut App) {
+    let prompt = Prompt::with_text(
+        TARGET_TITLE,
+        PromptAction::TransferTarget,
+        &app.transfer.target.clone(),
     );
     app.dialog = Some(Dialog::Prompt(prompt));
 }
@@ -724,6 +773,15 @@ fn start(app: &mut App, prompt: Prompt) {
                     }
                 };
             ask(app, ConfirmAction::Accessory(command));
+        }
+        // The form's two paths are just recorded: nothing is sent until the
+        // Start action is pressed, and a half-edited path is not something the
+        // device should ever see.
+        PromptAction::TransferLocal => {
+            app.transfer.local = answer.trim().to_string();
+        }
+        PromptAction::TransferTarget => {
+            app.transfer.target = answer.trim().to_string();
         }
         PromptAction::WebdavUrl => {
             if answer.trim().is_empty() {

@@ -56,6 +56,8 @@ three rules:
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
 | `views/network.rs` | The WiFi and WebDAV form: ten rows the keyboard walks, each action raising an approval card that names the change rather than the command |
+| `transfer/probe.rs` | The question the web client never asks: what file-transfer tools the device has, and therefore whether a run takes ZMODEM or the `dd \| base64` pager |
+| `views/transfer.rs` | The transfer form: direction, the two paths, three actions, and the precheck that decides the channel — plus the history of what has moved |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -72,9 +74,16 @@ of the state and may not reshape what it is drawing.
 
 Network is a live form: `@w?`/`@w scan` fill it, `@w=…` and `@d=…` are raised
 as approval cards that name the change, and a scan's answer goes to its own list
-rather than into the status slot. Assistant and Transfer still say so in their
-body rather than showing an empty frame; they are the next views, followed by the
-agent layer.
+rather than into the status slot.
+
+Transfer is a live form too. Opening it asks the device what it has, once: a
+board with `lrzsz` gets a ZMODEM run, one with only `dd`/`base64` gets the shell
+pager, and one with neither is told so instead of being handed a start button
+that can only fail. The channel is the device's answer and not a setting — the
+web client never asks, because a browser has no `sz` to offer, and this program
+does.
+
+Assistant is the next view, and behind it the agent layer.
 
 Every management question — `@i?`, `@u?`, `@w?`, `@d?` — is asked on the
 bridge's own GATT service and not down the pipe the target prints to. That is

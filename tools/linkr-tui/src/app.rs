@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::accessory::{self, UartSettings};
 use crate::device::{Conversation, Query, Reply};
@@ -17,11 +17,12 @@ use crate::i18n::Lang;
 use crate::session::{Dial, Session};
 use crate::text::human_bytes;
 use crate::theme::{Theme, ThemeChoice};
+use crate::transfer::probe::{self, TRANSFER_PROBE};
 use crate::transfer::zmodem::{Event as TransferEvent, LiveTransfer};
 use crate::transport::{Link, LinkEvent};
 use crate::views::diagnostics::DiagnosticsState;
 use crate::views::terminal::TerminalPane;
-use crate::views::transfer::TransferState;
+use crate::views::transfer::{RecordState, TransferState};
 use crate::watch::{SerialWatch, WatchOptions};
 use crate::{dialogs, palette};
 
@@ -31,6 +32,28 @@ use crate::{dialogs, palette};
 /// the transport module implements — re-exported rather than mirrored, so a
 /// link cannot exist without the chrome having a word for it.
 pub use crate::transport::LinkKind as Transport;
+
+/// A transfer precheck that is out, and the answer being collected for it.
+///
+/// A probe is a shell command and the device's answer to it, so it has to live
+/// across ticks: the tick that asked is never the tick that was answered, and a
+/// buffer held in a local variable would be dropped between them.
+#[derive(Debug, Clone)]
+pub struct ProbeRun {
+    /// When the question went out.
+    pub started: Instant,
+    /// Everything the device has printed since, best-effort as text. The answer
+    /// is a list of tool names; a byte that is not text was not going to name
+    /// one.
+    pub text: String,
+}
+
+/// How long a precheck may go unanswered before the view says so.
+///
+/// Generous, because the answer comes back through a console the target is
+/// typing into: a board busy with something else answers when it answers, and a
+/// probe that gave up after a second would report a working board as broken.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A shortcut in the sidebar's quick-send list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +150,12 @@ pub struct App {
     pub diagnostics: DiagnosticsState,
     /// WiFi/WebDAV management state for the network view.
     pub network: crate::views::network::NetworkState,
-    /// Transfer records for the transfer view.
-    pub transfer: crate::views::transfer::TransferState_,
+    /// The transfer form, its precheck and the records of what has moved.
+    pub transfer: TransferState,
+    /// The precheck in flight: when it was asked and what the device has said
+    /// since. `None` unless [`TransferState::probing`], which is the flag a
+    /// frame reads; this is the buffer the answer is collected into.
+    pub probe: Option<ProbeRun>,
     /// The ZMODEM transfer in flight, if any.
     ///
     /// Held as one value rather than as "an engine and a flag": a direction kept
@@ -240,7 +267,8 @@ impl Default for App {
             notices: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
-            transfer: crate::views::transfer::TransferState_::default(),
+            transfer: TransferState::default(),
+            probe: None,
             live_transfer: None,
             assistant: crate::views::assistant::AssistantState::default(),
             terminal: TerminalPane::new(),
@@ -454,8 +482,17 @@ impl App {
     }
 
     /// Select a view.
+    ///
+    /// Opening the transfer view asks the device what it has, the first time
+    /// and only the first time: the channel is the device's to choose, and a
+    /// form that offered "start" before anything had been asked would be
+    /// offering a guess. A later visit keeps what it already learned — the
+    /// precheck is a question about the board, not about the moment.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
+        if view == View::Transfer && self.connected() && self.transfer.probe.is_none() {
+            self.run_transfer_probe();
+        }
     }
 
     /// How many sidebar rows the cursor can reach: the transport row, the two
@@ -592,6 +629,11 @@ impl App {
                         if self.collect_output {
                             self.output.push_back(bytes.clone());
                         }
+                        // A precheck reads the same console the pane paints:
+                        // its answer is not a management reply and does not
+                        // arrive on the bridge's own channel, so it is picked
+                        // out of the target's output as it prints.
+                        self.feed_probe(&bytes);
                         // The same bytes, read a second time by the watch. It
                         // looks for a line saying `Kernel panic` or `Out of
                         // memory`, and where lines end is its own business — a
@@ -669,6 +711,7 @@ impl App {
             }
         }
         self.fold_transfer();
+        self.fold_probe();
         // Written after the fold, so a session that ended on this tick still
         // gets its closing frames out: the sign-off is part of the dialogue, not
         // a consequence of it. One write for the whole tick, because it is one
@@ -715,6 +758,12 @@ impl App {
             // hang-up as a slow bridge.
             self.talk.reset();
             self.management.reset();
+            // A precheck that was waiting on the console has nowhere to be
+            // answered from now. Dropped rather than left running: the timeout
+            // would report "the precheck did not answer" over a hang-up, which
+            // is not what happened.
+            self.probe = None;
+            self.transfer.probing = false;
             // And the half-typed line goes with it.
             self.pending_line.clear();
         }
@@ -1080,6 +1129,141 @@ impl App {
         self.live_transfer.is_some()
     }
 
+    /// Ask the device what file-transfer tools it has.
+    ///
+    /// Nothing is typed before the answer comes back, and that is the whole
+    /// point: the channel a run takes is the device's to choose, and a start
+    /// guessed at would put ZMODEM escapes at a board that has never heard of
+    /// them. The answer is collected by [`App::fold_probe`] as the console
+    /// prints it.
+    pub fn run_transfer_probe(&mut self) -> bool {
+        if self.transferring() {
+            crate::views::transfer::say(self, self.strings().xfer_busy, NoticeLevel::Warn);
+            return false;
+        }
+        if !self.connected() {
+            crate::views::transfer::say(self, self.strings().xfer_needs_link, NoticeLevel::Warn);
+            return false;
+        }
+        if !self.send_command(TRANSFER_PROBE) {
+            return false;
+        }
+        self.transfer.probing = true;
+        self.transfer.message.clear();
+        self.probe = Some(ProbeRun {
+            started: Instant::now(),
+            text: String::new(),
+        });
+        true
+    }
+
+    /// Start the run the transfer form describes.
+    ///
+    /// The channel is the precheck's, not the form's: a board with `lrzsz`
+    /// takes a block session, and a board with only the pager's tools has to be
+    /// talked to in shell commands. Both are the same two paths on the form,
+    /// which is why the form does not offer the choice.
+    pub fn start_transfer_from_form(&mut self) -> bool {
+        if self.transferring() {
+            crate::views::transfer::say(self, self.strings().xfer_busy, NoticeLevel::Warn);
+            return false;
+        }
+        if !self.connected() {
+            crate::views::transfer::say(self, self.strings().xfer_needs_link, NoticeLevel::Warn);
+            return false;
+        }
+        match self.transfer.channel() {
+            None => {
+                // No precheck, or a precheck that found neither channel: the
+                // reason is worth more than the silence of a refused click.
+                let text = if self.transfer.probe.is_none() {
+                    self.strings().xfer_probe_first
+                } else {
+                    self.strings().xfer_probe_none
+                };
+                crate::views::transfer::say(self, text, NoticeLevel::Warn);
+                false
+            }
+            Some(probe::Channel::Zmodem) => self.start_zmodem_from_form(),
+            Some(probe::Channel::Base64) => {
+                crate::views::transfer::say(
+                    self,
+                    self.strings().xfer_pager_pending,
+                    NoticeLevel::Warn,
+                );
+                false
+            }
+        }
+    }
+
+    /// A ZMODEM run, from the two paths on the form.
+    ///
+    /// The device path is not sent: `rz` on the far end names the file itself,
+    /// and a path this end chose would either be ignored or, worse, be taken as
+    /// a command to the shell. It is kept on the form because the pager needs
+    /// it and because what a run is for belongs on the screen.
+    fn start_zmodem_from_form(&mut self) -> bool {
+        let path = self.transfer.local.trim();
+        if self.transfer.uploading() {
+            if path.is_empty() {
+                crate::views::transfer::say(self, self.strings().xfer_no_path, NoticeLevel::Warn);
+                return false;
+            }
+            self.start_send(PathBuf::from(path))
+        } else {
+            let dir = if path.is_empty() {
+                dialogs::RECEIVE_DEFAULT
+            } else {
+                path
+            };
+            self.start_receive(PathBuf::from(dir))
+        }
+    }
+
+    /// Fold the precheck in flight into the form, and let it go when the device
+    /// has answered — or when it has had long enough and has not.
+    fn fold_probe(&mut self) {
+        let Some(run) = self.probe.as_mut() else {
+            return;
+        };
+        if let Some(report) = probe::parse_probe(&run.text) {
+            let word = match report.channel() {
+                Some(probe::Channel::Zmodem) => self.strings().xfer_probe_zmodem,
+                Some(probe::Channel::Base64) => self.strings().xfer_probe_pager,
+                None => self.strings().xfer_probe_none,
+            };
+            let level = if report.channel().is_none() {
+                NoticeLevel::Warn
+            } else {
+                NoticeLevel::Info
+            };
+            self.probe = None;
+            self.transfer.probing = false;
+            self.transfer.probe = Some(report);
+            crate::views::transfer::say(self, word, level);
+            return;
+        }
+        // A probe that is still out is not a failure yet. Only the timeout says
+        // "did not answer", because a slow console and a broken one look alike
+        // until one of them has had time to speak.
+        if run.started.elapsed() >= PROBE_TIMEOUT {
+            self.probe = None;
+            self.transfer.probing = false;
+            crate::views::transfer::say(
+                self,
+                self.strings().xfer_probe_no_answer,
+                NoticeLevel::Warn,
+            );
+        }
+    }
+
+    /// Hand one chunk of the console to the precheck that is waiting on it.
+    fn feed_probe(&mut self, bytes: &[u8]) {
+        if let Some(run) = self.probe.as_mut() {
+            run.text.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
+
     /// Offer a local file to the device.
     ///
     /// Refuses out loud rather than quietly doing nothing: the operator picked
@@ -1222,7 +1406,7 @@ impl App {
             }
             TransferEvent::Saved { name, bytes } => {
                 self.transfer
-                    .ended(&name, upload, TransferState::Saved, Some(bytes));
+                    .ended(&name, upload, RecordState::Saved, Some(bytes));
                 let text = format!(
                     "{}{} · {}",
                     self.strings().xfer_saved_notice,
@@ -1240,7 +1424,7 @@ impl App {
                 // row with a blank name would read as a file called "".
                 if !name.is_empty() {
                     self.transfer
-                        .ended(&name, upload, TransferState::Failed, None);
+                        .ended(&name, upload, RecordState::Failed, None);
                 }
                 let text = if name.is_empty() {
                     format!("{}{reason}", self.strings().xfer_failed_notice)
@@ -1614,6 +1798,84 @@ mod tests {
         let before = app.notices.len();
         assert!(!app.send_bytes(b"x"));
         assert_eq!(app.notices.len(), before);
+    }
+
+    fn probe_run(app: &mut App, text: &str, ago: Duration) {
+        app.transfer.probing = true;
+        app.probe = Some(ProbeRun {
+            started: Instant::now() - ago,
+            text: text.to_string(),
+        });
+    }
+
+    #[test]
+    fn the_console_feeds_the_probe_and_its_answer_picks_the_channel() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        probe_run(&mut app, "", Duration::ZERO);
+        app.feed_probe(b"printf 'LINKR_XFER_BEGIN\n'; ...\n");
+        app.feed_probe(b"LINKR_XFER_BEGIN\nLINKR_XTOOL:sz\nLINKR_XTOOL:rz\n");
+        // An unfinished answer is not one: a report read off half a list would
+        // send a board that has `rz` down the slow channel.
+        app.fold_probe();
+        assert!(app.transfer.probe.is_none());
+        app.feed_probe(b"LINKR_XFER_END\n");
+        app.fold_probe();
+        assert_eq!(
+            app.transfer.channel(),
+            Some(crate::transfer::probe::Channel::Zmodem)
+        );
+        assert!(!app.transfer.probing);
+        assert!(app.probe.is_none());
+    }
+
+    #[test]
+    fn an_unanswered_probe_says_so_once_its_timeout_has_passed() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        probe_run(&mut app, "nothing yet", PROBE_TIMEOUT);
+        app.fold_probe();
+        assert!(app.transfer.probe.is_none());
+        assert!(!app.transfer.probing);
+        assert_eq!(app.transfer.message, "the precheck did not answer");
+    }
+
+    #[test]
+    fn a_probe_is_refused_with_no_link() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        assert!(!app.run_transfer_probe());
+        assert!(!app.transfer.probing);
+        assert_eq!(
+            app.transfer.message,
+            "Not connected — no transfer was started."
+        );
+    }
+
+    #[test]
+    fn a_start_with_no_precheck_is_refused_out_loud() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // A real link, so the refusal is the precheck's and not the link's.
+        app.dial(&Dial::Stdio("-".to_string()))
+            .expect("the loopback opens");
+        app.pump();
+        assert!(app.connected());
+        assert!(!app.start_transfer_from_form());
+        assert!(
+            app.transfer.message.contains("precheck"),
+            "{}",
+            app.transfer.message
+        );
+        assert!(app.live_transfer.is_none());
     }
 
     /// Hanging up deliberately is announced once — and the pump does not
@@ -2345,7 +2607,7 @@ mod tests {
             app.send_bytes(b"x"),
             "a keystroke goes to the device once the transfer is over"
         );
-        assert_eq!(app.transfer.records[0].state, TransferState::Failed);
+        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
         assert!(
             app.log
                 .last()
@@ -2370,7 +2632,7 @@ mod tests {
         wire.close();
 
         assert!(pump_until(&mut app, |app| !app.transferring()));
-        assert_eq!(app.transfer.records[0].state, TransferState::Failed);
+        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
         assert!(
             app.log
                 .iter()
@@ -2431,7 +2693,7 @@ mod tests {
             !half.exists(),
             "a cancelled receive left a file that looks complete"
         );
-        assert_eq!(app.transfer.records[0].state, TransferState::Failed);
+        assert_eq!(app.transfer.records[0].state, RecordState::Failed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
