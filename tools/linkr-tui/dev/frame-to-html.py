@@ -125,7 +125,13 @@ def Style_with(style: Style) -> Style:
     return copy
 
 
-def render(rows: list[list[tuple[str, int, Style]]], title: str) -> str:
+def screen_markup(rows: list[list[tuple[str, int, Style]]]) -> str:
+    """The screen as a grid of cells, with its own column count.
+
+    The count travels on the element as `--cols` rather than being baked into
+    the page's stylesheet, so several screens of different widths can sit on one
+    page without their grids disagreeing.
+    """
     columns = sum(span for _, span, _ in (rows[0] if rows else []))
     body = []
     for row in rows:
@@ -144,40 +150,46 @@ def render(rows: list[list[tuple[str, int, Style]]], title: str) -> str:
             text = "&nbsp;" if glyph == " " else html.escape(glyph)
             cells.append(f"<i{attribute}>{text}</i>")
         body.append(f'<div class="row">{"".join(cells)}</div>')
+    return f'<div class="screen" style="--cols:{columns}">{"".join(body)}</div>'
+
+
+def render(rows: list[list[tuple[str, int, Style]]], title: str) -> str:
+    columns = sum(span for _, span, _ in (rows[0] if rows else []))
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>{html.escape(title)}</title>
 <style>
-  :root {{
-    --p0:#000;--p1:#8b2c2c;--p2:#2c7a3f;--p3:#8a7a2c;--p4:#33518a;--p5:#7a2c7a;
-    --p6:#2c7a7a;--p7:#b8b8b8;--p8:#666;--p9:#e06060;--p10:#54c46a;--p11:#d8c860;
-    --p12:#6f9ae0;--p13:#c86fc8;--p14:#5fc8c8;--p15:#fff;
-  }}
-  body {{ margin:0; padding:24px; background:#888; }}
-  figure {{ margin:0; }}
-  figcaption {{ font:13px/1.6 system-ui,sans-serif; color:#f2f2f2; margin-bottom:10px; }}
-  .screen {{
-    display:inline-block; padding:10px; background:#000; border-radius:8px;
-    font-family:"Sarasa Mono SC","Noto Sans Mono CJK SC","Noto Sans Mono",
-                "DejaVu Sans Mono",monospace;
-    font-size:14px; line-height:1.2; letter-spacing:0; white-space:pre;
-  }}
-  .row {{ display:grid; grid-template-columns:repeat({columns},1ch); }}
-  i {{ font-style:normal; overflow:hidden; }}
+{SCREEN_CSS}
 </style>
 </head>
 <body>
 <figure>
 <figcaption>{html.escape(title)} — {columns} columns, {len(rows)} rows</figcaption>
-<div class="screen">
-{"".join(body)}
-</div>
+{screen_markup(rows)}
 </figure>
 </body>
 </html>
 """
+
+
+SCREEN_CSS = """  :root {
+    --p0:#000;--p1:#8b2c2c;--p2:#2c7a3f;--p3:#8a7a2c;--p4:#33518a;--p5:#7a2c7a;
+    --p6:#2c7a7a;--p7:#b8b8b8;--p8:#666;--p9:#e06060;--p10:#54c46a;--p11:#d8c860;
+    --p12:#6f9ae0;--p13:#c86fc8;--p14:#5fc8c8;--p15:#fff;
+  }
+  body { margin:0; padding:24px; background:#888; }
+  figure { margin:0; }
+  figcaption { font:13px/1.6 system-ui,sans-serif; color:#f2f2f2; margin-bottom:10px; }
+  .screen {
+    display:inline-block; padding:10px; background:#000; border-radius:8px;
+    font-family:"Sarasa Mono SC","Noto Sans Mono CJK SC","Noto Sans Mono",
+                "DejaVu Sans Mono",monospace;
+    font-size:14px; line-height:1.2; letter-spacing:0; white-space:pre;
+  }
+  .row { display:grid; grid-template-columns:repeat(var(--cols),1ch); }
+  i { font-style:normal; overflow:hidden; }"""
 
 
 def main() -> int:

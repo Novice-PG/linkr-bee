@@ -1,0 +1,20 @@
+# The toolchain a release is built with, declared here rather than in the
+# workflow. rustup reads this file, so CI, a laptop and `dev/package.sh` cannot
+# disagree about which compiler — or which platforms — this crate is built for.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+
+# Every target the crate ships to. The seven-target `cargo check` is one of the
+# four gates, and rustup installing them from here is what keeps that gate from
+# needing a setup step of its own in CI.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]

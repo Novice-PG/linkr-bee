@@ -1,9 +1,11 @@
 //! Transfer view: what has been sent to and taken from the target, over the
-//! base64 shell protocol of `src/transfer/files.rs`.
+//! ZMODEM session of `src/transfer/zmodem.rs`.
 //!
 //! The model is the session layer's list of transfer records; the painter is a
 //! pure function from those records plus a width. Two sections, matching the
-//! direction of each transfer, plus the command hints for starting one.
+//! direction of each transfer, plus the command hints for starting one. A
+//! transfer that is still running is headed by a banner naming its direction and
+//! its destination, and its file is an ordinary record whose counter moves.
 
 use ratatui::text::{Line, Span};
 
@@ -41,9 +43,90 @@ pub struct TransferState_ {
     pub records: Vec<TransferRecord>,
 }
 
+/// How many records the view keeps, oldest dropped. A session that moved a
+/// hundred files should not grow the frame for ever, and the log dialog is where
+/// a longer history belongs.
+pub const MAX_RECORDS: usize = 100;
+
 impl TransferState_ {
     pub fn has_records(&self) -> bool {
         !self.records.is_empty()
+    }
+
+    /// Record a file that has begun. One record per file per direction, in the
+    /// order the far ends started them.
+    pub fn started(&mut self, name: String, total: Option<u64>, upload: bool) {
+        self.push(TransferRecord {
+            name,
+            bytes: Some(0),
+            total,
+            upload,
+            state: TransferState::Pending,
+        });
+    }
+
+    /// Record the end of a file, matching the record that began it.
+    ///
+    /// A file that never announced itself is still recorded: the fact that it
+    /// went is worth more than the tidiness of a one-to-one pairing, and the
+    /// alternative — dropping it — would be a transfer that happened and is not
+    /// on screen.
+    pub fn ended(&mut self, name: &str, upload: bool, state: TransferState, bytes: Option<u64>) {
+        if let Some(record) = self.pending(name, upload) {
+            record.state = state;
+            if let Some(bytes) = bytes {
+                record.bytes = Some(bytes);
+                // A file whose size the far end never declared still has one:
+                // it is what arrived.
+                record.total.get_or_insert(bytes);
+            }
+            return;
+        }
+        self.push(TransferRecord {
+            name: name.to_string(),
+            bytes,
+            total: bytes,
+            upload,
+            state,
+        });
+    }
+
+    /// Move the counter of the file in flight. Byte counts are not events, so
+    /// they do not go through [`Self::ended`] — a record would be the wrong
+    /// shape for a value that changes every kilobyte.
+    pub fn counted(&mut self, name: &str, upload: bool, bytes: u64, total: Option<u64>) {
+        if let Some(record) = self.pending(name, upload) {
+            record.bytes = Some(bytes);
+            if total.is_some() {
+                record.total = total;
+            }
+        }
+    }
+
+    /// Everything still in flight is over, and did not finish. Used when the
+    /// link goes away: a row left reading "running" over a session that has
+    /// ended is a row that lies.
+    pub fn abandon(&mut self) {
+        for record in &mut self.records {
+            if record.state == TransferState::Pending {
+                record.state = TransferState::Failed;
+            }
+        }
+    }
+
+    /// The newest unfinished record for a file. Newest, because a name may be
+    /// sent twice in one session and it is the later one that is in flight.
+    fn pending(&mut self, name: &str, upload: bool) -> Option<&mut TransferRecord> {
+        self.records.iter_mut().rev().find(|record| {
+            record.upload == upload && record.name == name && record.state == TransferState::Pending
+        })
+    }
+
+    fn push(&mut self, record: TransferRecord) {
+        self.records.push(record);
+        while self.records.len() > MAX_RECORDS {
+            self.records.remove(0);
+        }
     }
 }
 
@@ -60,21 +143,37 @@ fn state_word(state: TransferState, app: &App) -> &'static str {
 
 /// A human size: `1.2 KB`, `3.4 MB`, bytes below a kilobyte.
 fn size_text(bytes: Option<u64>, total: Option<u64>) -> String {
-    let fmt = |b: u64| -> String {
-        if b >= 1_048_576 {
-            format!("{:.1} MB", b as f64 / 1_048_576.0)
-        } else if b >= 1024 {
-            format!("{:.1} KB", b as f64 / 1024.0)
-        } else {
-            format!("{b} B")
-        }
-    };
     match (bytes, total) {
-        (Some(done), Some(total)) if total > 0 => format!("{} / {}", fmt(done), fmt(total)),
-        (Some(done), _) => fmt(done),
-        (None, Some(total)) => fmt(total),
+        (Some(done), Some(total)) if total > 0 => {
+            format!("{} / {}", text::human_bytes(done), text::human_bytes(total))
+        }
+        (Some(done), _) => text::human_bytes(done),
+        (None, Some(total)) => text::human_bytes(total),
         (None, None) => String::new(),
     }
+}
+
+/// The banner over the two sections while a transfer owns the link.
+///
+/// The heading names the direction and where the files are going, because those
+/// are the two things the operator asked for and the two things a half-finished
+/// transfer can get wrong. The file in flight is a record like any other; this
+/// only says which session it belongs to.
+fn banner(app: &App, width: u16, theme: &Theme) -> Line<'static> {
+    let s = app.strings();
+    let live = app.live_transfer.as_ref().expect("checked by the caller");
+    let (word, detail) = if live.upload {
+        (
+            s.xfer_started_out,
+            format!("{} ({})", live.target, live.files),
+        )
+    } else {
+        (s.xfer_started_in, live.target.clone())
+    };
+    Line::from(Span::styled(
+        text::clip_to(&format!("  {word}{detail}"), width as usize),
+        theme.accent_strong(),
+    ))
 }
 
 /// One record row: the file's name in body text, then ` · size · state` in the
@@ -131,8 +230,19 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             text::clip_to(&format!("  {}", s.xfer_download_hint), width as usize),
             theme.muted(),
         )),
+        Line::from(Span::styled(
+            text::clip_to(&format!("  {}", s.xfer_zmodem_hint), width as usize),
+            theme.muted(),
+        )),
         Line::from(""),
     ];
+
+    // The session in flight, before the two sections: it is the newest thing
+    // that has happened, and its record is at the bottom of its section.
+    if app.live_transfer.is_some() {
+        lines.push(banner(app, width, theme));
+        lines.push(Line::from(""));
+    }
 
     let uploads: Vec<&TransferRecord> = state.records.iter().filter(|r| r.upload).collect();
     let downloads: Vec<&TransferRecord> = state.records.iter().filter(|r| !r.upload).collect();
@@ -289,6 +399,11 @@ mod tests {
                     upload: true,
                     state: TransferState::Unverified,
                 }];
+                // The banner carries a path the operator typed, which is as long
+                // as anything a terminal will ever see.
+                a.live_transfer = Some(crate::transfer::zmodem::LiveTransfer::receive(
+                    "/a/directory/that/is/deliberately/rather/deep/for/a/narrow/pane",
+                ));
                 for line in lines(&a, &theme, width) {
                     let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                     assert!(
@@ -298,5 +413,131 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A record is opened by the start of a file, moved by the counter while it
+    /// is in flight, and closed by its end — the three shapes the engine reports,
+    /// which are deliberately not the same shape.
+    #[test]
+    fn a_record_follows_a_file_from_start_to_end() {
+        let mut state = TransferState_::default();
+        state.started("fw.bin".into(), Some(2048), true);
+        assert_eq!(state.records.len(), 1);
+        assert_eq!(state.records[0].state, TransferState::Pending);
+        assert_eq!(state.records[0].bytes, Some(0));
+
+        state.counted("fw.bin", true, 1024, Some(2048));
+        assert_eq!(state.records[0].bytes, Some(1024), "the counter moves");
+        assert_eq!(state.records[0].total, Some(2048));
+
+        state.ended("fw.bin", true, TransferState::Saved, Some(2048));
+        assert_eq!(state.records[0].state, TransferState::Saved);
+        assert_eq!(state.records[0].bytes, Some(2048));
+        assert_eq!(state.records.len(), 1, "one file, one record");
+
+        // A counter for a file that has finished is not a record of its own.
+        state.counted("fw.bin", true, 10, None);
+        assert_eq!(
+            state.records[0].bytes,
+            Some(2048),
+            "a finished row stays put"
+        );
+    }
+
+    /// A file the far end never declared a size for still ends up with one: it
+    /// is what arrived, and a row with no denominator reads as a row that never
+    /// finished.
+    #[test]
+    fn a_size_the_far_end_never_declared_is_filled_in_by_what_arrived() {
+        let mut state = TransferState_::default();
+        state.started("dmesg.log".into(), None, false);
+        assert_eq!(state.records[0].total, None);
+        state.ended("dmesg.log", false, TransferState::Saved, Some(4096));
+        assert_eq!(state.records[0].total, Some(4096));
+        assert_eq!(state.records[0].bytes, Some(4096));
+    }
+
+    /// The two directions do not share a name space: the same file going out and
+    /// coming back is two records, and the end of one must not close the other.
+    #[test]
+    fn the_two_directions_do_not_close_each_others_records() {
+        let mut state = TransferState_::default();
+        state.started("payload.bin".into(), Some(10), true);
+        state.started("payload.bin".into(), Some(10), false);
+        state.ended("payload.bin", false, TransferState::Saved, Some(10));
+        assert_eq!(state.records[0].state, TransferState::Pending, "the upload");
+        assert_eq!(state.records[1].state, TransferState::Saved, "the download");
+    }
+
+    /// A file that ends without ever having begun is still recorded — a transfer
+    /// that happened and is not on screen is worse than a row with no mate.
+    #[test]
+    fn a_file_that_never_announced_itself_is_still_recorded() {
+        let mut state = TransferState_::default();
+        state.ended("surprise.bin", false, TransferState::Failed, None);
+        assert_eq!(state.records.len(), 1);
+        assert_eq!(state.records[0].state, TransferState::Failed);
+        assert_eq!(state.records[0].bytes, None);
+    }
+
+    /// Giving up marks what was in flight as failed and leaves the history
+    /// alone: the flag going red is about *this* transfer, not the last one.
+    #[test]
+    fn giving_up_closes_only_what_is_in_flight() {
+        let mut state = TransferState_::default();
+        state.started("done.bin".into(), Some(4), false);
+        state.ended("done.bin", false, TransferState::Saved, Some(4));
+        state.started("half.bin".into(), Some(100), false);
+        state.abandon();
+        assert_eq!(state.records[0].state, TransferState::Saved);
+        assert_eq!(state.records[1].state, TransferState::Failed);
+    }
+
+    /// The history is bounded, and it drops the oldest: a long session must not
+    /// grow the frame without limit.
+    #[test]
+    fn the_history_is_bounded_and_drops_the_oldest() {
+        let mut state = TransferState_::default();
+        for index in 0..MAX_RECORDS + 5 {
+            state.started(format!("f{index}.bin"), Some(1), true);
+        }
+        assert_eq!(state.records.len(), MAX_RECORDS);
+        assert_eq!(
+            state.records.first().map(|record| record.name.as_str()),
+            Some("f5.bin"),
+            "the oldest went first"
+        );
+    }
+
+    /// The banner names the direction and where the files are going, and the row
+    /// under it is the file in flight — the two halves of "what is happening".
+    #[test]
+    fn a_live_transfer_is_headed_by_its_direction() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::En);
+        a.live_transfer = Some(crate::transfer::zmodem::LiveTransfer::receive("/tmp/inbox"));
+        a.transfer.started("dmesg.log".into(), Some(4096), false);
+        a.transfer.counted("dmesg.log", false, 2048, Some(4096));
+        let text = body_text(&lines(&a, &theme, 70));
+        assert!(text.contains("receiving into: /tmp/inbox"), "{text}");
+        assert!(text.contains("dmesg.log"), "{text}");
+        assert!(text.contains("2.0 KB / 4.0 KB"), "{text}");
+
+        let mut a = app(Lang::Zh);
+        a.live_transfer = Some(crate::transfer::zmodem::LiveTransfer::receive("/tmp/inbox"));
+        let zh = body_text(&lines(&a, &theme, 70));
+        assert!(zh.contains("/tmp/inbox"), "{zh}");
+        assert!(!zh.contains("receiving into"), "{zh}");
+    }
+
+    /// With nothing in flight there is no banner: an empty session is not a
+    /// session, and a heading over nothing reads as a stalled transfer.
+    #[test]
+    fn no_banner_without_a_transfer() {
+        let theme = Theme::DARK;
+        let a = app(Lang::En);
+        let text = body_text(&lines(&a, &theme, 70));
+        assert!(!text.contains("receiving into"), "{text}");
+        assert!(!text.contains("sending to the device"), "{text}");
     }
 }

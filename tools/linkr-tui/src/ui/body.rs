@@ -10,6 +10,7 @@
 //! never guesses its own size and never paints past it. That is the whole
 //! contract, and it is why a body can be asserted on without a terminal.
 
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use crate::app::App;
@@ -30,13 +31,20 @@ pub fn ground(app: &App, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
-/// The body of a view, as lines for a pane `width` columns wide.
-pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+/// The body of a view, as lines for the area it was given.
+///
+/// The pane is handed the whole rectangle rather than a width because the
+/// serial terminal is a *screen*: it shows a screenful of rows and wraps to the
+/// width, so both numbers are part of what it paints. Every other view is a
+/// document whose rows are laid out against the width alone, and it is given
+/// exactly that so nothing in those views has to know the split exists.
+pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
+    let width = area.width;
     match app.view {
         // A pane, not a document: the device's output is the content, and until
         // it writes there is nothing — which is what the design's first frame
         // shows.
-        View::Terminal => Vec::new(),
+        View::Terminal => views::terminal::lines(app, theme, area),
         View::Diagnostics => views::diagnostics::lines(app, theme, width),
         View::Network => views::network::lines(app, theme, width),
         View::Assistant => views::assistant::lines(app, theme, width),
@@ -48,6 +56,11 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::i18n::Lang;
+
+    /// An area for the tests: a pane `width` columns wide and 6 rows tall.
+    fn area(width: u16) -> Rect {
+        Rect::new(0, 0, width, 6)
+    }
 
     /// The text of a body, for assertions about what a pane shows.
     fn text_of(rows: &[Line<'static>]) -> String {
@@ -85,19 +98,24 @@ mod tests {
         }
     }
 
-    /// Every view has a body that says something, and the only silent one is the
-    /// terminal: a pane waiting for the device.
+    /// The terminal pane is a screen: it paints every row of its area, blank
+    /// until the device writes. Every other view is a document that has
+    /// something to say.
     #[test]
-    fn only_the_terminal_pane_is_silent() {
+    fn the_terminal_pane_paints_a_screen_and_the_others_paint_documents() {
         let theme = Theme::DARK;
         for view in View::ALL {
             let app = App {
                 view,
                 ..App::default()
             };
-            let rows = lines(&app, &theme, 60);
+            let rows = lines(&app, &theme, area(60));
             if view == View::Terminal {
-                assert!(rows.is_empty(), "{view:?} painted a placeholder");
+                assert_eq!(rows.len(), 6, "{view:?} did not paint a screenful");
+                assert!(
+                    text_of(&rows).trim().is_empty(),
+                    "{view:?} painted a placeholder instead of a blank screen"
+                );
             } else {
                 assert!(
                     !text_of(&rows).trim().is_empty(),
@@ -107,8 +125,8 @@ mod tests {
         }
     }
 
-    /// Every view has a body that names itself, in either language. There is
-    /// no unfinished view left: all five are built.
+    /// Every view has a body that names itself, in either language. The
+    /// terminal is the exception: it shows the device's bytes, not a title.
     #[test]
     fn every_view_names_itself() {
         let theme = Theme::DARK;
@@ -120,9 +138,9 @@ mod tests {
                 };
                 app.view = view;
                 if view == View::Terminal {
-                    continue; // the pane is silent until the device writes
+                    continue; // the pane carries the device's words, not its own
                 }
-                let text = text_of(&lines(&app, &theme, 60));
+                let text = text_of(&lines(&app, &theme, area(60)));
                 assert!(
                     text.contains(lang.view_name(view)),
                     "{view:?} {lang:?}: {text:?}"
@@ -138,11 +156,15 @@ mod tests {
         let theme = Theme::DARK;
         for width in [4u16, 12, 30, 80] {
             for view in View::ALL {
-                let app = App {
+                let mut app = App {
                     view,
                     ..App::default()
                 };
-                for line in lines(&app, &theme, width) {
+                // Give the terminal something to hold: an empty pane proves
+                // nothing about wrapping.
+                app.terminal
+                    .push_text("a long line that has to fold somewhere\n中文也要折行\n");
+                for line in lines(&app, &theme, area(width)) {
                     let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                     assert!(
                         crate::text::columns(&joined) <= width as usize,

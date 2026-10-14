@@ -1,0 +1,272 @@
+name: Host terminal (linkr-tui)
+
+# The host client is a Rust crate under tools/linkr-tui. It has its own gates —
+# one of which is a seven-target cross check — and its own release artifacts, so
+# it is a workflow of its own rather than jobs bolted onto the firmware one:
+# a TUI change should not spin up five Zephyr toolchains, and a firmware change
+# should not rebuild seven host binaries.
+#
+# Tag a release with `linkr-tui-v<version>`; the archives are attached to it.
+# The tag is namespaced so it cannot collide with the firmware's `v*` releases.
+
+on:
+  push:
+    # Every branch, filtered to the crate's own files: a TUI change runs these
+    # gates wherever it is pushed, a firmware-only change does not. Path filters
+    # are not evaluated for tag pushes, which is what a release wants — the tag
+    # builds whatever it points at.
+    branches:
+      - "**"
+    tags:
+      - "linkr-tui-v*"
+    paths:
+      - "tools/linkr-tui/**"
+      - ".github/workflows/linkr-tui.yml"
+  pull_request:
+    paths:
+      - "tools/linkr-tui/**"
+      - ".github/workflows/linkr-tui.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linkr-tui-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    # Every command below is crate-relative, the way it is run by hand.
+    working-directory: tools/linkr-tui
+
+jobs:
+  gates:
+    name: Gates (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml names the channel, the components and the seven
+      # targets, so there is nothing to install here beyond honouring it.
+      - name: Show the toolchain
+        run: |
+          set -euo pipefail
+          cargo --version
+          rustc --version
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+
+      - name: Style
+        run: cargo fmt --check
+
+      - name: Lints, warnings are errors
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests, headless
+        # `--locked`: Cargo.lock is committed, and a gate that silently updates
+        # it would be testing a dependency set nobody reviewed.
+        run: cargo test --locked
+
+  targets:
+    name: Seven targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+          key: targets
+
+      # The fourth gate: the crate claims Linux, macOS and Windows on x86-64 and
+      # ARM, so every one of them must at least type-check. `check` rather than
+      # `build`: no cross linkers are needed, which keeps this job to one runner
+      # and a few minutes.
+      - name: Check every target
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                        x86_64-pc-windows-msvc aarch64-pc-windows-msvc \
+                        x86_64-pc-windows-gnu \
+                        x86_64-apple-darwin aarch64-apple-darwin; do
+            echo "::group::$target"
+            cargo check --locked --all-targets --target "$target"
+            echo "::endgroup::"
+          done
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: [gates]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux on x86-64: the host this is developed on, so it is also the
+          # one whose archive is *run* before it is uploaded.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            native: true
+          # Linux on ARM: needs a cross linker, installed below.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu
+            linker_var: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            linker: aarch64-linux-gnu-gcc
+          # Windows, GNU ABI: built on Linux, where mingw-w64 is one apt away.
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            apt: gcc-mingw-w64-x86-64
+            linker_var: CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
+            linker: x86_64-w64-mingw32-gcc
+          # Windows, MSVC ABI, on Windows: the ARM64 tools ship with the
+          # Visual Studio build the runner has.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            native: true
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+          # macOS on both architectures. `macos-latest` is ARM, and Apple's
+          # clang links either, so the x86-64 build is a target swap and no more.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            native: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the cross linker
+        if: matrix.apt != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y "${{ matrix.apt }}"
+
+      - name: Point cargo at it
+        if: matrix.linker_var != ''
+        shell: bash
+        run: echo "${{ matrix.linker_var }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+          key: ${{ matrix.target }}
+
+      # The layout of the archive is decided in one place, by the script, and
+      # the workflow only calls it — the same call a developer makes by hand.
+      - name: Build and package
+        shell: bash
+        run: dev/package.sh "${{ matrix.target }}"
+
+      - name: Check the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(ls dist/*.tar.gz)
+          echo "archive: $archive"
+          listing=$(tar -tzf "$archive")
+          echo "$listing"
+          name=$(basename "$archive" .tar.gz)
+          # Nothing may be in here that the script did not put there: a stray
+          # file in a release is uploaded before anyone reads the diff.
+          allowed=$(printf '%s\n' "$name/" "$name/linkr" "$name/linkr.exe" \
+                                  "$name/README.md" "$name/LICENSE")
+          for entry in $listing; do
+            echo "$allowed" | grep -qx "$entry" || {
+              echo "unexpected entry in the archive: $entry" >&2
+              exit 1
+            }
+          done
+          # And one of them must be the binary itself.
+          echo "$listing" | grep -qE "^$name/linkr(\.exe)?$" || {
+            echo "the archive holds no binary" >&2
+            exit 1
+          }
+
+      # Only the host's own target can be executed here. The rest are checked by
+      # the fact that they linked, which is the most this runner can say.
+      - name: Run the packaged binary
+        if: matrix.native
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/smoke && mkdir -p /tmp/smoke
+          tar -xzf dist/*.tar.gz -C /tmp/smoke
+          bin=$(find /tmp/smoke -type f \( -name linkr -o -name linkr.exe \) | head -1)
+          echo "running $bin"
+          "$bin" --version
+          # The paint path, through the same renderer the TUI uses.
+          "$bin" --print-frame 80x24 --lang en --sample > /dev/null
+          # A dial that cannot open must fail loudly rather than start a broken
+          # session — this is the exit code the interface documents. (`|| status=$?`
+          # rather than `if`: the subject is the *exit code*, and an `if` whose
+          # condition is false has a status of its own.)
+          status=0
+          "$bin" --bridge /no/such/program > /dev/null 2>&1 || status=$?
+          [ "$status" -eq 2 ] || { echo "expected exit 2, got $status" >&2; exit 1; }
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-tui-${{ matrix.target }}
+          path: tools/linkr-tui/dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Attach the archives to the release
+    if: startsWith(github.ref, 'refs/tags/linkr-tui-v')
+    needs: [targets, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The one job that writes anything: a release upload.
+      contents: write
+    steps:
+      - name: Collect the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: .
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release if it is not there yet
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" \
+              --title "linkr-tui $GITHUB_REF_NAME" --generate-notes
+
+      # `--clobber` so re-running a workflow over an existing tag replaces the
+      # archives rather than failing halfway.
+      - name: Upload the archives and the checksums
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS --clobber

@@ -56,9 +56,79 @@ pub fn clip_to(text: &str, width: usize) -> String {
     out
 }
 
+/// Substitute `{}` placeholders in order.
+///
+/// The templates are `&'static str` from the string table and the arguments are
+/// runtime values, so this is the smallest thing that joins them — and it is
+/// written once rather than per overlay, so a translated string with its
+/// arguments in the other order still reads correctly everywhere.
+///
+/// A template with more placeholders than arguments keeps the leftover `{}`
+/// rather than eating the text: a half-formatted message is a bug to see, not
+/// one to hide.
+pub fn fill(template: &str, args: &[String]) -> String {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    let mut used = 0;
+    while let Some(at) = rest.find("{}") {
+        out.push_str(&rest[..at]);
+        match args.get(used) {
+            Some(value) => out.push_str(value),
+            None => out.push_str("{}"),
+        }
+        used += 1;
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A byte count as a person reads it: `512 B`, `1.0 KB`, `1.4 MB`.
+///
+/// Binary units, not decimal ones: the sizes here are file lengths and buffer
+/// counts, which is what `df`, `ls -h` and every file manager mean by `KB`. One
+/// place for it, so a notice and the row it is about cannot disagree about how
+/// big the same file is.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    let count = bytes as f64;
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    // Walk the units instead of stopping at one of them: the sizes on this side
+    // come from a file picker, which will happily offer a disk image, and an
+    // exabyte printed as megabytes is a row several screens wide.
+    let mut step = count / 1024.0;
+    let mut at = 1;
+    while step >= 1024.0 && at + 1 < UNITS.len() {
+        step /= 1024.0;
+        at += 1;
+    }
+    format!("{:.1} {}", step, UNITS[at])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sizes read the way a file manager writes them, and the threshold is the
+    /// unit's own: 1023 bytes is bytes, 1024 is a kilobyte.
+    #[test]
+    fn sizes_are_human_and_binary() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1_500_000), "1.4 MB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MB");
+        // Never wider than a short column: the whole point of the unit.
+        for bytes in [0u64, 1, 999, 1023, 1024, 10_000, 1_000_000, u64::MAX] {
+            assert!(
+                columns(&human_bytes(bytes)) <= 12,
+                "{bytes} reads as {:?}",
+                human_bytes(bytes)
+            );
+        }
+    }
 
     /// Columns are columns, not characters: the whole point of the module.
     #[test]
@@ -121,5 +191,18 @@ mod tests {
         assert!(columns(&cut) <= 29, "{cut:?}");
         assert!(cut.ends_with('…'), "{cut:?} is not marked as cut");
         assert!(!cut.contains('\n'), "a clip wrapped");
+    }
+
+    /// `fill` substitutes in order and leaves a template with more placeholders
+    /// than arguments readable rather than eating the text.
+    #[test]
+    fn fill_substitutes_in_order() {
+        assert_eq!(fill("a {} b {}", &["1".into(), "2".into()]), "a 1 b 2");
+        assert_eq!(fill("no placeholders", &[]), "no placeholders");
+        assert_eq!(fill("{} and {}", &["1".into()]), "1 and {}");
+        assert_eq!(
+            fill("已保存 {} 字节到 {}", &["41".into(), "x.log".into()]),
+            "已保存 41 字节到 x.log"
+        );
     }
 }

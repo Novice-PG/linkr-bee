@@ -19,6 +19,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
+use crate::dialogs::{self, ConfirmAction};
 use crate::event::View;
 use crate::text::clip_to;
 use crate::theme::Theme;
@@ -148,6 +149,47 @@ pub fn targets(app: &App) -> Vec<String> {
 /// `Transport: BLE` — a label, the language's separator, then the value.
 pub fn labelled(label: &str, value: &str, separator: &str) -> String {
     format!("{label}{separator}{value}")
+}
+
+/// What the row under the cursor does when it is activated.
+///
+/// The index is the one [`targets`] produces — the transport, the two
+/// connection actions, one row per view, then the quick sends — so a row the
+/// cursor can point at is a row that can be used, and a test holds the two
+/// together.
+///
+/// The guarded quick sends raise a confirmation rather than firing: `reboot`
+/// over a UART is not undoable, and one Enter's worth of cursor slip must not
+/// be enough to reboot the bridge. The focus is deliberately left where it is —
+/// `Tab` is the documented way to move it, and a row activation that moved it
+/// too would make that key mean two things.
+pub fn activate(app: &mut App) {
+    let views = View::ALL.len();
+    match app.sidebar_cursor {
+        0 => {
+            let notice = app.toggle_transport();
+            app.push_notice(notice);
+        }
+        1 => app.reconnect(),
+        2 => {
+            let text = app.strings().no_other_device.to_string();
+            app.push_notice(crate::app::Notice {
+                text,
+                level: crate::event::NoticeLevel::Warn,
+            });
+        }
+        index if index < 3 + views => app.set_view(View::ALL[index - 3]),
+        index => {
+            let Some(quick) = app.quick_send.get(index - (3 + views)).cloned() else {
+                return;
+            };
+            if quick.dangerous {
+                dialogs::ask(app, ConfirmAction::Send(quick.command));
+            } else {
+                app.send_command(&quick.command);
+            }
+        }
+    }
 }
 
 /// The whole sidebar, top to bottom, exactly as many rows as the design draws.

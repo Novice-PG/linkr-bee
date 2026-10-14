@@ -7,6 +7,7 @@
 
 pub mod body;
 pub mod chrome;
+pub mod overlay;
 pub mod sidebar;
 pub mod toast;
 
@@ -98,6 +99,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         chrome::bottom_right(app, &theme),
     );
     draw_toasts(frame, app, area);
+    // The modal layer last, so a palette or a dialog covers everything —
+    // including the toasts, which the user is not reading while answering a
+    // confirmation.
+    overlay::paint(frame, app, area);
 }
 
 /// One bar: the left half flush left, the right half flush right, split so they
@@ -171,12 +176,12 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
         // The body is told the width the border left it, so a row can never be
         // laid out for the frame's width and then spill into the border.
         frame.render_widget(
-            Paragraph::new(body::lines(app, &theme, inner.width)).style(ground),
+            Paragraph::new(body::lines(app, &theme, inner)).style(ground),
             inner,
         );
     } else {
         frame.render_widget(
-            Paragraph::new(body::lines(app, &theme, area.width)).style(ground),
+            Paragraph::new(body::lines(app, &theme, area)).style(ground),
             area,
         );
         draw_status_pill(frame, app, area);

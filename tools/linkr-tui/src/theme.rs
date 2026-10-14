@@ -57,6 +57,14 @@ pub struct Theme {
     pub terminal_bg: Color,
     /// The serial terminal's default foreground (xterm theme `fg`).
     pub terminal_fg: Color,
+    /// The sixteen ANSI colours a device's output can name.
+    ///
+    /// These are the palette the browser's xterm.js instance resolves to, so a
+    /// red error in the pane is the same red in both clients. The web client
+    /// only overrides a handful of xterm's defaults and leaves the rest; the
+    /// one it *does* override, `brightBlack`, is the one carried here — it is
+    /// what a great many tools paint their comments and separators in.
+    pub ansi: [Color; 16],
 }
 
 impl Theme {
@@ -78,6 +86,24 @@ impl Theme {
         warn: Color::Rgb(0xf2, 0xc9, 0x4c),
         terminal_bg: Color::Rgb(0x05, 0x08, 0x0d),
         terminal_fg: Color::Rgb(0xd8, 0xf3, 0xdc),
+        ansi: [
+            Color::Rgb(0x2e, 0x34, 0x36),
+            Color::Rgb(0xcc, 0x00, 0x00),
+            Color::Rgb(0x4e, 0x9a, 0x06),
+            Color::Rgb(0xc4, 0xa0, 0x00),
+            Color::Rgb(0x34, 0x65, 0xa4),
+            Color::Rgb(0x75, 0x50, 0x7b),
+            Color::Rgb(0x06, 0x98, 0x9a),
+            Color::Rgb(0xd3, 0xd7, 0xcf),
+            Color::Rgb(0x8d, 0x9b, 0xb0),
+            Color::Rgb(0xef, 0x29, 0x29),
+            Color::Rgb(0x8a, 0xe2, 0x34),
+            Color::Rgb(0xfc, 0xe9, 0x4f),
+            Color::Rgb(0x72, 0x9f, 0xcf),
+            Color::Rgb(0xad, 0x7f, 0xa8),
+            Color::Rgb(0x34, 0xe2, 0xe2),
+            Color::Rgb(0xee, 0xee, 0xec),
+        ],
     };
 
     /// The web client's `[data-theme="light"]`. The terminal pair is the
@@ -102,7 +128,52 @@ impl Theme {
         warn: Color::Rgb(0xb4, 0x53, 0x09),
         terminal_bg: Color::Rgb(0xf8, 0xfa, 0xfc),
         terminal_fg: Color::Rgb(0x1f, 0x6b, 0x43),
+        // The same sixteen, with the light theme's own `brightBlack`. The rest
+        // stay put because the browser's light terminal keeps them: changing
+        // them here would make the pane disagree with xterm.js next to it.
+        ansi: [
+            Color::Rgb(0x2e, 0x34, 0x36),
+            Color::Rgb(0xcc, 0x00, 0x00),
+            Color::Rgb(0x4e, 0x9a, 0x06),
+            Color::Rgb(0xc4, 0xa0, 0x00),
+            Color::Rgb(0x34, 0x65, 0xa4),
+            Color::Rgb(0x75, 0x50, 0x7b),
+            Color::Rgb(0x06, 0x98, 0x9a),
+            Color::Rgb(0xd3, 0xd7, 0xcf),
+            Color::Rgb(0x5c, 0x6a, 0x82),
+            Color::Rgb(0xef, 0x29, 0x29),
+            Color::Rgb(0x8a, 0xe2, 0x34),
+            Color::Rgb(0xfc, 0xe9, 0x4f),
+            Color::Rgb(0x72, 0x9f, 0xcf),
+            Color::Rgb(0xad, 0x7f, 0xa8),
+            Color::Rgb(0x34, 0xe2, 0xe2),
+            Color::Rgb(0xee, 0xee, 0xec),
+        ],
     };
+
+    /// Resolve a 256-colour palette index.
+    ///
+    /// The layout is the one the palette has had since xterm and every terminal
+    /// shares: sixteen named colours, then a 6×6×6 cube, then a 24-step grey
+    /// ramp. Keeping the arithmetic here means the serial pane only has to know
+    /// *that* the device named a colour, not how the name becomes a value.
+    pub fn indexed(&self, index: u8) -> Color {
+        match index {
+            0..=15 => self.ansi[index as usize],
+            16..=231 => {
+                // 16 + 36r + 6g + b, over the cube's six levels.
+                const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+                let i = index as usize - 16;
+                Color::Rgb(LEVELS[(i / 36) % 6], LEVELS[(i / 6) % 6], LEVELS[i % 6])
+            }
+            // 232..=255: a 24-step grey ramp from 8 to 238.
+            _ => {
+                let level = 8 + (index as u16 - 232) * 10;
+                let value = level as u8;
+                Color::Rgb(value, value, value)
+            }
+        }
+    }
 
     /// The theme behind [`ThemeChoice`], the enum settings persist.
     pub fn for_choice(choice: ThemeChoice) -> Theme {
