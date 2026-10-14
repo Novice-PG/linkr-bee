@@ -1015,6 +1015,30 @@ impl App {
         }
     }
 
+    /// Paste a block of text, as one thing.
+    ///
+    /// A paste is a typing gesture that arrives whole, so it takes the same
+    /// door a keystroke takes — `type_bytes` — and gets the same treatment:
+    /// line mode holds it until Enter, and the echo, the trace and the `tx`
+    /// counter all see it. It is not looped over as lines with an Enter
+    /// guessed after each, because a paste of a shell script would then run
+    /// each line as it was typed, which is the one thing a paste must never do
+    /// to a device.
+    ///
+    /// Returns false when there is nothing to send, which is the same silence
+    /// `send_bytes` gives a keystroke: a paste into a disconnected session is
+    /// not worth a toast either.
+    pub fn paste(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return true;
+        }
+        // Newlines and tabs are what a paste carries and what a terminal sends:
+        // \r\n, \n or \r all arrive as the newline a paste means, and a \r
+        // inside the block is the shape every terminal actually emits.
+        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.type_bytes(normalised.ends_with('\n'), &normalised)
+    }
+
     /// Send raw bytes. Silent when there is no link, because this is the path a
     /// *keystroke* takes and a toast per character would bury the screen.
     pub fn send_bytes(&mut self, bytes: &[u8]) -> bool {
@@ -1339,6 +1363,61 @@ mod tests {
         assert!(app.sidebar_visible);
         assert_eq!(app.focus, Focus::Sidebar);
         assert_eq!(notice.text, app.strings().sidebar_shown);
+    }
+
+    /// A paste is a typing gesture, so line mode holds it until Enter exactly
+    /// as it would have held the same characters typed one at a time. What a
+    /// paste must never be is chopped at its newlines into per-line sends —
+    /// pasting a shell script would then run each line as it was typed.
+    #[test]
+    fn a_paste_is_held_whole_in_line_mode() {
+        let mut app = App {
+            line_mode: true,
+            ..App::default()
+        };
+
+        // No trailing newline: nothing is sent, the whole block is held.
+        assert!(app.paste("echo one\necho two"));
+        assert_eq!(app.pending_line, "echo one\necho two");
+    }
+
+    /// The three newline shapes every terminal actually emits all arrive as the
+    /// one newline a paste means: \r\n, \n, and a lone \r. A \r left in place
+    /// would be a carriage return the target reads as "start of line again".
+    #[test]
+    fn every_newline_shape_a_paste_can_carry_is_normalised() {
+        for raw in ["a\r\nb", "a\nb", "a\rb"] {
+            let mut app = App {
+                line_mode: true,
+                ..App::default()
+            };
+            assert!(app.paste(raw), "{raw:?} was refused");
+            assert_eq!(
+                app.pending_line, "a\nb",
+                "{raw:?} did not arrive as one newline"
+            );
+        }
+    }
+
+    /// An empty paste is a no-op, not a send. Terminals emit it for an empty
+    /// selection, and a keystroke-sized toast for it would be noise.
+    #[test]
+    fn an_empty_paste_is_a_no_op() {
+        let mut app = App {
+            line_mode: true,
+            ..App::default()
+        };
+        assert!(app.paste(""), "an empty paste should be accepted");
+        assert!(app.pending_line.is_empty(), "an empty paste held something");
+    }
+
+    /// With no link the paste is refused in the same silence `send_bytes` gives
+    /// a keystroke: the path is shared, so the behaviour cannot diverge.
+    #[test]
+    fn a_paste_with_no_link_is_refused_silently() {
+        let mut app = App::default();
+        assert!(!app.paste("anything"), "a paste went out with no link");
+        assert!(app.notices.is_empty(), "a silent path announced itself");
     }
 
     /// Toasts are bounded: the stack never grows past the cap, and the oldest

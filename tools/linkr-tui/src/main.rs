@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -488,11 +489,23 @@ impl TerminalGuard {
             let _ = disable_raw_mode();
             return Err(err);
         }
+        // Bracketed paste, or the paste arrives as its keystrokes. Without this
+        // a multi-line paste reaches the device's line editor as a burst of
+        // separate edits — every newline an Enter the user never pressed, on a
+        // shell that has already run the first half of it. With it, the whole
+        // paste is one event carrying the whole payload, which is the only
+        // shape in which a paste can be sent as one thing.
+        if let Err(err) = execute!(stdout, EnableBracketedPaste) {
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout, LeaveAlternateScreen);
+            return Err(err);
+        }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(TerminalGuard { terminal })
     }
 
     fn restore(&mut self) {
+        let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
@@ -819,6 +832,22 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     if handle_key(app, key) || app.quit {
                         return Ok(());
                     }
+                }
+                // A paste arrives as one event carrying the whole payload, not
+                // as the keystrokes that would have produced it. Bracketed
+                // paste is enabled below, so the bytes in a paste never reach
+                // the device's own line editor as stray keys — which is the
+                // entire reason the terminal introduced the mode.
+                Event::Paste(text) => {
+                    // A paste is a *typing* gesture, so it goes through the
+                    // door a keystroke uses: line mode holds it until Enter
+                    // exactly as it would have held the characters, and the
+                    // echo, the trace and the tx counter all see it. The text
+                    // can span newlines, and a target that sees the whole block
+                    // is what was asked for — what a paste must not be is
+                    // chopped into per-line sends with an Enter guessed after
+                    // each one.
+                    app.paste(&text);
                 }
                 // A resize is picked up by the next draw; nothing to do.
                 Event::Resize(_, _) => {}
