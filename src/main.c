@@ -1603,6 +1603,24 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 			 */
 			return 0;
 		}
+	} else if (err == -EINVAL || err == -EMSGSIZE) {
+		/* The reliable path refused the chunk itself rather than
+		 * failing to deliver it: -EINVAL for a payload past its limit,
+		 * -EMSGSIZE for an ATT payload too small to carry the header,
+		 * which is what an unexchanged MTU amounts to once it is
+		 * clamped instead of wrapping. Neither gets larger by being
+		 * retried — the chunk is fixed and so is the reason — and this
+		 * loop does retry a failed chunk in place: len is left at
+		 * sizeof(buf), so the very next pass re-enters this call with
+		 * the same arguments and the thread stops draining the ring
+		 * for the rest of the session. The log ring and the WebSocket
+		 * bridge were both already fed above, so only the BLE copy is
+		 * lost by dropping here, which is the same trade the
+		 * no-connection case already makes.
+		 */
+		LOG_WRN("Dropping %u UART bytes the reliable path cannot carry (%d)",
+			len, err);
+		return 0;
 	} else if (err) {
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}
