@@ -811,7 +811,14 @@ int linkr_ws_rotate_token(void)
 
 	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
 	if (err) {
-		LOG_WRN("persisting WebSocket token failed: %d", err);
+		/* Same as linkr_ws_set_token(): the rotation is already live,
+		 * so only persistence is at risk. Reporting it as a failure
+		 * would make the caller rotate again — generating yet another
+		 * token and invalidating the one the caller was just handed,
+		 * kicking its session a second time for a link that is
+		 * already working. */
+		LOG_WRN("WebSocket token not persisted: %d (applies now, not after reboot)",
+			err);
 	}
 
 	/* Revoke sessions that authenticated with the replaced token; see
@@ -824,7 +831,7 @@ int linkr_ws_rotate_token(void)
 		(void)ws_server_start();
 	}
 	LOG_INF("WebSocket LAN auth token generated");
-	return err;
+	return 0;
 }
 
 int linkr_ws_set_enabled(bool enabled)
