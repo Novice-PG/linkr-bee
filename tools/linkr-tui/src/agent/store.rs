@@ -16,7 +16,7 @@
 //! truncated one. The rename is atomic on every platform this builds for.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::config::Storage;
 
@@ -26,7 +26,13 @@ use super::config::Storage;
 /// stores write: `TaskStore` serialises its own array, `NoteStore` its own, and
 /// neither knows the other exists. This file is their shared shelf, not their
 /// schema.
+/// The program's prefix, and the file's stem.
 const MAGIC: &str = "linkr";
+
+/// The state file's name, with an extension: a file without one is a file
+/// nothing can be told apart, and the next thing to be written into its
+/// directory would have to guess.
+const DEFAULT_FILE: &str = "linkr-agent.json";
 
 /// `Debug` because `App` holds one and `App` is `Debug`; the path is the only
 /// thing anyone has ever wanted from it, so the data is summarised rather
@@ -55,7 +61,14 @@ impl JsonFile {
     /// platform has none. Named `agent.json` rather than `tasks.json` because
     /// every agent store shares it.
     pub fn load() -> JsonFile {
-        JsonFile::at(default_path())
+        match default_path() {
+            Some(path) => JsonFile::at(path),
+            None => {
+                let mut path = std::env::temp_dir();
+                path.push(format!("{DEFAULT_FILE}.{}", std::process::id()));
+                JsonFile::at(path)
+            }
+        }
     }
 
     /// Write the whole object back. Called after every mutation, which is
@@ -75,6 +88,10 @@ impl JsonFile {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // After the rename, so the file exists at its final name when the
+        // permission is taken away — restricting the temp file would leave the
+        // renamed one however the umask made it.
+        let _ = restrict(path);
         // Write beside it and rename, so an interrupted write leaves the old
         // file rather than a half-written one.
         let mut tmp = path.clone();
@@ -227,13 +244,65 @@ fn escape(value: &str) -> String {
     out
 }
 
-/// One file next to the token store, so a user has one place to look.
-fn default_path() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".config").join(format!("{MAGIC}-agent"))
+/// Where the file lives, and the same rules the LAN token store uses.
+///
+/// The three stores of this program should be findable in one place, so the
+/// search is deliberately the token store's: an explicit override, then
+/// `XDG_CONFIG_HOME` on the platforms that define it, then the platform's own
+/// configuration directory — `Library/Application Support` on macOS, `.config`
+/// elsewhere, `%APPDATA%` on Windows.
+///
+/// Returns `None` when the platform has nothing to say, and the caller falls
+/// back to the temp directory rather than refusing to start: an agent history
+/// is not worth a program that will not boot.
+fn default_path() -> Option<PathBuf> {
+    // An explicit override, honoured for the same reason the token store honours
+    // one: a scripted environment needs somewhere to say where state goes.
+    if let Ok(path) = std::env::var(format!("{}-FILE", MAGIC.to_uppercase())) {
+        if !path.trim().is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+        if !dir.trim().is_empty() {
+            return Some(Path::new(&dir).join(DEFAULT_FILE));
+        }
+    }
+    // `APPDATA` is the Windows configuration directory, and it is checked before
+    // `HOME` because Windows does not define `HOME` and a `.config` directory
+    // under `%USERPROFILE%` is a place nothing else on the machine looks.
+    #[cfg(windows)]
+    if let Ok(dir) = std::env::var("APPDATA") {
+        if !dir.trim().is_empty() {
+            return Some(Path::new(&dir).join(DEFAULT_FILE));
+        }
+    }
+    let home = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())?;
+    if home.trim().is_empty() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    let base = Path::new(&home).join("Library/Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let base = Path::new(&home).join(".config");
+    Some(base.join(DEFAULT_FILE))
+}
+
+/// Take away the group and other bits, where the platform has them.
+///
+/// This file holds the model's API key, so the restriction is not decoration:
+/// the token store next to it is already 0600 for exactly the same reason, and a
+/// credential left world-readable is a credential that survived one `ls`.
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+/// Nothing to do where the file's ACL is the user's own business.
+#[cfg(not(unix))]
+fn restrict(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -322,6 +391,30 @@ mod tests {
 
     /// The atomic write leaves a single file behind and no temp litter, even
     /// across several mutations.
+    #[test]
+    /// The file is 0600 on unix, because it holds the model's API key.
+    ///
+    /// The LAN token store next to it is restricted the same way and for the
+    /// same reason; a credential that survives one `ls` is a credential that
+    /// survived.
+    #[test]
+    #[cfg(unix)]
+    fn the_state_file_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp("state-perm");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = JsonFile::at(&path);
+            store.set("k", "v");
+        }
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the file is {mode:o}");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn no_temp_litter() {
         const NAME: &str = "no_temp_litter";
