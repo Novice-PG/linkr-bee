@@ -39,6 +39,15 @@ const CAT_TRANSFER: Entry = ["Transfer", "传输"];
 const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
 const CAT_AGENT: Entry = ["Assistant", "助手"];
+const CAT_NETWORK: Entry = ["Network", "网络"];
+
+const T_WIFI_CONFIG: Entry = ["Set the WiFi network", "设置无线网络"];
+const T_WIFI_SCAN: Entry = ["Scan for WiFi networks", "扫描无线网络"];
+const T_WIFI_STATUS: Entry = ["Read the WiFi status", "读取无线状态"];
+const T_WIFI_OFF: Entry = ["Forget the WiFi network", "断开无线网络"];
+const T_WEBDAV_CONFIG: Entry = ["Set the log upload URL", "设置日志上传地址"];
+const T_WEBDAV_OFF: Entry = ["Turn off log upload", "关闭日志上传"];
+const T_WEBDAV_STATUS: Entry = ["Read the upload status", "读取上传状态"];
 
 const T_AGENT_CONFIG: Entry = ["Configure the assistant", "配置助手"];
 const T_AGENT_ASK: Entry = ["Ask the assistant", "向助手提问"];
@@ -255,6 +264,69 @@ fn agent_clear(app: &mut App) {
     });
 }
 
+/// The network bridge's own functions, as palette entries.
+///
+/// The network view is a form whose rows are entered from, and that is the right
+/// shape for *reading* it — but joining a network, scanning for one and pointing
+/// the log somewhere are things a user does before they have found the view, and
+/// a palette entry for each is what makes them reachable without knowing which
+/// F-key the form is on.
+fn wifi_config(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::prompt_wifi_ssid(app);
+}
+
+fn wifi_scan(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::ask(
+        app,
+        crate::dialogs::ConfirmAction::Accessory("@w scan".to_string()),
+    );
+}
+
+/// A status read is not guarded — it changes nothing, and a card asking
+/// permission to look at something teaches people to press yes without reading.
+fn wifi_status(app: &mut App) {
+    app.set_view(View::Network);
+    if let Err(why) = app.ask_device(crate::device::Query::Wifi) {
+        app.push_notice(crate::app::Notice {
+            text: why,
+            level: crate::event::NoticeLevel::Error,
+        });
+    }
+}
+
+fn wifi_off(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::ask(
+        app,
+        crate::dialogs::ConfirmAction::Accessory("@w off".to_string()),
+    );
+}
+
+fn webdav_config(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::prompt_webdav_url(app);
+}
+
+fn webdav_off(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::ask(
+        app,
+        crate::dialogs::ConfirmAction::Accessory("@d off".to_string()),
+    );
+}
+
+fn webdav_status(app: &mut App) {
+    app.set_view(View::Network);
+    if let Err(why) = app.ask_device(crate::device::Query::Webdav) {
+        app.push_notice(crate::app::Notice {
+            text: why,
+            level: crate::event::NoticeLevel::Error,
+        });
+    }
+}
+
 fn toggle_sidebar(app: &mut App) {
     let notice = app.toggle_sidebar();
     app.push_notice(notice);
@@ -417,6 +489,55 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_APP,
         shortcut: "Ctrl+T",
         run: toggle_theme,
+    },
+    Action {
+        id: "net.wifi_config",
+        title: T_WIFI_CONFIG,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: wifi_config,
+    },
+    Action {
+        id: "net.wifi_scan",
+        title: T_WIFI_SCAN,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: wifi_scan,
+    },
+    Action {
+        id: "net.wifi_status",
+        title: T_WIFI_STATUS,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: wifi_status,
+    },
+    Action {
+        id: "net.wifi_off",
+        title: T_WIFI_OFF,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: wifi_off,
+    },
+    Action {
+        id: "net.webdav_config",
+        title: T_WEBDAV_CONFIG,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_config,
+    },
+    Action {
+        id: "net.webdav_off",
+        title: T_WEBDAV_OFF,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_off,
+    },
+    Action {
+        id: "net.webdav_status",
+        title: T_WEBDAV_STATUS,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_status,
     },
     Action {
         id: "agent.configure",
@@ -731,6 +852,13 @@ mod tests {
         "app.notices",
         "app.language",
         "app.theme",
+        "net.wifi_config",
+        "net.wifi_scan",
+        "net.wifi_status",
+        "net.wifi_off",
+        "net.webdav_config",
+        "net.webdav_off",
+        "net.webdav_status",
         "agent.configure",
         "agent.ask",
         "agent.note",
@@ -763,6 +891,37 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "two actions share an id");
+    }
+
+    /// A network action asks before it acts on the *link*, and asks nowhere
+    /// else: joining a network is a command the board will carry out, and a click
+    /// the user cannot take back is worth a card — while a status read changes
+    /// nothing and a card for it would only train people to press yes.
+    #[test]
+    fn network_actions_guard_the_ones_that_change_things() {
+        // A status read goes straight out: no dialog, no notice of its own.
+        let mut app = App::default();
+        wifi_status(&mut app);
+        assert!(app.dialog.is_none(), "a status read asked first");
+
+        // A scan is guarded: it is a command the board runs.
+        let mut scan = App::default();
+        wifi_scan(&mut scan);
+        assert!(scan.dialog.is_some(), "a scan went out unguarded");
+
+        // And each network action lands the user on the network view, because a
+        // command issued from the palette should leave them looking at the thing
+        // it changed.
+        for name in ["config", "scan", "status"] {
+            let mut app = App::default();
+            app.set_view(View::Terminal);
+            match name {
+                "config" => wifi_config(&mut app),
+                "scan" => wifi_scan(&mut app),
+                _ => wifi_status(&mut app),
+            }
+            assert_eq!(app.view, View::Network, "{name} did not show the network");
+        }
     }
 
     /// The assistant's actions land the user on the field that answers the
