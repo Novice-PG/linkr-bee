@@ -60,6 +60,11 @@ pub struct AssistantState {
     /// Persisted by `agent::session` across restarts, which is the one piece of
     /// agent state that was still write-only until now.
     pub display: Vec<crate::agent::session::DisplayLine>,
+    /// Which note the keyboard is on, for removal.
+    ///
+    /// Notes are shown newest first and the cursor rides that order, so the
+    /// row the user sees highlighted is the row that goes.
+    pub note_cursor: usize,
     /// A note being typed. Enter below the notes adds it; the evidence is
     /// whatever the newest task last said, because a note with nothing behind
     /// it is an opinion and the point of the field is what the target said.
@@ -249,6 +254,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             let text = field_text_mut(app);
             text.pop();
         }
+        // Up and Down walk the notes while the note field is focused, and are
+        // consumed either way. Consumed because the assistant is a form and the
+        // interface's own sidebar focus sits *below* this dispatch: an arrow
+        // the form does not want would reach it, and a cursor would move in a
+        // pane the user is not looking at.
+        KeyCode::Up => {
+            if app.assistant.focus == AgentField::Notes {
+                app.assistant.note_cursor =
+                    app.assistant.note_cursor.saturating_sub(1);
+            }
+        }
+        KeyCode::Down => {
+            if app.assistant.focus == AgentField::Notes {
+                let last = app.assistant.notes.len().saturating_sub(1);
+                app.assistant.note_cursor = (app.assistant.note_cursor + 1).min(last);
+            }
+        }
+        // Delete removes the note under the cursor. Not a letter, which would
+        // take that letter out of the field being typed in, and not Backspace,
+        // which already means "delete a character".
+        KeyCode::Delete if app.assistant.focus == AgentField::Notes => {
+            remove_note(app);
+        }
         KeyCode::Enter => match app.assistant.focus {
             AgentField::Composer => submit_prompt(app),
             AgentField::Notes => add_note(app),
@@ -344,6 +372,43 @@ fn add_note(app: &mut App) {
         let _ = crate::agent::notes::NoteStore::new(&mut *store).add(&key, trimmed, &evidence, now);
     }
     refresh_notes(app);
+}
+
+/// Remove the note under the cursor.
+///
+/// The cursor follows the deletion rather than being reset: rows are newest
+/// first, so removing one leaves the cursor on the row that took its place,
+/// which is where the user was looking when they pressed `d` twice.
+fn remove_note(app: &mut App) {
+    let key = app.agent_device_key();
+    let Some((text, _)) = app.assistant.notes.get(app.assistant.note_cursor).cloned()
+    else {
+        return;
+    };
+    // Notes are matched by text because that is what the view holds: the store's
+    // id is an implementation detail of its own ordering.
+    let ids: Vec<String> = app
+        .agent_store
+        .as_mut()
+        .map(|store| {
+            let listed = crate::agent::notes::NoteStore::new(&mut *store).list(&key);
+            listed
+                .into_iter()
+                .filter(|note| note.text == text)
+                .map(|note| note.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in ids {
+        if let Some(store) = app.agent_store.as_mut() {
+            crate::agent::notes::NoteStore::new(&mut *store).remove(&key, &id);
+        }
+    }
+    refresh_notes(app);
+    // A cursor past the end after the last row goes is a cursor pointing at
+    // nothing.
+    let last = app.assistant.notes.len().saturating_sub(1);
+    app.assistant.note_cursor = app.assistant.note_cursor.min(last);
 }
 
 /// Re-read the notes from the store into the view.
@@ -755,15 +820,23 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if state.notes.is_empty() {
         lines.push(note(&format!("  {}", s.asst_no_notes), width, theme));
     } else {
-        for (text, evidence) in &state.notes {
-            let row = if evidence.is_empty() {
+        for (index, (text, evidence)) in state.notes.iter().enumerate() {
+            // The cursor is a colour, not a marker: a `>` would shift every row
+            // by a column and a list that reflows as the cursor moves is a list
+            // nobody can read.
+            let body = if evidence.is_empty() {
                 format!("  {text}")
             } else {
                 format!("  {text} ({evidence})")
             };
+            let style = if index == state.note_cursor {
+                theme.selected()
+            } else {
+                theme.text()
+            };
             lines.push(Line::from(Span::styled(
-                text::clip_to(&row, width as usize),
-                theme.text(),
+                text::clip_to(&body, width as usize),
+                style,
             )));
         }
     }
