@@ -21,6 +21,7 @@
 //! either copy.
 
 pub mod config;
+pub mod markdown;
 pub mod notes;
 pub mod redact;
 pub mod report;

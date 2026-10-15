@@ -663,8 +663,23 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if state.tasks.is_empty() {
         lines.push(note(&format!("  {}", s.asst_no_tasks), width, theme));
     } else {
-        for task in &state.tasks {
+        for (index, task) in state.tasks.iter().enumerate() {
             lines.push(task_row(task, width, theme));
+            // The newest answer is rendered as markdown; the ones before it are
+            // rows. A model's reply *is* markdown, and an answer shown as its
+            // own source is the one place a reader would rather see the text —
+            // the renderer gives it back as source when it does not understand
+            // a construct, so nothing is lost either way.
+            if index == 0 && !task.summary.is_empty() {
+                // Two columns of indent, and the renderer is given the width
+                // that is left — so the row's total is never more than the
+                // pane's, which is the invariant the painting tests enforce.
+                let room = (width as usize).saturating_sub(2);
+                for mut line in crate::agent::markdown::render(&task.summary, room, theme) {
+                    line.spans.insert(0, Span::raw("  "));
+                    lines.push(line);
+                }
+            }
         }
     }
 
@@ -981,6 +996,43 @@ mod interaction {
             a.assistant.notes[0].1, "root mounted at /",
             "the evidence is what the target said"
         );
+    }
+
+    /// A markdown answer is rendered, not shown as its own source — and rendered
+    /// at the width that is left of the pane, so the indent does not push the
+    /// row past the edge the painting tests guard.
+    #[test]
+    fn the_newest_answer_is_rendered_as_markdown() {
+        let mut a = app();
+        a.assistant.tasks = vec![TaskRecord {
+            id: "t".into(),
+            device_key: "k".into(),
+            updated_at: 0,
+            goal: "explain".into(),
+            summary: "## Heading\n\nSome **bold** and `code`.".into(),
+            status: "answered".into(),
+        }];
+        let rendered = lines(&a, &a.theme(), 60);
+        let joined: String = rendered
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Heading"), "the heading is gone: {joined}");
+        assert!(joined.contains("bold"), "the inline is gone: {joined}");
+        assert!(
+            !joined.contains("## Heading"),
+            "the markdown was shown as source: {joined}"
+        );
+        for (lang, lines) in [(a.lang, &rendered)] {
+            for line in lines.iter() {
+                let row: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    crate::text::columns(&row) <= 60,
+                    "{lang:?}: {row:?} is past the pane"
+                );
+            }
+        }
     }
 
     /// An outstanding approval takes the keyboard.
