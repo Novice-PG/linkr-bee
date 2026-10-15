@@ -1310,6 +1310,43 @@ fn local_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
+/// One mouse gesture, folded into whatever the focused thing wants.
+///
+/// A wheel notch is one row, never a page and never "whatever the terminal felt
+/// like". That is the whole reason the mouse gets captured at all: without it
+/// the wheel belongs to the emulator, and an emulator in an alternate screen has
+/// nothing to scroll, so it either does nothing or jumps.
+fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
+                cols: u16, rows: u16) {
+    use crossterm::event::MouseEventKind;
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if app.focus == linkr_tui::app::Focus::Sidebar {
+                app.cursor_down();
+            } else {
+                app.scroll_terminal(3);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if app.focus == linkr_tui::app::Focus::Sidebar {
+                app.cursor_up();
+            } else {
+                let back = app.terminal.scroll.saturating_sub(3);
+                app.terminal.scroll = back;
+                if back == 0 {
+                    app.scroll_terminal_to_bottom();
+                }
+            }
+        }
+        _ => {}
+    }
+    // A wheel over the rail scrolls the rail; over the pane it scrolls the
+    // pane; neither is a page. The size is here for the drag that follows, and
+    // until then it is what a drag would need rather than a wheel.
+    let _ = (cols, rows);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2178,41 +2215,4 @@ mod tests {
         );
         assert_eq!(app.tx, 1, "the byte went out");
     }
-}
-
-/// One mouse gesture, folded into whatever the focused thing wants.
-///
-/// A wheel notch is one row, never a page and never "whatever the terminal felt
-/// like". That is the whole reason the mouse gets captured at all: without it
-/// the wheel belongs to the emulator, and an emulator in an alternate screen has
-/// nothing to scroll, so it either does nothing or jumps.
-fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
-                cols: u16, rows: u16) {
-    use crossterm::event::MouseEventKind;
-
-    match mouse.kind {
-        MouseEventKind::ScrollDown => {
-            if app.focus == linkr_tui::app::Focus::Sidebar {
-                app.cursor_down();
-            } else {
-                app.scroll_terminal(3);
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            if app.focus == linkr_tui::app::Focus::Sidebar {
-                app.cursor_up();
-            } else {
-                let back = app.terminal.scroll.saturating_sub(3);
-                app.terminal.scroll = back;
-                if back == 0 {
-                    app.scroll_terminal_to_bottom();
-                }
-            }
-        }
-        _ => {}
-    }
-    // A wheel over the rail scrolls the rail; over the pane it scrolls the
-    // pane; neither is a page. The size is here for the drag that follows, and
-    // until then it is what a drag would need rather than a wheel.
-    let _ = (cols, rows);
 }

@@ -139,7 +139,17 @@ pub fn targets(app: &App) -> Vec<String> {
         &app.transport_text(),
         s.label_separator,
     )];
-    out.push(s.connect.to_string());
+    // One row that says `Connect` when there is nothing to connect to and
+    // `Disconnect` when there is: the label is the state, so the row under the
+    // cursor always names what Enter will do.
+    out.push(
+        if app.session.is_live() {
+            s.disconnect
+        } else {
+            s.connect
+        }
+        .to_string(),
+    );
     out.push(s.switch_device.to_string());
     for view in View::ALL {
         out.push(app.lang.view_name(view).to_string());
@@ -170,19 +180,26 @@ pub fn labelled(label: &str, value: &str, separator: &str) -> String {
 pub fn activate(app: &mut App) {
     let views = View::ALL.len();
     match app.sidebar_cursor {
-        index if index == 1 || index == 2 => {
-            return;
-        }
-        _ => {}
         0 => {
             let notice = app.toggle_transport();
             app.push_notice(notice);
         }
-        1 | 2 => {
-            /* Connected, neither is reachable: disconnecting is how you change
-             * what is connected. Explained rather than silently ignored, because
-             * a row that looks the same and does nothing is worse than one that
-             * says why. */
+        /* The two connection rows are one toggle with the web client's shape:
+         * while a link is up the first says `Disconnect` and hangs up, and the
+         * second is dimmed — switching is what disconnecting is for, so the
+         * row says so rather than looking live and doing nothing. */
+        index if index == 1 || index == 2 => {
+            if index == 1 {
+                // The row is `Disconnect` while a link is up, so pressing it
+                // hangs up — the same toggle the web client has. When there
+                // is nothing live it is `Connect` again and re-dials.
+                if app.session.is_live() {
+                    app.disconnect();
+                } else {
+                    app.reconnect();
+                }
+                return;
+            }
             if app.session.is_live() {
                 let text = app.strings().switch_needs_disconnect.to_string();
                 app.push_notice(crate::app::Notice {
@@ -191,29 +208,12 @@ pub fn activate(app: &mut App) {
                 });
                 return;
             }
-            if app.sidebar_cursor == 2 {
-                /* Switching device IS looking for one. There used to be a
-                 * separate palette action for the scan and a warning here,
-                 * which left the sidebar row — the one place a user looks to
-                 * change who they are talking to — as the only action in the
-                 * interface that answered "no other device" without ever having
-                 * asked the radio. */
-                if let Err(why) = app.start_ble_scan() {
-                    let text = app.strings().ble_scan_failed.to_string();
-                    app.push_notice(crate::app::Notice {
-                        text: format!("{text}: {why}"),
-                        level: crate::event::NoticeLevel::Error,
-                    });
-                }
-                return;
-            }
-            app.reconnect()
-        }        2 => {
-            // Switching device IS looking for one. There used to be a separate
-            // palette action for the scan and a warning here, which left the
-            // sidebar row — the one place a user looks to change who they are
-            // talking to — as the only action in the interface that answered
-            // "there is no other device" without ever having asked the radio.
+            /* Switching device IS looking for one. There used to be a
+             * separate palette action for the scan and a warning here,
+             * which left the sidebar row — the one place a user looks to
+             * change who they are talking to — as the only action in the
+             * interface that answered "there is no other device" without
+             * ever having asked the radio. */
             if let Err(why) = app.start_ble_scan() {
                 let text = app.strings().ble_scan_failed.to_string();
                 app.push_notice(crate::app::Notice {
@@ -300,19 +300,32 @@ pub fn rows(app: &App) -> Vec<Row> {
             .trailing(token),
         );
     }
-	for label in [s.connect, s.switch_device] {
-		let index = next_cursor();
-		// Connected, both rows go dim. The web client is built this way and it
-		// is the honest shape: a session is one link, and picking another while
-		// this one holds the target would mean two things claiming the same
-		// console. Disconnecting is the action that opens the choice.
-		let style = if app.session.is_live() {
-			RowStyle::Hint
-		} else {
-			action_style(index)
-		};
-		rows.push(Row::at(label, style, ITEM_INDENT));
-	}
+    for label in [
+        if app.session.is_live() {
+            s.disconnect
+        } else {
+            s.connect
+        },
+        s.switch_device,
+    ] {
+        let index = next_cursor();
+        // Connected, the switch-device row goes dim: a session is one link,
+        // and picking another while this one holds the target would mean two
+        // things claiming the same console. Disconnecting is what opens the
+        // choice, so the connect row stays live as `Disconnect`. The cursor
+        // keeps its chip on the dim row rather than vanishing — a row the
+        // cursor cannot be on is a row that cannot explain itself.
+        let style = if app.session.is_live() && index == 2 {
+            if selected(index) {
+                RowStyle::Selected
+            } else {
+                RowStyle::Hint
+            }
+        } else {
+            action_style(index)
+        };
+        rows.push(Row::at(label, style, ITEM_INDENT));
+    }
 
     // --- Views ------------------------------------------------------------
     rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
@@ -457,6 +470,22 @@ mod tests {
     /// The text of a painted row, marker and indent included.
     fn text_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// An app with a link up. The loopback is live the moment it is dialled —
+    /// `is_live` is the handle, not the state — so the connected rows can be
+    /// read without pumping a frame into place first.
+    fn app_live_with(lang: Lang) -> App {
+        use crate::session::Dial;
+        let mut app = app_in(lang);
+        app.dial(&Dial::Stdio("-".into()))
+            .expect("the loopback opens");
+        assert!(app.session.is_live(), "the link is up");
+        app
+    }
+
+    fn app_live() -> App {
+        app_live_with(Lang::En)
     }
 
     /// The rows appear in the designed order: four sections, each header
@@ -928,6 +957,83 @@ mod tests {
         assert!(
             columns(&view_row) > view_row.chars().count(),
             "{view_row:?} carries no wide glyph"
+        );
+    }
+
+    /// The connection rows tell the truth about the link: with one up the
+    /// first reads `Disconnect` (and `断开连接` in Chinese) rather than a
+    /// `Connect` that pressing would answer with silence.
+    #[test]
+    fn the_connect_row_reads_disconnect_while_a_link_is_up() {
+        for lang in [Lang::Zh, Lang::En] {
+            let mut app = app_in(lang);
+            let idle = targets(&app);
+            assert_eq!(idle[1], app.strings().connect, "{lang:?} idle");
+
+            app = app_live_with(lang);
+            let live = targets(&app);
+            // `dial` pins the transport, so only the rows this is about are
+            // compared: the connect row changes name, the switch row does not.
+            assert_eq!(live[1], app.strings().disconnect, "{lang:?} live");
+            assert_eq!(live[2], idle[2], "the switch row keeps its name");
+
+            let painted = rows(&app);
+            let connect: Vec<&Row> = painted
+                .iter()
+                .filter(|r| r.text == app.strings().disconnect)
+                .collect();
+            assert_eq!(connect.len(), 1, "{lang:?} rows: {painted:?}");
+            // Live, not dimmed: it is the row that hangs the link up.
+            assert_eq!(connect[0].style, RowStyle::Action, "{lang:?}");
+        }
+    }
+
+    /// Connected, the switch-device row goes dim but keeps the cursor's chip:
+    /// it is refused with a reason, never silently dead.
+    #[test]
+    fn the_switch_row_is_dim_but_still_cursable_while_a_link_is_up() {
+        let mut app = app_live();
+        let painted = rows(&app);
+        let switch: Vec<&Row> = painted
+            .iter()
+            .filter(|r| r.text == app.strings().switch_device)
+            .collect();
+        assert_eq!(switch.len(), 1);
+        assert_eq!(switch[0].style, RowStyle::Hint, "dimmed while live");
+
+        app.sidebar_cursor = 2;
+        let painted = rows(&app);
+        let marked: Vec<&Row> = painted
+            .iter()
+            .filter(|r| r.style == RowStyle::Selected)
+            .collect();
+        assert_eq!(marked.len(), 1, "the cursor vanished from the dim row");
+        assert_eq!(marked[0].text, app.strings().switch_device);
+    }
+
+    /// Enter on `Disconnect` hangs the link up; Enter on the dimmed switch row
+    /// says why it will not, and does not open a scan.
+    #[test]
+    fn enter_disconnects_and_the_switch_row_refuses_with_a_reason() {
+        let mut app = app_live();
+        app.sidebar_cursor = 1;
+        activate(&mut app);
+        assert!(!app.session.is_live(), "the link is still up");
+
+        let mut app = app_live();
+        app.sidebar_cursor = 2;
+        let before = app.notices.len();
+        activate(&mut app);
+        assert!(app.session.is_live(), "the refusal did not hang up");
+        assert!(!app.ble_scan.is_running(), "and no scan was started");
+        assert_eq!(
+            app.notices.len(),
+            before + 1,
+            "the refusal was silent"
+        );
+        assert_eq!(
+            app.notices.last().map(|n| n.text.as_str()),
+            Some(app.strings().switch_needs_disconnect)
         );
     }
 

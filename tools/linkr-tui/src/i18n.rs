@@ -64,6 +64,10 @@ pub struct Strings {
     pub lan_token_no: &'static str,
     /// The connect action.
     pub connect: &'static str,
+    /// The same row once a link is up: pressing it hangs up. One row, two
+    /// words, is how the web client does it — a row that always says `Connect`
+    /// leaves nothing to press once the link is live.
+    pub disconnect: &'static str,
     /// The switch-device action.
     pub switch_device: &'static str,
     /// Suffix on the transport row when a CLI flag pinned it.
@@ -320,6 +324,7 @@ const ZH: Strings = Strings {
     lan_token_yes: "有密钥",
     lan_token_no: "无密钥",
     connect: "连接",
+    disconnect: "断开连接",
     switch_device: "切换设备",
     transport_locked: "（已锁定）",
     quick_send_hint: "Enter 发送 · reboot 先确认",
@@ -446,6 +451,7 @@ const EN: Strings = Strings {
     lan_token_yes: "token",
     lan_token_no: "no token",
     connect: "Connect",
+    disconnect: "Disconnect",
     switch_device: "Switch device",
     transport_locked: "(locked)",
     // Fits the 29-column sidebar with three columns to spare. The longer
