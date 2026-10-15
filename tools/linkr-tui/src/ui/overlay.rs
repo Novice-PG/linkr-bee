@@ -38,9 +38,13 @@ const MAX_WIDTH: u16 = 96;
 
 /// Paint whichever modal is open.
 ///
-/// The dialog wins. The palette closes itself before it runs an action, so the
-/// two are never up together — but if they ever were, the dialog is the one the
-/// user is answering.
+/// The two modals are a stack, and only the top of it is painted. A dialog is
+/// raised *over* the palette — `dialogs` closes the palette when it opens — so
+/// a dialog wins; the palette is painted only when no dialog is up, which is
+/// the state Ctrl+P leaves behind when it opens over one. Painting both was
+/// what made Ctrl+P look dead: the palette was open but hidden under the
+/// dialog, and the keyboard went to the dialog, so Escape was the only way to
+/// find it again.
 ///
 /// A modal is centred in the *centre column*, not over the whole frame: the
 /// rail, the counters and the key hints stay visible, which is the point of a
@@ -50,10 +54,14 @@ pub fn paint(frame: &mut Frame, app: &App, area: Rect) {
     if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
         return;
     }
-    if let Some(dialog) = &app.dialog {
-        paint_dialog(frame, app, dialog, region);
-    } else if let Some(state) = &app.palette {
+    // Top of the stack first. A dialog closes the palette when it opens, so
+    // the only way both are up is `Ctrl+P` raising the palette *over* a
+    // dialog — and that is the one the keyboard answers to, so that is the
+    // one that is painted.
+    if let Some(state) = &app.palette {
         paint_palette(frame, app, state, region);
+    } else if let Some(dialog) = &app.dialog {
+        paint_dialog(frame, app, dialog, region);
     }
 }
 
@@ -220,6 +228,59 @@ mod tests {
         assert!(head.contains("RX"), "the top bar survived: {head:?}");
         let rail = with.lines().nth(1).unwrap_or_default();
         assert!(rail.contains("Connection"), "the rail survived: {rail:?}");
+    }
+
+    /// The palette is the top of the modal stack: with a dialog under it the
+    /// palette is what is painted, because it is also what takes the keys.
+    /// Painting the dialog here was what made `Ctrl+P` look dead — the palette
+    /// opened, stayed hidden, and Escape was the only way to find it.
+    #[test]
+    fn the_palette_paints_over_a_dialog() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        crate::dialogs::ask(
+            &mut app,
+            crate::dialogs::ConfirmAction::Send("reboot".into()),
+        );
+        assert!(app.dialog.is_some());
+
+        crate::palette::open(&mut app);
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(
+            text.contains("Command palette"),
+            "the palette is on top:\n{text}"
+        );
+        assert!(
+            !text.contains("to the device?"),
+            "the dialog under it is not painted:\n{text}"
+        );
+
+        // Closing the top of the stack puts the dialog back, unharmed.
+        app.palette = None;
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(text.contains("to the device?"), "{text}");
+        assert!(app.dialog.is_some(), "the dialog survived");
+    }
+
+    /// A dialog raised while the palette is up takes the keyboard and the
+    /// screen: the two are never both answering, and the one that was opened
+    /// last is the one that is.
+    #[test]
+    fn a_dialog_raised_over_the_palette_is_the_one_painted() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        crate::palette::open(&mut app);
+        crate::dialogs::open_help(&mut app);
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(text.contains("Keyboard help"), "{text}");
+        assert!(
+            !text.contains("Command palette (Ctrl+P)"),
+            "the palette gave up the screen:\n{text}"
+        );
     }
 
     /// The palette follows the language, title and rows alike.

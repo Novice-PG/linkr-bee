@@ -1210,6 +1210,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     pub fn start_ble_scan(&mut self) -> Result<(), String> {
         self.ble_scan.reset();
         self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
+        // A dialog is the top of the modal stack, so it takes the keyboard
+        // from the palette rather than joining it underneath: the list is
+        // what the next key is for.
+        self.palette = None;
         self.dialog = Some(crate::dialogs::Dialog::DevicePick(
             crate::dialogs::DevicePick {
                 devices: Vec::new(),

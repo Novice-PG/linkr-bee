@@ -372,14 +372,26 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
 
 // --- opening -----------------------------------------------------------------
 
+/// Put a dialog on the screen, taking the keyboard from whatever had it.
+///
+/// The palette is closed rather than left underneath: a dialog is the top of
+/// the modal stack, and one painted over a palette that is still taking keys
+/// would be a window the user can see but not answer. `Ctrl+P` is the other
+/// direction and stays legal — the palette opens over a dialog and takes the
+/// keys back — which is what `handle_key` in `main.rs` dispatches for.
+fn raise(app: &mut App, dialog: Dialog) {
+    app.palette = None;
+    app.dialog = Some(dialog);
+}
+
 /// Raise the keyboard help.
 pub fn open_help(app: &mut App) {
-    app.dialog = Some(Dialog::Help(0));
+    raise(app, Dialog::Help(0));
 }
 
 /// Raise the notice log.
 pub fn open_notices(app: &mut App) {
-    app.dialog = Some(Dialog::Notices(0));
+    raise(app, Dialog::Notices(0));
 }
 
 /// Ask which network to join. The password is asked for next, by the prompt
@@ -390,7 +402,7 @@ pub fn prompt_wifi_ssid(app: &mut App) {
         PromptAction::WifiSsid,
         &app.network.ssid_input.clone(),
     );
-    app.dialog = Some(Dialog::Prompt(prompt));
+    raise(app, Dialog::Prompt(prompt));
 }
 
 /// Ask where the device's log should be uploaded to.
@@ -404,7 +416,7 @@ pub fn prompt_webdav_url(app: &mut App) {
             .map(|d| d.url.clone())
             .unwrap_or_default(),
     );
-    app.dialog = Some(Dialog::Prompt(prompt));
+    raise(app, Dialog::Prompt(prompt));
 }
 
 /// A confirmation: what is about to happen, and what agreeing does.
@@ -451,12 +463,15 @@ pub fn ask(app: &mut App, action: ConfirmAction) {
             app.strings().net_confirm_detail.to_string(),
         ),
     };
-    app.dialog = Some(Dialog::Confirm(Confirm {
-        prompt,
-        detail,
-        action,
-        yes: false,
-    }));
+    raise(
+        app,
+        Dialog::Confirm(Confirm {
+            prompt,
+            detail,
+            action,
+            yes: false,
+        }),
+    );
 }
 
 // --- the body ----------------------------------------------------------------

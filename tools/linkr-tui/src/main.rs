@@ -1093,10 +1093,17 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 /// quits and `Ctrl+T` still repaints with an overlay up. Then the global
 /// chords, then the sidebar, and only what is left is the device's.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    if app.dialog.is_some() && dialogs::handle_key(app, key) {
+    // The two modals are a stack: whichever was opened last is on top, takes
+    // the keys, and is the one painted. Dispatch has to agree with the
+    // painter, and the painter puts the palette first — so the palette is
+    // checked first. Before this, a dialog was checked first while the painter
+    // also preferred the dialog, which made `Ctrl+P` look dead with a form
+    // open: the palette *did* open, over the dialog, but it was painted under
+    // it and fed no keys, so Escape was the only way to find it again.
+    if app.palette.is_some() && palette::handle_key(app, key) {
         return app.quit;
     }
-    if app.palette.is_some() && palette::handle_key(app, key) {
+    if app.dialog.is_some() && dialogs::handle_key(app, key) {
         return app.quit;
     }
 
@@ -2120,6 +2127,86 @@ mod tests {
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         );
         assert_eq!(app.tx, 0);
+    }
+
+    /// A palette opened over a dialog is *live*: the keys reach it and it can
+    /// be closed again. It used to open behind the dialog and take no keys, so
+    /// the chord read as dead until Escape cleared the box in front of it.
+    #[test]
+    fn control_p_wakes_the_palette_over_a_dialog() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // The form's own modal: a prompt is what a network view raises, and
+        // the state the report came from.
+        linkr_tui::dialogs::prompt_wifi_ssid(&mut app);
+        assert!(app.dialog.is_some(), "the prompt is up");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_some(), "Ctrl+P woke the palette");
+        assert!(app.dialog.is_some(), "the prompt is still underneath");
+
+        // The keys are the palette's, not the prompt's: a letter is a query
+        // character and the prompt's field does not move.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.palette.as_ref().map(|p| p.query.as_str()),
+            Some("z"),
+            "the palette took the key"
+        );
+
+        // Escape closes the top of the stack, and the prompt comes back.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.palette.is_none(), "Escape closed the palette");
+        assert!(app.dialog.is_some(), "and the prompt is back");
+
+        // Ctrl+P again, then Ctrl+P to close it: the chord is a toggle even
+        // with a dialog up.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_some());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_none(), "the chord put it away");
+        assert!(app.dialog.is_some(), "the prompt never moved");
+    }
+
+    /// A dialog raised while the palette is open takes the keyboard: the two
+    /// are a stack, and the one opened last is the one answering.
+    #[test]
+    fn a_dialog_raised_over_the_palette_takes_the_keys() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_some());
+
+        // F1 is the help, and it is legal with the palette up.
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(app.dialog.is_some(), "the help is up");
+        assert!(app.palette.is_none(), "and gave up the keyboard");
+
+        // A letter now belongs to the dialog, not to a palette query.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.tx, 0, "the dialog swallowed the keystroke");
     }
 
     /// Enter on a sidebar row does what the row says: it opens a view, sends a
