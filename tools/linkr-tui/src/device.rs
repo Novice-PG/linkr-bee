@@ -132,6 +132,20 @@ impl Conversation {
         self.pending.as_ref().map(|p| p.query)
     }
 
+    /// What the question in flight has been told so far, before it is finished.
+    ///
+    /// Half an answer is still an answer for a question that streams: a scan
+    /// reports one network at a time, and a view that showed this while it
+    /// arrives would show a list growing. Empty when nothing is being waited
+    /// for, which is how a caller tells "half" from "none" without a flag of
+    /// its own.
+    pub fn pending_lines(&self) -> &[String] {
+        match &self.pending {
+            Some(pending) => &pending.lines,
+            None => &[],
+        }
+    }
+
     /// Ask `query` at `now`, replacing any question still open.
     ///
     /// Returns the request id and the command body, so the frame that goes out

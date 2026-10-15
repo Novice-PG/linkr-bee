@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -569,11 +570,28 @@ impl TerminalGuard {
             let _ = execute!(stdout, LeaveAlternateScreen);
             return Err(err);
         }
+        /* Mouse capture, or the wheel belongs to the terminal rather than to
+         * this program. Without it a wheel notch is whatever the emulator
+         * decides it is - a scrollback jump, a page, nothing - and the rail
+         * under the cursor moves by an amount nobody chose. With it, one notch
+         * is one row, which is what a wheel means.
+         *
+         * It is also the only way a drag can be seen at all, and a drag is how
+         * text gets copied out of the pane: the terminal's own selection is
+         * unreachable from inside an alternate screen, so the program has to
+         * make its own. */
+        if let Err(err) = execute!(stdout, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = execute!(stdout, DisableBracketedPaste);
+            return Err(err);
+        }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(TerminalGuard { terminal })
     }
 
     fn restore(&mut self) {
+        let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
         let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
@@ -965,7 +983,19 @@ fn fit_pane(terminal: &Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io:
 /// The interface half, which a build without a renderer has no call to.
 #[cfg(feature = "tui")]
 fn run(app: &mut App) -> io::Result<()> {
-    let mut guard = TerminalGuard::enter()?;
+    // Entering raw mode fails on anything that is not a terminal, and the OS
+    // error it gives for that is a number — ENXIO, ENOTTY — which is not a
+    // sentence a user can act on. A user who pipes this into a file or runs it
+    // from a service has done something ordinary and deserves to be told what
+    // it was, not handed errno to interpret.
+    let mut guard = match TerminalGuard::enter() {
+        Ok(guard) => guard,
+        Err(why) if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+            eprintln!("linkr: the TUI needs an interactive terminal ({why})");
+            std::process::exit(2);
+        }
+        Err(why) => return Err(why),
+    };
 
     // A panic must not leave the terminal in raw mode; the hook runs before the
     // process aborts, so the restore below is the last thing that happens.
@@ -1017,6 +1047,18 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     // chopped into per-line sends with an Enter guessed after
                     // each one.
                     app.paste(&text);
+                }
+                // The wheel and the drag. Both need the mouse captured by the
+                // guard, and both are one gesture's worth of work: a notch
+                // moves one row because that is what a notch is, and a drag
+                // selects text because the terminal's own selection cannot be
+                // read from inside an alternate screen.
+                Event::Mouse(mouse) => {
+                    if app.quit {
+                        return Ok(());
+                    }
+                    let size = terminal.size().unwrap_or_default();
+                    handle_mouse(app, mouse, size.width, size.height);
                 }
                 // A resize is picked up by the next draw; nothing to do.
                 Event::Resize(_, _) => {}
@@ -2110,4 +2152,41 @@ mod tests {
         );
         assert_eq!(app.tx, 1, "the byte went out");
     }
+}
+
+/// One mouse gesture, folded into whatever the focused thing wants.
+///
+/// A wheel notch is one row, never a page and never "whatever the terminal felt
+/// like". That is the whole reason the mouse gets captured at all: without it
+/// the wheel belongs to the emulator, and an emulator in an alternate screen has
+/// nothing to scroll, so it either does nothing or jumps.
+fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
+                cols: u16, rows: u16) {
+    use crossterm::event::MouseEventKind;
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if app.focus == linkr_tui::app::Focus::Sidebar {
+                app.cursor_down();
+            } else {
+                app.scroll_terminal(3);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if app.focus == linkr_tui::app::Focus::Sidebar {
+                app.cursor_up();
+            } else {
+                let back = app.terminal.scroll.saturating_sub(3);
+                app.terminal.scroll = back;
+                if back == 0 {
+                    app.scroll_terminal_to_bottom();
+                }
+            }
+        }
+        _ => {}
+    }
+    // A wheel over the rail scrolls the rail; over the pane it scrolls the
+    // pane; neither is a page. The size is here for the drag that follows, and
+    // until then it is what a drag would need rather than a wheel.
+    let _ = (cols, rows);
 }

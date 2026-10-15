@@ -411,7 +411,19 @@ fn activate(app: &mut App) {
             // would be asking twice.
             dialogs::prompt_wifi_ssid(app);
         }
-        NetworkRow::Scan => dialogs::ask(app, ConfirmAction::Accessory("@w scan".to_string())),
+        // A scan is a read, and the note above this match says why that
+        // matters: a card asking permission to look at something is a card
+        // that teaches people to press yes without reading. The command in
+        // the card's prompt would have been `@w scan` — gadget talk nobody
+        // outside this codebase types.
+        NetworkRow::Scan => {
+            if let Err(why) = app.scan_wifi() {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: crate::event::NoticeLevel::Error,
+                });
+            }
+        }
         NetworkRow::WifiOff => dialogs::ask(app, ConfirmAction::Accessory("@w off".to_string())),
         NetworkRow::WebdavOff => dialogs::ask(app, ConfirmAction::Accessory("@d off".to_string())),
         // Reads are not guarded: they change nothing, and a card asking

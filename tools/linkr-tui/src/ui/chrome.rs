@@ -356,7 +356,7 @@ mod tests {
             },
             &Theme::DARK,
         ));
-        assert_eq!(zh, "Ctrl+P 面板 · F1 帮助 · F2-F6 视图 · Ctrl+Q 退出");
+        assert_eq!(zh, "Ctrl+P 面板 · F1 帮助 · F2-F5 视图 · Ctrl+Q 退出");
         let en = line_text(&bottom_right(
             &App {
                 lang: Lang::En,
@@ -364,7 +364,7 @@ mod tests {
             },
             &Theme::DARK,
         ));
-        assert_eq!(en, "Ctrl+P palette · F1 help · F2-F6 views · Ctrl+Q quit");
+        assert_eq!(en, "Ctrl+P palette · F1 help · F2-F5 views · Ctrl+Q quit");
     }
 
     /// Every span in both bars takes its colour from the theme, so switching

@@ -1067,6 +1067,23 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                             // with no trace of having arrived.
                             let _ = (header, payload);
                         }
+                        // A scan streams: the bridge answers one network at a
+                        // time rather than once at the end, and the list is
+                        // where the user watches it happen. Folded here rather
+                        // than only at finalize, so a network appears as it is
+                        // heard — the alternative is a view that reads "scanning"
+                        // for eleven seconds and then fills at once, which is
+                        // the same wait with nothing to watch.
+                        //
+                        // The last line may be half a name while its frame is
+                        // still in flight. It is corrected by the next one,
+                        // which is what a streaming list looks like on the wire.
+                        if self.talk.waiting() == Some(Query::Wifi) {
+                            let partial = scan_results(self.talk.pending_lines());
+                            if !partial.is_empty() {
+                                self.network.scan_results = partial;
+                            }
+                        }
                     }
                 }
                 LinkEvent::Opened | LinkEvent::Closed(_) => {}
@@ -2503,6 +2520,23 @@ mod tests {
         (app, wire)
     }
 
+    /// Build one *unfinished* management fragment: a response in progress.
+    ///
+    /// A scan streams its results this way — the firmware sends each one with
+    /// no final flag, and only `@scan done` ends it — so a test that wants to
+    /// see the list grow needs this rather than `answer`'s finished frame.
+    fn partial(id: u32, body: &str) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"LK");
+        frame.push(crate::protocol::MGMT_API_MAJOR);
+        frame.push(2);
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&0u16.to_le_bytes());
+        frame.extend_from_slice(body.as_bytes());
+        frame
+    }
+
     /// Build one management response for `id`, framed the way the bridge
     /// frames them, ending with the flag that says the answer is complete.
     fn answer(id: u32, body: &str) -> Vec<u8> {
@@ -2740,6 +2774,41 @@ mod tests {
             "the status line is dropped and the networks are kept"
         );
         assert!(app.network.wifi.is_none(), "a list is not a status");
+    }
+
+    /// A scan streams: the first network shows before the scan is over.
+    ///
+    /// The bridge answers one network at a time, so folding only at finalize
+    /// would leave the view reading "scanning" for the whole scan and then fill
+    /// at once — the same wait, with nothing to watch. This is the regression
+    /// test for that: half an answer is fed, and the list already has a row.
+    #[test]
+    fn a_scan_fills_while_it_is_still_running() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.scan_wifi().expect("asked");
+        let id = asked_id(&wire);
+
+        // One result line, without the final flag. The firmware streams a scan
+        // exactly this way — `wifi_scan_respond()` in the firmware sends each
+        // result with flags 0 and only `@scan done` carries FINAL — so this is
+        // the real shape, not a convenience. A body with an `OK` line in it
+        // would be recognised as a finished answer by shape alone, which is why
+        // the status line is deliberately absent here.
+        wire.feed_management(partial(id, "BenchNet -58 6"));
+
+        assert!(pump_until(&mut app, |app| !app
+            .network
+            .scan_results
+            .is_empty()));
+        assert_eq!(
+            app.network.scan_results,
+            vec!["BenchNet -58 6".to_string()],
+            "the first network is visible before the scan ends"
+        );
+        assert!(
+            app.network.loading,
+            "still waiting: the scan has not said it is finished"
+        );
     }
 
     /// An approved change is the command, and the read that confirms it follows
