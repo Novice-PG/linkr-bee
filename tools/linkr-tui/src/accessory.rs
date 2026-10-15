@@ -27,6 +27,11 @@ pub const UART_QUERY_COMMAND: &str = "@u?";
 pub const WIFI_QUERY_COMMAND: &str = "@w?";
 pub const WEBDAV_QUERY_COMMAND: &str = "@d?";
 
+/// `@s?` — the WebSocket/LAN settings, and the only place the bridge reports
+/// its LAN access token. `@i?` deliberately omits it, so this is the one
+/// command a client has to send to learn a token it does not already have.
+pub const LAN_QUERY_COMMAND: &str = "@s?";
+
 /// A UART settings set, as both the command builder and the parser use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UartSettings {
@@ -301,6 +306,42 @@ pub struct WebdavStatus {
 
 /// `OK webdav=on,url=http://host/dav/`. Everything after `url=` is the target,
 /// so a URL containing a comma or a query string survives the parse.
+/// What `@s?` reports: whether LAN access is on, and the token it expects.
+///
+/// `token=none` is a real answer and not a missing one: it is how the bridge
+/// says LAN auth was switched off, and the LAN dial must then be attempted
+/// without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanStatus {
+    pub ws: String,
+    pub token: String,
+}
+
+/// Read a LAN status out of an `@s?` reply.
+pub fn parse_lan_status(text: &str) -> Option<LanStatus> {
+    let line = text.lines().find(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.contains("ws=") || lower.contains("ws ")
+    })?;
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("ws=")?;
+    let payload = &line[idx + 3..];
+    let token = payload
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("token="))
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    Some(LanStatus {
+        ws: payload
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+        token: if token == "none" { String::new() } else { token },
+    })
+}
+
 pub fn parse_webdav_status(text: &str) -> Option<WebdavStatus> {
     let line = text.lines().find(|l| {
         let lower = l.to_ascii_lowercase();
@@ -492,5 +533,45 @@ mod tests {
             accessory_change_summary("@d=https://h/d/", false),
             "Enable log upload to https://h/d/"
         );
+    }
+}
+
+#[cfg(test)]
+mod lan_tests {
+    use super::*;
+
+    /// `@s?` is the only place a token can be learned, and this is the shape it
+    /// comes back in — from the real web client's own parser.
+    #[test]
+    fn a_socket_status_reports_its_token() {
+        let status = parse_lan_status("OK ws=on token=0123456789abcdef0123456789abcdef")
+            .expect("parses");
+        assert_eq!(status.ws, "on");
+        assert_eq!(status.token, "0123456789abcdef0123456789abcdef");
+    }
+
+    /// `token=none` is an answer, not a blank: LAN auth was switched off and the
+    /// dial must be attempted with nothing.
+    #[test]
+    fn a_socket_status_without_auth_says_none() {
+        let status = parse_lan_status("OK ws=on token=none").expect("parses");
+        assert_eq!(status.token, "");
+    }
+
+    /// Uppercase is what a user's own `@s token=` writes and what some firmware
+    /// echoes; the wire is lowercase, so it is lowered here rather than rejected.
+    #[test]
+    fn a_token_is_lowered_because_the_wire_is() {
+        let status = parse_lan_status("OK ws=on token=ABCDEF0123456789ABCDEF0123456789")
+            .expect("parses");
+        assert_eq!(status.token, "abcdef0123456789abcdef0123456789");
+    }
+
+    /// A line that is not a socket status is not one — the diagnostics reply has
+    /// plenty of `x=y` in it and none of them is a token.
+    #[test]
+    fn an_unrelated_line_is_not_a_socket_status() {
+        assert!(parse_lan_status("OK info fw=1.2.3").is_none());
+        assert!(parse_lan_status("").is_none());
     }
 }

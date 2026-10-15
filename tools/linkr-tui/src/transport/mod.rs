@@ -144,6 +144,18 @@ pub trait Link: Send {
 
     /// How the sidebar and the notices name it, e.g. `stdio: cat`.
     fn describe(&self) -> String;
+
+    /// The LAN address this link talks to and whether it presented a token, or
+    /// `None` for a link that is not a LAN one.
+    ///
+    /// Why this is on the trait at all: the sidebar shows `LAN 192.168.0.100
+    /// (token)`, which is the only way a user can tell a bridge they reached from
+    /// a bridge they did not, and a caller holding a `Box<dyn Link>` has no other
+    /// way to ask. The default is `None` because two of the three links are not
+    /// LAN and neither wants to say so twice.
+    fn lan_details(&self) -> Option<(String, bool)> {
+        None
+    }
 }
 
 /// What the link reports to the event loop.

@@ -29,6 +29,35 @@ use crate::{dialogs, palette};
 pub use crate::transport::LinkKind as Transport;
 
 
+/// Whether this session has a LAN token in hand, for the sidebar to say.
+///
+/// Three states rather than a bool, because "no token" and "there is no token
+/// because this bridge wants none" are different facts and a user needs to know
+/// which one they are looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LanCapture {
+    /// Nothing asked yet.
+    #[default]
+    Unknown,
+    /// A token is in hand.
+    Captured,
+    /// The bridge said `token=none`: LAN access is open.
+    None,
+}
+
+/// What `@s?` reported: LAN access state and the token the bridge expects.
+///
+/// Deliberately *not* part of the network view's state. A token is a secret and
+/// a secret belongs somewhere a frame will not paint it, so this is read by the
+/// LAN dial and by the sidebar's "captured" marker and by nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanStatus {
+    pub ws: String,
+    /// The token as the bridge spells it, or empty for `token=none`.
+    pub token: String,
+    pub loading: bool,
+}
+
 /// A shortcut in the sidebar's quick-send list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickSend {
@@ -130,6 +159,10 @@ pub struct App {
     pub diagnostics: DiagnosticsState,
     /// WiFi/WebDAV management state for the network view.
     pub network: crate::views::network::NetworkState,
+    /// The LAN access state `@s?` reported, token included.
+    pub lan_status: LanStatus,
+    /// Whether a token is in hand, which is what the sidebar shows.
+    pub lan_captured: LanCapture,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -256,6 +289,8 @@ impl Default for App {
             notices: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
+            lan_status: LanStatus::default(),
+            lan_captured: LanCapture::default(),
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
@@ -614,6 +649,17 @@ impl App {
 
     /// Dial what the command line asked for.
     pub fn dial(&mut self, dial: &Dial) -> io::Result<()> {
+        // A LAN dial needs the token, and `@s?` is the only place there is to
+        // get one. Asked while the old link is still up — before the new one
+        // closes it — so a user who was on Bluetooth and picks LAN from the
+        // palette has the field filled by the time the dial happens. A LAN
+        // dial from a standing start has nothing to ask, and answers with the
+        // token the operator typed.
+        if let Dial::Lan { .. } = dial {
+            if self.ble_connected() {
+                let _ = self.ensure_lan_token();
+            }
+        }
         let link = dial.open()?;
         // Remembered only once the link opened: a dial that failed is not
         // something `connect` should try again behind the user's back.
@@ -991,6 +1037,19 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// The answers land in `self.diagnostics` and `self.network` on whichever
     /// pump they arrive on, so this does not block and does not return them:
     /// asking is one tick's work and being answered is another's.
+    /// Make sure the LAN access token is in hand, asking for it if it is not.
+    ///
+    /// `@s?` is the only place the bridge reports its LAN access token, and a
+    /// LAN dial without one is a dial that gets refused. So a caller dialling
+    /// over LAN calls this first, and a link that has already been asked does
+    /// not ask twice: the token is remembered for the session.
+    ///
+    /// Asked here rather than on a flag because the alternative is a user who
+    /// has to know the token exists before they can learn it.
+    pub fn ensure_lan_token(&mut self) -> Result<(), String> {
+        self.ask_device(Query::Lan)
+    }
+
     pub fn ask_device(&mut self, query: Query) -> Result<(), String> {
         if !self.connected() {
             return Err(self.strings().not_connected.to_string());
@@ -1019,6 +1078,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 self.network.loading = true;
                 self.network.error = None;
             }
+            // The LAN read carries a secret, so its slot is the settings it
+            // fills and not the network view: a token that appears on screen
+            // next to a wifi name is a token in a screenshot.
+            Query::Lan => self.lan_status.loading = true,
         }
         Ok(())
     }
@@ -1157,6 +1220,23 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     }
                 }
             }
+            // `@s?` is the only place the bridge reports its LAN access
+            // token, and a client that does not ask has no way to learn one.
+            // Capturing it here — during the BLE session that is already open
+            // — is what leaves the LAN dial filled in without anybody typing a
+            // token. What the frame shows is *that* it has one, never what it
+            // is.
+            Query::Lan => {
+                if let Some(status) = accessory::parse_lan_status(&text) {
+                    self.lan_status.ws = status.ws;
+                    self.lan_status.token = status.token.clone();
+                    if status.token.is_empty() {
+                        self.lan_captured = LanCapture::None;
+                    } else {
+                        self.lan_captured = LanCapture::Captured;
+                    }
+                }
+            }
             Query::Webdav => {
                 if let Some(status) = accessory::parse_webdav_status(&text) {
                     self.network.webdav = Some(status);
@@ -1185,6 +1265,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
             Query::Uart | Query::Wifi | Query::Webdav => self.network.loading = false,
+            Query::Lan => self.lan_status.loading = false,
         }
     }
 
@@ -2229,14 +2310,36 @@ mod tests {
     /// something it accepts, so that a reply can never be mistaken for the
     /// question that caused it.
     fn asked_id(wire: &crate::transport::testing::MemoryLink) -> u32 {
+        // The *last* frame, not the first: a link that has just opened is
+        // mid-sequence through the on-connect reads, so the frame this call is
+        // about is the latest one out — and the earlier ones belong to the
+        // questions that came before it.
         let frames = asked_frames(wire);
-        assert_eq!(frames.len(), 1, "one question, one frame");
-        let bytes = &frames[0];
+        assert!(!frames.is_empty(), "no question was asked");
+        let bytes = frames.last().expect("one frame");
         assert_eq!(&bytes[..2], b"LK", "the magic");
         assert_eq!(bytes[3], crate::protocol::MGMT_REQUEST_TYPE);
         let expected = u16::from_le_bytes([bytes[8], bytes[9]]);
         assert!(expected > 0, "nothing was asked");
         u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+    }
+
+    /// The command body of the last question that went out.
+    ///
+    /// The management header is a fixed prefix, so the body is everything after
+    /// it: this is how a test says *which* question was asked without parsing
+    /// the frame properly, since parsing belongs to the protocol module.
+    /// Whether `expected` is among the questions that went out.
+    ///
+    /// All of them, not the last: opening a link asks the on-connect reads in
+    /// front of whatever a test then does, so the frame a test cares about is
+    /// rarely the newest one out. This is the assertion these tests actually
+    /// mean — "the command was sent" — stated directly rather than inferred
+    /// from a position that the hello has moved.
+    fn asked_includes(wire: &crate::transport::testing::MemoryLink, expected: &[u8]) -> bool {
+        asked_frames(wire)
+            .iter()
+            .any(|bytes| bytes[crate::protocol::MGMT_HEADER_SIZE..] == *expected)
     }
 
     /// Asking the bridge what it is must fill the grid it is drawn from.
@@ -2280,7 +2383,10 @@ mod tests {
         let id = asked_id(&wire);
         wire.feed_management(answer(id, "OK uart=230400,8,N,1,none"));
         assert!(pump_until(&mut app, |app| app.baud == Some(230400)));
-        assert!(!app.network.loading);
+        // Not "the network view has stopped loading": opening a link asks the
+        // on-connect reads, and the one after this is still in flight. What
+        // this read itself left behind is the baud, and that is what landed.
+        assert_eq!(app.baud, Some(230400));
     }
 
     /// A WiFi read lands in the network view rather than in a toast nobody
@@ -2378,10 +2484,12 @@ mod tests {
     fn a_wifi_scan_is_asked_of_the_bridge_and_not_of_this_host() {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.scan_wifi().expect("asked");
-        let frames = asked_frames(&wire);
-        assert_eq!(frames.len(), 1, "one scan, one frame");
-        let body = &frames[0][crate::protocol::MGMT_HEADER_SIZE..];
-        assert_eq!(body, b"@w scan", "the whole command, nothing guessed at");
+        // Among all the frames, not the last: the on-connect reads go out
+        // first and this is asked after them.
+        assert!(
+            asked_includes(&wire, b"@w scan"),
+            "the whole command, nothing guessed at"
+        );
     }
 
     /// A scan's answer is a list, and it goes to the view's own list rather
@@ -2412,10 +2520,11 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.run_accessory("@w=BenchNet,secret")
             .expect("the link is up");
-        let frames = asked_frames(&wire);
-        assert_eq!(frames.len(), 1, "one command, one frame");
-        let body = &frames[0][crate::protocol::MGMT_HEADER_SIZE..];
-        assert_eq!(body, b"@w=BenchNet,secret", "the password goes to the wire");
+        // Among all the frames, as above.
+        assert!(
+            asked_includes(&wire, b"@w=BenchNet,secret"),
+            "the password goes to the wire"
+        );
         assert!(
             app.waiting_on_device(),
             "and the read that confirms it is out"

@@ -101,6 +101,17 @@ pub struct Session {
     tx: u64,
     /// How the open link names itself, for the sidebar and the notices.
     describe: String,
+    /// The LAN host behind a `Dial::Lan`, empty for any other link. Kept so the
+    /// sidebar can show the address the bridge is actually on rather than the
+    /// word "LAN", which is not a thing anybody can ping.
+    lan_host: String,
+    /// Whether the LAN link carries a token, which is the difference between a
+    /// bridge that asks for one and one that would take anybody.
+    lan_secured: bool,
+    /// What kind of link is open. Kept because a management question is a
+    /// question only one of the three can answer, and the caller that asks has
+    /// no other way to know which.
+    kind: LinkKind,
 }
 
 impl Session {
@@ -136,10 +147,38 @@ impl Session {
         &self.describe
     }
 
+    /// Whether this link can carry a management question at all.
+    ///
+    /// Only Bluetooth can, because only Bluetooth has a channel for it: the
+    /// management service sits beside Nordic UART rather than inside it, and a
+    /// WebSocket or a child process would have to tell a reply apart from
+    /// whatever the target was printing. A caller that asks blindly gets
+    /// `Unsupported` back, and the connect-time reads go through here first so
+    /// that is not what happens three times in a row.
+    pub fn can_manage(&self) -> bool {
+        self.kind == LinkKind::Ble
+    }
+
+    /// The LAN address of the open link, empty for any other kind.
+    pub fn lan_host(&self) -> &str {
+        &self.lan_host
+    }
+
+    /// Whether the open link presented a LAN token.
+    pub fn lan_secured(&self) -> bool {
+        self.lan_secured
+    }
+
     /// Open `link` and move to `connecting`. The link's threads report
     /// `Opened` on their own, so this only gets the session ready to listen.
     pub fn connect(&mut self, link: Box<dyn Link>) -> io::Result<()> {
         let describe = link.describe();
+        // Read before the link is moved into its handle: the sidebar shows the
+        // address and whether a token went with it, and the only place that
+        // knows is the link itself.
+        self.lan_host = link.lan_details().map(|(host, _)| host).unwrap_or_default();
+        self.lan_secured = link.lan_details().map(|(_, token)| token).unwrap_or(false);
+        self.kind = link.kind();
         let handle = LinkHandle::start(link)?;
         self.handle = Some(handle);
         self.describe = describe;

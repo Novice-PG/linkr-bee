@@ -403,6 +403,10 @@ impl Link for LanLink {
         // notices, in the sidebar and in bug reports.
         format!("lan:{}", host_key(&self.host))
     }
+
+    fn lan_details(&self) -> Option<(String, bool)> {
+        Some((self.host.clone(), self.token.is_some()))
+    }
 }
 
 /// How long a dial may take in total: connect, retries, handshake.

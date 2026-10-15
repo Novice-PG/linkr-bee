@@ -1079,12 +1079,46 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.clear_terminal();
             return false;
         }
-        // Ctrl+Up opens or closes the rail. A chord rather than a plain key
-        // because Up alone is the cursor or scrollback in every focus, and a
-        // toggle the user can hit by accident is worse than one they cannot.
+        // Ctrl+Up puts the keyboard on the rail. Up alone is the cursor or
+        // scrollback in every focus, so focusing needs a chord; and Esc takes
+        // the keyboard back out again, which is why this is a one-way trip.
+        //
+        // The rail's *visibility* is a different thing and is not bound here:
+        // a key that could hide the sidebar from under a user who is trying to
+        // focus it is a key that fights them. It is in the palette.
         (KeyCode::Up, true) => {
-            let notice = app.toggle_sidebar();
-            app.push_notice(notice);
+            app.focus = Focus::Sidebar;
+            return false;
+        }
+        // --- the assistant ---------------------------------------------------
+        // Four chords, all landing on a field rather than on the view. A
+        // shortcut that opens the view but leaves the keyboard in the terminal
+        // is a shortcut that saves one keystroke and costs two.
+        (KeyCode::Char('K'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.set_view(View::Assistant);
+            app.assistant.focus = crate::views::assistant::AgentField::Composer;
+            return false;
+        }
+        (KeyCode::Char('S'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.set_view(View::Assistant);
+            app.assistant.focus = crate::views::assistant::AgentField::Endpoint;
+            return false;
+        }
+        (KeyCode::Char('M'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.set_view(View::Assistant);
+            crate::views::assistant::cycle_mode(app);
+            return false;
+        }
+        (KeyCode::Char('N'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.set_view(View::Assistant);
+            crate::views::assistant::clear_conversation(app);
+            return false;
+        }
+        // The clipboard, pasted as text. `V` is not a device key the way a
+        // letter is, and a paste that reached the backend would be retyped by
+        // it as so many keystrokes.
+        (KeyCode::Char('V'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            crate::views::assistant::paste_into_focus(app);
             return false;
         }
         // F1 is the help, not a view: the view rota starts at F2.
@@ -1115,6 +1149,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // Enter does what the row says: change the transport, dial, open a
             // view, or send a preset — the guarded ones asking first.
             KeyCode::Enter => ui::sidebar::activate(app),
+            // Esc hands the keyboard back to the centre column. It is the only
+            // key that means "stop being in a pane" in every other layer of
+            // this interface, so it means it here too — and it is consumed
+            // here rather than falling through, because Esc is otherwise the
+            // escape byte the wire carries and a focused rail must not type to
+            // the target by accident.
+            KeyCode::Esc => app.focus = Focus::Terminal,
             _ => {}
         }
         return false;

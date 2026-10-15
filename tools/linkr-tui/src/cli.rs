@@ -958,6 +958,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Uart => "uart",
         crate::device::Query::Wifi => "wifi",
         crate::device::Query::Webdav => "webdav",
+        crate::device::Query::Lan => "lan",
     }
 }
 
@@ -1009,6 +1010,24 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
             Some(webdav) => format!("webdav={},url={}", webdav.state, webdav.url),
             None => String::new(),
         },
+        // The state is reported; the token never is. A CLI's output goes to a
+        // pipe and a pipe goes to a log, and a token in a log is a token that
+        // has to be rotated.
+        crate::device::Query::Lan => {
+            if app.lan_status.ws.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "ws={},token={}",
+                    app.lan_status.ws,
+                    if app.lan_status.token.is_empty() {
+                        "none"
+                    } else {
+                        "captured"
+                    }
+                )
+            }
+        }
     };
     match format {
         Format::Text => {

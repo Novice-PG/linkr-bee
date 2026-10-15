@@ -1194,3 +1194,163 @@ mod interaction {
         assert_eq!(n.assistant.composer, "already", "a key leaked past the answer");
     }
 }
+
+/// Cycle the execution mode and say which one it landed on.
+///
+/// Public because two doors open it and only one of them is the view: the
+/// palette has an action for it and `Ctrl+Shift+M` is a chord. Both go through
+/// here so the wording and the cycle live in one place — a mode that cycles
+/// differently depending on how it was reached is a mode nobody can learn.
+pub fn cycle_mode(app: &mut App) {
+    use crate::exec::executor::Mode;
+    let next = app.assistant.mode.unwrap_or(Mode::Auto).next();
+    app.assistant.mode = Some(next);
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: format!("{}: {}", s.asst_mode_label, s.execution_mode(next)),
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+/// Start a new conversation, on disk as well as on screen.
+///
+/// A clear that left the store alone would be undone by the next restart, which
+/// is the one thing a clear must not do.
+pub fn clear_conversation(app: &mut App) {
+    app.assistant.display.clear();
+    let key = app.agent_device_key();
+    if let Some(store) = app.agent_store.as_mut() {
+        crate::agent::session::clear_session(store, &key);
+    }
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: s.agent_cleared.to_string(),
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+/// The tool this platform reads its clipboard with, tried in this order.
+///
+/// One per platform, first that exists wins: a machine with both `xclip` and
+/// `wl-paste` (XWayland under Wayland, common) has both, and the order only
+/// matters in that the first found is the one used.
+const CLIPBOARD_READERS: &[&[&str]] = &[
+    &["wl-paste", "--no-newline"],
+    &["xclip", "-selection", "clipboard", "-o"],
+    &["xsel", "--clipboard", "--output"],
+    &["pbpaste"],
+    #[cfg(windows)]
+    &["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+];
+
+/// The tool this platform writes its clipboard with.
+const CLIPBOARD_WRITERS: &[&[&str]] = &[
+    &["wl-copy", "--type", "text/plain"],
+    &["xclip", "-selection", "clipboard"],
+    &["xsel", "--clipboard", "--input"],
+    &["pbcopy"],
+    #[cfg(windows)]
+    &["clip"],
+];
+
+/// Read the system clipboard as text, or None when nothing can.
+///
+/// The terminal's own paste is a different door and arrives as a bracketed paste
+/// event; this is the one a *chord* takes, and it exists so a keystroke can do
+/// what a terminal's paste menu does. It is a subprocess because there is no
+/// portable clipboard API without a dependency this crate does not have, and the
+/// split the web client makes (`wl-paste` under
+/// `navigator.clipboard.readText()`) is the one to make here.
+pub fn read_system_clipboard() -> Option<String> {
+    for tool in CLIPBOARD_READERS {
+        let output = match std::process::Command::new(tool[0])
+            .args(&tool[1..])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
+        if output.status.success() {
+            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    None
+}
+
+/// Put `text` on the system clipboard, or say why not.
+///
+/// The same tool list the reader uses, in the other direction. A tool that
+/// exists but is not usable — a `wl-copy` with no Wayland display — fails here,
+/// and the next one is tried.
+pub fn write_system_clipboard(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("nothing to copy".to_string());
+    }
+    for tool in CLIPBOARD_WRITERS {
+        let mut child = match std::process::Command::new(tool[0])
+            .args(&tool[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            if stdin.write_all(text.as_bytes()).is_ok() {
+                drop(child.stdin.take());
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err("no clipboard tool worked".to_string())
+}
+
+/// Paste the system clipboard into whatever field has the caret.
+///
+/// A chord rather than the terminal's own paste, because the terminal's paste
+/// goes to the *device* while the caret is in a field; this one knows the
+/// difference. A newline in the pasted text is a newline the field does not want
+/// — a goal is one line — so it becomes a space. A note takes newlines: it is
+/// prose, and pasting one long line into a field meant to hold several is a
+/// paste that only half worked.
+pub fn paste_into_focus(app: &mut App) {
+    let Some(text) = read_system_clipboard() else {
+        let s = app.strings();
+        app.push_notice(crate::app::Notice {
+            text: s.clipboard_empty.to_string(),
+            level: crate::event::NoticeLevel::Warn,
+        });
+        return;
+    };
+    let focused = app.assistant.focus;
+    let field = match focused {
+        AgentField::Composer => Some(&mut app.assistant.composer),
+        AgentField::Endpoint => Some(&mut app.assistant.endpoint),
+        AgentField::Model => Some(&mut app.assistant.model),
+        AgentField::ApiKey => Some(&mut app.assistant.api_key),
+        AgentField::Headers => Some(&mut app.assistant.headers),
+        AgentField::Notes => Some(&mut app.assistant.note_input),
+    };
+    let Some(field) = field else {
+        return;
+    };
+    let pasted = if focused == AgentField::Notes {
+        text.clone()
+    } else {
+        text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+    };
+    let count = pasted.trim().chars().count();
+    field.push_str(&pasted);
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: format!("{} {}", s.clipboard_pasted, count),
+        level: crate::event::NoticeLevel::Info,
+    });
+}

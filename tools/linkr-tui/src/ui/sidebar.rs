@@ -239,6 +239,27 @@ pub fn rows(app: &App) -> Vec<Row> {
         RowStyle::Label,
         ITEM_INDENT,
     ));
+    // A LAN link shows its address, which is the one thing about it a user can
+    // act on — it goes in a browser, in a ping, in a bookmark. It rides the
+    // device row as a trailer rather than taking a row of its own, because the
+    // address belongs to the same connection the name does and a sidebar that
+    // grew a row per address would be a sidebar that grew a gap.
+    let lan = app.session.lan_host();
+    if !lan.is_empty() {
+        let token = if app.session.lan_secured() {
+            s.lan_token_yes
+        } else {
+            s.lan_token_no
+        };
+        rows.push(
+            Row::at(
+                labelled(s.lan_address_label, lan, s.label_separator),
+                RowStyle::Label,
+                ITEM_INDENT,
+            )
+            .trailing(token),
+        );
+    }
     for label in [s.connect, s.switch_device] {
         let index = next_cursor();
         rows.push(Row::at(label, action_style(index), ITEM_INDENT));

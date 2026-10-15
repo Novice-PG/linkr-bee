@@ -220,16 +220,10 @@ fn agent_note(app: &mut App) {
 ///
 /// The mode decides what the assistant may send unattended, so it is a thing a
 /// user changes by hand several times a session and should not have to find a
-/// field for.
+/// field for. The cycle lives in the assistant module, because the mode is its
+/// mode; this is the palette's door to it.
 fn cycle_agent_mode(app: &mut App) {
-    use crate::exec::executor::Mode;
-    let next = app.assistant.mode.unwrap_or(Mode::Auto).next();
-    app.assistant.mode = Some(next);
-    let s = app.strings();
-    app.push_notice(crate::app::Notice {
-        text: format!("{}: {}", s.asst_mode_label, s.execution_mode(next)),
-        level: crate::event::NoticeLevel::Info,
-    });
+    crate::views::assistant::cycle_mode(app);
 }
 
 fn agent_report(app: &mut App) {
@@ -237,16 +231,7 @@ fn agent_report(app: &mut App) {
 }
 
 fn agent_clear(app: &mut App) {
-    app.assistant.display.clear();
-    let key = app.agent_device_key();
-    if let Some(store) = app.agent_store.as_mut() {
-        crate::agent::session::clear_session(store, &key);
-    }
-    let s = app.strings();
-    app.push_notice(crate::app::Notice {
-        text: s.agent_cleared.to_string(),
-        level: crate::event::NoticeLevel::Info,
-    });
+    crate::views::assistant::clear_conversation(app);
 }
 
 /// The network bridge's own functions, as palette entries.

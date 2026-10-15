@@ -41,6 +41,8 @@ pub enum Query {
     Wifi,
     /// `@d?` — whether log upload is on, and where it goes.
     Webdav,
+    /// `@s?` — LAN access state, and the token the bridge expects.
+    Lan,
 }
 
 impl Query {
@@ -51,6 +53,7 @@ impl Query {
             Query::Uart => crate::accessory::UART_QUERY_COMMAND,
             Query::Wifi => crate::accessory::WIFI_QUERY_COMMAND,
             Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
+            Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
         }
     }
 
@@ -67,7 +70,7 @@ impl Query {
             Query::Diagnostics => lines
                 .iter()
                 .any(|line| line.trim().eq_ignore_ascii_case("@info done")),
-            Query::Uart | Query::Wifi | Query::Webdav => {
+            Query::Uart | Query::Wifi | Query::Webdav | Query::Lan => {
                 crate::accessory::reply_status(&lines.join("\n")).ok
                     || !crate::accessory::reply_status(&lines.join("\n"))
                         .error

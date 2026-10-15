@@ -56,6 +56,12 @@ pub struct Strings {
     pub transport_label: &'static str,
     /// `Device: <name>` prefix.
     pub device_label: &'static str,
+    /// The LAN link's address, shown only for a LAN connection.
+    pub lan_address_label: &'static str,
+    /// Whether the live LAN link presented a token.
+    pub lan_token_yes: &'static str,
+    /// The same, when it did not.
+    pub lan_token_no: &'static str,
     /// The connect action.
     pub connect: &'static str,
     /// The switch-device action.
@@ -72,6 +78,8 @@ pub struct Strings {
     pub focus_terminal: &'static str,
     /// The focus tag's word for the sidebar.
     pub focus_sidebar: &'static str,
+    /// What the keyboard is typing into while the terminal has it.
+    pub term_input: &'static str,
     /// The palette hint.
     pub hint_palette: &'static str,
     /// The help hint.
@@ -234,6 +242,10 @@ pub struct Strings {
     pub agent_field_note: &'static str,
     /// The conversation section heading.
     pub agent_thread_section: &'static str,
+    /// Notice when the system clipboard could not be read.
+    pub clipboard_empty: &'static str,
+    /// Prefix of the notice naming how much was pasted.
+    pub clipboard_pasted: &'static str,
     /// Who the user's own turns are labelled.
     pub agent_who_user: &'static str,
     /// Who the model's turns are labelled.
@@ -300,6 +312,9 @@ const ZH: Strings = Strings {
     section_watch: "监控",
     transport_label: "传输方式",
     device_label: "设备",
+    lan_address_label: "局域网地址",
+    lan_token_yes: "有密钥",
+    lan_token_no: "无密钥",
     connect: "连接",
     switch_device: "切换设备",
     transport_locked: "（已锁定）",
@@ -307,6 +322,7 @@ const ZH: Strings = Strings {
     watch_empty: "暂无发现",
     focus_terminal: "终端",
     focus_sidebar: "侧栏",
+    term_input: "输入",
     hint_palette: "Ctrl+P 面板",
     hint_help: "F1 帮助",
     hint_views: "F2-F6 视图",
@@ -345,6 +361,8 @@ const ZH: Strings = Strings {
     agent_field_headers: "自定义头",
     agent_field_note: "记一条",
     agent_thread_section: "对话",
+    clipboard_empty: "读不到剪贴板",
+    clipboard_pasted: "已粘贴",
     agent_who_user: "你",
     agent_who_model: "模型",
     agent_key_hidden: "（不显示）",
@@ -418,6 +436,9 @@ const EN: Strings = Strings {
     section_watch: "Watch",
     transport_label: "Transport",
     device_label: "Device",
+    lan_address_label: "LAN address",
+    lan_token_yes: "token",
+    lan_token_no: "no token",
     connect: "Connect",
     switch_device: "Switch device",
     transport_locked: "(locked)",
@@ -429,6 +450,7 @@ const EN: Strings = Strings {
     watch_empty: "no findings yet",
     focus_terminal: "Terminal",
     focus_sidebar: "Sidebar",
+    term_input: "typing",
     hint_palette: "Ctrl+P palette",
     hint_help: "F1 help",
     hint_views: "F2-F6 views",
@@ -467,6 +489,8 @@ const EN: Strings = Strings {
     agent_field_headers: "headers",
     agent_field_note: "note",
     agent_thread_section: "conversation",
+    clipboard_empty: "the clipboard could not be read",
+    clipboard_pasted: "Pasted",
     agent_who_user: "you",
     agent_who_model: "model",
     agent_key_hidden: "(not shown)",
@@ -633,6 +657,9 @@ mod tests {
                 s.section_watch,
                 s.transport_label,
                 s.device_label,
+                s.lan_address_label,
+                s.lan_token_yes,
+                s.lan_token_no,
                 s.connect,
                 s.switch_device,
                 s.transport_locked,
@@ -640,6 +667,7 @@ mod tests {
                 s.watch_empty,
                 s.focus_terminal,
                 s.focus_sidebar,
+                s.term_input,
                 s.hint_palette,
                 s.hint_help,
                 s.hint_views,

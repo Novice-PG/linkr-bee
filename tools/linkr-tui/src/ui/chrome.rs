@@ -58,12 +58,36 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
         crate::app::Focus::Sidebar => s.focus_sidebar,
     };
     let state_style = theme.state_dot(app.state);
-    Line::from(vec![
-        Span::styled(format!("[{focus}] "), theme.accent()),
-        Span::styled(app.view_name().to_string(), theme.text()),
-        Span::styled(DOT.to_string(), theme.muted()),
-        Span::styled(app.state_name().to_string(), state_style),
-    ])
+    let mut spans = vec![Span::styled(format!("[{focus}] "), theme.accent())];
+    // The view's own name, then what the keyboard is on *inside* it. A rail
+    // focused on a link the user has not picked says "link", because that is
+    // the row under the cursor and that is what Enter will act on — a left
+    // half that only ever said the view's name left the operator to count rows
+    // to know what they were about to press.
+    spans.push(Span::styled(app.view_name().to_string(), theme.text()));
+    spans.push(Span::styled(format!(" / {}", focus_detail(app, s)), theme.muted()));
+    spans.push(Span::styled(DOT.to_string(), theme.muted()));
+    spans.push(Span::styled(app.state_name().to_string(), state_style));
+    Line::from(spans)
+}
+
+/// What the keyboard is on inside the focused view, in the interface language.
+///
+/// A function of the focus rather than of the view, because a rail's rows are
+/// the same rows whichever view is open — the transport, the two connection
+/// actions, and the quick sends — and naming the row is what tells the user
+/// what Enter is about to do.
+fn focus_detail(app: &App, s: &crate::i18n::Strings) -> String {
+    match app.focus {
+        crate::app::Focus::Sidebar => {
+            let targets = crate::ui::sidebar::targets(app);
+            targets
+                .get(app.sidebar_cursor)
+                .cloned()
+                .unwrap_or_else(|| s.focus_terminal.to_string())
+        }
+        crate::app::Focus::Terminal => s.term_input.to_string(),
+    }
 }
 
 /// The bottom bar's right half: the four key hints the design spells out.
@@ -310,11 +334,15 @@ mod tests {
         app.view = crate::event::View::Network;
         app.state = ConnectionState::Connecting;
         let text = line_text(&bottom_left(&app, &Theme::DARK));
-        assert_eq!(text, "[终端] 网络 · 连接中…");
+        assert_eq!(text, "[终端] 网络 / 输入 · 连接中…");
 
+        // The rail names the row the cursor is on, not just the view: a left
+        // half that says "侧栏 网络" tells the user which view they are in and
+        // nothing about what Enter will do.
         app.focus = crate::app::Focus::Sidebar;
         let text = line_text(&bottom_left(&app, &Theme::DARK));
-        assert_eq!(text, "[侧栏] 网络 · 连接中…");
+        assert!(text.starts_with("[侧栏] 网络 / "), "{text}");
+        assert!(text.contains("传输"), "the row is named: {text}");
     }
 
     /// The right half lists the four designed hints, in order, in both
