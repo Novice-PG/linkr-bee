@@ -597,7 +597,9 @@ fn submit_prompt(app: &mut App) {
         // One in flight at a time: two prompts answering out of order is a
         // harder problem than it looks, and a queue that answers them in order
         // is the honest first version.
-        app.agent_replies = Some(receiver);
+        // One channel per question in flight, not one slot: a second prompt
+        // must not drop the reply the first one is waiting for.
+        app.agent_replies.push(receiver);
         let _ = client;
     }
 }
@@ -1088,12 +1090,13 @@ mod interaction {
         // The transport was started and is holding a reply channel, so the
         // answer has somewhere to arrive.
         assert!(a.agent_client.is_some(), "no transport was started");
-        assert!(a.agent_replies.is_some(), "the reply has nowhere to go");
+        assert!(!a.agent_replies.is_empty(), "the reply has nowhere to go");
 
         // The reply channel answers eventually; drain it into the task the way
         // the beat does. Nothing is listening, so this is a failure and the
         // task records that it was asked.
-        let receiver = a.agent_replies.take().expect("channel");
+        // The first (and for now only) live channel.
+        let receiver = a.agent_replies.remove(0);
         a.pump();
         let dead = receiver.recv_timeout(Duration::from_secs(3));
         assert!(dead.is_ok(), "the transport never answered");

@@ -177,15 +177,24 @@ pub struct App {
     /// touches the filesystem, and a `Default` that writes to the user's home
     /// directory is not a default anyone can run a test suite against.
     pub agent_store: Option<crate::agent::store::JsonFile>,
-    /// Where a reply the model is still thinking about arrives. Drained on the
-    /// same beat as the serial link, so a slow model cannot freeze the
-    /// interface — and so a reply lands in the task it belongs to rather than
-    /// being applied to whichever task is on screen.
     /// The model transport, started on first use rather than at boot: a thread
     /// and a Tokio runtime are not something a `Default` should cost.
     pub agent_client: Option<crate::agent::runtime::AgentClient>,
-    pub agent_replies:
-        Option<std::sync::mpsc::Receiver<(String, Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>)>>,
+    /// Where the replies the model is still thinking about arrive — one channel
+    /// per question in flight, drained on the same beat as the serial link, so
+    /// a slow model cannot freeze the interface and a reply lands in the task
+    /// it belongs to.
+    ///
+    /// A vector, not a single slot. The slot was the first version, and it meant
+    /// a second prompt submitted while the first was still being answered
+    /// dropped the first one's channel — the reply the user was waiting for,
+    /// lost silently.
+    pub agent_replies: Vec<
+        std::sync::mpsc::Receiver<(
+            String,
+            Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>,
+        )>,
+    >,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
     /// The questions asked of the bridge about itself, and their answers.
@@ -294,7 +303,7 @@ impl Default for App {
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
-            agent_replies: None,
+            agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -718,23 +727,33 @@ impl App {
     ///
     /// A reply arrives as `(task_id, outcome)` so it can be matched to the goal
     /// it belongs to even when two prompts are in flight and answer out of
-    /// order. The channel is drained into a local first, because a saved task
-    /// needs `agent_store` mutably and holding a borrow of the receiver across
-    /// that would take the whole of `self` at once.
+    /// order. Every live channel is drained, not just one — draining a single
+    /// slot would leave the rest to arrive on a later beat with their task ids
+    /// still matching, which is the same answer worked twice.
     ///
     /// A reply nobody is waiting for is dropped rather than applied to the
     /// newest task: a stale answer filed against the wrong question is worse
     /// than none, because it reads as though the model said it.
     pub fn drain_agent_replies(&mut self) {
-        let Some(receiver) = self.agent_replies.as_ref() else {
-            return;
-        };
+        // Taken out so the store can be borrowed while the channels are read,
+        // and so a channel that is still live goes back rather than being
+        // replaced by the next one's.
+        let live = std::mem::take(&mut self.agent_replies);
         let mut arrived: Vec<(
             String,
             Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>,
         )> = Vec::new();
-        while let Ok(item) = receiver.try_recv() {
-            arrived.push(item);
+        for receiver in live {
+            let mut answered = false;
+            while let Ok(item) = receiver.try_recv() {
+                arrived.push(item);
+                answered = true;
+            }
+            if !answered {
+                // Nothing yet: keep waiting rather than dropping the channel and
+                // losing the answer when it comes.
+                self.agent_replies.push(receiver);
+            }
         }
 
         for (task_id, outcome) in arrived {
@@ -765,13 +784,12 @@ impl App {
             };
             // The reply is the assistant's turn in the conversation. A failure
             // is a turn too: the thread of what was asked and what came back is
-            // the record of the session, and a gap in it is worse than a turn
-            // that says the model did not answer.
-            let turn = crate::agent::session::DisplayLine {
+            // the record, and a gap in it is worse than a turn that says the
+            // model did not answer.
+            self.assistant.display.push(crate::agent::session::DisplayLine {
                 role: "assistant".to_string(),
                 text: answered.0.clone(),
-            };
-            self.assistant.display.push(turn);
+            });
             let keep = crate::agent::session::SESSION_MESSAGES;
             let from = self.assistant.display.len().saturating_sub(keep);
             self.assistant.display.drain(..from);
@@ -789,6 +807,7 @@ impl App {
                     now,
                 );
             }
+
             // Whatever happened, the answer is in the store: a task that says
             // "failed" is the record of a question that was asked.
             let saved = crate::agent::tasks::TaskRecord {
@@ -1461,6 +1480,118 @@ fn wall_clock_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod multi_reply {
+    use super::*;
+
+    fn task(id: &str, goal: &str) -> crate::agent::tasks::TaskRecord {
+        crate::agent::tasks::TaskRecord {
+            id: id.to_string(),
+            device_key: "board".to_string(),
+            updated_at: 0,
+            goal: goal.to_string(),
+            summary: String::new(),
+            status: "asking".to_string(),
+        }
+    }
+
+    /// Two prompts in flight, both answered, each filed against its own task.
+    ///
+    /// The single-slot version of `agent_replies` dropped the first channel when
+    /// the second prompt was submitted, so the reply the user was waiting for
+    /// was lost silently and the task stayed "asking" for ever.
+    #[test]
+    fn two_in_flight_prompts_are_both_answered() {
+        let mut app = App::default();
+        app.assistant.tasks = vec![task("t1", "first"), task("t2", "second")];
+
+        let (tx1, rx1) = std::sync::mpsc::channel();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        // Out of order, which is the case a slot cannot handle at all: t2
+        // answers first and t1's channel has already been replaced.
+        tx2.send((
+            "t2".to_string(),
+            Ok(crate::agent::runtime::Completion {
+                text: "second answer".to_string(),
+                usage: crate::agent::usage::Usage::default(),
+            }),
+        ))
+        .expect("send");
+        tx1.send((
+            "t1".to_string(),
+            Ok(crate::agent::runtime::Completion {
+                text: "first answer".to_string(),
+                usage: crate::agent::usage::Usage::default(),
+            }),
+        ))
+        .expect("send");
+        app.agent_replies = vec![rx1, rx2];
+
+        app.drain_agent_replies();
+
+        let summaries: Vec<(&str, &str)> = app
+            .assistant
+            .tasks
+            .iter()
+            .map(|t| (t.id.as_str(), t.summary.as_str()))
+            .collect();
+        assert_eq!(summaries[0], ("t1", "first answer"));
+        assert_eq!(summaries[1], ("t2", "second answer"));
+        // And both channels are gone, so nothing is waited on for ever.
+        assert!(
+            app.agent_replies.is_empty(),
+            "a channel nobody answers was left waiting"
+        );
+    }
+
+    /// A channel still waiting keeps its place rather than being dropped.
+    #[test]
+    fn a_channel_still_waiting_is_kept() {
+        let mut app = App::default();
+        app.assistant.tasks = vec![task("t1", "first")];
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.agent_replies = vec![rx];
+        app.drain_agent_replies();
+        assert_eq!(app.agent_replies.len(), 1, "the channel was dropped");
+        assert_eq!(app.assistant.tasks[0].status, "asking");
+        // It answers on a later beat and is filed then.
+        tx.send((
+            "t1".to_string(),
+            Ok(crate::agent::runtime::Completion {
+                text: "late answer".to_string(),
+                usage: crate::agent::usage::Usage::default(),
+            }),
+        ))
+        .expect("send");
+        app.drain_agent_replies();
+        assert_eq!(app.assistant.tasks[0].summary, "late answer");
+        assert!(app.agent_replies.is_empty());
+    }
+
+    /// A reply for a task that is not waiting is dropped rather than filed
+    /// against whichever task is on screen.
+    #[test]
+    fn a_stale_reply_is_dropped_not_filed() {
+        let mut app = App::default();
+        app.assistant.tasks = vec![task("t9", "the one on screen")];
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((
+            "ghost".to_string(),
+            Ok(crate::agent::runtime::Completion {
+                text: "an answer to something else".to_string(),
+                usage: crate::agent::usage::Usage::default(),
+            }),
+        ))
+        .expect("send");
+        app.agent_replies = vec![rx];
+        app.drain_agent_replies();
+        assert!(
+            app.assistant.tasks[0].summary.is_empty(),
+            "a stale reply was filed against the wrong task"
+        );
+    }
 }
 
 #[cfg(test)]
