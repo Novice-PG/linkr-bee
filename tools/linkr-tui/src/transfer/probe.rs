@@ -14,7 +14,7 @@
 //! for character, not a second copy of it. What lives here is the reading of
 //! its answer.
 
-use crate::transfer::files;
+
 
 /// The tools a read needs, and the reason each is asked about.
 ///
@@ -32,7 +32,20 @@ pub const DIGEST_TOOLS: [&str; 2] = ["sha256sum", "shasum"];
 
 /// The command that asks the device what it has. Re-exported rather than
 /// retyped, so the web's probe and this client's cannot drift apart.
-pub const TRANSFER_PROBE: &str = files::TARGET_FILE_PROBE;
+/// The command that asks the device what it can page with.
+///
+/// It is the web client's own string, character for character, because a board
+/// that answers one has to answer the other or the two clients disagree about
+/// what the same hardware can do.
+///
+/// It used to live in the file-transfer module this crate no longer carries.
+/// Nothing outside it was used except this string, so the string moved here and
+/// the rest went: 2,300 lines of upload planning, chunking and verification that
+/// only `web/target_files.js` drives, in a TUI that has no way to start one.
+pub const TARGET_FILE_PROBE: &str =
+    "for t in dd base64 wc tr sha256sum shasum; do command -v \"$t\" >/dev/null 2>&1 && printf 'LINKR_TOOL:%s\\n' \"$t\"; done; :";
+
+pub const TRANSFER_PROBE: &str = TARGET_FILE_PROBE;
 
 /// The marker each answered tool is printed under, from `web/target_files.js`.
 const TOOL_PREFIX: &str = "LINKR_TOOL:";
@@ -205,6 +218,6 @@ mod tests {
             );
         }
         // And what it asks for is the web's own command, not a rewrite of it.
-        assert_eq!(TRANSFER_PROBE, files::TARGET_FILE_PROBE);
+        assert_eq!(TRANSFER_PROBE, TARGET_FILE_PROBE);
     }
 }

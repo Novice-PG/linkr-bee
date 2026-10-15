@@ -3,7 +3,7 @@
 //! The encoder and decoder live here (not on some platform `base64`) so the
 //! same code runs everywhere and the decoder can refuse anything `base64 -d`
 //! would refuse. The decoder only runs on text that already passed the charset
-//! and length checks in [`super::files::parse_file_read`].
+//! and length checks in the caller that parses the device's reply.
 
 const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
