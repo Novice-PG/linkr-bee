@@ -196,24 +196,21 @@ fn toggle_theme(app: &mut App) {
     app.push_notice(notice);
 }
 
-/// The assistant, opened on the field that configures it.
+/// The assistant's settings window, on the row that configures it.
 ///
 /// The endpoint is where somebody lands who has just been told "set the endpoint
-/// and model first", so it is the field the action focuses rather than the
+/// and model first", so it is the field the window opens on rather than the
 /// composer: a notice that names a field should open on that field.
 fn agent_configure(app: &mut App) {
-    app.set_view(View::Assistant);
-    app.assistant.focus = crate::views::assistant::AgentField::Endpoint;
+    crate::views::assistant::open_settings(app, crate::views::assistant::AgentField::Endpoint);
 }
 
 fn agent_ask(app: &mut App) {
-    app.set_view(View::Assistant);
-    app.assistant.focus = crate::views::assistant::AgentField::Composer;
+    crate::views::assistant::focus_composer(app);
 }
 
 fn agent_note(app: &mut App) {
-    app.set_view(View::Assistant);
-    app.assistant.focus = crate::views::assistant::AgentField::Notes;
+    crate::views::assistant::open_settings(app, crate::views::assistant::AgentField::Notes);
 }
 
 /// Cycle the execution mode and say which one it landed on.
@@ -880,21 +877,36 @@ mod tests {
     /// The assistant's actions land the user on the field that answers the
     /// question they just asked. A notice saying "set the endpoint" that opened
     /// on the composer would be a notice that sent them somewhere else.
+    /// The assistant's actions land where the work is: configure and "write a
+    /// note" raise the settings window on their own row, and asking closes it
+    /// and hands the keyboard to the composer.
     #[test]
     fn an_assistant_action_lands_on_its_field() {
         let mut app = App::default();
         agent_configure(&mut app);
-        assert_eq!(app.view, View::Assistant);
+        assert!(matches!(
+            app.dialog,
+            Some(crate::dialogs::Dialog::Settings(_))
+        ));
         assert_eq!(
             app.assistant.focus,
             crate::views::assistant::AgentField::Endpoint
         );
+
+        // Asking leaves the window shut rather than stranded under the view
+        // with a caret on a row nobody is painting.
         agent_ask(&mut app);
+        assert!(app.dialog.is_none(), "the window outlived the question");
         assert_eq!(
             app.assistant.focus,
             crate::views::assistant::AgentField::Composer
         );
+
         agent_note(&mut app);
+        assert!(matches!(
+            app.dialog,
+            Some(crate::dialogs::Dialog::Settings(_))
+        ));
         assert_eq!(
             app.assistant.focus,
             crate::views::assistant::AgentField::Notes

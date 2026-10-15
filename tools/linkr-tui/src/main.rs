@@ -74,6 +74,9 @@ enum OverlayPreview {
     WifiSsid,
     /// The prompt the WebDAV row opens.
     WebdavUrl,
+    /// The assistant's settings: five fields, a note list and a caret that has
+    /// nowhere else to be looked at.
+    Settings,
 }
 
 impl OverlayPreview {
@@ -87,7 +90,36 @@ impl OverlayPreview {
             "confirm" => Some(OverlayPreview::Confirm),
             "wifi" => Some(OverlayPreview::WifiSsid),
             "webdav" => Some(OverlayPreview::WebdavUrl),
+            "settings" => Some(OverlayPreview::Settings),
             _ => None,
+        }
+    }
+
+    /// Raise this modal on `app`, through the same doors the real keystrokes use.
+    ///
+    /// One function rather than a `match` in the run loop and another in the
+    /// tests: a preview that opens a window a differently is a preview of
+    /// something the user will never meet.
+    fn raise(self, app: &mut App) {
+        match self {
+            OverlayPreview::Palette => palette::open(app),
+            OverlayPreview::Help => dialogs::open_help(app),
+            OverlayPreview::Notices => dialogs::open_notices(app),
+            OverlayPreview::Confirm => {
+                // The guarded preset this build ships, so the preview shows the
+                // confirmation the user will really meet.
+                let command = app
+                    .quick_send
+                    .last()
+                    .map_or_else(|| "reboot".to_string(), |quick| quick.command.clone());
+                dialogs::ask(app, dialogs::ConfirmAction::Send(command));
+            }
+            OverlayPreview::WifiSsid => dialogs::prompt_wifi_ssid(app),
+            OverlayPreview::WebdavUrl => dialogs::prompt_webdav_url(app),
+            // On the endpoint, which is the row a first-time user lands on.
+            OverlayPreview::Settings => {
+                views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
+            }
         }
     }
 }
@@ -742,22 +774,8 @@ fn main() -> io::Result<()> {
             level: linkr_tui::event::NoticeLevel::Warn,
         });
     }
-    match args.overlay {
-        Some(OverlayPreview::Palette) => palette::open(&mut app),
-        Some(OverlayPreview::Help) => dialogs::open_help(&mut app),
-        Some(OverlayPreview::Notices) => dialogs::open_notices(&mut app),
-        Some(OverlayPreview::Confirm) => {
-            // The guarded preset this build ships, so the preview shows the
-            // confirmation the user will really meet.
-            let command = app
-                .quick_send
-                .last()
-                .map_or_else(|| "reboot".to_string(), |quick| quick.command.clone());
-            dialogs::ask(&mut app, dialogs::ConfirmAction::Send(command));
-        }
-        Some(OverlayPreview::WifiSsid) => dialogs::prompt_wifi_ssid(&mut app),
-        Some(OverlayPreview::WebdavUrl) => dialogs::prompt_webdav_url(&mut app),
-        None => {}
+    if let Some(overlay) = args.overlay {
+        overlay.raise(&mut app);
     }
 
     if let Some(text) = &args.feed {
@@ -1154,17 +1172,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         // --- the assistant ---------------------------------------------------
-        // Four chords, all landing on a field rather than on the view. A
-        // shortcut that opens the view but leaves the keyboard in the terminal
-        // is a shortcut that saves one keystroke and costs two.
+        // Three chords, each landing where the work is: the composer for a
+        // question, the settings window for a setting, and the mode cycle on the
+        // view that displays the mode. A shortcut that opens the view but leaves
+        // the keyboard somewhere else is one that saves a keystroke and costs
+        // two — and the settings are a window now, so the configure chord raises
+        // it wherever the keyboard happened to be.
         (KeyCode::Char('K'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.set_view(View::Assistant);
-            app.assistant.focus = crate::views::assistant::AgentField::Composer;
+            views::assistant::focus_composer(app);
             return false;
         }
         (KeyCode::Char('S'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.set_view(View::Assistant);
-            app.assistant.focus = crate::views::assistant::AgentField::Endpoint;
+            views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
             return false;
         }
         (KeyCode::Char('M'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1597,6 +1616,55 @@ mod tests {
         );
     }
 
+    /// Ctrl+Shift+K lands on the composer; Ctrl+Shift+S raises the settings
+    /// window on the endpoint. Both are doors into the assistant, and a door
+    /// that opened the view but left the keyboard elsewhere would save a
+    /// keystroke and cost two.
+    #[test]
+    fn the_assistant_chords_land_where_the_work_is() {
+        let mut app = App::default();
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('K'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert_eq!(app.view, View::Assistant);
+        assert_eq!(
+            app.assistant.focus,
+            linkr_tui::views::assistant::AgentField::Composer
+        );
+        assert!(app.dialog.is_none(), "the composer is not a window");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('S'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(
+            matches!(app.dialog, Some(linkr_tui::dialogs::Dialog::Settings(_))),
+            "Ctrl+Shift+S did not raise the window: {:?}",
+            app.dialog
+        );
+        assert_eq!(
+            app.assistant.focus,
+            linkr_tui::views::assistant::AgentField::Endpoint,
+            "the configure chord lands on the field the notice names"
+        );
+
+        // Escape from the window hands the caret back to the composer, or the
+        // next keystroke would be typed into a row nothing is painting.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape did not close the window");
+        assert_eq!(
+            app.assistant.focus,
+            linkr_tui::views::assistant::AgentField::Composer
+        );
+    }
+
     /// Ctrl+Q and Ctrl+C stop the loop; a bare 'q' does not, so the terminal
     /// stays open while the user is typing to the device.
     #[test]
@@ -1910,6 +1978,7 @@ mod tests {
             ("confirm", OverlayPreview::Confirm),
             ("wifi", OverlayPreview::WifiSsid),
             ("webdav", OverlayPreview::WebdavUrl),
+            ("settings", OverlayPreview::Settings),
         ] {
             assert_eq!(args(&["--overlay", name]).overlay, Some(expected), "{name}");
         }
@@ -1976,18 +2045,10 @@ mod tests {
             (OverlayPreview::Confirm, "请确认"),
             (OverlayPreview::WifiSsid, "加入 WiFi 网络"),
             (OverlayPreview::WebdavUrl, "日志上传目标"),
+            (OverlayPreview::Settings, "助手设置"),
         ] {
             let mut app = App::default();
-            match overlay {
-                OverlayPreview::Palette => palette::open(&mut app),
-                OverlayPreview::Help => dialogs::open_help(&mut app),
-                OverlayPreview::Notices => dialogs::open_notices(&mut app),
-                OverlayPreview::Confirm => {
-                    dialogs::ask(&mut app, dialogs::ConfirmAction::Send("reboot".into()))
-                }
-                OverlayPreview::WifiSsid => dialogs::prompt_wifi_ssid(&mut app),
-                OverlayPreview::WebdavUrl => dialogs::prompt_webdav_url(&mut app),
-            }
+            overlay.raise(&mut app);
             let frame = linkr_tui::ui::render_to_text(&app, 100, 30);
             assert!(frame.contains(needle), "{overlay:?}:\n{frame}");
         }

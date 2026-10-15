@@ -1,10 +1,19 @@
-//! Assistant view: the agent's session, tasks and notes for this device.
+//! Assistant: the agent's session and tasks for this device, and the settings
+//! that make it run.
 //!
 //! The model is the agent data layer's plain records; the painter is a pure
 //! function from them plus a width. The LLM runtime itself is out of scope for
 //! this crate — what is shown here is everything the web panel shows about the
 //! conversation's durable state: the configured mode, the token usage, the task
 //! history and the device notes.
+//!
+//! Two surfaces, one form. The *view* is the thread: session, composer,
+//! conversation, tasks. The *settings window* — `Ctrl+P`, "Configure the
+//! assistant" — is the five fields and the note list, raised as a dialog. They
+//! split because a form the user has to scroll past is what pushed the thread
+//! off the pane, and both halves share `AssistantState` so the caret, the
+//! hidden key and the note cursor are one piece of state rather than two
+//! opinions about where the keys go.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -62,8 +71,9 @@ pub struct AssistantState {
     pub display: Vec<crate::agent::session::DisplayLine>,
     /// Which note the keyboard is on, for removal.
     ///
-    /// Notes are shown newest first and the cursor rides that order, so the
-    /// row the user sees highlighted is the row that goes.
+    /// The cursor rides the list as `refresh_notes` fills it, which is the
+    /// store's own order — oldest first, because that is what `NoteStore::list`
+    /// sorts by. The row the user sees highlighted is the row that goes.
     pub note_cursor: usize,
     /// A note being typed. Enter below the notes adds it; the evidence is
     /// whatever the newest task last said, because a note with nothing behind
@@ -76,9 +86,10 @@ pub struct AssistantState {
 
 /// The field the keyboard is typing into.
 ///
-/// One entry per editable field, in the order Tab walks them, so the composer
-/// is first and the settings follow — a user opens the view to talk to the model
-/// and configures it when the notice says they must.
+/// One entry per editable field. They live in two places now: the composer is
+/// the view's, and the five settings are the settings window's — a user opens
+/// the view to talk to the model and opens the window on purpose when the
+/// notice says they must configure it first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentField {
     /// The prompt being typed.
@@ -88,7 +99,7 @@ pub enum AgentField {
     Endpoint,
     /// The model name, as the provider spells it.
     Model,
-    /// The API key. Never displayed: see `render_field`.
+    /// The API key. Never displayed: see `is_secret` and `settings_lines`.
     ApiKey,
     /// Extra HTTP headers, one per line.
     Headers,
@@ -96,9 +107,13 @@ pub enum AgentField {
     Notes,
 }
 
-/// Every field, in Tab order.
-pub const FIELDS: [AgentField; 6] = [
-    AgentField::Composer,
+/// The fields the settings window edits, in Tab order.
+///
+/// The composer is deliberately absent: it is the *view's* field, and this list
+/// is what the view became once the settings moved out into their own window.
+/// Tab here walks a form with an end, and the end is the last setting — never a
+/// trip through a caret that is not painted anywhere the user can see it.
+pub const SETTINGS: [AgentField; 5] = [
     AgentField::Endpoint,
     AgentField::Model,
     AgentField::ApiKey,
@@ -120,16 +135,27 @@ impl AgentField {
         }
     }
 
-    /// The next field in Tab order, wrapping.
+    /// The next setting, wrapping.
+    ///
+    /// A field from *outside* the list — the composer's, which is where a caret
+    /// sits until the window opens — lands on the first setting rather than on
+    /// the second, so opening the window and pressing Tab twice from a stale
+    /// caret still ends up somewhere the box is showing.
     pub fn next(self) -> AgentField {
-        let at = FIELDS.iter().position(|f| *f == self).unwrap_or(0);
-        FIELDS[(at + 1) % FIELDS.len()]
+        let at = SETTINGS.iter().position(|f| *f == self);
+        match at {
+            Some(at) => SETTINGS[(at + 1) % SETTINGS.len()],
+            None => SETTINGS[0],
+        }
     }
 
-    /// The previous field in Tab order, wrapping.
+    /// The previous setting, wrapping.
     pub fn prev(self) -> AgentField {
-        let at = FIELDS.iter().position(|f| *f == self).unwrap_or(0);
-        FIELDS[(at + FIELDS.len() - 1) % FIELDS.len()]
+        let at = SETTINGS.iter().position(|f| *f == self);
+        match at {
+            Some(at) => SETTINGS[(at + SETTINGS.len() - 1) % SETTINGS.len()],
+            None => SETTINGS[0],
+        }
     }
 
     /// The text of this field, for a painter that reads one field.
@@ -201,20 +227,15 @@ fn task_row(task: &TaskRecord, width: u16, theme: &Theme) -> Line<'static> {
     ))
 }
 
-/// The whole body: session (mode, usage), tasks, notes.
 /// Handle one key press in the assistant view. Returns true when the view
 /// consumed it, which is what the dispatcher checks.
 ///
-/// The view is one form with two halves — a composer and the model settings —
-/// and Tab walks between them. That is the whole interaction model, and it is
-/// modelled on the dialogs the other views already prompt through rather than
-/// on a mode key: a field either has the caret or it does not, and typing goes
-/// wherever the caret is.
-///
-/// Enter means what the focused field means. In the composer it sends the
-/// prompt as a goal; in a settings field it saves the whole form, because a
-/// half-filled endpoint is not a configuration and saving field by field would
-/// leave the model configured with an endpoint that was never validated.
+/// The view is one field deep: the composer. The model settings moved into
+/// their own window (`Ctrl+P`, "Configure the assistant"), so there is nothing
+/// for Tab to walk to here and the caret is the composer's whenever that window
+/// is shut — the guard below puts it back if something closed the window
+/// without giving it up, because a caret parked on an unpainted field is a
+/// keystroke that lands nowhere the user can see.
 ///
 /// An awaited command outranks all of it: while one is outstanding the view is
 /// asking a yes/no question, and a keystroke typed into the composer mid-way
@@ -234,54 +255,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
 
-    let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
+    if !matches!(app.dialog, Some(crate::dialogs::Dialog::Settings(_))) {
+        app.assistant.focus = AgentField::Composer;
+    }
+
     match key.code {
-        // Tab walks forward, BackTab walks back, as every text field does.
-        // BackTab is its own `KeyCode` rather than a Tab with SHIFT attached,
-        // which is why the guard below reads `shifted` at all: it is here so a
-        // *Tab* carrying SHIFT still walks forward on the emulators that send
-        // it that way.
-        KeyCode::BackTab => {
-            app.assistant.focus = app.assistant.focus.prev();
-        }
-        KeyCode::Tab if shifted => {
-            app.assistant.focus = app.assistant.focus.next();
-        }
-        KeyCode::Tab => {
-            app.assistant.focus = app.assistant.focus.next();
-        }
         KeyCode::Backspace => {
             let text = field_text_mut(app);
             text.pop();
         }
-        // Up and Down walk the notes while the note field is focused, and are
-        // consumed either way. Consumed because the assistant is a form and the
-        // interface's own sidebar focus sits *below* this dispatch: an arrow
-        // the form does not want would reach it, and a cursor would move in a
-        // pane the user is not looking at.
-        KeyCode::Up => {
-            if app.assistant.focus == AgentField::Notes {
-                app.assistant.note_cursor =
-                    app.assistant.note_cursor.saturating_sub(1);
-            }
-        }
-        KeyCode::Down => {
-            if app.assistant.focus == AgentField::Notes {
-                let last = app.assistant.notes.len().saturating_sub(1);
-                app.assistant.note_cursor = (app.assistant.note_cursor + 1).min(last);
-            }
-        }
-        // Delete removes the note under the cursor. Not a letter, which would
-        // take that letter out of the field being typed in, and not Backspace,
-        // which already means "delete a character".
-        KeyCode::Delete if app.assistant.focus == AgentField::Notes => {
-            remove_note(app);
-        }
-        KeyCode::Enter => match app.assistant.focus {
-            AgentField::Composer => submit_prompt(app),
-            AgentField::Notes => add_note(app),
-            _ => save_settings(app),
-        },
+        // Up and Down are consumed either way. The assistant is a form, and an
+        // arrow it has no use for would otherwise reach the pane below this
+        // dispatch and scroll — or worse, be sent on to the device as a cursor
+        // key in a view where the user is not reading the console.
+        KeyCode::Up | KeyCode::Down => {}
+        // Enter sends: the composer is the only field here, and the settings
+        // window's own Enter (save / file a note) is its handler's, not this one's.
+        KeyCode::Enter => submit_prompt(app),
         // Ctrl+R exports the diagnostic report. R for report, and not a
         // control character: the interface's own chords are taken before this
         // point, so what reaches here is a printable one.
@@ -311,6 +301,95 @@ fn field_text_mut(app: &mut App) -> &mut String {
         AgentField::Headers => &mut state.headers,
         AgentField::Notes => &mut state.note_input,
     }
+}
+
+/// Open the settings window with the caret on `field`.
+///
+/// The field must be one of the settings: the composer has no row in this
+/// window, so a caller naming it gets the first row rather than a caret on
+/// nothing — a caret on nothing is the state that eats keystrokes silently.
+pub fn open_settings(app: &mut App, field: AgentField) {
+    app.assistant.focus = if SETTINGS.contains(&field) {
+        field
+    } else {
+        SETTINGS[0]
+    };
+    crate::dialogs::open_settings(app);
+}
+
+/// Put the keyboard on the composer: the assistant view, and the caret with it.
+///
+/// A settings window still up is closed rather than left behind the view: it
+/// would be a window whose caret has just been moved to a field it does not
+/// paint, so the next keystroke would be typed into a row nobody is showing —
+/// which is the state `handle_key` spends a line guarding against, closed here
+/// instead of being cleaned up after.
+pub fn focus_composer(app: &mut App) {
+    close_settings(app);
+    app.set_view(crate::event::View::Assistant);
+}
+
+/// Give the caret back to the composer and put the settings window away.
+///
+/// The caret moves with the window, always: while it is up the caret is one of
+/// the five fields, and the moment it shuts the caret is the composer's. A caret
+/// left on a field the view does not paint is a keystroke that lands nowhere.
+pub fn close_settings(app: &mut App) {
+    app.assistant.focus = AgentField::Composer;
+    if matches!(app.dialog, Some(crate::dialogs::Dialog::Settings(_))) {
+        app.dialog = None;
+    }
+}
+
+/// One key in the settings window. Returns true when the form took it.
+///
+/// Tab and the arrows walk the five fields — the arrows *except* on the note
+/// row, where they walk the note list instead: that row is where a field meets
+/// a list, and the list is the only thing that says which note `Delete` means.
+/// Enter saves the whole form, or files the note when the note row has the
+/// caret, because a half-filled endpoint is not a configuration and saving
+/// field by field would leave the model configured with an endpoint that was
+/// never validated.
+///
+/// Escape is deliberately not handled here: closing the window — and handing
+/// the caret back to the composer — is the dialog's business, since the dialog
+/// is what carries the scroll offset with it.
+pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        // BackTab is its own `KeyCode` rather than a Tab with SHIFT attached,
+        // so both spellings of "walk forward" land on the same next row.
+        KeyCode::BackTab => app.assistant.focus = app.assistant.focus.prev(),
+        KeyCode::Tab => app.assistant.focus = app.assistant.focus.next(),
+        KeyCode::Backspace => {
+            let text = field_text_mut(app);
+            text.pop();
+        }
+        KeyCode::Up if app.assistant.focus == AgentField::Notes => {
+            app.assistant.note_cursor = app.assistant.note_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.assistant.focus == AgentField::Notes => {
+            let last = app.assistant.notes.len().saturating_sub(1);
+            app.assistant.note_cursor = (app.assistant.note_cursor + 1).min(last);
+        }
+        KeyCode::Up => app.assistant.focus = app.assistant.focus.prev(),
+        KeyCode::Down => app.assistant.focus = app.assistant.focus.next(),
+        // Delete removes the note under the cursor. Not a letter, which would
+        // take that letter out of the field being typed in, and not Backspace,
+        // which already means "delete a character".
+        KeyCode::Delete if app.assistant.focus == AgentField::Notes => remove_note(app),
+        KeyCode::Enter => match app.assistant.focus {
+            AgentField::Notes => add_note(app),
+            _ => save_settings(app),
+        },
+        // A control character is not text: the window's own chords (there are
+        // none) and the interface's own are decided before this handler runs.
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let text = field_text_mut(app);
+            text.push(ch);
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Add one turn to the conversation and persist it.
@@ -704,10 +783,11 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // The composer, then the settings. The composer is first because a user
-    // opens this view to ask a question and configures the model when the
-    // notice says they must — and because the settings below it are what makes
-    // the composer usable, so the order also reads as a cause and its effect.
+    // The composer, then the thread. The settings are not here: five fields and
+    // a note list are what this view used to show *instead of* the
+    // conversation, and they now live in their own window — `Ctrl+P`, "Configure
+    // the assistant" — where a user who came to configure opens it on purpose
+    // and one who came to talk never scrolls past them.
     lines.push(Line::from(""));
     lines.push(heading(s.agent_composer_section, width, theme));
     // The prompt marker and the typed text in one span each, and the text
@@ -721,41 +801,6 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         Span::styled(marker.to_string(), theme.accent()),
         Span::styled(typed, theme.text()),
     ]));
-
-    lines.push(Line::from(""));
-    lines.push(heading(s.agent_settings_section, width, theme));
-    for field in FIELDS {
-        if field == AgentField::Composer {
-            continue;
-        }
-        let focused = state.focus == field;
-        let caret = if focused { "▌" } else { " " };
-        // The key field never paints its value: a shoulder-surfed key is a
-        // rotated key, and the value is one backspace from being retyped.
-        let value = if field.is_secret() && !state.api_key.is_empty() {
-            s.agent_key_hidden.to_string()
-        } else if field.text(state).is_empty() {
-            let _ = caret;
-            s.value_unknown.to_string()
-        } else {
-            field.text(state).to_string()
-        };
-        let label = format!("  {}{}", field.label(app.lang), s.label_separator);
-        // One string, clipped once. Colouring the label separately would mean
-        // two spans and a column count that is the sum of two clipped halves,
-        // which is exactly how a row wraps.
-        let row = format!("{label}{value}{caret}");
-        lines.push(Line::from(Span::styled(
-            text::clip_to(&row, width as usize),
-            if focused { theme.accent() } else { theme.text() },
-        )));
-    }
-    if let Some(notice) = &state.notice {
-        lines.push(Line::from(Span::styled(
-            text::clip_to(&format!("  ! {notice}"), width as usize),
-            theme.warn(),
-        )));
-    }
 
     // The conversation, oldest first, and then the task history. This is the
     // reading order of a thread — what was asked, what came back — and the task
@@ -815,6 +860,51 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
                 }
             }
         }
+    }
+
+    lines
+}
+
+/// The settings window's body: the five fields, the save's answer, and the
+/// notes the last field files.
+///
+/// Painted by the dialog rather than by the view, which is the whole point of
+/// the move — but it is still *this* module's form, so the caret, the hidden key
+/// and the note cursor are read from the same state the keys write to.
+pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let s = app.strings();
+    let state = &app.assistant;
+    let mut lines = vec![
+        Line::from(""),
+        heading(s.agent_settings_section, width, theme),
+    ];
+    for field in SETTINGS {
+        let focused = state.focus == field;
+        let caret = if focused { "▌" } else { " " };
+        // The key field never paints its value: a shoulder-surfed key is a
+        // rotated key, and the value is one backspace from being retyped.
+        let value = if field.is_secret() && !state.api_key.is_empty() {
+            s.agent_key_hidden.to_string()
+        } else if field.text(state).is_empty() {
+            s.value_unknown.to_string()
+        } else {
+            field.text(state).to_string()
+        };
+        let label = format!("  {}{}", field.label(app.lang), s.label_separator);
+        // One string, clipped once. Colouring the label separately would mean
+        // two spans and a column count that is the sum of two clipped halves,
+        // which is exactly how a row wraps.
+        let row = format!("{label}{value}{caret}");
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&row, width as usize),
+            if focused { theme.accent() } else { theme.text() },
+        )));
+    }
+    if let Some(notice) = &state.notice {
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&format!("  ! {notice}"), width as usize),
+            theme.warn(),
+        )));
     }
 
     lines.push(Line::from(""));
@@ -906,7 +996,55 @@ mod tests {
         assert!(text.contains("full auto"), "{text}");
         assert!(text.contains("4,600"), "{text}");
         assert!(text.contains("diagnose boot loop"), "{text}");
-        assert!(text.contains("wget is present"), "{text}");
+        // The note is in the settings window now, and that is where it is
+        // looked for: the view kept the thread and gave up the filing cabinet.
+        let window = body_text(&settings_lines(&a, &theme, 90));
+        assert!(window.contains("wget is present"), "{window}");
+    }
+
+    /// The view shows the conversation; the settings have their own window. A
+    /// form the user has to scroll past is what pushed the thread off the pane.
+    #[test]
+    fn the_view_leaves_the_settings_to_their_window() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::En);
+        a.assistant.endpoint = "http://localhost:8080/v1".to_string();
+        a.assistant.notes = vec![("disk".to_string(), String::new())];
+
+        let view = body_text(&lines(&a, &theme, 90));
+        assert!(view.contains("Tasks"), "{view}");
+        // The endpoint's *value*, not its word: the view still says "no model
+        // endpoint configured" when there is none, and that sentence is the
+        // pointer to the window rather than the window itself.
+        assert!(!view.contains("localhost:8080"), "{view}");
+        assert!(!view.contains(a.strings().asst_notes_section), "{view}");
+        assert!(!view.contains(a.strings().agent_settings_section), "{view}");
+
+        let window = body_text(&settings_lines(&a, &theme, 90));
+        assert!(
+            window.contains("localhost:8080"),
+            "the window lost a field's value:\n{window}"
+        );
+        assert!(
+            window.contains(a.strings().asst_notes_section),
+            "the window lost the notes:\n{window}"
+        );
+        assert!(window.contains("disk"), "{window}");
+    }
+
+    /// The key field is painted as a placeholder, never as the key — and it is
+    /// painted in the window now, so that is where the test looks. Neither
+    /// surface gets the value.
+    #[test]
+    fn a_key_field_is_never_painted() {
+        let a = app(Lang::En);
+        let mut a = a;
+        a.assistant.api_key = "sk-super-secret".to_string();
+        let window = body_text(&settings_lines(&a, &a.theme(), 80));
+        assert!(!window.contains("sk-super-secret"), "the window painted it");
+        assert!(window.contains(a.strings().agent_key_hidden), "{window}");
+        let view = body_text(&lines(&a, &a.theme(), 80));
+        assert!(!view.contains("sk-super-secret"), "the view painted it");
     }
 
     #[test]
@@ -951,6 +1089,16 @@ mod tests {
                         "{lang:?} at {width}: {joined:?}"
                     );
                 }
+                // The settings window is the other surface that paints rows,
+                // and it is the one with the longest labels on it — a pane that
+                // clips the composer but wraps the endpoint is still broken.
+                for line in settings_lines(&a, &theme, width) {
+                    let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    assert!(
+                        text::columns(&joined) <= width as usize,
+                        "settings at {lang:?} {width}: {joined:?}"
+                    );
+                }
             }
         }
     }
@@ -970,71 +1118,88 @@ mod interaction {
         let _ = handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    /// Tab walks the form forward and Shift+Tab walks it back, wrapping at both
-    /// ends, so every field is reachable and none is a dead end.
-    #[test]
-    fn tab_walks_every_field_and_wraps() {
-        let mut a = app();
-        assert_eq!(a.assistant.focus, AgentField::Composer);
-        let mut seen = vec![a.assistant.focus];
-        for _ in 0..FIELDS.len() - 1 {
-            press(&mut a, KeyCode::Tab);
-            assert!(seen.iter().all(|f| *f != a.assistant.focus), "revisit");
-            seen.push(a.assistant.focus);
-        }
-        assert_eq!(seen.len(), FIELDS.len(), "every field, once");
-        press(&mut a, KeyCode::Tab);
-        assert_eq!(a.assistant.focus, AgentField::Composer, "wraps forward");
-        press(&mut a, KeyCode::BackTab);
-        assert_eq!(a.assistant.focus, AgentField::Notes, "wraps backward");
+    /// Open the settings window with the caret on `field`, the way every entry
+    /// point opens it — the palette action, the `Ctrl+Shift+S` chord.
+    fn settings(app: &mut App, field: AgentField) {
+        open_settings(app, field);
+        assert!(matches!(
+            app.dialog,
+            Some(crate::dialogs::Dialog::Settings(_))
+        ));
     }
 
-    /// Typing goes wherever the caret is, and nowhere else.
+    /// The same press, in the settings window rather than in the view.
+    fn press_settings(app: &mut App, code: KeyCode) {
+        let _ = handle_settings_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Tab walks the window's five fields forward and BackTab back, wrapping at
+    /// both ends — and the composer is not among them: the caret either has a
+    /// row in the window or it is not in the window at all.
     #[test]
-    fn typing_goes_to_the_focused_field() {
+    fn tab_walks_every_setting_and_wraps() {
+        let mut a = app();
+        settings(&mut a, AgentField::Endpoint);
+        let mut seen = vec![a.assistant.focus];
+        for _ in 0..SETTINGS.len() - 1 {
+            press_settings(&mut a, KeyCode::Tab);
+            assert!(
+                seen.iter().all(|f| *f != a.assistant.focus),
+                "revisit: {:?}",
+                a.assistant.focus
+            );
+            assert_ne!(a.assistant.focus, AgentField::Composer, "the composer's row");
+            seen.push(a.assistant.focus);
+        }
+        assert_eq!(seen.len(), SETTINGS.len(), "every setting, once");
+        press_settings(&mut a, KeyCode::Tab);
+        assert_eq!(a.assistant.focus, SETTINGS[0], "wraps forward");
+        press_settings(&mut a, KeyCode::BackTab);
+        assert_eq!(a.assistant.focus, SETTINGS[SETTINGS.len() - 1], "wraps backward");
+    }
+
+    /// Typing goes wherever the caret is, and the two halves do not leak into
+    /// each other: the view's keystrokes reach the composer and the window's
+    /// reach the row under its caret.
+    #[test]
+    fn typing_goes_to_whichever_caret_is_up() {
         let mut a = app();
         press(&mut a, KeyCode::Char('h'));
         press(&mut a, KeyCode::Char('i'));
         assert_eq!(a.assistant.composer, "hi");
         assert!(a.assistant.endpoint.is_empty());
 
-        press(&mut a, KeyCode::Tab);
-        press(&mut a, KeyCode::Char('u'));
-        press(&mut a, KeyCode::Char('r'));
+        settings(&mut a, AgentField::Endpoint);
+        press_settings(&mut a, KeyCode::Char('u'));
+        press_settings(&mut a, KeyCode::Char('r'));
         assert_eq!(a.assistant.endpoint, "ur");
         assert_eq!(a.assistant.composer, "hi", "the composer did not move");
-        press(&mut a, KeyCode::Backspace);
+        press_settings(&mut a, KeyCode::Backspace);
         assert_eq!(a.assistant.endpoint, "u");
+
+        // Back in the view, the caret is the composer's again — the window's
+        // field does not keep a caret that no longer has a row to paint it on.
+        close_settings(&mut a);
+        assert_eq!(a.assistant.focus, AgentField::Composer);
+        press(&mut a, KeyCode::Char('!'));
+        assert_eq!(a.assistant.composer, "hi!", "the caret went back");
+        assert_eq!(a.assistant.endpoint, "u", "and the setting stayed");
     }
 
-    /// The key field is painted as a placeholder, never as the key.
-    #[test]
-    fn a_key_field_is_never_painted() {
-        let mut a = app();
-        a.assistant.api_key = "sk-super-secret".to_string();
-        let rendered: String = lines(&a, &a.theme(), 80)
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!rendered.contains("sk-super-secret"), "the key was painted");
-        assert!(rendered.contains(a.strings().agent_key_hidden));
-    }
-
-    /// Enter in a settings field saves the whole form or says why not.
+    /// Enter in the settings window saves the whole form or says why not.
     #[test]
     fn saving_validates_the_whole_form() {
         let mut a = app();
         a.assistant.endpoint = "http://localhost:8080/v1".to_string();
         a.assistant.model = "llama-3".to_string();
-        press(&mut a, KeyCode::Tab);
-        press(&mut a, KeyCode::Enter);
+        settings(&mut a, AgentField::Endpoint);
+        press_settings(&mut a, KeyCode::Enter);
         assert!(a.assistant.configured, "a loopback endpoint is a valid one");
 
         let mut bad = app();
         bad.assistant.endpoint = "not a url".to_string();
-        press(&mut bad, KeyCode::Tab);
-        press(&mut bad, KeyCode::Enter);
+        settings(&mut bad, AgentField::Endpoint);
+        press_settings(&mut bad, KeyCode::Enter);
         assert!(!bad.assistant.configured, "a bad endpoint was accepted");
         assert!(!bad.notices.is_empty(), "the refusal was not said out loud");
     }
@@ -1126,14 +1291,16 @@ mod interaction {
             summary: "root mounted at /".into(),
             status: "answered".into(),
         }];
-        a.assistant.focus = AgentField::Notes;
-        press(&mut a, KeyCode::Char('d'));
-        press(&mut a, KeyCode::Char('i'));
-        press(&mut a, KeyCode::Char('s'));
-        press(&mut a, KeyCode::Char('k'));
-        press(&mut a, KeyCode::Enter);
-        assert_eq!(a.assistant.note_input, "", "the composer kept its text");
-        assert_eq!(a.assistant.notes.len(), 1, "the note is not shown");
+        // The note row is in the settings window, so that is where it is
+        // written: the caret has a row there or it is not the note's caret.
+        settings(&mut a, AgentField::Notes);
+        press_settings(&mut a, KeyCode::Char('d'));
+        press_settings(&mut a, KeyCode::Char('i'));
+        press_settings(&mut a, KeyCode::Char('s'));
+        press_settings(&mut a, KeyCode::Char('k'));
+        press_settings(&mut a, KeyCode::Enter);
+        assert_eq!(a.assistant.note_input, "", "the note field kept its text");
+        assert_eq!(a.assistant.notes.len(), 1, "the note is not filed");
         assert_eq!(a.assistant.notes[0].0, "disk");
         assert_eq!(
             a.assistant.notes[0].1, "root mounted at /",

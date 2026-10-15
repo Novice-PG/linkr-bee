@@ -511,7 +511,11 @@ const EN: Strings = Strings {
     agent_needs_endpoint: "set the endpoint and model first",
     agent_setting_invalid: "that setting is not acceptable",
     agent_composer_section: "ask",
-    agent_settings_section: "model",
+    // A section heading, and a word that also appears in the "no endpoint"
+    // notice — so it is spelled out rather than left as "model", which would
+    // make the view and the window indistinguishable to anything looking for
+    // the heading by name.
+    agent_settings_section: "Model settings",
     agent_mode_auto: "auto",
     agent_mode_full: "full auto",
     agent_mode_manual: "manual",

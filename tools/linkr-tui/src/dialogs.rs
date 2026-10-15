@@ -39,6 +39,7 @@ use crate::views::terminal::wrap_rows;
 const HELP_TITLE: Entry = [" Keyboard help ", " 键盘帮助 "];
 const NOTICES_TITLE: Entry = [" Notice log ", " 通知记录 "];
 const CONFIRM_TITLE: Entry = [" Confirm ", " 请确认 "];
+const SETTINGS_TITLE: Entry = [" Assistant settings ", " 助手设置 "];
 
 const HELP_KEYS: Entry = [
     "↑↓ scroll · PgUp/PgDn page · Home/End · Esc close",
@@ -47,6 +48,10 @@ const HELP_KEYS: Entry = [
 const NOTICES_KEYS: Entry = [
     "↑↓ scroll · PgUp/PgDn page · Home/End · Esc close",
     "↑↓ 滚动 · PgUp/PgDn 翻页 · Home/End · Esc 关闭",
+];
+const SETTINGS_KEYS: Entry = [
+    "Tab/↑↓ field · Enter save · PgDn scroll · Esc close",
+    "Tab/↑↓ 换字段 · Enter 保存 · PgDn 滚动 · Esc 关闭",
 ];
 const CONFIRM_KEYS: Entry = [
     "←→ choose · Enter run the highlighted button · y confirm · n/Esc cancel",
@@ -117,6 +122,15 @@ pub enum Dialog {
     Prompt(Prompt),
     /// The boards a scan heard, waiting for a pick.
     DevicePick(DevicePick),
+    /// The assistant's settings, scrolled to a row.
+    ///
+    /// Its own window rather than a section of the assistant view: five fields
+    /// and a note list are what the view was showing *instead of* the
+    /// conversation, and a form a user opens on purpose is easier to fill than
+    /// one they scroll past. The caret is `assistant.focus` — one piece of
+    /// state, so the paste chord and the painter agree about where the keys
+    /// go — and this carries only how far the body has been scrolled.
+    Settings(usize),
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
@@ -329,11 +343,11 @@ impl Prompt {
 }
 
 impl Dialog {
-    /// The row the dialog is scrolled to. Nothing but the help and the log
-    /// scrolls; a confirmation and a prompt are the size of their content.
+    /// The row the dialog is scrolled to. The help, the log and the settings
+    /// scroll; a confirmation and a prompt are the size of their content.
     pub fn scroll(&self) -> usize {
         match self {
-            Dialog::Help(offset) | Dialog::Notices(offset) => *offset,
+            Dialog::Help(offset) | Dialog::Notices(offset) | Dialog::Settings(offset) => *offset,
             Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::DevicePick(_) => 0,
         }
     }
@@ -347,6 +361,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Confirm(_) => entry(CONFIRM_TITLE, lang),
         Dialog::Prompt(prompt) => entry(prompt.title, lang),
         Dialog::DevicePick(_) => entry(T_PICK, lang),
+        Dialog::Settings(_) => entry(SETTINGS_TITLE, lang),
     }
 }
 
@@ -366,6 +381,7 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
                 entry(PICK_KEYS, lang)
             }
         }
+        Dialog::Settings(_) => entry(SETTINGS_KEYS, lang),
     };
     Line::from(Span::styled(text, theme.muted()))
 }
@@ -392,6 +408,15 @@ pub fn open_help(app: &mut App) {
 /// Raise the notice log.
 pub fn open_notices(app: &mut App) {
     raise(app, Dialog::Notices(0));
+}
+
+/// Raise the assistant's settings.
+///
+/// The caret is not decided here: it is the caller's field, because the window
+/// is reached from three places that mean three different rows — configure, the
+/// notice that names the endpoint, and "write a note".
+pub fn open_settings(app: &mut App) {
+    raise(app, Dialog::Settings(0));
 }
 
 /// Ask which network to join. The password is asked for next, by the prompt
@@ -623,6 +648,10 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             Line::default(),
             prompt_field(prompt, lang, theme),
         ],
+        // The assistant's form, painted by the module that owns it: the caret,
+        // the hidden key and the note cursor all live in `assistant` state, and
+        // a second painter would be a second opinion about what a field holds.
+        Dialog::Settings(_) => crate::views::assistant::settings_lines(app, theme, width as u16),
     }
 }
 
@@ -757,6 +786,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         },
         Dialog::Help(offset) => app.dialog = scrolled(app, Dialog::Help(offset), offset, key),
         Dialog::Notices(offset) => app.dialog = scrolled(app, Dialog::Notices(offset), offset, key),
+        // The assistant's window: Escape shuts it and hands the caret back to
+        // the composer, the paging keys scroll the body, and every other key
+        // belongs to the form — which re-puts the dialog here whatever it did
+        // with the caret, because "not the form's key" and "close the window"
+        // are two different answers and only Escape means the second.
+        Dialog::Settings(offset) => {
+            if key.code == KeyCode::Esc {
+                crate::views::assistant::close_settings(app);
+            } else {
+                let last = row_count(app, &Dialog::Settings(offset)).saturating_sub(1);
+                let moved = match key.code {
+                    KeyCode::PageUp => offset.saturating_sub(10),
+                    KeyCode::PageDown => offset.saturating_add(10),
+                    KeyCode::Home => 0,
+                    KeyCode::End => last,
+                    _ => offset,
+                };
+                let _ = crate::views::assistant::handle_settings_key(app, key);
+                app.dialog = Some(Dialog::Settings(moved.min(last)));
+            }
+        }
     }
     true
 }
@@ -897,9 +947,11 @@ mod tests {
             HELP_TITLE,
             NOTICES_TITLE,
             CONFIRM_TITLE,
+            SETTINGS_TITLE,
             HELP_KEYS,
             NOTICES_KEYS,
             CONFIRM_KEYS,
+            SETTINGS_KEYS,
             NOTICES_EMPTY,
             BUTTON_YES,
             BUTTON_NO,
@@ -1429,6 +1481,125 @@ mod tests {
         assert!(zh.spans[0].content.contains("Enter 开始"), "{zh:?}");
         // The two prompts do not share their words either.
         assert_ne!(title(&send, Lang::En), title(&receive, Lang::En));
+    }
+
+    /// The settings window is a form, not a log: it has its own title and
+    /// legend, it paints the rows it edits, and it answers to the field keys —
+    /// `q` types a `q` and does not close anything, which is the one habit a
+    /// reader of the notice log would otherwise bring with them.
+    #[test]
+    fn the_settings_window_is_a_form() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.assistant.notes = vec![(String::from("disk"), String::new())];
+        crate::views::assistant::open_settings(
+            &mut app,
+            crate::views::assistant::AgentField::Endpoint,
+        );
+        let dialog = app.dialog.clone().expect("the window was not raised");
+        let shown = text_of(&lines(&dialog, &app, 70, 20));
+        assert!(shown.contains("endpoint"), "{shown}");
+        assert!(shown.contains("Device notes"), "{shown}");
+        assert!(shown.contains("disk"), "the note list is not painted:\n{shown}");
+        assert_eq!(title(&dialog, app.lang).trim(), "Assistant settings");
+        assert!(!legend(&dialog, app.lang, &Theme::DARK).spans.is_empty());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        assert!(app.dialog.is_some(), "`q` closed a form that was typing");
+        assert_eq!(app.assistant.endpoint, "q");
+    }
+
+    /// The window pages with the reading keys and hands the caret back on
+    /// Escape — a caret left on a row the view does not paint is a keystroke
+    /// that lands nowhere the user can see it.
+    #[test]
+    fn the_settings_window_pages_and_gives_the_caret_back() {
+        let mut app = App::default();
+        crate::views::assistant::open_settings(
+            &mut app,
+            crate::views::assistant::AgentField::Endpoint,
+        );
+        for _ in 0..40 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let scrolled = app.dialog.clone().expect("the window closed on a page");
+        assert!(scrolled.scroll() > 0, "PgDn scrolled nothing");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.dialog.clone().unwrap().scroll(), 0, "Home kept a page");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape did not close the window");
+        assert_eq!(
+            crate::views::assistant::AgentField::Composer,
+            app.assistant.focus,
+            "the caret stayed on a row nothing is painting"
+        );
+    }
+
+    /// On the note row the arrows walk the notes; anywhere else they walk the
+    /// fields. That row is where a field meets a list, and the list is the only
+    /// thing that says which note Delete means.
+    #[test]
+    fn the_note_row_walks_the_notes() {
+        // A real store in a temp file: both the write and the delete go through
+        // it, and a `None` store empties the list on every write — which would
+        // make this test pass for the wrong reason.
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-dialog-note-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            agent_store: Some(crate::agent::store::JsonFile::at(&path)),
+            ..App::default()
+        };
+
+        crate::views::assistant::open_settings(
+            &mut app,
+            crate::views::assistant::AgentField::Notes,
+        );
+        for word in ["one", "two"] {
+            for ch in word.chars() {
+                handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        assert_eq!(app.assistant.notes.len(), 2, "neither note was filed");
+
+        // Which row is which depends on the store's own ordering, so the test
+        // asks the list rather than assuming it: Delete means the note under the
+        // cursor, and the other one is what must survive.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.assistant.note_cursor, 1,
+            "Down walked the fields, not the list"
+        );
+        let gone = app.assistant.notes[app.assistant.note_cursor].0.clone();
+        handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.assistant.notes.len(), 1, "Delete kept both notes");
+        assert_ne!(
+            app.assistant.notes[0].0, gone,
+            "Delete removed a note the cursor was not on"
+        );
+
+        // Tab leaves the row, and then the arrows are the fields' again — the
+        // note list keeps its cursor, so coming back finds it where it was.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_ne!(
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Notes,
+            "Tab did not leave the note row"
+        );
+        let cursor = app.assistant.note_cursor;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.assistant.note_cursor, cursor,
+            "the list moved while a different field had the caret"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
 
