@@ -27,6 +27,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use crate::agent::config::AgentConfig;
 use crate::agent::usage::Usage;
 
@@ -56,6 +58,23 @@ impl ChatRole {
             ChatRole::Assistant => "assistant",
         }
     }
+}
+
+/// One step of an answer arriving.
+///
+/// A model streams its reply as a series of deltas and then a final message with
+/// the token counts, so the transport reports progress rather than one value.
+/// The distinction matters because a reply being typed out on screen is a
+/// partial one and must never be mistaken for a finished one: `Done` is what
+/// moves the task from "asking" to "answered", and nothing else may.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Progress {
+    /// More of the reply, in order.
+    Delta(String),
+    /// The reply is complete, with whatever accounting the provider sent.
+    Done(Usage),
+    /// The reply is over and there is no answer.
+    Failed(Failure),
 }
 
 /// What came back, when it came back at all.
@@ -103,7 +122,7 @@ impl Failure {
 struct Job {
     config: AgentConfig,
     messages: Vec<ChatMessage>,
-    reply: Option<Sender<(String, Result<Completion, Failure>)>>,
+    reply: Option<Sender<(String, Progress)>>,
     /// The task this answers, so a reply can be matched to the goal it belongs
     /// to when it arrives out of order.
     task_id: String,
@@ -156,22 +175,20 @@ impl AgentClient {
                 }
             };
             while let Ok(mut job) = rx.recv() {
-                let outcome = runtime.block_on(send_once(&job));
-                if let Some(reply) = job.reply.take() {
-                    let _ = reply.send((job.task_id, outcome));
-                }
+                // The reply channel is moved out first, because the stream sends
+                // through it as it goes rather than once at the end.
+                let reply = job.reply.take();
+                runtime.block_on(send_stream(&job, reply));
             }
         });
         AgentClient { jobs: tx }
     }
 
-    /// Ask the model a question. Blocks until the answer arrives or the timeout
-    /// fires — the caller is a synchronous interface, and a frame that waited
-    /// for a channel would be a frame waiting on a network.
+    /// Ask the model and wait for the whole answer.
     ///
-    /// `task_id` is carried through so the view can file the reply against the
-    /// goal it belongs to, which matters because two prompts in flight at once
-    /// can answer out of order.
+    /// The streaming path, collected. There is no second non-streaming request:
+    /// a provider that answers in one message is a stream of one, and two code
+    /// paths to the same wire would be two places for the parsing to drift.
     pub fn chat(
         &self,
         task_id: &str,
@@ -189,13 +206,24 @@ impl AgentClient {
         if self.jobs.send(job).is_err() {
             return Err(Failure::Unreachable("the transport stopped".to_string()));
         }
-        // A dropped job would leave this blocking for ever, so the timeout is
-        // the real bound and the worker's own request timeout is a second one
-        // inside it. The task id comes back with the answer and is dropped
-        // here, because the caller named the task it asked about.
-        rx.recv_timeout(timeout)
-            .map(|(_, outcome)| outcome)
-            .map_err(|_| Failure::Unreachable("the model took too long".to_string()))?
+        let mut text = String::new();
+        loop {
+            match rx.recv_timeout(timeout) {
+                Ok((_, Progress::Delta(part))) => text.push_str(&part),
+                Ok((_, Progress::Done(reported))) => {
+                    return Ok(Completion {
+                        text,
+                        usage: reported,
+                    })
+                }
+                Ok((_, Progress::Failed(failure))) => return Err(failure),
+                Err(_) => {
+                    return Err(Failure::Unreachable(
+                        "the model took too long".to_string(),
+                    ))
+                }
+            }
+        }
     }
 
     /// Ask without waiting: the worker answers into a channel the interface
@@ -208,7 +236,7 @@ impl AgentClient {
         task_id: &str,
         config: AgentConfig,
         messages: Vec<ChatMessage>,
-    ) -> Option<Receiver<(String, Result<Completion, Failure>)>> {
+    ) -> Option<Receiver<(String, Progress)>> {
         let (tx, rx) = mpsc::channel();
         let job = Job {
             config,
@@ -221,50 +249,169 @@ impl AgentClient {
     }
 }
 
-/// One round trip, on the transport's runtime.
-async fn send_once(job: &Job) -> Result<Completion, Failure> {
+/// One round trip, streamed, reporting as it goes.
+///
+/// The body asks for a stream with the usage reported at the end, which is the
+/// one option every OpenAI-compatible provider understands. What comes back is
+/// a series of `data:` lines separated by blank ones — server-sent events — and
+/// the reply arrives as deltas of `choices[0].delta.content` until a final event
+/// carries `finish_reason`, after which `usage` may follow in the same event or
+/// in a later one.
+///
+/// A provider that does not stream still answers with one event and a
+/// `message` rather than a `delta`, which is read the same way: the reply is in
+/// `choices[0].message.content` and the token counts are in `usage`.
+async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     let key = job.config.api_key.clone();
     let url = chat_url(&job.config.endpoint);
-    let body = request_body(&job.config, &job.messages);
 
-    // A client per call rather than one shared: the timeout is part of the
-    // config's own `max_tokens`, and a client built once would have to guess at
-    // the first call's budget. The connection pool is the cost, and an
-    // interactive assistant makes one call per question.
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|why| Failure::Unreachable(redact(&why.to_string(), &key)))?;
-
-    let mut request = client
+    let mut request = client_for(&key)
         .post(&url)
         .header("content-type", "application/json")
-        .body(body);
+        // Accept SSE, because a provider that supports both will otherwise
+        // answer with JSON and the deltas would never arrive.
+        .header("accept", "text/event-stream")
+        .body(request_body(&job.config, &job.messages, true));
     if !key.is_empty() {
         request = request.header("authorization", format!("Bearer {key}"));
     }
     for (name, value) in &job.config.headers {
-        // The validator in `agent::config` already rejects a header name that
-        // is not `[A-Za-z0-9-]{1,64}`, so this cannot fail on a name a provider
-        // would refuse — and a value containing a control byte was refused
-        // there too.
         request = request.header(name.as_str(), value.as_str());
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|why| Failure::Unreachable(redact(&why.to_string(), &key)))?;
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(why) => {
+            send(&reply, &job.task_id, Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))));
+            return;
+        }
+    };
     let status = response.status().as_u16();
-    let text = response
-        .text()
-        .await
-        .map_err(|why| Failure::Unreachable(redact(&why.to_string(), &key)))?;
-
     if status != 200 {
-        return Err(Failure::Rejected(status, redact(&text, &key)));
+        // Read the body whatever the status: a provider's reason for refusing is
+        // the one thing worth showing, and it is redacted on the way out.
+        let body = response.text().await.unwrap_or_default();
+        send(&reply, &job.task_id, Progress::Failed(Failure::Rejected(status, redact(&body, &key))));
+        return;
     }
-    parse_completion(&text).ok_or(Failure::Malformed)
+
+    let mut stream = response.bytes_stream();
+    // A partial line survives across chunks: an SSE event is not obliged to
+    // arrive in one TCP segment, and cutting the buffer at the chunk boundary
+    // would split `data: {...}` in half and lose the event.
+    let mut buffer = String::new();
+    let mut usage = Usage::default();
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                send(&reply, &job.task_id, Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))));
+                return;
+            }
+        };
+        // `from_utf8_lossy` because a delta may split a multi-byte character
+        // across two chunks, and the half that arrives is not the character —
+        // it is replaced, and the next chunk's half is not a character either.
+        // The alternative is dropping the whole chunk.
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        let mut drained = String::new();
+        while let Some((event, rest)) = next_event(&buffer) {
+            drained.push_str(&event);
+            buffer = rest;
+        }
+        if drained.is_empty() {
+            continue;
+        }
+        // Every event in the chunk is read, and any text it holds is sent as
+        // one delta: a chunk is a unit of what the model decided to write.
+        let mut text = String::new();
+        for event in drained.split("\n\n") {
+            let Some(payload) = event.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                break;
+            }
+            if let Some(reported) = usage_of(payload) {
+                usage = reported;
+                continue;
+            }
+            if let Some(delta) = text_of(payload) {
+                text.push_str(&delta);
+            }
+        }
+        if !text.is_empty() {
+            send(&reply, &job.task_id, Progress::Delta(text));
+        }
+    }
+    send(&reply, &job.task_id, Progress::Done(usage));
+}
+
+/// Push one step into the reply channel, if there is one.
+///
+/// A job with no channel is a job nobody asked to watch — `chat()` takes the
+/// channel for itself — and a send that fails means the interface stopped
+/// listening, which is not a transport error.
+fn send(reply: &Option<Sender<(String, Progress)>>, task_id: &str, step: Progress) {
+    if let Some(reply) = reply {
+        let _ = reply.send((task_id.to_string(), step));
+    }
+}
+
+/// The client, with the timeout the whole request has to fit in.
+fn client_for(key: &str) -> reqwest::Client {
+    let _ = key;
+    // A client per answer, because the timeout is part of the request and a
+    // shared one would have to be built before the first caller knew its
+    // budget. The connection pool is the cost, and an interactive assistant
+    // asks one question at a time in practice.
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The next complete SSE event in `buffer`, and what is left after it.
+///
+/// `\n\n` is the separator, and a lone `\r\n\r\n` is what some gateways send —
+/// so the search is for the longest run of blank-line separators and the event
+/// is everything before it.
+fn next_event(buffer: &str) -> Option<(String, String)> {
+    for separator in ["\r\n\r\n", "\n\n"] {
+        if let Some(at) = buffer.find(separator) {
+            let (event, rest) = buffer.split_at(at);
+            let event = event.trim_end_matches('\r').to_string();
+            let rest = rest[separator.len()..].to_string();
+            return Some((event, rest));
+        }
+    }
+    None
+}
+
+/// The text one stream event carries, if it carries any.
+///
+/// Two shapes reach here and both are real: a delta during the answer
+/// (`choices[0].delta.content`), and a provider that answers in one message
+/// (`choices[0].message.content`). Reading the delta first is not a preference —
+/// a provider that sends both sends the message only once, at the end, and
+/// reading the message on every event would repeat the whole reply.
+fn text_of(event: &str) -> Option<String> {
+    let choices = field(event, "choices")?;
+    let first = first_element(choices)?;
+    if let Some(delta) = field(first, "delta") {
+        if let Some(content) = field(delta, "content") {
+            return unquote(content);
+        }
+    }
+    let message = field(first, "message")?;
+    unquote(field(message, "content")?)
+}
+
+/// The token accounting a stream event carries, if it carries one.
+fn usage_of(event: &str) -> Option<Usage> {
+    let usage = field(event, "usage")?;
+    Some(parse_usage(usage))
 }
 
 /// The chat-completions URL. A trailing slash is stripped rather than
@@ -283,7 +430,7 @@ fn chat_url(endpoint: &str) -> String {
 /// serialises a struct with `#[derive]` to save eight lines of `format!` is a
 /// dependency that then has to be taught about the response too. The endpoint,
 /// the model and the messages are the whole of what a provider needs.
-fn request_body(config: &AgentConfig, messages: &[ChatMessage]) -> String {
+fn request_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) -> String {
     let mut out = String::from("{\"model\":");
     out.push_str(&crate::agent::tasks::json_string(&config.model));
     out.push_str(",\"messages\":[");
@@ -299,6 +446,14 @@ fn request_body(config: &AgentConfig, messages: &[ChatMessage]) -> String {
     }
     out.push_str("],\"max_tokens\":");
     out.push_str(&config.max_tokens.to_string());
+    if stream {
+        // `stream` on its own is enough for the deltas; `stream_options` is what
+        // asks for the token counts in a final event, because the default is
+        // that a streaming reply reports no usage at all — which would leave the
+        // accounting permanently at zero for every question asked this way.
+        out.push_str(",\"stream\":true");
+        out.push_str(",\"stream_options\":{\"include_usage\":true}");
+    }
     out.push('}');
     out
 }
@@ -591,6 +746,7 @@ mod tests {
                     content: "hi\nthere".to_string(),
                 },
             ],
+            false,
         );
         // A request is not a reply: reading one back yields nothing, which is
         // the failure a caller would otherwise take for an empty answer.
@@ -670,6 +826,55 @@ mod tests {
     /// exactly what a `Default` for a field in `App` must not do inside a test
     /// suite that builds hundreds of frames — so `App` holds `None` and the
     /// transport is started explicitly.
+    /// A stream event is only complete when its blank line has arrived, and a
+    /// chunk can split one — cutting the buffer at the chunk boundary would
+    /// lose the event.
+    #[test]
+    fn a_partial_event_is_kept_until_its_blank_line() {
+        let mut buffer = "data: {\"choices\":[".to_string();
+        assert!(next_event(&buffer).is_none(), "an incomplete event was read");
+        buffer.push_str("{\"finish_reason\":\"stop\"}]}\n\n");
+        let (event, rest) = next_event(&buffer).expect("now complete");
+        assert_eq!(event, "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}");
+        assert!(rest.is_empty());
+    }
+
+    /// Both blank-line spellings, because gateways send either.
+    #[test]
+    fn both_blank_line_spellings_separate_events() {
+        for separator in ["\n\n", "\r\n\r\n"] {
+            let text = format!("data: one{separator}data: two{separator}");
+            let (first, rest) = next_event(&text).expect("split");
+            assert_eq!(first, "data: one", "{separator:?}");
+            assert_eq!(rest, format!("data: two{separator}"));
+        }
+    }
+
+    /// A delta is what arrives while the model writes.
+    #[test]
+    fn a_delta_is_what_arrives_mid_stream() {
+        let event = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hel"}}]}"#;
+        assert_eq!(text_of(event).as_deref(), Some("hel"));
+    }
+
+    /// A provider that answers in one message puts it in `message`, not `delta`.
+    #[test]
+    fn a_single_message_is_read_from_message() {
+        let event = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#;
+        assert_eq!(text_of(event).as_deref(), Some("done"));
+        let usage = usage_of(event).expect("usage");
+        assert_eq!(usage.input, 2);
+        assert_eq!(usage.output, 3);
+    }
+
+    /// `[DONE]` is a sentinel with no JSON, and must not be read as a delta.
+    #[test]
+    fn the_done_sentinel_is_not_a_delta() {
+        assert!(text_of("data: [DONE]").is_none());
+    }
+
+    /// A transport that is started and answered by nothing is `Unreachable`,
+    /// not a hang — the only way to test the whole path without a server.
     #[test]
     fn a_client_is_constructed_explicitly() {
         let client = AgentClient::spawn();

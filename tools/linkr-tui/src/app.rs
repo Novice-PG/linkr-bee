@@ -190,10 +190,7 @@ pub struct App {
     /// dropped the first one's channel — the reply the user was waiting for,
     /// lost silently.
     pub agent_replies: Vec<
-        std::sync::mpsc::Receiver<(
-            String,
-            Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>,
-        )>,
+        std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>,
     >,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
@@ -739,36 +736,27 @@ impl App {
         // and so a channel that is still live goes back rather than being
         // replaced by the next one's.
         let live = std::mem::take(&mut self.agent_replies);
-        let mut arrived: Vec<(
-            String,
-            Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>,
-        )> = Vec::new();
+        let mut arrived: Vec<(String, crate::agent::runtime::Progress)> = Vec::new();
         for receiver in live {
-            let mut answered = false;
+            // The channel is dropped only when the stream is over. Anything else
+            // — nothing yet, or a delta in mid-answer — keeps it: a stream that
+            // was cut off after its first chunk would otherwise lose the rest,
+            // and the answer would stop half-way through without a `Done` to
+            // close it.
+            let mut closed = false;
             while let Ok(item) = receiver.try_recv() {
+                closed = !matches!(
+                    item.1,
+                    crate::agent::runtime::Progress::Delta(_)
+                );
                 arrived.push(item);
-                answered = true;
             }
-            if !answered {
-                // Nothing yet: keep waiting rather than dropping the channel and
-                // losing the answer when it comes.
+            if !closed {
                 self.agent_replies.push(receiver);
             }
         }
 
-        for (task_id, outcome) in arrived {
-            // The two numbers the view shows are a running total, so one more
-            // message is folded in rather than replacing the count.
-            if let Ok(completion) = &outcome {
-                let running = crate::agent::usage::Usage {
-                    input: self.assistant.usage.0,
-                    output: self.assistant.usage.1,
-                    ..crate::agent::usage::Usage::default()
-                };
-                let merged = crate::agent::usage::add_usage(&running, &completion.usage);
-                self.assistant.usage = (merged.input, merged.output);
-            }
-
+        for (task_id, progress) in arrived {
             let Some(found) = self
                 .assistant
                 .tasks
@@ -778,57 +766,108 @@ impl App {
             else {
                 continue;
             };
-            let answered = match &outcome {
-                Ok(completion) => (completion.text.clone(), "answered"),
-                Err(failure) => (failure.describe(), "failed"),
-            };
-            // The reply is the assistant's turn in the conversation. A failure
-            // is a turn too: the thread of what was asked and what came back is
-            // the record, and a gap in it is worse than a turn that says the
-            // model did not answer.
-            self.assistant.display.push(crate::agent::session::DisplayLine {
-                role: "assistant".to_string(),
-                text: answered.0.clone(),
-            });
-            let keep = crate::agent::session::SESSION_MESSAGES;
-            let from = self.assistant.display.len().saturating_sub(keep);
-            self.assistant.display.drain(..from);
-            // Persisted here rather than only at the view's Enter: the reply
-            // arrives on this beat, and a session saved on the question alone
-            // would lose every answer if the program ended between the two.
-            let key = self.agent_device_key();
-            let now = self.environment_stamp() * 1000;
-            if let Some(store) = self.agent_store.as_mut() {
-                let _ = crate::agent::session::save_session(
-                    store,
-                    &key,
-                    &self.assistant.display,
-                    &self.assistant.display,
-                    now,
-                );
-            }
 
-            // Whatever happened, the answer is in the store: a task that says
-            // "failed" is the record of a question that was asked.
-            let saved = crate::agent::tasks::TaskRecord {
-                summary: answered.0,
-                status: answered.1.to_string(),
-                ..found
+            // A delta is the reply arriving, so it goes into the summary the
+            // view already paints: the answer is typed out as the model writes
+            // it, which is the whole point of asking for a stream.
+            let crate::agent::runtime::Progress::Delta(delta) = &progress else {
+                // `Done` and `Failed` are the end of the answer, and both go
+                // through the closing path below.
+                Self::finish(self, &found, progress);
+                continue;
             };
-            if let Some(store) = self.agent_store.as_mut() {
-                crate::agent::tasks::TaskStore::new(&mut *store).save(&saved);
-            }
             if let Some(slot) = self
                 .assistant
                 .tasks
                 .iter_mut()
                 .find(|task| task.id == task_id)
             {
-                slot.summary = saved.summary;
-                slot.status = saved.status;
+                slot.summary.push_str(delta);
+                // Not "answered" yet: a partial reply is not a reply, and `Done`
+                // is what says the model finished.
+                if slot.status == "asking" {
+                    slot.status = "typing".to_string();
+                }
             }
         }
     }
+
+/// Close one answer: file it, remember it, and say what it was.
+///
+/// Both `Done` and `Failed` come here, because the difference between them is
+/// one field — the summary and the status — and everything else a finished
+/// answer does is the same for both.
+fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::agent::runtime::Progress) {
+    let (summary, status, usage) = match &step {
+        crate::agent::runtime::Progress::Done(reported) => {
+            (found.summary.clone(), "answered", *reported)
+        }
+        _ => {
+            let failure = match &step {
+                crate::agent::runtime::Progress::Failed(failure) => failure.clone(),
+                _ => crate::agent::runtime::Failure::Malformed,
+            };
+            (failure.describe(), "failed", crate::agent::usage::Usage::default())
+        }
+    };
+
+    // The two numbers the view shows are a running total, so one more message is
+    // folded in rather than replacing the count.
+    {
+        let running = crate::agent::usage::Usage {
+            input: app.assistant.usage.0,
+            output: app.assistant.usage.1,
+            ..crate::agent::usage::Usage::default()
+        };
+        let merged = crate::agent::usage::add_usage(&running, &usage);
+        app.assistant.usage = (merged.input, merged.output);
+    }
+
+    // The reply is the assistant's turn in the conversation. A failure is a turn
+    // too: the thread of what was asked and what came back is the record, and a
+    // gap in it is worse than a turn that says the model did not answer.
+    app.assistant.display.push(crate::agent::session::DisplayLine {
+        role: "assistant".to_string(),
+        text: summary.clone(),
+    });
+    let keep = crate::agent::session::SESSION_MESSAGES;
+    let from = app.assistant.display.len().saturating_sub(keep);
+    app.assistant.display.drain(..from);
+    // Persisted here rather than only at the view's Enter: the reply arrives on
+    // this beat, and a session saved on the question alone would lose every
+    // answer if the program ended between the two.
+    let key = app.agent_device_key();
+    let now = app.environment_stamp() * 1000;
+    if let Some(store) = app.agent_store.as_mut() {
+        let _ = crate::agent::session::save_session(
+            store,
+            &key,
+            &app.assistant.display,
+            &app.assistant.display,
+            now,
+        );
+    }
+
+    // Whatever happened, the answer is in the store: a task that says "failed"
+    // is the record of a question that was asked.
+    let saved = crate::agent::tasks::TaskRecord {
+        summary,
+        status: status.to_string(),
+        ..found.clone()
+    };
+    if let Some(store) = app.agent_store.as_mut() {
+        crate::agent::tasks::TaskStore::new(&mut *store).save(&saved);
+    }
+    if let Some(slot) = app
+        .assistant
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == found.id)
+    {
+        slot.summary = saved.summary;
+        slot.status = saved.status;
+    }
+}
 
     pub fn pump(&mut self) {
         self.drain_agent_replies();
@@ -1511,20 +1550,27 @@ mod multi_reply {
         let (tx2, rx2) = std::sync::mpsc::channel();
         // Out of order, which is the case a slot cannot handle at all: t2
         // answers first and t1's channel has already been replaced.
+        // The answer arrives as a delta and then a done, which is the shape a
+        // stream really has: the text is written as it comes, and the `Done`
+        // step is what says the model finished.
         tx2.send((
             "t2".to_string(),
-            Ok(crate::agent::runtime::Completion {
-                text: "second answer".to_string(),
-                usage: crate::agent::usage::Usage::default(),
-            }),
+            crate::agent::runtime::Progress::Delta("second answer".to_string()),
+        ))
+        .expect("send");
+        tx2.send((
+            "t2".to_string(),
+            crate::agent::runtime::Progress::Done(crate::agent::usage::Usage::default()),
         ))
         .expect("send");
         tx1.send((
             "t1".to_string(),
-            Ok(crate::agent::runtime::Completion {
-                text: "first answer".to_string(),
-                usage: crate::agent::usage::Usage::default(),
-            }),
+            crate::agent::runtime::Progress::Delta("first answer".to_string()),
+        ))
+        .expect("send");
+        tx1.send((
+            "t1".to_string(),
+            crate::agent::runtime::Progress::Done(crate::agent::usage::Usage::default()),
         ))
         .expect("send");
         app.agent_replies = vec![rx1, rx2];
@@ -1559,14 +1605,27 @@ mod multi_reply {
         // It answers on a later beat and is filed then.
         tx.send((
             "t1".to_string(),
-            Ok(crate::agent::runtime::Completion {
-                text: "late answer".to_string(),
-                usage: crate::agent::usage::Usage::default(),
-            }),
+            crate::agent::runtime::Progress::Delta("late ".to_string()),
+        ))
+        .expect("send");
+        app.drain_agent_replies();
+        // The delta alone does not close the task: a partial reply is not a
+        // reply, and this is what stops "typing" from reading as "answered".
+        assert_eq!(app.assistant.tasks[0].summary, "late ");
+        assert_eq!(app.assistant.tasks[0].status, "typing");
+        tx.send((
+            "t1".to_string(),
+            crate::agent::runtime::Progress::Delta("answer".to_string()),
+        ))
+        .expect("send");
+        tx.send((
+            "t1".to_string(),
+            crate::agent::runtime::Progress::Done(crate::agent::usage::Usage::default()),
         ))
         .expect("send");
         app.drain_agent_replies();
         assert_eq!(app.assistant.tasks[0].summary, "late answer");
+        assert_eq!(app.assistant.tasks[0].status, "answered");
         assert!(app.agent_replies.is_empty());
     }
 
@@ -1579,10 +1638,7 @@ mod multi_reply {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send((
             "ghost".to_string(),
-            Ok(crate::agent::runtime::Completion {
-                text: "an answer to something else".to_string(),
-                usage: crate::agent::usage::Usage::default(),
-            }),
+            crate::agent::runtime::Progress::Delta("an answer to something else".to_string()),
         ))
         .expect("send");
         app.agent_replies = vec![rx];
