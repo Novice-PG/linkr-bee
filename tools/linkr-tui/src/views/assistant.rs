@@ -53,6 +53,10 @@ pub struct AssistantState {
     /// name from the validator is not a sentence a user can act on, so it is
     /// translated here rather than shown raw.
     pub notice: Option<String>,
+    /// A note being typed. Enter below the notes adds it; the evidence is
+    /// whatever the newest task last said, because a note with nothing behind
+    /// it is an opinion and the point of the field is what the target said.
+    pub note_input: String,
     /// Prompts already handed to a task, newest first. They are goals the agent
     /// has not run a model against yet, and this is what the composer becomes.
     pub inbox: Vec<String>,
@@ -76,15 +80,18 @@ pub enum AgentField {
     ApiKey,
     /// Extra HTTP headers, one per line.
     Headers,
+    /// A note being typed, below the notes it will join.
+    Notes,
 }
 
 /// Every field, in Tab order.
-pub const FIELDS: [AgentField; 5] = [
+pub const FIELDS: [AgentField; 6] = [
     AgentField::Composer,
     AgentField::Endpoint,
     AgentField::Model,
     AgentField::ApiKey,
     AgentField::Headers,
+    AgentField::Notes,
 ];
 
 impl AgentField {
@@ -97,6 +104,7 @@ impl AgentField {
             AgentField::Model => s.agent_field_model,
             AgentField::ApiKey => s.agent_field_key,
             AgentField::Headers => s.agent_field_headers,
+            AgentField::Notes => s.agent_field_note,
         }
     }
 
@@ -120,6 +128,7 @@ impl AgentField {
             AgentField::Model => &state.model,
             AgentField::ApiKey => &state.api_key,
             AgentField::Headers => &state.headers,
+            AgentField::Notes => &state.note_input,
         }
     }
 
@@ -233,12 +242,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             let text = field_text_mut(app);
             text.pop();
         }
-        KeyCode::Enter => {
-            if app.assistant.focus == AgentField::Composer {
-                submit_prompt(app);
-            } else {
-                save_settings(app);
-            }
+        KeyCode::Enter => match app.assistant.focus {
+            AgentField::Composer => submit_prompt(app),
+            AgentField::Notes => add_note(app),
+            _ => save_settings(app),
+        },
+        // Ctrl+R exports the diagnostic report. R for report, and not a
+        // control character: the interface's own chords are taken before this
+        // point, so what reaches here is a printable one.
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            export_report(app);
         }
         // A control character is not text. `handle_key` in `main.rs` has
         // already taken the chords that are the interface's own, so what
@@ -261,7 +274,133 @@ fn field_text_mut(app: &mut App) -> &mut String {
         AgentField::Model => &mut state.model,
         AgentField::ApiKey => &mut state.api_key,
         AgentField::Headers => &mut state.headers,
+        AgentField::Notes => &mut state.note_input,
     }
+}
+
+/// Add the note being typed, with the newest task's answer as its evidence.
+///
+/// The evidence is not decoration: a note saying "the UART is at 115200" is worth
+/// keeping only if something in the record said so, and it is what makes a note
+/// checkable later instead of a memory. A note typed before anything was asked
+/// gets empty evidence rather than a guess at one.
+fn add_note(app: &mut App) {
+    let text = std::mem::take(&mut app.assistant.note_input);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let key = app.agent_device_key();
+    let evidence = app
+        .assistant
+        .tasks
+        .first()
+        .map(|task| task.summary.clone())
+        .unwrap_or_default();
+    let now = app.environment_stamp() * 1000;
+    if let Some(store) = app.agent_store.as_mut() {
+        // A duplicate or a rejected note is left as it was: the user has typed
+        // the same thing twice and has already been told.
+        let _ = crate::agent::notes::NoteStore::new(&mut *store).add(&key, trimmed, &evidence, now);
+    }
+    refresh_notes(app);
+}
+
+/// Re-read the notes from the store into the view.
+///
+/// Read back rather than pushed, because a note the store refused — a duplicate,
+/// an over-long one — must not appear, and the store's own answer is the only
+/// one that knows.
+fn refresh_notes(app: &mut App) {
+    let key = app.agent_device_key();
+    // A mutable borrow even for a read: the `Storage` trait's `set` and
+    // `remove` take `&mut self`, so there is no read-only handle to a store —
+    // and this is the same reason `load_agent_state` in main.rs borrows the way
+    // it does.
+    let listed = app
+        .agent_store
+        .as_mut()
+        .map(|store| {
+            crate::agent::notes::NoteStore::new(&mut *store)
+                .list(&key)
+                .into_iter()
+                .map(|note| (note.text, note.evidence))
+                .collect()
+        })
+        .unwrap_or_default();
+    app.assistant.notes = listed;
+}
+
+/// Build the diagnostic report and put it on the terminal's clipboard.
+///
+/// `build_task_report` is 404 lines of ported, tested logic that nothing called.
+/// The web panel downloads the same text as a `.md` file; a TUI has no download,
+/// so the clipboard is where it goes — and OSC 52 already works here, so this is
+/// a paste away from being a GitHub issue.
+///
+/// The report is the newest task as the task and everything before it as
+/// earlier tasks, which is the shape the builder asks for and the shape the view
+/// already holds.
+fn export_report(app: &mut App) {
+    let key = app.agent_device_key();
+    let zh = app.lang == crate::i18n::Lang::Zh;
+    let task = app.assistant.tasks.first().map(|record| {
+        crate::agent::report::ReportTask {
+            goal: record.goal.clone(),
+            status: record.status.clone(),
+            summary: record.summary.clone(),
+            plan: Vec::new(),
+        }
+    });
+    let earlier: Vec<crate::agent::report::ReportEarlierTask> = app
+        .assistant
+        .tasks
+        .iter()
+        .skip(1)
+        .map(|record| crate::agent::report::ReportEarlierTask {
+            goal: record.goal.clone(),
+            status: record.status.clone(),
+            updated_at: Some(record.updated_at),
+        })
+        .collect();
+    let notes: Vec<crate::agent::report::ReportNote> = app
+        .assistant
+        .notes
+        .iter()
+        .map(|(text, evidence)| crate::agent::report::ReportNote {
+            text: text.clone(),
+            evidence: evidence.clone(),
+        })
+        .collect();
+    let stamp = app.environment_stamp();
+    let generated = crate::agent::report::ReportExecution {
+        id: String::new(),
+        payload: String::new(),
+        delivery: String::new(),
+        execution_status: String::new(),
+        exit_code: None,
+        observation: String::new(),
+        error: String::new(),
+        download_path: String::new(),
+        download_bytes: None,
+        download_sha256: String::new(),
+        evidence: String::new(),
+    };
+    let report = crate::agent::report::build_task_report(
+        zh,
+        &key,
+        &format!("{stamp}"),
+        task.as_ref(),
+        &earlier,
+        &[generated],
+        &notes,
+    );
+    let copied = crate::app::osc52_copy(&report);
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: format!("{} {} {}", s.copy_done_prefix, copied, s.copy_done_suffix),
+        level: crate::event::NoticeLevel::Info,
+    });
 }
 
 /// Take the composer's contents as a goal and record it.
@@ -690,7 +829,7 @@ mod interaction {
         press(&mut a, KeyCode::Tab);
         assert_eq!(a.assistant.focus, AgentField::Composer, "wraps forward");
         press(&mut a, KeyCode::BackTab);
-        assert_eq!(a.assistant.focus, AgentField::Headers, "wraps backward");
+        assert_eq!(a.assistant.focus, AgentField::Notes, "wraps backward");
     }
 
     /// Typing goes wherever the caret is, and nowhere else.
@@ -803,6 +942,45 @@ mod interaction {
         a.pump();
         let dead = receiver.recv_timeout(Duration::from_secs(3));
         assert!(dead.is_ok(), "the transport never answered");
+    }
+
+    /// A note is written with the newest answer as its evidence, and the evidence
+    /// is not decoration — a note with nothing behind it is an opinion, and the
+    /// field is where "the target said so" gets attached.
+    #[test]
+    fn a_note_is_written_with_its_evidence() {
+        // A real store, in a temp file: `agent_store` is `None` in a default
+        // `App` on purpose, and a note written to `None` is a note written to
+        // nowhere.
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-note-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut a = app();
+        a.agent_store = Some(crate::agent::store::JsonFile::at(&path));
+        let _ = std::fs::remove_file(&path);
+        a.assistant.configured = true;
+        a.assistant.mode = Some(crate::exec::executor::Mode::Auto);
+        a.assistant.tasks = vec![TaskRecord {
+            id: "t0".into(),
+            device_key: a.agent_device_key(),
+            updated_at: 0,
+            goal: "df -h".into(),
+            summary: "root mounted at /".into(),
+            status: "answered".into(),
+        }];
+        a.assistant.focus = AgentField::Notes;
+        press(&mut a, KeyCode::Char('d'));
+        press(&mut a, KeyCode::Char('i'));
+        press(&mut a, KeyCode::Char('s'));
+        press(&mut a, KeyCode::Char('k'));
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.assistant.note_input, "", "the composer kept its text");
+        assert_eq!(a.assistant.notes.len(), 1, "the note is not shown");
+        assert_eq!(a.assistant.notes[0].0, "disk");
+        assert_eq!(
+            a.assistant.notes[0].1, "root mounted at /",
+            "the evidence is what the target said"
+        );
     }
 
     /// An outstanding approval takes the keyboard.

@@ -335,16 +335,17 @@ const MAX_OSC52_CHARS: usize = 64 * 1024;
 /// No ST terminator on purpose. The BEL form is the one every emulator that
 /// supports the sequence accepts, and the ST form ends in a byte that some
 /// terminals mistake for text.
-fn osc52_copy(text: &str) {
+pub fn osc52_copy(text: &str) -> usize {
     use std::io::Write;
 
     if text.is_empty() {
-        return;
+        return 0;
     }
     let payload = crate::transfer::base64::encode_base64(text.as_bytes());
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "\x1b]52;c;{payload}\x07");
     let _ = out.flush();
+    text.chars().count()
 }
 
 impl App {
