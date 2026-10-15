@@ -99,7 +99,6 @@ pub const FLAGS: &[Flag] = &[
             "diagnostics",
             "network",
             "assistant",
-            "transfer",
         ],
         "open on this view",
     ),

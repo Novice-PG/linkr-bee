@@ -1127,13 +1127,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
-    // The transfer form is the same kind of thing, and it owns the arrow keys
-    // too: its rows are walked with them, and a device being typed at with the
-    // arrows of a form would see escape sequences it never asked for.
-    if app.view == View::Transfer && linkr_tui::views::transfer::handle_key(app, key) {
-        return false;
-    }
-
     // The assistant is a form too, and the same reasoning applies with more
     // force: it has a composer, and a composer that types a newline into the
     // console on every Enter is not a composer.
@@ -1435,7 +1428,7 @@ mod tests {
         }
     }
 
-    /// F2–F6 select the views; any other function key changes nothing.
+    /// F2–F5 select the views; any other function key changes nothing.
     #[test]
     fn the_view_keys_select_views() {
         let mut app = App::default();
@@ -1444,17 +1437,18 @@ mod tests {
             KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)
         ));
         assert_eq!(app.view, View::Network);
+        // F5 is the last view, so F6 and F7 are unbound and must leave it be.
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Assistant);
         handle_key(&mut app, KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
-        assert_eq!(app.view, View::Transfer);
-        handle_key(&mut app, KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
         assert_eq!(
             app.view,
-            View::Transfer,
+            View::Assistant,
             "an unbound F-key must not move the view"
         );
         // F1 is help, not a view: it opens the overlay and leaves the view be.
         handle_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-        assert_eq!(app.view, View::Transfer, "F1 is help, not a view");
+        assert_eq!(app.view, View::Assistant, "F1 is help, not a view");
         assert!(
             matches!(app.dialog, Some(linkr_tui::dialogs::Dialog::Help(0))),
             "F1 opened the help: {:?}",

@@ -659,7 +659,7 @@ mod tests {
         let last = lines[39];
         assert!(last.starts_with("[终端]"), "{last:?}");
         assert!(last.contains("Ctrl+Q 退出"), "{last:?}");
-        for needle in ["连接", "视图", "快捷发送", "监控", "串口终端", "文件传输"]
+        for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"]
         {
             assert!(text.contains(needle), "frame is missing {needle:?}\n{text}");
         }

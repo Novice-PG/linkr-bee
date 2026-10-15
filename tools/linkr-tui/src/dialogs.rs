@@ -1,6 +1,6 @@
 //! Modal dialogs: the keyboard help, the notice log, the confirmation a guarded
-//! command asks for before it goes out, and the one-line prompt that a file
-//! transfer starts from.
+//! command asks for before it goes out, and the one-line prompt that a settings
+//! value starts from.
 //!
 //! A dialog is *state*, not a widget. `App` holds an `Option<Dialog>` and this
 //! module owns what each one means, what it says and which keys it answers to;
@@ -15,10 +15,11 @@
 //! button starts on *Cancel* for the same reason: a dialog raised by one
 //! keystroke must not be answerable by another.
 //!
-//! The prompt is the same idea with a text field: a transfer cannot be started
-//! by a keystroke alone, because *which* file is not a thing a key says. It
-//! carries its own labels as [`Entry`] pairs rather than looking them up in the
-//! shared table, so a dialog's words stay next to the dialog.
+//! The prompt is the same idea with a text field: a value like a WiFi name or an
+//! upload URL cannot be typed by a keystroke alone, because *which* value is not
+//! a thing a key says. It carries its own labels as [`Entry`] pairs rather than
+//! looking them up in the shared table, so a dialog's words stay next to the
+//! dialog.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -87,14 +88,13 @@ const HELP_NOTE: Entry = [
 const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
-    ("F2–F6", ["Switch the view", "切换视图"]),
+    ("F2–F5", ["Switch the view", "切换视图"]),
     ("Tab", ["Move the focus", "切换焦点"]),
     ("↑ / ↓", ["Walk the sidebar", "在侧栏中移动"]),
     ("Enter", ["Send the preset / activate", "发送预设 / 激活"]),
     ("PgUp / PgDn", ["Scroll the pane", "滚动终端"]),
     ("End", ["Jump to the newest line", "跳到最新一行"]),
     ("Ctrl+L", ["Clear the pane", "清屏"]),
-    ("Ctrl+X", ["Cancel the transfer", "取消传输"]),
     ("Ctrl+T", ["Toggle the theme", "切换主题"]),
     ("Ctrl+Q", ["Quit", "退出"]),
 ];
@@ -120,7 +120,7 @@ pub enum Dialog {
 /// A text field: a question, an answer, and what agreeing to it does.
 ///
 /// A prompt rather than a second command line: the interface has no command
-/// line, and a transfer needs exactly one argument. Keeping it a dialog means it
+/// line, and a settings value needs exactly one argument. Keeping it a dialog means it
 /// takes the keyboard the same way the others do, and that the answer is a
 /// value the tests can read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -788,7 +788,7 @@ mod tests {
         let app = App::default();
         let shown = text_of(&lines(&Dialog::Help(0), &app, 60, 20));
         for key in [
-            "Ctrl+P", "F1", "F2–F6", "Tab", "Enter", "PgUp", "Ctrl+L", "Ctrl+X", "Ctrl+T", "Ctrl+Q",
+            "Ctrl+P", "F1", "F2–F5", "Tab", "Enter", "PgUp", "Ctrl+L", "Ctrl+T", "Ctrl+Q",
         ] {
             assert!(shown.contains(key), "help is missing {key:?}\n{shown}");
         }

@@ -21,7 +21,7 @@ pub mod session;
 pub mod text;
 pub mod theme;
 pub mod trace;
-pub mod transfer;
+pub mod base64;
 pub mod transport;
 pub mod ui;
 pub mod views;

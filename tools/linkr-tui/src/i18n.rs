@@ -90,8 +90,6 @@ pub struct Strings {
     pub view_network: &'static str,
     /// Title of the assistant view.
     pub view_assistant: &'static str,
-    /// Title of the transfer view.
-    pub view_transfer: &'static str,
     /// Placeholder in a view whose body has no content yet.
     pub view_empty: &'static str,
 
@@ -182,41 +180,6 @@ pub struct Strings {
     /// acted on slowly. The wording has to leave that open, because whether to
     /// press the button again depends on it.
     pub mgmt_no_answer: &'static str,
-
-    // --- transfer view ----------------------------------------------------
-    /// The outgoing-files section heading.
-    pub xfer_out_section: &'static str,
-    /// The incoming-files section heading.
-    pub xfer_in_section: &'static str,
-    /// Shown when no transfer has happened yet.
-    pub xfer_empty: &'static str,
-    /// A one-line transfer record: name, size, state.
-    pub xfer_record_failed: &'static str,
-    pub xfer_record_saved: &'static str,
-    pub xfer_record_unverified: &'static str,
-    pub xfer_record_pending: &'static str,
-    /// Shown when a precheck was asked for with no link.
-    pub xfer_needs_link: &'static str,
-    /// The one row this view draws: the precheck.
-    pub xfer_check: &'static str,
-    /// The precheck section heading.
-    pub xfer_precheck: &'static str,
-    /// The precheck has not been run.
-    pub xfer_probe_idle: &'static str,
-    /// The precheck is waiting on the device.
-    pub xfer_probe_running: &'static str,
-    /// The device has everything the pager's commands are built from.
-    pub xfer_probe_ready: &'static str,
-    /// The device is missing tools, so a file cannot move with it.
-    pub xfer_probe_missing: &'static str,
-    /// The precheck was asked and never answered.
-    pub xfer_probe_no_answer: &'static str,
-    /// The row naming the tool an upload's digest can be taken with.
-    pub xfer_digest_row: &'static str,
-    /// Shown when the device has no digest tool at all.
-    pub xfer_no_digest: &'static str,
-    /// The keys this view answers.
-    pub xfer_keys_hint: &'static str,
 
     // --- assistant view ---------------------------------------------------
     /// The session section heading.
@@ -352,7 +315,6 @@ const ZH: Strings = Strings {
     view_diagnostics: "诊断",
     view_network: "网络",
     view_assistant: "助手",
-    view_transfer: "文件传输",
     view_empty: "此视图尚未实现",
     diag_updated: "@i? · 已更新",
     diag_not_read: "@i? 尚未读取",
@@ -419,24 +381,6 @@ const ZH: Strings = Strings {
     net_no_url: "先填写上传地址",
     net_bad_command: "不是桥接能识别的命令",
     mgmt_no_answer: "桥接没有应答：它可能正忙，请稍后重试",
-    xfer_out_section: "发送到设备",
-    xfer_in_section: "从设备取回",
-    xfer_empty: "暂无传输记录。",
-    xfer_record_failed: "失败",
-    xfer_record_saved: "已保存",
-    xfer_record_unverified: "未校验",
-    xfer_record_pending: "进行中",
-    xfer_needs_link: "未连接——什么都没发出。",
-    xfer_check: "预检目标机工具",
-    xfer_precheck: "预检",
-    xfer_probe_idle: "尚未运行——按 Enter 询问设备",
-    xfer_probe_running: "正在询问设备…",
-    xfer_probe_ready: "目标机可以收发文件（dd|base64 分页，与 web 端一致）",
-    xfer_probe_missing: "目标机缺少工具，无法收发文件：",
-    xfer_probe_no_answer: "预检没有应答",
-    xfer_digest_row: "校验工具",
-    xfer_no_digest: "无——只能搬运，结果无法校验",
-    xfer_keys_hint: "Enter 预检 · Esc 返回终端",
     asst_session_section: "会话",
     asst_tasks_section: "任务",
     asst_no_tasks: "此设备暂无任务记录。",
@@ -493,7 +437,6 @@ const EN: Strings = Strings {
     view_diagnostics: "Diagnostics",
     view_network: "Network",
     view_assistant: "Assistant",
-    view_transfer: "File transfer",
     view_empty: "This view is not implemented yet",
     diag_updated: "@i? · updated",
     diag_not_read: "@i? not read yet",
@@ -561,24 +504,6 @@ const EN: Strings = Strings {
     net_no_url: "name the upload URL first",
     net_bad_command: "not a command the bridge understands",
     mgmt_no_answer: "the bridge did not answer — it may be busy, try again",
-    xfer_out_section: "To the device",
-    xfer_in_section: "From the device",
-    xfer_empty: "No transfers yet.",
-    xfer_record_failed: "failed",
-    xfer_record_saved: "saved",
-    xfer_record_unverified: "unverified",
-    xfer_record_pending: "running",
-    xfer_needs_link: "Not connected — nothing was sent.",
-    xfer_check: "Check the target's tools",
-    xfer_precheck: "Precheck",
-    xfer_probe_idle: "not run yet — press Enter to ask the device",
-    xfer_probe_running: "asking the device…",
-    xfer_probe_ready: "the target can take a file (dd|base64 paging, as on the web)",
-    xfer_probe_missing: "the target is missing tools, so a file cannot move:",
-    xfer_probe_no_answer: "the precheck did not answer",
-    xfer_digest_row: "Digest",
-    xfer_no_digest: "none — bytes move, the result cannot be proved",
-    xfer_keys_hint: "Enter precheck · Esc back to the terminal",
     asst_session_section: "Session",
     asst_tasks_section: "Tasks",
     asst_no_tasks: "No tasks recorded for this device.",
@@ -667,7 +592,6 @@ impl Lang {
             View::Diagnostics => s.view_diagnostics,
             View::Network => s.view_network,
             View::Assistant => s.view_assistant,
-            View::Transfer => s.view_transfer,
         }
     }
 
@@ -724,7 +648,6 @@ mod tests {
                 s.view_diagnostics,
                 s.view_network,
                 s.view_assistant,
-                s.view_transfer,
                 s.view_empty,
                 s.diag_updated,
                 s.diag_not_read,
@@ -787,24 +710,6 @@ mod tests {
                 s.net_no_ssid,
                 s.net_no_url,
                 s.net_bad_command,
-                s.xfer_out_section,
-                s.xfer_in_section,
-                s.xfer_empty,
-                s.xfer_record_failed,
-                s.xfer_record_saved,
-                s.xfer_record_unverified,
-                s.xfer_record_pending,
-                s.xfer_needs_link,
-                s.xfer_check,
-                s.xfer_precheck,
-                s.xfer_probe_idle,
-                s.xfer_probe_running,
-                s.xfer_probe_ready,
-                s.xfer_probe_missing,
-                s.xfer_probe_no_answer,
-                s.xfer_digest_row,
-                s.xfer_no_digest,
-                s.xfer_keys_hint,
                 s.asst_session_section,
                 s.asst_tasks_section,
                 s.asst_no_tasks,

@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::accessory::{self, UartSettings};
 use crate::device::{Conversation, Query, Reply};
@@ -15,11 +15,9 @@ use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::session::{Dial, Session};
 use crate::theme::{Theme, ThemeChoice};
-use crate::transfer::probe::{self, TRANSFER_PROBE};
 use crate::transport::{Link, LinkEvent};
 use crate::views::diagnostics::DiagnosticsState;
 use crate::views::terminal::TerminalPane;
-use crate::views::transfer::TransferState;
 use crate::watch::{SerialWatch, WatchOptions};
 use crate::{dialogs, palette};
 
@@ -30,37 +28,6 @@ use crate::{dialogs, palette};
 /// link cannot exist without the chrome having a word for it.
 pub use crate::transport::LinkKind as Transport;
 
-/// A transfer precheck that is out, and the answer being collected for it.
-///
-/// A probe is a shell command and the device's answer to it, so it has to live
-/// across ticks: the tick that asked is never the tick that was answered, and a
-/// buffer held in a local variable would be dropped between them.
-#[derive(Debug, Clone)]
-pub struct ProbeRun {
-    /// When the question went out.
-    pub started: Instant,
-    /// When the device last printed anything. The answer has no end marker, so
-    /// this is what closes it: a console that has gone quiet has finished
-    /// answering.
-    pub quiet_since: Instant,
-    /// Everything the device has printed since, best-effort as text. The answer
-    /// is a list of tool names; a byte that is not text was not going to name
-    /// one.
-    pub text: String,
-}
-
-/// How long a precheck may go unanswered before the view says so.
-///
-/// Generous, because the answer comes back through a console the target is
-/// typing into: a board busy with something else answers when it answers, and a
-/// probe that gave up after a second would report a working board as broken.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// How long the console has to hold still before its answer is taken as
-/// complete. Shorter than [`PROBE_TIMEOUT`] because it measures a different
-/// thing: that one is "the board never spoke", this one is "the board has
-/// finished speaking".
-pub const PROBE_QUIET: Duration = Duration::from_millis(600);
 
 /// A shortcut in the sidebar's quick-send list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,12 +130,6 @@ pub struct App {
     pub diagnostics: DiagnosticsState,
     /// WiFi/WebDAV management state for the network view.
     pub network: crate::views::network::NetworkState,
-    /// The transfer form, its precheck and the records of what has moved.
-    pub transfer: TransferState,
-    /// The precheck in flight: when it was asked and what the device has said
-    /// since. `None` unless [`TransferState::probing`], which is the flag a
-    /// frame reads; this is the buffer the answer is collected into.
-    pub probe: Option<ProbeRun>,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -295,8 +256,6 @@ impl Default for App {
             notices: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
-            transfer: TransferState::default(),
-            probe: None,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
@@ -347,7 +306,7 @@ pub fn osc52_copy(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    let payload = crate::transfer::base64::encode_base64(text.as_bytes());
+    let payload = crate::base64::encode_base64(text.as_bytes());
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "\x1b]52;c;{payload}\x07");
     let _ = out.flush();
@@ -595,16 +554,9 @@ impl App {
 
     /// Select a view.
     ///
-    /// Opening the transfer view asks the device what it has, the first time
-    /// and only the first time: the channel is the device's to choose, and a
-    /// form that offered "start" before anything had been asked would be
-    /// offering a guess. A later visit keeps what it already learned — the
-    /// precheck is a question about the board, not about the moment.
+    /// Select a view.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
-        if view == View::Transfer && self.connected() && self.transfer.probe.is_none() {
-            self.run_transfer_probe();
-        }
     }
 
     /// How many sidebar rows the cursor can reach: the transport row, the two
@@ -883,11 +835,6 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     if self.collect_output {
                         self.output.push_back(bytes.clone());
                     }
-                    // A precheck reads the same console the pane paints:
-                    // its answer is not a management reply and does not
-                    // arrive on the bridge's own channel, so it is picked
-                    // out of the target's output as it prints.
-                    self.feed_probe(&bytes);
                     {
                         // The same bytes, read a second time by the watch. It
                         // looks for a line saying `Kernel panic` or `Out of
@@ -963,7 +910,6 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         for reply in self.terminal.take_replies() {
             self.session.send(&reply);
         }
-        self.fold_probe();
         let now_live = self.session.is_live();
         if let Some(state) = self.session.state() {
             self.state = state;
@@ -996,12 +942,6 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             // hang-up as a slow bridge.
             self.talk.reset();
             self.management.reset();
-            // A precheck that was waiting on the console has nowhere to be
-            // answered from now. Dropped rather than left running: the timeout
-            // would report "the precheck did not answer" over a hang-up, which
-            // is not what happened.
-            self.probe = None;
-            self.transfer.probing = false;
             // And the half-typed line goes with it.
             self.pending_line.clear();
         }
@@ -1395,96 +1335,6 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         self.terminal.scroll = self.terminal.scroll.saturating_add(lines_up);
     }
 
-    // --- the transfer ------------------------------------------------------
-
-    /// Ask the device what file-transfer tools it has.
-    ///
-    /// The file path on this bridge is the web's: `dd | base64`, paged a chunk
-    /// at a time, because there is nothing else a console can carry and nothing
-    /// else the web client uses. So the only thing worth asking before the
-    /// operator picks a path is whether *this* board has the tools those
-    /// commands are built from — a board without them cannot take a file at
-    /// all, and finding that out from a failed transfer is finding it out too
-    /// late. The answer is collected by [`App::fold_probe`] as the console
-    /// prints it.
-    pub fn run_transfer_probe(&mut self) -> bool {
-        if !self.connected() {
-            crate::views::transfer::say(self, self.strings().xfer_needs_link, NoticeLevel::Warn);
-            return false;
-        }
-        if self.transfer.probing {
-            // A second question would put a second command between the first
-            // one's answer lines, and a reader cannot tell whose line is whose.
-            return false;
-        }
-        if !self.send_command(TRANSFER_PROBE) {
-            return false;
-        }
-        let now = Instant::now();
-        self.transfer.probing = true;
-        self.transfer.message.clear();
-        self.probe = Some(ProbeRun {
-            started: now,
-            quiet_since: now,
-            text: String::new(),
-        });
-        true
-    }
-
-    /// Fold the precheck in flight into the form, and let it go once the console
-    /// has had its say.
-    ///
-    /// There is no end marker to wait for: the answer is `command -v` output, so
-    /// its length is the device's business and the last tool's line is the last
-    /// line. What closes the question is therefore *quiet* — the console has
-    /// stopped printing — with an overall deadline behind it for a board that
-    /// never answers at all. That is the same way the web client decides an
-    /// execution has settled, and it is the only honest way to read a reply
-    /// whose shape is not known in advance.
-    fn fold_probe(&mut self) {
-        let Some(run) = self.probe.as_ref() else {
-            return;
-        };
-        let quiet = run.quiet_since.elapsed() >= PROBE_QUIET;
-        let expired = run.started.elapsed() >= PROBE_TIMEOUT;
-        if !quiet && !expired {
-            return;
-        }
-        let text = run.text.clone();
-        self.probe = None;
-        self.transfer.probing = false;
-        // Nothing at all came back. That is not "this board has no tools": it is
-        // a console that never answered, and reporting it as a board without
-        // `dd` would send the operator looking at the wrong end of the link.
-        if text.trim().is_empty() {
-            crate::views::transfer::say(
-                self,
-                self.strings().xfer_probe_no_answer,
-                NoticeLevel::Warn,
-            );
-            return;
-        }
-        // An answer with no tool names in it is a *real* answer — every tool
-        // asked for is missing — so it becomes an empty report rather than a
-        // failure. The echoed command line is in that text too, and it names no
-        // tool, which is exactly why the parser only accepts whole lines.
-        let report = probe::parse_probe(&text).unwrap_or_default();
-        let (word, level) = if report.usable() {
-            (self.strings().xfer_probe_ready, NoticeLevel::Info)
-        } else {
-            (self.strings().xfer_probe_missing, NoticeLevel::Warn)
-        };
-        self.transfer.probe = Some(report);
-        crate::views::transfer::say(self, word, level);
-    }
-
-    /// Hand one chunk of the console to the precheck that is waiting on it.
-    fn feed_probe(&mut self, bytes: &[u8]) {
-        if let Some(run) = self.probe.as_mut() {
-            run.text.push_str(&String::from_utf8_lossy(bytes));
-            run.quiet_since = Instant::now();
-        }
-    }
 }
 
 /// The networks out of a `@w scan` reply.
@@ -2108,145 +1958,6 @@ mod tests {
         assert_eq!(app.notices.len(), before);
     }
 
-    /// A probe that is out, with its clock wound back so the settle rule can be
-    /// exercised without waiting for a real console.
-    fn probe_run(app: &mut App, text: &str, ago: Duration) {
-        app.transfer.probing = true;
-        let at = Instant::now() - ago;
-        app.probe = Some(ProbeRun {
-            started: at,
-            quiet_since: at,
-            text: text.to_string(),
-        });
-    }
-
-    #[test]
-    fn the_console_feeds_the_probe_and_quiet_closes_the_question() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        probe_run(&mut app, "", Duration::ZERO);
-        app.feed_probe(b"$ for t in dd base64 wc tr sha256sum shasum; do ...\r\n");
-        // Still printing. A report read off half a list is a report that a board
-        // lacks `tr` because `tr` had not been printed yet.
-        app.fold_probe();
-        assert!(app.transfer.probe.is_none(), "nothing has settled yet");
-        assert!(app.transfer.probing);
-
-        // The tools arrive; then the console holds still, and that is the whole
-        // of the protocol — the answer has no end marker to wait for.
-        app.feed_probe(b"LINKR_TOOL:dd\r\nLINKR_TOOL:base64\r\nLINKR_TOOL:wc\r\nLINKR_TOOL:tr\r\n");
-        app.probe.as_mut().expect("still out").quiet_since = Instant::now() - PROBE_QUIET;
-        app.fold_probe();
-        assert!(app.probe.is_none());
-        assert!(!app.transfer.probing);
-        assert_eq!(app.transfer.usable(), Some(true));
-        assert_eq!(
-            app.transfer.message,
-            "the target can take a file (dd|base64 paging, as on the web)"
-        );
-    }
-
-    #[test]
-    fn an_echo_with_no_tools_in_it_is_a_board_with_no_tools() {
-        // `command -v` prints nothing for a tool it cannot find, so the echoed
-        // command can be the whole of the answer — and that answer is *none of
-        // them*, which is a real answer rather than silence.
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        probe_run(&mut app, &format!("$ {TRANSFER_PROBE}\r\n"), PROBE_QUIET);
-        app.fold_probe();
-        assert_eq!(app.transfer.usable(), Some(false));
-        assert_eq!(
-            app.transfer.message,
-            "the target is missing tools, so a file cannot move:"
-        );
-    }
-
-    #[test]
-    fn a_console_that_never_answered_is_not_a_board_without_tools() {
-        // The two failures look alike on screen and are not alike at all: one is
-        // the board's, the other is the link's, and only one of them is worth
-        // acting on.
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        probe_run(&mut app, "", PROBE_TIMEOUT);
-        app.fold_probe();
-        assert!(app.transfer.probe.is_none());
-        assert!(!app.transfer.probing);
-        assert_eq!(app.transfer.message, "the precheck did not answer");
-    }
-
-    #[test]
-    fn a_probe_is_refused_with_no_link() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        assert!(!app.run_transfer_probe());
-        assert!(!app.transfer.probing);
-        assert_eq!(app.transfer.message, "Not connected — nothing was sent.");
-    }
-
-    #[test]
-    fn a_second_probe_waits_for_the_first_one() {
-        // Two questions in flight put a second command between the first one's
-        // answer lines, and a reader cannot tell whose line is whose.
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        app.dial(&Dial::Stdio("-".to_string()))
-            .expect("the loopback opens");
-        assert!(pump_until(&mut app, |app| app.connected()));
-        assert!(app.run_transfer_probe());
-        assert!(!app.run_transfer_probe());
-        assert_eq!(
-            app.tx,
-            TRANSFER_PROBE.len() as u64 + 1,
-            "one command went out"
-        );
-    }
-
-    /// Hanging up deliberately is announced once — and the pump does not
-    /// announce it again, which would turn one hang-up into a stream of toasts.
-    #[test]
-    fn a_deliberate_hang_up_is_announced_once() {
-        let mut app = App {
-            lang: Lang::En,
-            ..App::default()
-        };
-        app.dial(&Dial::Stdio("-".to_string())).expect("opens");
-        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
-
-        let before = app.notices.len();
-        app.disconnect();
-        assert!(!app.session.is_live(), "the link is gone");
-        assert_eq!(app.state, ConnectionState::Disconnected);
-        assert_eq!(app.notices.len(), before + 1);
-        assert!(
-            app.notices
-                .last()
-                .is_some_and(|notice| notice.text.contains("link closed")),
-            "{:?}",
-            app.notices
-        );
-
-        app.pump();
-        app.pump();
-        assert_eq!(
-            app.notices.len(),
-            before + 1,
-            "a second pump re-announced the hang-up: {:?}",
-            app.notices
-        );
-    }
-
     /// A dial that cannot be built changes nothing: the frame keeps its own
     /// state and no session appears behind it.
     #[test]
@@ -2452,10 +2163,10 @@ mod tests {
         assert!(app.quit);
     }
 
-    // --- the transfer ------------------------------------------------------
+    // --- the memory link -----------------------------------------------------
 
-    /// A connected app on a memory link, which is what every transfer test
-    /// needs and none of them should re-derive.
+    /// A connected app on a memory link, which is what every test that puts
+    /// bytes on the wire needs and none of them should re-derive.
     fn connected(lang: Lang) -> (App, crate::transport::testing::MemoryLink) {
         let mut app = App {
             lang,
@@ -2803,7 +2514,7 @@ mod tests {
         assert!(joined.contains("panic"), "{joined}");
     }
 
-    /// A transfer's binary must not be read as though it were text: the watch
+    /// Binary must not be read as though it were text: the watch
     /// looking for a word cannot be the thing that corrupts a file.
     #[test]
     fn binary_output_is_not_mistaken_for_a_finding() {

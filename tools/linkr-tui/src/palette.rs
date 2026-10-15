@@ -35,7 +35,6 @@ const MSG_SAVE_FAILED: Entry = ["Save failed: {}", "保存失败：{}"];
 const CAT_VIEW: Entry = ["View", "视图"];
 const CAT_FOCUS: Entry = ["Focus", "焦点"];
 const CAT_CONNECTION: Entry = ["Connection", "连接"];
-const CAT_TRANSFER: Entry = ["Transfer", "传输"];
 const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
 const CAT_AGENT: Entry = ["Assistant", "助手"];
@@ -63,13 +62,11 @@ const T_VIEW_TERMINAL: Entry = ["Open terminal view", "打开终端视图"];
 const T_VIEW_DIAGNOSTICS: Entry = ["Open diagnostics view", "打开诊断视图"];
 const T_VIEW_NETWORK: Entry = ["Open network view", "打开网络视图"];
 const T_VIEW_ASSISTANT: Entry = ["Open assistant view", "打开助手视图"];
-const T_VIEW_TRANSFER: Entry = ["Open file transfer view", "打开文件传输视图"];
 const T_FOCUS_SIDEBAR: Entry = ["Focus the sidebar", "聚焦侧栏"];
 const T_FOCUS_TERMINAL: Entry = ["Focus the terminal", "聚焦终端"];
 const T_CONNECT: Entry = ["Connect", "连接"];
 const T_DISCONNECT: Entry = ["Disconnect", "断开连接"];
 const T_TRANSPORT: Entry = ["Switch the transport", "切换传输方式"];
-const T_XFER_CHECK: Entry = ["Check the target's file tools", "预检目标机的文件工具"];
 const T_AUTOSCROLL: Entry = ["Toggle autoscroll", "切换自动滚动"];
 const T_ECHO: Entry = ["Toggle local echo", "切换本地回显"];
 const T_CLEAR: Entry = ["Clear the terminal", "清屏"];
@@ -114,10 +111,6 @@ fn view_assistant(app: &mut App) {
     app.set_view(View::Assistant);
 }
 
-fn view_transfer(app: &mut App) {
-    app.set_view(View::Transfer);
-}
-
 fn focus_sidebar(app: &mut App) {
     app.focus = Focus::Sidebar;
 }
@@ -141,14 +134,6 @@ fn disconnect(app: &mut App) {
 fn toggle_transport(app: &mut App) {
     let notice = app.toggle_transport();
     app.push_notice(notice);
-}
-
-/// Open the view *and* ask the question, because the answer belongs on the
-/// screen that explains what it is: a toast saying a board is missing `base64`
-/// is a sentence with no context, and the context is the view.
-fn transfer_check(app: &mut App) {
-    app.set_view(View::Transfer);
-    app.run_transfer_probe();
 }
 
 fn toggle_autoscroll(app: &mut App) {
@@ -373,13 +358,6 @@ pub const ACTIONS: &[Action] = &[
         shortcut: "F5",
         run: view_assistant,
     },
-    Action {
-        id: "view.transfer",
-        title: T_VIEW_TRANSFER,
-        category: CAT_VIEW,
-        shortcut: "F6",
-        run: view_transfer,
-    },
     // Focus
     Action {
         id: "focus.sidebar",
@@ -416,14 +394,6 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_CONNECTION,
         shortcut: "",
         run: toggle_transport,
-    },
-    // Transfer
-    Action {
-        id: "xfer.check",
-        title: T_XFER_CHECK,
-        category: CAT_TRANSFER,
-        shortcut: "",
-        run: transfer_check,
     },
     // Terminal
     Action {
@@ -836,13 +806,11 @@ mod tests {
         "view.diagnostics",
         "view.network",
         "view.assistant",
-        "view.transfer",
         "focus.sidebar",
         "focus.terminal",
         "connect",
         "disconnect",
         "transport.toggle",
-        "xfer.check",
         "term.autoscroll",
         "term.echo",
         "term.clear",
@@ -1028,7 +996,6 @@ mod tests {
             CAT_VIEW,
             CAT_FOCUS,
             CAT_CONNECTION,
-            CAT_TRANSFER,
             CAT_TERMINAL,
             CAT_APP,
         ]);
@@ -1223,7 +1190,7 @@ mod tests {
         let mut app = App::default();
         app.set_view(View::Network);
         open(&mut app);
-        for c in "view.transfer".chars() {
+        for c in "view.assistant".chars() {
             handle_key(
                 &mut app,
                 KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
@@ -1231,7 +1198,7 @@ mod tests {
         }
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.palette.is_none());
-        assert_eq!(app.view, View::Transfer);
+        assert_eq!(app.view, View::Assistant);
     }
 
     /// A Control chord is not a query character: `Ctrl+T` still switches the

@@ -883,7 +883,6 @@ mod tests {
                 (Action, 2),
                 (Action, 2),
                 (Action, 2),
-                (Action, 2),
                 (Gap, 0),
                 (Header, 0),
                 (Hint, 0),

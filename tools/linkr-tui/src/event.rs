@@ -49,28 +49,25 @@ pub enum View {
     Diagnostics,
     Network,
     Assistant,
-    Transfer,
 }
 
 impl View {
     /// Every view, in the order the sidebar lists them and the F-keys walk.
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 4] = [
         View::Terminal,
         View::Diagnostics,
         View::Network,
         View::Assistant,
-        View::Transfer,
     ];
 
     /// The function key that selects this view: `F2` for the serial terminal
-    /// through `F6` for file transfer, matching the hint in the bottom bar.
+    /// through `F5` for the assistant, matching the hint in the bottom bar.
     pub fn fkey(self) -> u8 {
         match self {
             View::Terminal => 2,
             View::Diagnostics => 3,
             View::Network => 4,
             View::Assistant => 5,
-            View::Transfer => 6,
         }
     }
 
@@ -86,7 +83,6 @@ impl View {
             View::Diagnostics => "diagnostics",
             View::Network => "network",
             View::Assistant => "assistant",
-            View::Transfer => "transfer",
         }
     }
 
@@ -108,7 +104,7 @@ mod tests {
     #[test]
     fn the_fkey_rota_covers_every_view_exactly_once() {
         let keys: Vec<u8> = View::ALL.iter().map(|v| v.fkey()).collect();
-        assert_eq!(keys, vec![2, 3, 4, 5, 6]);
+        assert_eq!(keys, vec![2, 3, 4, 5]);
         for view in View::ALL {
             assert_eq!(View::from_fkey(view.fkey()), Some(view));
         }
@@ -137,8 +133,7 @@ mod tests {
                 "terminal",
                 "diagnostics",
                 "network",
-                "assistant",
-                "transfer"
+                "assistant"
             ]
         );
         let mut unique = names.clone();

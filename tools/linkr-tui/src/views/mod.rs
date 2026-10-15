@@ -10,7 +10,6 @@ pub mod assistant;
 pub mod diagnostics;
 pub mod network;
 pub mod terminal;
-pub mod transfer;
 
 /// The sample reply used by `--sample` and by tests, so the grid can be looked
 /// at with real data instead of an empty state. Kept here rather than in the

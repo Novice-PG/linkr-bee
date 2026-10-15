@@ -48,7 +48,6 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
         View::Diagnostics => views::diagnostics::lines(app, theme, width),
         View::Network => views::network::lines(app, theme, width),
         View::Assistant => views::assistant::lines(app, theme, width),
-        View::Transfer => views::transfer::lines(app, theme, width),
     }
 }
 
