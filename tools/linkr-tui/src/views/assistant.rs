@@ -321,6 +321,17 @@ fn save_settings(app: &mut App) {
         .unwrap_or_default();
     match crate::agent::config::validate_agent_config(&input) {
         Ok(_) => {
+            // Written where a restart will find it. `configured` alone would
+            // have made the view claim a model it forgets on the next launch.
+            let stored = crate::agent::config::StoredAgentConfig {
+                endpoint: input.endpoint.clone(),
+                model: input.model.clone(),
+                api_key: input.api_key.clone(),
+                headers: app.assistant.headers.clone(),
+            };
+            if let Some(store) = app.agent_store.as_mut() {
+                crate::agent::config::save_agent_config(store, &stored);
+            }
             app.assistant.configured = true;
             app.assistant.notice = None;
         }

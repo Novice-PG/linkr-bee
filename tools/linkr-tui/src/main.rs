@@ -678,6 +678,7 @@ fn main() -> io::Result<()> {
     // one store file for tasks, notes and the session, so a task written by
     // this run and a note written by the last one are the same file.
     app.agent_store = Some(linkr_tui::agent::store::JsonFile::load());
+    load_agent_state(&mut app);
     if let Some(transport) = args.transport {
         app.transport = transport;
     }
@@ -832,6 +833,42 @@ fn main() -> io::Result<()> {
     }
 
     run(&mut app)
+}
+
+/// Bring the agent's durable state back into the view.
+///
+/// Without this the store is write-only: a task saved and a model configured
+/// both survive on disk and neither is ever read back, so the view is blank
+/// after every restart and the form asks for the endpoint it already has. The
+/// stores were built for a `Storage` that nobody opened, and this is the other
+/// half of opening it.
+fn load_agent_state(app: &mut App) {
+    // The key is taken before the store is borrowed, because `agent_device_key`
+    // reads `app` and a mutable borrow of `app.agent_store` is still a borrow
+    // of `app`.
+    let key = app.agent_device_key();
+    // A mutable borrow, even for a read: the `Storage` trait's `set` and
+    // `remove` take `&mut self`, so there is no read-only handle to a store.
+    if let Some(store) = app.agent_store.as_mut() {
+        app.assistant.tasks = linkr_tui::agent::tasks::TaskStore::new(&mut *store).list(&key);
+    }
+    let saved = app
+        .agent_store
+        .as_ref()
+        .map(linkr_tui::agent::config::load_agent_config)
+        .unwrap_or_default();
+    app.assistant.endpoint = saved.endpoint.clone();
+    app.assistant.model = saved.model.clone();
+    app.assistant.api_key = saved.api_key;
+    app.assistant.headers = saved.headers;
+    // The model is configured when it validates, which is the same answer the
+    // Enter key gives — a stored config that no longer validates should not
+    // leave the view claiming a model it cannot use.
+    let mut input = linkr_tui::agent::config::AgentConfigInput::new();
+    input.endpoint = saved.endpoint;
+    input.model = saved.model;
+    app.assistant.configured =
+        linkr_tui::agent::config::validate_agent_config(&input).is_ok();
 }
 
 /// The first line of `path`, which is how a secret is handed over: a file the

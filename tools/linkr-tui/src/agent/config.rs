@@ -456,3 +456,113 @@ mod tests {
         assert!(is_context_window_tight(1000, 0));
     }
 }
+
+/// The four keys the agent configuration is stored under, and where.
+///
+/// Separate keys rather than one blob, because the store is a key-value shelf
+/// and a form that edits one field should not have to parse and rewrite the
+/// other three to do it. The API key has its own for the same reason and one
+/// more: the key is the field most likely to be rotated alone.
+const KEY_ENDPOINT: &str = "linkr-agent-model:endpoint";
+const KEY_MODEL: &str = "linkr-agent-model:model";
+const KEY_API_KEY: &str = "linkr-agent-model:key";
+const KEY_HEADERS: &str = "linkr-agent-model:headers";
+
+/// The form's contents, as the view keeps them.
+///
+/// Not `AgentConfigInput` and not `AgentConfig`: this is what a half-typed form
+/// looks like, so a load hands back exactly what a save took rather than
+/// something already validated. The validation belongs to the Enter key that
+/// saves it, not to a reader that would then fail on its own data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredAgentConfig {
+    pub endpoint: String,
+    pub model: String,
+    pub api_key: String,
+    /// Extra headers, one `Name: Value` per line — [`format_agent_headers`]'s
+    /// own output, so a round trip is the same function backwards.
+    pub headers: String,
+}
+
+/// Write the four fields. A blank field is written as blank rather than
+/// removed, so "the user cleared the model" and "there is no model yet" are the
+/// same thing and a load cannot tell them apart by accident.
+pub fn save_agent_config<S: Storage>(storage: &mut S, config: &StoredAgentConfig) {
+    storage.set(KEY_ENDPOINT, &config.endpoint);
+    storage.set(KEY_MODEL, &config.model);
+    storage.set(KEY_API_KEY, &config.api_key);
+    storage.set(KEY_HEADERS, &config.headers);
+}
+
+/// Read them back. A store with nothing in it gives a blank form, which is the
+/// same shape the view starts with.
+pub fn load_agent_config<S: Storage>(storage: &S) -> StoredAgentConfig {
+    StoredAgentConfig {
+        endpoint: storage.get(KEY_ENDPOINT).unwrap_or_default(),
+        model: storage.get(KEY_MODEL).unwrap_or_default(),
+        api_key: storage.get(KEY_API_KEY).unwrap_or_default(),
+        headers: storage.get(KEY_HEADERS).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::super::store::JsonFile;
+    use super::*;
+
+    /// A saved configuration is read back exactly, which is the whole point of
+    /// having a load: without it the view asks for an endpoint it already has.
+    #[test]
+    fn a_saved_config_is_read_back() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-cfg-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = JsonFile::at(&path);
+            save_agent_config(
+                &mut store,
+                &StoredAgentConfig {
+                    endpoint: "http://localhost:8080/v1".into(),
+                    model: "llama-3".into(),
+                    api_key: "sk-x".into(),
+                    headers: "X-A: 1".into(),
+                },
+            );
+        }
+        let loaded = load_agent_config(&JsonFile::at(&path));
+        assert_eq!(loaded.endpoint, "http://localhost:8080/v1");
+        assert_eq!(loaded.model, "llama-3");
+        assert_eq!(loaded.api_key, "sk-x");
+        assert_eq!(loaded.headers, "X-A: 1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A store with nothing in it gives a blank form, not an error: the view
+    /// opens on an empty configuration and that is the designed first frame.
+    #[test]
+    fn an_empty_store_is_a_blank_form() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-cfg-empty-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let loaded = load_agent_config(&JsonFile::at(&path));
+        assert_eq!(loaded, StoredAgentConfig::default());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A blank field stays blank rather than becoming a value, so a load cannot
+    /// turn "cleared the key" into "still has the old key".
+    #[test]
+    fn a_blank_field_stays_blank() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-cfg-blank-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = JsonFile::at(&path);
+            save_agent_config(&mut store, &StoredAgentConfig::default());
+        }
+        let loaded = load_agent_config(&JsonFile::at(&path));
+        assert!(loaded.api_key.is_empty());
+        assert!(loaded.model.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+}
