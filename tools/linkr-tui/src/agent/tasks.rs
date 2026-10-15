@@ -31,18 +31,47 @@ pub fn device_identity(
 fn serde_json_like_array(parts: &[&str]) -> String {
     let quoted: Vec<String> = parts
         .iter()
-        .map(|p| format!("\"{}\"", escape_json(p)))
+        .map(|p| json_string(p))
         .collect();
     format!("[{}]", quoted.join(","))
 }
 
-fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// Write a value as a JSON string literal, escaping what JSON requires.
+///
+/// Backslash and quote were the whole of this until the transport arrived, and
+/// that was a latent bug rather than a harmless one: a control character — a
+/// newline, a tab, a stray `\x01` from someone's serial log — was written
+/// raw, which is invalid JSON. The store's reader would then fail to parse the
+/// file and lose *every* task in it, not the one with the newline. A task
+/// summary redacted for length is exactly the kind of text that can still carry
+/// a control byte.
+///
+/// `\n`, `\r`, `\t` keep their short forms because every reader understands
+/// those and a `\u000a` in a hand-edited file is noise. Everything else below
+/// `0x20` becomes `\uXXXX`, which is the only portable spelling.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if (other as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", other as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
-/// Quote and escape a string as a JSON string literal (shared by all stores).
+/// Quote a string as a JSON string literal (shared by all stores).
 pub fn json_string(s: &str) -> String {
-    format!("\"{}\"", escape_json(s))
+    json_escape(s)
 }
 
 /// A task summary record.

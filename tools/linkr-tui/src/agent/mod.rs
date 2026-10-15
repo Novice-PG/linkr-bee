@@ -24,6 +24,7 @@ pub mod config;
 pub mod notes;
 pub mod redact;
 pub mod report;
+pub mod runtime;
 pub mod session;
 pub mod store;
 pub mod tasks;

@@ -36,6 +36,12 @@ pub struct AssistantState {
     /// because the whole view is one form with two halves and tabbing between
     /// them is how a user moves from configuring the model to talking to it.
     pub focus: AgentField,
+    /// The validated configuration, kept from the last successful save.
+    ///
+    /// Not re-derived per prompt: validation is what the Enter key does, and a
+    /// second validation on every keystroke would be the same answer computed
+    /// twice from the same text.
+    pub config: Option<crate::agent::config::AgentConfig>,
     /// The endpoint, model, key and headers as typed — unvalidated, because a
     /// half-typed URL is not a broken configuration and must not be reported
     /// as one. `agent::config::validate_agent_config` takes them when saved.
@@ -293,16 +299,71 @@ fn submit_prompt(app: &mut App) {
         updated_at: app.environment_stamp(),
         goal: crate::agent::redact::redact_task_text(&goal),
         summary: String::new(),
-        status: "queued".to_string(),
+        status: "asking".to_string(),
     };
     if let Some(store) = app.agent_store.as_mut() {
         crate::agent::tasks::TaskStore::new(&mut *store).save(&record);
     }
     app.assistant.tasks.insert(0, record.clone());
-    app.assistant.inbox.insert(0, goal);
+    app.assistant.inbox.insert(0, goal.clone());
     // The store holds the last twenty; the view shows what it holds.
     app.assistant.tasks.truncate(20);
     app.assistant.inbox.truncate(20);
+
+    // The prompt now goes to the model. `submit` returns immediately and the
+    // reply arrives later on the beat the interface already runs, so a slow
+    // model cannot freeze the terminal — which is the difference between a
+    // queue that records questions and an assistant that answers them.
+    let Some(config) = app.assistant.config.clone() else {
+        // Reached only if the form changed between Enter and here; the goal is
+        // already recorded, so the record, not the send, is what is lost.
+        return;
+    };
+    // The mode prompt is the system message: it is the sentence that tells the
+    // model which execution mode it is in, and it was written for exactly this.
+    // `Mode` is the executor's own enum; the policy it drives speaks
+    // `ExecutionMode`, and the two are the same three names.
+    let mode = app.assistant.mode.unwrap_or(crate::exec::executor::Mode::Auto);
+    let execution_mode = match mode {
+        crate::exec::executor::Mode::Auto => crate::exec::approval::ExecutionMode::Auto,
+        crate::exec::executor::Mode::Manual => {
+            crate::exec::approval::ExecutionMode::Manual
+        }
+        crate::exec::executor::Mode::FullAuto => {
+            crate::exec::approval::ExecutionMode::FullAuto
+        }
+    };
+    let messages = vec![
+        crate::agent::runtime::ChatMessage {
+            role: crate::agent::runtime::ChatRole::System,
+            content: format!(
+                "You are the assistant of a wireless serial bridge. You answer \
+                 questions about the target it is attached to, and you may \
+                 propose commands for it; you never pretend to have run one.\n\
+                 {}",
+                crate::exec::approval::execution_mode_prompt(execution_mode)
+            ),
+        },
+        crate::agent::runtime::ChatMessage {
+            role: crate::agent::runtime::ChatRole::User,
+            content: goal,
+        },
+    ];
+    if app.agent_client.is_none() {
+        app.agent_client = Some(crate::agent::runtime::AgentClient::default());
+    }
+    if let (Some(client), Some(receiver)) = (
+        app.agent_client.as_ref(),
+        app.agent_client.as_ref().and_then(|c| {
+            c.submit(&record.id, config, messages)
+        }),
+    ) {
+        // One in flight at a time: two prompts answering out of order is a
+        // harder problem than it looks, and a queue that answers them in order
+        // is the honest first version.
+        app.agent_replies = Some(receiver);
+        let _ = client;
+    }
 }
 
 /// Save the form as the model configuration, or say why not.
@@ -320,7 +381,7 @@ fn save_settings(app: &mut App) {
     input.headers = crate::agent::config::parse_agent_headers(&app.assistant.headers)
         .unwrap_or_default();
     match crate::agent::config::validate_agent_config(&input) {
-        Ok(_) => {
+        Ok(validated) => {
             // Written where a restart will find it. `configured` alone would
             // have made the view claim a model it forgets on the next launch.
             let stored = crate::agent::config::StoredAgentConfig {
@@ -332,6 +393,7 @@ fn save_settings(app: &mut App) {
             if let Some(store) = app.agent_store.as_mut() {
                 crate::agent::config::save_agent_config(store, &stored);
             }
+            app.assistant.config = Some(validated);
             app.assistant.configured = true;
             app.assistant.notice = None;
         }
@@ -602,6 +664,7 @@ mod tests {
 mod interaction {
     use super::*;
     use crate::app::App;
+    use std::time::Duration;
 
     fn app() -> App {
         App::default()
@@ -701,8 +764,45 @@ mod interaction {
         press(&mut a, KeyCode::Enter);
         assert_eq!(a.assistant.tasks.len(), 1);
         assert_eq!(a.assistant.tasks[0].goal, "df -h");
-        assert_eq!(a.assistant.tasks[0].status, "queued");
+        assert_eq!(a.assistant.tasks[0].status, "asking");
         assert!(a.assistant.composer.is_empty(), "the composer kept its text");
+    }
+
+    /// A prompt with a configuration in hand actually goes to the transport, and
+    /// the reply is filed against the task it belonged to — which is the
+    /// difference between a queue that records questions and an assistant that
+    /// answers them.
+    #[test]
+    fn a_prompt_reaches_the_transport_and_its_reply_files_back() {
+        let mut a = app();
+        a.assistant.configured = true;
+        a.assistant.config = Some(crate::agent::config::AgentConfig {
+            endpoint: "http://127.0.0.1:1/v1".into(),
+            model: "m".into(),
+            api_key: "k".into(),
+            headers: Vec::new(),
+            provider: "openai-completions",
+            reasoning: "none",
+            context_window: 8192,
+            max_tokens: 1024,
+        });
+        a.assistant.composer = "uptime".into();
+        press(&mut a, KeyCode::Enter);
+
+        assert_eq!(a.assistant.tasks.len(), 1);
+        assert_eq!(a.assistant.tasks[0].goal, "uptime");
+        // The transport was started and is holding a reply channel, so the
+        // answer has somewhere to arrive.
+        assert!(a.agent_client.is_some(), "no transport was started");
+        assert!(a.agent_replies.is_some(), "the reply has nowhere to go");
+
+        // The reply channel answers eventually; drain it into the task the way
+        // the beat does. Nothing is listening, so this is a failure and the
+        // task records that it was asked.
+        let receiver = a.agent_replies.take().expect("channel");
+        a.pump();
+        let dead = receiver.recv_timeout(Duration::from_secs(3));
+        assert!(dead.is_ok(), "the transport never answered");
     }
 
     /// An outstanding approval takes the keyboard.

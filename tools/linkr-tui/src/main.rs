@@ -857,18 +857,22 @@ fn load_agent_state(app: &mut App) {
         .as_ref()
         .map(linkr_tui::agent::config::load_agent_config)
         .unwrap_or_default();
-    app.assistant.endpoint = saved.endpoint.clone();
-    app.assistant.model = saved.model.clone();
-    app.assistant.api_key = saved.api_key;
-    app.assistant.headers = saved.headers;
-    // The model is configured when it validates, which is the same answer the
-    // Enter key gives — a stored config that no longer validates should not
-    // leave the view claiming a model it cannot use.
+    // The key is read once and copied, because it is used twice — into the form,
+    // so a user can see there is one, and into the validation that decides
+    // whether the model is configured at all.
     let mut input = linkr_tui::agent::config::AgentConfigInput::new();
-    input.endpoint = saved.endpoint;
-    input.model = saved.model;
-    app.assistant.configured =
-        linkr_tui::agent::config::validate_agent_config(&input).is_ok();
+    input.endpoint = saved.endpoint.clone();
+    input.model = saved.model.clone();
+    input.api_key = saved.api_key.clone();
+    // A stored config that no longer validates must not leave the view claiming
+    // a model it cannot use: the answer here is the same one the Enter key
+    // gives, so a bad endpoint is caught the same way wherever it came from.
+    app.assistant.config = linkr_tui::agent::config::validate_agent_config(&input).ok();
+    app.assistant.configured = app.assistant.config.is_some();
+    app.assistant.endpoint = input.endpoint;
+    app.assistant.model = input.model;
+    app.assistant.api_key = input.api_key;
+    app.assistant.headers = saved.headers;
 }
 
 /// The first line of `path`, which is how a secret is handed over: a file the

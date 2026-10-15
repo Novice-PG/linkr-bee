@@ -177,6 +177,15 @@ pub struct App {
     /// touches the filesystem, and a `Default` that writes to the user's home
     /// directory is not a default anyone can run a test suite against.
     pub agent_store: Option<crate::agent::store::JsonFile>,
+    /// Where a reply the model is still thinking about arrives. Drained on the
+    /// same beat as the serial link, so a slow model cannot freeze the
+    /// interface — and so a reply lands in the task it belongs to rather than
+    /// being applied to whichever task is on screen.
+    /// The model transport, started on first use rather than at boot: a thread
+    /// and a Tokio runtime are not something a `Default` should cost.
+    pub agent_client: Option<crate::agent::runtime::AgentClient>,
+    pub agent_replies:
+        Option<std::sync::mpsc::Receiver<(String, Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>)>>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
     /// The questions asked of the bridge about itself, and their answers.
@@ -284,6 +293,8 @@ impl Default for App {
             probe: None,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
+            agent_client: None,
+            agent_replies: None,
             terminal: TerminalPane::new(),
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -702,7 +713,79 @@ impl App {
     /// The session already folded the counters and the state; what is left is
     /// the *edge*: a link that came up and a link that went away. Announcing
     /// the state instead of the transition would raise a toast on every tick.
+    /// File any answer the model has finished thinking about.
+    ///
+    /// A reply arrives as `(task_id, outcome)` so it can be matched to the goal
+    /// it belongs to even when two prompts are in flight and answer out of
+    /// order. The channel is drained into a local first, because a saved task
+    /// needs `agent_store` mutably and holding a borrow of the receiver across
+    /// that would take the whole of `self` at once.
+    ///
+    /// A reply nobody is waiting for is dropped rather than applied to the
+    /// newest task: a stale answer filed against the wrong question is worse
+    /// than none, because it reads as though the model said it.
+    pub fn drain_agent_replies(&mut self) {
+        let Some(receiver) = self.agent_replies.as_ref() else {
+            return;
+        };
+        let mut arrived: Vec<(
+            String,
+            Result<crate::agent::runtime::Completion, crate::agent::runtime::Failure>,
+        )> = Vec::new();
+        while let Ok(item) = receiver.try_recv() {
+            arrived.push(item);
+        }
+
+        for (task_id, outcome) in arrived {
+            // The two numbers the view shows are a running total, so one more
+            // message is folded in rather than replacing the count.
+            if let Ok(completion) = &outcome {
+                let running = crate::agent::usage::Usage {
+                    input: self.assistant.usage.0,
+                    output: self.assistant.usage.1,
+                    ..crate::agent::usage::Usage::default()
+                };
+                let merged = crate::agent::usage::add_usage(&running, &completion.usage);
+                self.assistant.usage = (merged.input, merged.output);
+            }
+
+            let Some(found) = self
+                .assistant
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+            else {
+                continue;
+            };
+            let answered = match &outcome {
+                Ok(completion) => (completion.text.clone(), "answered"),
+                Err(failure) => (failure.describe(), "failed"),
+            };
+            // Whatever happened, the answer is in the store: a task that says
+            // "failed" is the record of a question that was asked.
+            let saved = crate::agent::tasks::TaskRecord {
+                summary: answered.0,
+                status: answered.1.to_string(),
+                ..found
+            };
+            if let Some(store) = self.agent_store.as_mut() {
+                crate::agent::tasks::TaskStore::new(&mut *store).save(&saved);
+            }
+            if let Some(slot) = self
+                .assistant
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+            {
+                slot.summary = saved.summary;
+                slot.status = saved.status;
+            }
+        }
+    }
+
     pub fn pump(&mut self) {
+        self.drain_agent_replies();
         let was_live = self.session.is_live();
         let was_connected = self.state == ConnectionState::Connected;
         let describe = self.session.describe().to_string();
