@@ -254,6 +254,52 @@ fn json_string(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod round_trip {
+    use super::super::store::JsonFile;
+    use super::*;
+
+    /// A conversation survives a reopen, which is the whole point of a session
+    /// store: without it the agent is amnesiac between restarts and the thread
+    /// on screen has nothing behind it.
+    #[test]
+    fn a_conversation_survives_a_reopen() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-session-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let turns = vec![
+            DisplayLine {
+                role: "user".into(),
+                text: "what is the uptime".into(),
+            },
+            DisplayLine {
+                role: "assistant".into(),
+                text: "up 4 hours".into(),
+            },
+        ];
+        {
+            let mut store = JsonFile::at(&path);
+            let saved = save_session(&mut store, "board", &turns, &turns, 1_000);
+            assert!(saved.is_some(), "the session was not saved");
+        }
+        let loaded = load_session(&JsonFile::at(&path), "board").expect("loaded");
+        assert_eq!(loaded.display, turns);
+        // A different device does not see it: the store is per target.
+        assert!(load_session(&JsonFile::at(&path), "other").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty store has no session rather than an error.
+    #[test]
+    fn an_empty_store_has_no_session() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-session-empty-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(load_session(&JsonFile::at(&path), "board").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

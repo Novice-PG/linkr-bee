@@ -269,6 +269,12 @@ pub struct Strings {
     pub agent_field_headers: &'static str,
     /// The note field label.
     pub agent_field_note: &'static str,
+    /// The conversation section heading.
+    pub agent_thread_section: &'static str,
+    /// Who the user's own turns are labelled.
+    pub agent_who_user: &'static str,
+    /// Who the model's turns are labelled.
+    pub agent_who_model: &'static str,
     /// The value of a key field as painted: never the key.
     pub agent_key_hidden: &'static str,
     /// The notice when a model is not configured and a prompt cannot be sent.
@@ -370,6 +376,9 @@ const ZH: Strings = Strings {
     agent_field_key: "密钥",
     agent_field_headers: "自定义头",
     agent_field_note: "记一条",
+    agent_thread_section: "对话",
+    agent_who_user: "你",
+    agent_who_model: "模型",
     agent_key_hidden: "（不显示）",
     agent_needs_endpoint: "先填接口地址和模型",
     agent_setting_invalid: "这一项没填对",
@@ -504,6 +513,9 @@ const EN: Strings = Strings {
     agent_field_key: "key",
     agent_field_headers: "headers",
     agent_field_note: "note",
+    agent_thread_section: "conversation",
+    agent_who_user: "you",
+    agent_who_model: "model",
     agent_key_hidden: "(not shown)",
     agent_needs_endpoint: "set the endpoint and model first",
     agent_setting_invalid: "that setting is not acceptable",

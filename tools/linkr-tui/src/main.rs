@@ -873,6 +873,16 @@ fn load_agent_state(app: &mut App) {
     app.assistant.model = input.model;
     app.assistant.api_key = input.api_key;
     app.assistant.headers = saved.headers;
+    // The conversation comes back too, oldest first, which is the order it was
+    // written in — `load_session` keeps the last N turns and drops the rest, so
+    // a long thread loses its beginning rather than its end.
+    app.assistant.display = app
+        .agent_store
+        .as_mut()
+        .and_then(|store| {
+            linkr_tui::agent::session::load_session(store, &key).map(|session| session.display)
+        })
+        .unwrap_or_default();
 }
 
 /// The first line of `path`, which is how a secret is handed over: a file the

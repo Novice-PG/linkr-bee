@@ -763,6 +763,32 @@ impl App {
                 Ok(completion) => (completion.text.clone(), "answered"),
                 Err(failure) => (failure.describe(), "failed"),
             };
+            // The reply is the assistant's turn in the conversation. A failure
+            // is a turn too: the thread of what was asked and what came back is
+            // the record of the session, and a gap in it is worse than a turn
+            // that says the model did not answer.
+            let turn = crate::agent::session::DisplayLine {
+                role: "assistant".to_string(),
+                text: answered.0.clone(),
+            };
+            self.assistant.display.push(turn);
+            let keep = crate::agent::session::SESSION_MESSAGES;
+            let from = self.assistant.display.len().saturating_sub(keep);
+            self.assistant.display.drain(..from);
+            // Persisted here rather than only at the view's Enter: the reply
+            // arrives on this beat, and a session saved on the question alone
+            // would lose every answer if the program ended between the two.
+            let key = self.agent_device_key();
+            let now = self.environment_stamp() * 1000;
+            if let Some(store) = self.agent_store.as_mut() {
+                let _ = crate::agent::session::save_session(
+                    store,
+                    &key,
+                    &self.assistant.display,
+                    &self.assistant.display,
+                    now,
+                );
+            }
             // Whatever happened, the answer is in the store: a task that says
             // "failed" is the record of a question that was asked.
             let saved = crate::agent::tasks::TaskRecord {

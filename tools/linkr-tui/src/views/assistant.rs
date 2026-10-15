@@ -53,6 +53,13 @@ pub struct AssistantState {
     /// name from the validator is not a sentence a user can act on, so it is
     /// translated here rather than shown raw.
     pub notice: Option<String>,
+    /// The conversation turns, oldest first: what was asked and what came back.
+    ///
+    /// Kept separately from the task history because it is what the *session* is
+    /// — a task is a record of a job, and this is the thread of a conversation.
+    /// Persisted by `agent::session` across restarts, which is the one piece of
+    /// agent state that was still write-only until now.
+    pub display: Vec<crate::agent::session::DisplayLine>,
     /// A note being typed. Enter below the notes adds it; the evidence is
     /// whatever the newest task last said, because a note with nothing behind
     /// it is an opinion and the point of the field is what the target said.
@@ -278,6 +285,39 @@ fn field_text_mut(app: &mut App) -> &mut String {
     }
 }
 
+/// Add one turn to the conversation and persist it.
+///
+/// Saved on every turn rather than at exit: the session is the one piece of agent
+/// state a user would actually miss, and a bridge that loses it on a crash has
+/// lost the conversation, not a setting.
+fn push_turn(app: &mut App, role: &str, text: &str) {
+    app.assistant.display.push(crate::agent::session::DisplayLine {
+        role: role.to_string(),
+        text: text.to_string(),
+    });
+    // The store keeps the last few turns; the view shows the same bound, so what
+    // is on screen is what is on disk rather than more of one than the other.
+    let keep = crate::agent::session::SESSION_MESSAGES;
+    let from = app.assistant.display.len().saturating_sub(keep);
+    app.assistant.display.drain(..from);
+    persist_session(app);
+}
+
+/// Write the conversation where a restart will find it.
+fn persist_session(app: &mut App) {
+    let key = app.agent_device_key();
+    let now = app.environment_stamp() * 1000;
+    if let Some(store) = app.agent_store.as_mut() {
+        let _ = crate::agent::session::save_session(
+            store,
+            &key,
+            &app.assistant.display,
+            &app.assistant.display,
+            now,
+        );
+    }
+}
+
 /// Add the note being typed, with the newest task's answer as its evidence.
 ///
 /// The evidence is not decoration: a note saying "the UART is at 115200" is worth
@@ -445,6 +485,7 @@ fn submit_prompt(app: &mut App) {
     }
     app.assistant.tasks.insert(0, record.clone());
     app.assistant.inbox.insert(0, goal.clone());
+    push_turn(app, "user", &goal);
     // The store holds the last twenty; the view shows what it holds.
     app.assistant.tasks.truncate(20);
     app.assistant.inbox.truncate(20);
@@ -656,6 +697,41 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             text::clip_to(&format!("  ! {notice}"), width as usize),
             theme.warn(),
         )));
+    }
+
+    // The conversation, oldest first, and then the task history. This is the
+    // reading order of a thread — what was asked, what came back — and the task
+    // list below it is the durable record rather than the conversation itself.
+    lines.push(Line::from(""));
+    lines.push(heading(s.agent_thread_section, width, theme));
+    if state.display.is_empty() {
+        lines.push(note(&format!("  {}", s.asst_no_tasks), width, theme));
+    } else {
+        for turn in &state.display {
+            let who = if turn.role == "assistant" {
+                s.agent_who_model
+            } else {
+                s.agent_who_user
+            };
+            let marker = if turn.role == "assistant" { "< " } else { "> " };
+            lines.push(Line::from(Span::styled(
+                text::clip_to(&format!("  {marker}{who}"), width as usize),
+                theme.muted(),
+            )));
+            // An answer is markdown; a question is plain text the user typed.
+            if turn.role == "assistant" {
+                let room = (width as usize).saturating_sub(4);
+                for mut line in crate::agent::markdown::render(&turn.text, room, theme) {
+                    line.spans.insert(0, Span::raw("    "));
+                    lines.push(line);
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    text::clip_to(&format!("    {}", turn.text), width as usize),
+                    theme.text(),
+                )));
+            }
+        }
     }
 
     lines.push(Line::from(""));
