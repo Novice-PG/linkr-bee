@@ -244,6 +244,8 @@ pub struct Strings {
     pub agent_thread_section: &'static str,
     /// Notice when the system clipboard could not be read.
     pub clipboard_empty: &'static str,
+    /// Notice when a Bluetooth scan could not start.
+    pub ble_scan_failed: &'static str,
     /// Prefix of the notice naming how much was pasted.
     pub clipboard_pasted: &'static str,
     /// Who the user's own turns are labelled.
@@ -362,6 +364,7 @@ const ZH: Strings = Strings {
     agent_field_note: "记一条",
     agent_thread_section: "对话",
     clipboard_empty: "读不到剪贴板",
+    ble_scan_failed: "无法开始搜索设备",
     clipboard_pasted: "已粘贴",
     agent_who_user: "你",
     agent_who_model: "模型",
@@ -490,6 +493,7 @@ const EN: Strings = Strings {
     agent_field_note: "note",
     agent_thread_section: "conversation",
     clipboard_empty: "the clipboard could not be read",
+    ble_scan_failed: "the scan could not start",
     clipboard_pasted: "Pasted",
     agent_who_user: "you",
     agent_who_model: "model",

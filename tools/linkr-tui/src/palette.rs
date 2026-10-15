@@ -55,6 +55,7 @@ const T_AGENT_MODE: Entry = ["Change execution mode", "切换执行模式"];
 const T_AGENT_REPORT: Entry = ["Export diagnostic report", "导出排查报告"];
 const T_AGENT_CLEAR: Entry = ["Clear the conversation", "清空对话"];
 const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
+const T_BLE_SCAN: Entry = ["Find a board", "搜索设备"];
 const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
 
 // Titles.
@@ -109,6 +110,21 @@ fn view_network(app: &mut App) {
 
 fn view_assistant(app: &mut App) {
     app.set_view(View::Assistant);
+}
+
+/// Ask which board to dial, and dial the one picked.
+///
+/// A different door from `connect`, which re-dials the *last* link: this one
+/// answers "which board", which is the question a bench with two of them has
+/// and no command line can settle.
+fn scan_ble(app: &mut App) {
+    if let Err(why) = app.start_ble_scan() {
+        let notice = app.strings().ble_scan_failed.to_string();
+        app.push_notice(crate::app::Notice {
+            text: format!("{notice}: {why}"),
+            level: crate::event::NoticeLevel::Error,
+        });
+    }
 }
 
 fn focus_sidebar(app: &mut App) {
@@ -344,6 +360,13 @@ pub const ACTIONS: &[Action] = &[
         run: view_assistant,
     },
     // Focus
+    Action {
+        id: "ble.scan",
+        title: T_BLE_SCAN,
+        category: CAT_CONNECTION,
+        shortcut: "",
+        run: scan_ble,
+    },
     Action {
         id: "focus.sidebar",
         title: T_FOCUS_SIDEBAR,
@@ -791,6 +814,7 @@ mod tests {
         "view.diagnostics",
         "view.network",
         "view.assistant",
+        "ble.scan",
         "focus.sidebar",
         "focus.terminal",
         "connect",

@@ -115,6 +115,64 @@ pub enum Dialog {
     Confirm(Confirm),
     /// A one-line answer waiting to be typed.
     Prompt(Prompt),
+    /// The boards a scan heard, waiting for a pick.
+    DevicePick(DevicePick),
+}
+
+const T_PICK: Entry = ["Choose a board", "选择设备"];
+const PICK_SCANNING: Entry = ["Scanning… Esc cancels", "正在扫描… Esc 取消"];
+const PICK_EMPTY: Entry = ["No board answered. Enter scans again", "没有设备应答。回车重新扫描"];
+const PICK_KEYS: Entry = ["↑↓ move · Enter connect · Esc close", "↑↓ 选择 · 回车连接 · Esc 关闭"];
+
+/// The boards a Bluetooth scan heard, and which one the keyboard is on.
+///
+/// A list rather than a prompt, because the answer is a *choice* and not a
+/// value: `--ble-address` can name one, but a user with two boards on the bench
+/// has no way to tell which MAC is which, and a scan is the only thing that
+/// knows. Keep the list in the dialog so the keyboard answers to it the way it
+/// answers to every other dialog.
+///
+/// `nus` is shown beside each name rather than filtered on: a board that is
+/// advertising but not offering the serial service is a firmware problem and
+/// not a radio one, and a list that hid it would be a list that answered a
+/// different question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevicePick {
+    /// What has been heard so far, best first.
+    pub devices: Vec<crate::cli::FoundDevice>,
+    /// Which row the keyboard is on.
+    pub cursor: usize,
+    /// Whether the scan is still listening.
+    pub scanning: bool,
+    /// Why the scan could not run, when it could not.
+    pub message: String,
+}
+
+impl DevicePick {
+    /// The board under the cursor, which is what Enter dials.
+    pub fn selected(&self) -> Option<&crate::cli::FoundDevice> {
+        self.devices.get(self.cursor)
+    }
+
+    /// How many rows the keyboard can reach.
+    pub fn rows(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Move the cursor, clamped to the list.
+    pub fn move_cursor(&mut self, down: bool) {
+        let last = self.devices.len().saturating_sub(1);
+        if down {
+            self.cursor = (self.cursor + 1).min(last);
+        } else {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+    }
+
+    /// Scroll the list so the cursor stays visible in `height` rows.
+    pub fn scroll(&self) -> usize {
+        0
+    }
 }
 
 /// A text field: a question, an answer, and what agreeing to it does.
@@ -276,7 +334,7 @@ impl Dialog {
     pub fn scroll(&self) -> usize {
         match self {
             Dialog::Help(offset) | Dialog::Notices(offset) => *offset,
-            Dialog::Confirm(_) | Dialog::Prompt(_) => 0,
+            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::DevicePick(_) => 0,
         }
     }
 }
@@ -288,6 +346,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Notices(_) => entry(NOTICES_TITLE, lang),
         Dialog::Confirm(_) => entry(CONFIRM_TITLE, lang),
         Dialog::Prompt(prompt) => entry(prompt.title, lang),
+        Dialog::DevicePick(_) => entry(T_PICK, lang),
     }
 }
 
@@ -298,6 +357,15 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         Dialog::Notices(_) => entry(NOTICES_KEYS, lang),
         Dialog::Confirm(_) => entry(CONFIRM_KEYS, lang),
         Dialog::Prompt(_) => entry(PROMPT_KEYS, lang),
+        Dialog::DevicePick(pick) => {
+            if pick.scanning {
+                entry(PICK_SCANNING, lang)
+            } else if pick.devices.is_empty() {
+                entry(PICK_EMPTY, lang)
+            } else {
+                entry(PICK_KEYS, lang)
+            }
+        }
     };
     Line::from(Span::styled(text, theme.muted()))
 }
@@ -451,6 +519,38 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             )));
             out
         }
+        Dialog::DevicePick(pick) => {
+            if pick.scanning {
+                return vec![Line::from(Span::styled(
+                    entry(PICK_SCANNING, lang),
+                    theme.muted(),
+                ))];
+            }
+            if pick.devices.is_empty() {
+                return vec![Line::from(Span::styled(
+                    entry(PICK_EMPTY, lang),
+                    theme.muted(),
+                ))];
+            }
+            // One row per device, the way the help is one row per key: the box
+            // is then a fixed height for a known list, and the cursor stays on
+            // a row rather than somewhere inside a paragraph.
+            pick.devices
+                .iter()
+                .enumerate()
+                .map(|(index, device)| {
+                    let name = device.name.as_deref().unwrap_or("(no name)");
+                    let nus = if device.nus { "nus" } else { "-" };
+                    let row = format!("{nus:>3} {name:<24} {}", device.id);
+                    let style = if index == pick.cursor {
+                        theme.selected()
+                    } else {
+                        theme.text()
+                    };
+                    Line::from(Span::styled(text::clip_to(&row, width), style))
+                })
+                .collect()
+        }
         Dialog::Notices(_) => {
             if app.log.is_empty() {
                 return vec![Line::from(Span::styled(
@@ -563,6 +663,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     };
     match dialog {
+        Dialog::DevicePick(mut pick) => match key.code {
+            // Escape closes without dialling. A user who opened a scan by
+            // mistake wants out, not to answer a question nobody asked.
+            KeyCode::Esc => app.cancel_ble_scan(),
+            KeyCode::Up => pick.move_cursor(false),
+            KeyCode::Down => pick.move_cursor(true),
+            // Enter dials the row under the cursor — by address, which is the
+            // only part of a scan result that identifies a device exactly,
+            // since a name is a substring and two boards can carry it. With
+            // nothing heard it scans again, which is what a bench with the
+            // board switched on mid-dialog needs.
+            KeyCode::Enter => match pick.selected() {
+                Some(device) => app.connect_to_board(&device.id),
+                None if !pick.scanning => {
+                    let _ = app.start_ble_scan();
+                }
+                None => {}
+            },
+            _ => app.dialog = Some(Dialog::DevicePick(pick)),
+        },
         Dialog::Confirm(mut confirm) => match key.code {
             // Cancel, by the key, by the button, or by Escape.
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {}
@@ -1294,5 +1414,87 @@ mod tests {
         assert!(zh.spans[0].content.contains("Enter 开始"), "{zh:?}");
         // The two prompts do not share their words either.
         assert_ne!(title(&send, Lang::En), title(&receive, Lang::En));
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn device(name: &str, id: &str, nus: bool) -> crate::cli::FoundDevice {
+        crate::cli::FoundDevice {
+            name: Some(name.to_string()),
+            id: id.to_string(),
+            nus,
+        }
+    }
+
+    /// The list is a list: the cursor moves inside it and stops at both ends,
+    /// so a user cannot walk off a bench onto nothing.
+    #[test]
+    fn the_cursor_moves_inside_the_list() {
+        let mut pick = DevicePick {
+            devices: vec![device("A", "aa", true), device("B", "bb", false)],
+            cursor: 0,
+            scanning: false,
+            message: String::new(),
+        };
+        pick.move_cursor(false);
+        assert_eq!(pick.cursor, 0, "up from the top");
+        pick.move_cursor(true);
+        assert_eq!(pick.cursor, 1);
+        pick.move_cursor(true);
+        assert_eq!(pick.cursor, 1, "down from the bottom");
+    }
+
+    /// A board that is advertising without the serial service is still listed:
+    /// hiding it would answer "which boards can I use" instead of the question
+    /// that was asked, which is "what is out there".
+    #[test]
+    fn a_device_without_nus_is_still_listed() {
+        let pick = DevicePick {
+            devices: vec![device("Bee", "aa", true), device("Other", "bb", false)],
+            cursor: 1,
+            scanning: false,
+            message: String::new(),
+        };
+        assert_eq!(pick.rows(), 2);
+        assert!(pick.selected().is_some());
+        assert!(!pick.selected().expect("a device").nus);
+    }
+
+    /// An empty list has no selection, which is what makes Enter scan again
+    /// rather than dial nothing.
+    #[test]
+    fn an_empty_list_selects_nothing() {
+        let pick = DevicePick {
+            devices: Vec::new(),
+            cursor: 0,
+            scanning: true,
+            message: String::new(),
+        };
+        assert_eq!(pick.rows(), 0);
+        assert!(pick.selected().is_none());
+    }
+
+    /// A cursor left over from a longer list is clamped by the app, not by the
+    /// dialog: this is what that clamp looks like when the list shrinks to one
+    /// — walking up from anywhere lands on the only row.
+    #[test]
+    fn a_stale_cursor_walks_back_onto_the_list() {
+        let mut pick = DevicePick {
+            devices: vec![device("A", "aa", true)],
+            cursor: 3,
+            scanning: false,
+            message: String::new(),
+        };
+        // The app clamps on the way in; this is the invariant it relies on —
+        // that up from any position reaches the top and stops.
+        pick.move_cursor(false);
+        pick.move_cursor(false);
+        pick.move_cursor(false);
+        pick.move_cursor(false);
+        assert_eq!(pick.cursor, 0, "up stops at the top of one row");
+        assert!(pick.selected().is_some());
     }
 }

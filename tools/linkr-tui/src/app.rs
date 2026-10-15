@@ -45,6 +45,138 @@ pub enum LanCapture {
     None,
 }
 
+/// How long the interface listens for boards before showing what it heard.
+///
+/// Longer than `--scan`'s own default: a user who picks "find my board" from a
+/// palette is looking at a screen and is willing to wait, where a shell command
+/// is watched while it runs. Short enough that a bench with the board switched
+/// off does not leave the dialog sitting there for half a minute.
+pub const BLE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// A Bluetooth scan running in the background, and where its answer lands.
+///
+/// Separate from the link because a scan has to keep running while the user
+/// reads the console, and a scan that blocked the pump would be a scan that
+/// froze the frame it is filling. The radio library is async and this program
+/// is not, so the scan owns a thread of its own exactly as the BLE link does.
+/// `Debug` by hand: `App` derives it, and the two channels behind a scan do not
+/// implement it and should not — what a scan is, in a diagnostic, is how many
+/// devices it heard and whether it is still listening.
+impl std::fmt::Debug for BleScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BleScan")
+            .field("devices", &self.devices.len())
+            .field("running", &self.running)
+            .finish()
+    }
+}
+
+#[derive(Default)]
+pub struct BleScan {
+    /// What it has found so far.
+    pub devices: Vec<crate::cli::FoundDevice>,
+    /// Whether the scan is still listening.
+    running: bool,
+    /// Where the scan's thread posts what it saw.
+    rx: Option<std::sync::mpsc::Receiver<Vec<crate::cli::FoundDevice>>>,
+    /// Where the scan's thread posts a reason it could not run at all.
+    failure: Option<std::sync::mpsc::Receiver<String>>,
+}
+
+impl BleScan {
+    /// Start listening, unless one is already running.
+    ///
+    /// `Err` is a sentence rather than a panic because the three ways this
+    /// fails — no adapter, no Bluetooth on the host, a library that refuses —
+    /// are all ordinary facts about the machine and all things a user can act
+    /// on, unlike a bug in this program.
+    pub fn start(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        if self.running {
+            return Err("a scan is already running".to_string());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.running = true;
+        self.rx = Some(rx);
+        self.devices.clear();
+        // A second channel for the "no adapter, no point going on" case, because
+        // that answer is a sentence and not a device: posting it through the
+        // device channel would make a caller think a scan succeeded and came
+        // back with nothing.
+        let (fail_tx, fail_rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let outcome = crate::cli::scan_devices(timeout);
+            match outcome {
+                Ok(devices) => {
+                    let _ = tx.send(devices);
+                }
+                Err(why) => {
+                    let _ = fail_tx.send(why);
+                }
+            }
+        });
+        self.failure = Some(fail_rx);
+        Ok(())
+    }
+
+    /// Whether a scan is in flight.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// What the scan has seen, and whether it has finished.
+    ///
+    /// `Ok(false)` means "still running, nothing new". The devices are replaced
+    /// rather than appended because the channel posts the whole list each time
+    /// it has one: a device that went out of range then disappears from the
+    /// count rather than sticking on the screen as a ghost.
+    pub fn poll(&mut self) -> Result<bool, String> {
+        if !self.running {
+            return Ok(false);
+        }
+        // The failure channel is checked first so a scan that could not start
+        // reports its reason instead of its empty list: a user who sees "no
+        // devices" when the machine has no adapter is a user who goes looking
+        // for a firmware bug.
+        if let Some(fail_rx) = self.failure.as_ref() {
+            if let Ok(why) = fail_rx.try_recv() {
+                self.running = false;
+                return Err(why);
+            }
+        }
+        let Some(rx) = self.rx.as_ref() else {
+            self.running = false;
+            return Ok(false);
+        };
+        match rx.try_recv() {
+            Ok(devices) => {
+                self.devices = devices;
+                self.running = false;
+                Ok(true)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),
+            Err(_) => {
+                self.running = false;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Why the scan could not run, when it could not.
+    pub fn take_failure(&mut self) -> Option<String> {
+        let fail_rx = self.failure.as_ref()?;
+        let why = fail_rx.try_recv().ok()?;
+        Some(why)
+    }
+
+    /// Stop listening and forget what was heard.
+    pub fn reset(&mut self) {
+        self.running = false;
+        self.devices.clear();
+        self.rx = None;
+        self.failure = None;
+    }
+}
+
 /// What `@s?` reported: LAN access state and the token the bridge expects.
 ///
 /// Deliberately *not* part of the network view's state. A token is a secret and
@@ -163,6 +295,8 @@ pub struct App {
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
     pub lan_captured: LanCapture,
+    /// A Bluetooth scan in flight, for the pick-a-board dialog.
+    pub ble_scan: BleScan,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -291,6 +425,7 @@ impl Default for App {
             network: crate::views::network::NetworkState::default(),
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
+            ble_scan: BleScan::default(),
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
@@ -868,6 +1003,8 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
 }
 
     pub fn pump(&mut self) {
+        self.poll_ble_scan();
+
         self.drain_agent_replies();
         let was_live = self.session.is_live();
         let was_connected = self.state == ConnectionState::Connected;
@@ -1046,6 +1183,98 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     ///
     /// Asked here rather than on a flag because the alternative is a user who
     /// has to know the token exists before they can learn it.
+    /// Look for boards, and open the list to pick from.
+    ///
+    /// The question this answers is the one nothing else can: which board is
+    /// *this* one, when there are two on the bench and neither was named on a
+    /// command line. `--scan` answers it for a shell and leaves the interface
+    /// unable to act on the answer, so re-typing the MAC it just showed is the
+    /// work it was supposed to save.
+    pub fn start_ble_scan(&mut self) -> Result<(), String> {
+        self.ble_scan.reset();
+        self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
+        self.dialog = Some(crate::dialogs::Dialog::DevicePick(
+            crate::dialogs::DevicePick {
+                devices: Vec::new(),
+                cursor: 0,
+                scanning: true,
+                message: String::new(),
+            },
+        ));
+        Ok(())
+    }
+
+    /// Stop listening and close the list.
+    ///
+    /// Closing the dialog matters as much as stopping the thread: a dialog left
+    /// open over a finished scan would offer Enter on a list nothing is adding
+    /// to, and a user who cancels wants the screen back.
+    pub fn cancel_ble_scan(&mut self) {
+        self.ble_scan.reset();
+        self.dialog = None;
+    }
+
+    /// Dial the board with this address, and say which one it was.
+    ///
+    /// The address is what a scan result identifies a device by — a name is a
+    /// substring, and two boards on a bench can both be called "Linkr Bee" —
+    /// so the dial takes the id and the notice repeats the name the user
+    /// picked so the log says what they meant and not just what went out.
+    pub fn connect_to_board(&mut self, address: &str) {
+        let selection = crate::transport::ble::Selection::Address(address.to_string());
+        if let Err(why) = self.dial(&crate::session::Dial::Ble(selection)) {
+            let text = format!("{}: {why}", self.strings().link_failed);
+            self.push_notice(Notice {
+                text,
+                level: crate::event::NoticeLevel::Error,
+            });
+            return;
+        }
+        self.dialog = None;
+        self.set_view(crate::event::View::Terminal);
+        self.focus = crate::app::Focus::Terminal;
+    }
+
+    /// Fold whatever the background scan has seen into the open dialog.
+    ///
+    /// Called from `pump`, so the dialog fills on the same beat as the console:
+    /// a scan whose results appeared only after the pump would look like a scan
+    /// that had finished and then thought of something.
+    fn poll_ble_scan(&mut self) {
+        if !self.ble_scan.is_running() {
+            // Finished or never started: clear the dialog's "listening" flag so
+            // the legend stops offering a cancel that would do nothing.
+            if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+                pick.scanning = false;
+            }
+            // A failure has a sentence, and a sentence is what the user is
+            // owed: "no adapter" is not the same news as "no boards".
+            if let Some(why) = self.ble_scan.take_failure() {
+                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+                    pick.message = why;
+                }
+                self.ble_scan.reset();
+            }
+            return;
+        }
+        match self.ble_scan.poll() {
+            Ok(true) => {
+                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+                    pick.devices = self.ble_scan.devices.clone();
+                    pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
+                }
+            }
+            Ok(false) => {}
+            Err(why) => {
+                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+                    pick.message = why;
+                }
+                self.ble_scan.reset();
+            }
+        }
+    }
+
+    /// Ask for the LAN access token if it is not already in hand.
     pub fn ensure_lan_token(&mut self) -> Result<(), String> {
         self.ask_device(Query::Lan)
     }
