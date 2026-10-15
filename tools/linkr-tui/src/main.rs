@@ -674,6 +674,10 @@ fn main() -> io::Result<()> {
         transport_locked: args.transport.is_some(),
         ..App::default()
     };
+    // The agent's durable state, opened once here rather than lazily per call:
+    // one store file for tasks, notes and the session, so a task written by
+    // this run and a note written by the last one are the same file.
+    app.agent_store = Some(linkr_tui::agent::store::JsonFile::load());
     if let Some(transport) = args.transport {
         app.transport = transport;
     }
@@ -1035,6 +1039,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // too: its rows are walked with them, and a device being typed at with the
     // arrows of a form would see escape sequences it never asked for.
     if app.view == View::Transfer && linkr_tui::views::transfer::handle_key(app, key) {
+        return false;
+    }
+
+    // The assistant is a form too, and the same reasoning applies with more
+    // force: it has a composer, and a composer that types a newline into the
+    // console on every Enter is not a composer.
+    if app.view == View::Assistant && views::assistant::handle_key(app, key) {
         return false;
     }
 

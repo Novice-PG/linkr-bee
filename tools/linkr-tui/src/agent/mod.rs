@@ -25,5 +25,6 @@ pub mod notes;
 pub mod redact;
 pub mod report;
 pub mod session;
+pub mod store;
 pub mod tasks;
 pub mod usage;

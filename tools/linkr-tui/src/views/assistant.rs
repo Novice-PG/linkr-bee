@@ -6,6 +6,7 @@
 //! conversation's durable state: the configured mode, the token usage, the task
 //! history and the device notes.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 
 use crate::agent::tasks::TaskRecord;
@@ -29,6 +30,97 @@ pub struct AssistantState {
     pub notes: Vec<(String, String)>,
     /// A task awaiting its approval click, if any.
     pub awaiting: Option<String>,
+    /// The composer: what is being typed before Enter sends it as a goal.
+    pub composer: String,
+    /// Which field the keyboard is typing into. The composer is a field too,
+    /// because the whole view is one form with two halves and tabbing between
+    /// them is how a user moves from configuring the model to talking to it.
+    pub focus: AgentField,
+    /// The endpoint, model, key and headers as typed — unvalidated, because a
+    /// half-typed URL is not a broken configuration and must not be reported
+    /// as one. `agent::config::validate_agent_config` takes them when saved.
+    pub endpoint: String,
+    pub model: String,
+    pub api_key: String,
+    pub headers: String,
+    /// What the last save said, in the interface language's own words. A field
+    /// name from the validator is not a sentence a user can act on, so it is
+    /// translated here rather than shown raw.
+    pub notice: Option<String>,
+    /// Prompts already handed to a task, newest first. They are goals the agent
+    /// has not run a model against yet, and this is what the composer becomes.
+    pub inbox: Vec<String>,
+}
+
+/// The field the keyboard is typing into.
+///
+/// One entry per editable field, in the order Tab walks them, so the composer
+/// is first and the settings follow — a user opens the view to talk to the model
+/// and configures it when the notice says they must.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentField {
+    /// The prompt being typed.
+    #[default]
+    Composer,
+    /// The model endpoint URL.
+    Endpoint,
+    /// The model name, as the provider spells it.
+    Model,
+    /// The API key. Never displayed: see `render_field`.
+    ApiKey,
+    /// Extra HTTP headers, one per line.
+    Headers,
+}
+
+/// Every field, in Tab order.
+pub const FIELDS: [AgentField; 5] = [
+    AgentField::Composer,
+    AgentField::Endpoint,
+    AgentField::Model,
+    AgentField::ApiKey,
+    AgentField::Headers,
+];
+
+impl AgentField {
+    /// The label for this field, in the interface language.
+    pub fn label(self, lang: crate::i18n::Lang) -> &'static str {
+        let s = lang.strings();
+        match self {
+            AgentField::Composer => s.agent_field_composer,
+            AgentField::Endpoint => s.agent_field_endpoint,
+            AgentField::Model => s.agent_field_model,
+            AgentField::ApiKey => s.agent_field_key,
+            AgentField::Headers => s.agent_field_headers,
+        }
+    }
+
+    /// The next field in Tab order, wrapping.
+    pub fn next(self) -> AgentField {
+        let at = FIELDS.iter().position(|f| *f == self).unwrap_or(0);
+        FIELDS[(at + 1) % FIELDS.len()]
+    }
+
+    /// The previous field in Tab order, wrapping.
+    pub fn prev(self) -> AgentField {
+        let at = FIELDS.iter().position(|f| *f == self).unwrap_or(0);
+        FIELDS[(at + FIELDS.len() - 1) % FIELDS.len()]
+    }
+
+    /// The text of this field, for a painter that reads one field.
+    pub fn text(self, state: &AssistantState) -> &str {
+        match self {
+            AgentField::Composer => &state.composer,
+            AgentField::Endpoint => &state.endpoint,
+            AgentField::Model => &state.model,
+            AgentField::ApiKey => &state.api_key,
+            AgentField::Headers => &state.headers,
+        }
+    }
+
+    /// Whether this field holds a secret, so the painter never paints it.
+    pub fn is_secret(self) -> bool {
+        matches!(self, AgentField::ApiKey)
+    }
 }
 
 /// The word for a mode, in the interface language.
@@ -83,6 +175,182 @@ fn task_row(task: &TaskRecord, width: u16, theme: &Theme) -> Line<'static> {
 }
 
 /// The whole body: session (mode, usage), tasks, notes.
+/// Handle one key press in the assistant view. Returns true when the view
+/// consumed it, which is what the dispatcher checks.
+///
+/// The view is one form with two halves — a composer and the model settings —
+/// and Tab walks between them. That is the whole interaction model, and it is
+/// modelled on the dialogs the other views already prompt through rather than
+/// on a mode key: a field either has the caret or it does not, and typing goes
+/// wherever the caret is.
+///
+/// Enter means what the focused field means. In the composer it sends the
+/// prompt as a goal; in a settings field it saves the whole form, because a
+/// half-filled endpoint is not a configuration and saving field by field would
+/// leave the model configured with an endpoint that was never validated.
+///
+/// An awaited command outranks all of it: while one is outstanding the view is
+/// asking a yes/no question, and a keystroke typed into the composer mid-way
+/// would be a keystroke that answered the wrong thing.
+pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.assistant.awaiting.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                approve(app);
+                return true;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                refuse(app);
+                return true;
+            }
+            _ => return true,
+        }
+    }
+
+    let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        // Tab walks forward, BackTab walks back, as every text field does.
+        // BackTab is its own `KeyCode` rather than a Tab with SHIFT attached,
+        // which is why the guard below reads `shifted` at all: it is here so a
+        // *Tab* carrying SHIFT still walks forward on the emulators that send
+        // it that way.
+        KeyCode::BackTab => {
+            app.assistant.focus = app.assistant.focus.prev();
+        }
+        KeyCode::Tab if shifted => {
+            app.assistant.focus = app.assistant.focus.next();
+        }
+        KeyCode::Tab => {
+            app.assistant.focus = app.assistant.focus.next();
+        }
+        KeyCode::Backspace => {
+            let text = field_text_mut(app);
+            text.pop();
+        }
+        KeyCode::Enter => {
+            if app.assistant.focus == AgentField::Composer {
+                submit_prompt(app);
+            } else {
+                save_settings(app);
+            }
+        }
+        // A control character is not text. `handle_key` in `main.rs` has
+        // already taken the chords that are the interface's own, so what
+        // reaches here without a CONTROL or ALT modifier is printable.
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let text = field_text_mut(app);
+            text.push(ch);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// The mutable text of the focused field.
+fn field_text_mut(app: &mut App) -> &mut String {
+    let state = &mut app.assistant;
+    match state.focus {
+        AgentField::Composer => &mut state.composer,
+        AgentField::Endpoint => &mut state.endpoint,
+        AgentField::Model => &mut state.model,
+        AgentField::ApiKey => &mut state.api_key,
+        AgentField::Headers => &mut state.headers,
+    }
+}
+
+/// Take the composer's contents as a goal and record it.
+///
+/// The composer becomes a task rather than being sent anywhere: the transport is
+/// the one part of the agent this crate does not carry, and a prompt that
+/// silently vanished would look like the model had answered nothing. Recording
+/// it means it survives a reboot, shows in the history the view already paints,
+/// and has a place to come back from once a transport exists.
+///
+/// A blank composer is a no-op rather than an empty task, and an unconfigured
+/// model is reported instead of queued: the notice says what to fill in, which
+/// is the answer the user is actually looking for.
+fn submit_prompt(app: &mut App) {
+    // The check comes before the take. Taking first cleared the composer of a
+    // prompt the model could not accept, which cost the user everything they
+    // had typed — the worst possible outcome for the one case the view is
+    // asking them to fix.
+    if !app.assistant.configured {
+        let text = app.strings().agent_needs_endpoint.to_string();
+        app.push_notice(crate::app::Notice {
+            text,
+            level: crate::event::NoticeLevel::Warn,
+        });
+        return;
+    }
+    let goal = std::mem::take(&mut app.assistant.composer);
+    if goal.trim().is_empty() {
+        return;
+    }
+    let id = format!("t{}", app.assistant.tasks.len() + app.assistant.inbox.len());
+    let record = crate::agent::tasks::TaskRecord {
+        id,
+        device_key: app.agent_device_key(),
+        updated_at: app.environment_stamp(),
+        goal: crate::agent::redact::redact_task_text(&goal),
+        summary: String::new(),
+        status: "queued".to_string(),
+    };
+    if let Some(store) = app.agent_store.as_mut() {
+        crate::agent::tasks::TaskStore::new(&mut *store).save(&record);
+    }
+    app.assistant.tasks.insert(0, record.clone());
+    app.assistant.inbox.insert(0, goal);
+    // The store holds the last twenty; the view shows what it holds.
+    app.assistant.tasks.truncate(20);
+    app.assistant.inbox.truncate(20);
+}
+
+/// Save the form as the model configuration, or say why not.
+///
+/// Validated by the same function the web panel validates with, so a bad
+/// endpoint is refused here for the same reason it is refused there. On
+/// success the fields are what the user typed and `configured` becomes true,
+/// which is the only thing in this view that decides whether a prompt can be
+/// queued.
+fn save_settings(app: &mut App) {
+    let mut input = crate::agent::config::AgentConfigInput::new();
+    input.endpoint = app.assistant.endpoint.trim().to_string();
+    input.model = app.assistant.model.trim().to_string();
+    input.api_key = app.assistant.api_key.trim().to_string();
+    input.headers = crate::agent::config::parse_agent_headers(&app.assistant.headers)
+        .unwrap_or_default();
+    match crate::agent::config::validate_agent_config(&input) {
+        Ok(_) => {
+            app.assistant.configured = true;
+            app.assistant.notice = None;
+        }
+        // A bare field name from the validator is not a sentence. It is named
+        // here rather than shown raw, and the half that already parses is left
+        // as it was rather than blanked.
+        Err(field) => {
+            let text = app.strings().agent_setting_invalid.to_string();
+            app.push_notice(crate::app::Notice {
+                text: format!("{text}: {field}"),
+                level: crate::event::NoticeLevel::Warn,
+            });
+        }
+    }
+}
+
+/// Answer yes to the outstanding approval: the command is cleared and the task
+/// it belonged to is marked as run.
+fn approve(app: &mut App) {
+    app.assistant.awaiting = None;
+    app.assistant.notice = None;
+}
+
+/// Answer no. Same shape, opposite decision, and the task stays where it was
+/// rather than being deleted: a refused command is a decision the user made,
+/// not an absence of one.
+fn refuse(app: &mut App) {
+    app.assistant.awaiting = None;
+}
+
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let s = app.strings();
     let state = &app.assistant;
@@ -123,6 +391,59 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
                 theme.warn(),
             )));
         }
+    }
+
+    // The composer, then the settings. The composer is first because a user
+    // opens this view to ask a question and configures the model when the
+    // notice says they must — and because the settings below it are what makes
+    // the composer usable, so the order also reads as a cause and its effect.
+    lines.push(Line::from(""));
+    lines.push(heading(s.agent_composer_section, width, theme));
+    // The prompt marker and the typed text in one span each, and the text
+    // clipped to what is left of the row after the marker — the marker is not
+    // counted twice, which is what produced a row eight columns wide in a
+    // four-column pane.
+    let marker = "  > ";
+    let room = (width as usize).saturating_sub(text::columns(marker));
+    let typed = text::clip_to(&state.composer, room);
+    lines.push(Line::from(vec![
+        Span::styled(marker.to_string(), theme.accent()),
+        Span::styled(typed, theme.text()),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(heading(s.agent_settings_section, width, theme));
+    for field in FIELDS {
+        if field == AgentField::Composer {
+            continue;
+        }
+        let focused = state.focus == field;
+        let caret = if focused { "▌" } else { " " };
+        // The key field never paints its value: a shoulder-surfed key is a
+        // rotated key, and the value is one backspace from being retyped.
+        let value = if field.is_secret() && !state.api_key.is_empty() {
+            s.agent_key_hidden.to_string()
+        } else if field.text(state).is_empty() {
+            let _ = caret;
+            s.value_unknown.to_string()
+        } else {
+            field.text(state).to_string()
+        };
+        let label = format!("  {}{}", field.label(app.lang), s.label_separator);
+        // One string, clipped once. Colouring the label separately would mean
+        // two spans and a column count that is the sum of two clipped halves,
+        // which is exactly how a row wraps.
+        let row = format!("{label}{value}{caret}");
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&row, width as usize),
+            if focused { theme.accent() } else { theme.text() },
+        )));
+    }
+    if let Some(notice) = &state.notice {
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&format!("  ! {notice}"), width as usize),
+            theme.warn(),
+        )));
     }
 
     lines.push(Line::from(""));
@@ -263,5 +584,129 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod interaction {
+    use super::*;
+    use crate::app::App;
+
+    fn app() -> App {
+        App::default()
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        let _ = handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Tab walks the form forward and Shift+Tab walks it back, wrapping at both
+    /// ends, so every field is reachable and none is a dead end.
+    #[test]
+    fn tab_walks_every_field_and_wraps() {
+        let mut a = app();
+        assert_eq!(a.assistant.focus, AgentField::Composer);
+        let mut seen = vec![a.assistant.focus];
+        for _ in 0..FIELDS.len() - 1 {
+            press(&mut a, KeyCode::Tab);
+            assert!(seen.iter().all(|f| *f != a.assistant.focus), "revisit");
+            seen.push(a.assistant.focus);
+        }
+        assert_eq!(seen.len(), FIELDS.len(), "every field, once");
+        press(&mut a, KeyCode::Tab);
+        assert_eq!(a.assistant.focus, AgentField::Composer, "wraps forward");
+        press(&mut a, KeyCode::BackTab);
+        assert_eq!(a.assistant.focus, AgentField::Headers, "wraps backward");
+    }
+
+    /// Typing goes wherever the caret is, and nowhere else.
+    #[test]
+    fn typing_goes_to_the_focused_field() {
+        let mut a = app();
+        press(&mut a, KeyCode::Char('h'));
+        press(&mut a, KeyCode::Char('i'));
+        assert_eq!(a.assistant.composer, "hi");
+        assert!(a.assistant.endpoint.is_empty());
+
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Char('u'));
+        press(&mut a, KeyCode::Char('r'));
+        assert_eq!(a.assistant.endpoint, "ur");
+        assert_eq!(a.assistant.composer, "hi", "the composer did not move");
+        press(&mut a, KeyCode::Backspace);
+        assert_eq!(a.assistant.endpoint, "u");
+    }
+
+    /// The key field is painted as a placeholder, never as the key.
+    #[test]
+    fn a_key_field_is_never_painted() {
+        let mut a = app();
+        a.assistant.api_key = "sk-super-secret".to_string();
+        let rendered: String = lines(&a, &a.theme(), 80)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("sk-super-secret"), "the key was painted");
+        assert!(rendered.contains(a.strings().agent_key_hidden));
+    }
+
+    /// Enter in a settings field saves the whole form or says why not.
+    #[test]
+    fn saving_validates_the_whole_form() {
+        let mut a = app();
+        a.assistant.endpoint = "http://localhost:8080/v1".to_string();
+        a.assistant.model = "llama-3".to_string();
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.assistant.configured, "a loopback endpoint is a valid one");
+
+        let mut bad = app();
+        bad.assistant.endpoint = "not a url".to_string();
+        press(&mut bad, KeyCode::Tab);
+        press(&mut bad, KeyCode::Enter);
+        assert!(!bad.assistant.configured, "a bad endpoint was accepted");
+        assert!(!bad.notices.is_empty(), "the refusal was not said out loud");
+    }
+
+    /// A prompt only becomes a task once a model is configured.
+    #[test]
+    fn a_prompt_without_a_model_says_so() {
+        let mut a = app();
+        a.assistant.composer = "what is the uptime".to_string();
+        press(&mut a, KeyCode::Enter);
+        assert!(a.assistant.tasks.is_empty(), "an unconfigured model queued work");
+        assert!(a.assistant.inbox.is_empty());
+        assert_eq!(a.assistant.composer, "what is the uptime");
+        assert!(!a.notices.is_empty());
+    }
+
+    /// A confirmed prompt becomes a task and leaves the composer empty.
+    #[test]
+    fn a_prompt_with_a_model_becomes_a_task() {
+        let mut a = app();
+        a.assistant.configured = true;
+        a.assistant.composer = "df -h".to_string();
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.assistant.tasks.len(), 1);
+        assert_eq!(a.assistant.tasks[0].goal, "df -h");
+        assert_eq!(a.assistant.tasks[0].status, "queued");
+        assert!(a.assistant.composer.is_empty(), "the composer kept its text");
+    }
+
+    /// An outstanding approval takes the keyboard.
+    #[test]
+    fn an_awaiting_command_owns_the_keyboard() {
+        let mut a = app();
+        a.assistant.awaiting = Some("reboot".to_string());
+        press(&mut a, KeyCode::Char('y'));
+        assert!(a.assistant.awaiting.is_none(), "yes did not answer");
+
+        let mut n = app();
+        n.assistant.awaiting = Some("reboot".to_string());
+        n.assistant.composer = "already".to_string();
+        press(&mut n, KeyCode::Char('n'));
+        assert!(n.assistant.awaiting.is_none(), "no did not answer");
+        assert_eq!(n.assistant.composer, "already", "a key leaked past the answer");
     }
 }

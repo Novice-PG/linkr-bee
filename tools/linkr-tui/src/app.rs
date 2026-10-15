@@ -171,6 +171,12 @@ pub struct App {
     pub probe: Option<ProbeRun>,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
+    /// The agent's durable state: tasks, notes and the saved session.
+    ///
+    /// None until `main` opens it, which is also what the tests get. A store
+    /// touches the filesystem, and a `Default` that writes to the user's home
+    /// directory is not a default anyone can run a test suite against.
+    pub agent_store: Option<crate::agent::store::JsonFile>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
     /// The questions asked of the bridge about itself, and their answers.
@@ -277,6 +283,7 @@ impl Default for App {
             transfer: TransferState::default(),
             probe: None,
             assistant: crate::views::assistant::AssistantState::default(),
+            agent_store: None,
             terminal: TerminalPane::new(),
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -336,6 +343,33 @@ impl App {
     }
 
     /// The current language's table.
+    /// The key the agent's per-device state is stored under.
+    ///
+    /// The name the user gave the link, or the address when they did not name
+    /// one. Two boards that are both "Linkr BLE UART" share a store, which is
+    /// the one case this gets wrong and the reason the address wins whenever
+    /// there is one to use.
+    pub fn agent_device_key(&self) -> String {
+        if self.device_name.trim().is_empty() {
+            "unknown".to_string()
+        } else {
+            self.device_name.clone()
+        }
+    }
+
+    /// Seconds since boot, for a timestamp that means something in a log and
+    /// nothing to anyone trying to read one.
+    ///
+    /// The clock in the top bar is wall time, which is right for a person
+    /// looking at a frame and wrong for a record that has to be ordered after
+    /// a reboot across a timezone.
+    pub fn environment_stamp(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     pub fn strings(&self) -> &'static crate::i18n::Strings {
         self.lang.strings()
     }

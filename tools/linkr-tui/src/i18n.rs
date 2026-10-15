@@ -257,6 +257,26 @@ pub struct Strings {
     pub copy_done_prefix: &'static str,
     /// The tail of the copy confirmation.
     pub copy_done_suffix: &'static str,
+    /// The composer field label in the assistant view.
+    pub agent_field_composer: &'static str,
+    /// The endpoint field label.
+    pub agent_field_endpoint: &'static str,
+    /// The model field label.
+    pub agent_field_model: &'static str,
+    /// The API key field label.
+    pub agent_field_key: &'static str,
+    /// The extra headers field label.
+    pub agent_field_headers: &'static str,
+    /// The value of a key field as painted: never the key.
+    pub agent_key_hidden: &'static str,
+    /// The notice when a model is not configured and a prompt cannot be sent.
+    pub agent_needs_endpoint: &'static str,
+    /// The notice when a settings save was refused, naming the field after it.
+    pub agent_setting_invalid: &'static str,
+    /// The composer section heading.
+    pub agent_composer_section: &'static str,
+    /// The model settings section heading.
+    pub agent_settings_section: &'static str,
     /// The word for a finding awaiting review.
     pub pending_review: &'static str,
 
@@ -342,6 +362,16 @@ const ZH: Strings = Strings {
     sidebar_hidden: "侧栏已隐藏",
     copy_done_prefix: "已复制",
     copy_done_suffix: "字符",
+    agent_field_composer: "提问",
+    agent_field_endpoint: "接口地址",
+    agent_field_model: "模型",
+    agent_field_key: "密钥",
+    agent_field_headers: "自定义头",
+    agent_key_hidden: "（不显示）",
+    agent_needs_endpoint: "先填接口地址和模型",
+    agent_setting_invalid: "这一项没填对",
+    agent_composer_section: "提问",
+    agent_settings_section: "模型设置",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
@@ -465,6 +495,16 @@ const EN: Strings = Strings {
     sidebar_hidden: "Sidebar hidden",
     copy_done_prefix: "Copied",
     copy_done_suffix: "chars",
+    agent_field_composer: "ask",
+    agent_field_endpoint: "endpoint",
+    agent_field_model: "model",
+    agent_field_key: "key",
+    agent_field_headers: "headers",
+    agent_key_hidden: "(not shown)",
+    agent_needs_endpoint: "set the endpoint and model first",
+    agent_setting_invalid: "that setting is not acceptable",
+    agent_composer_section: "ask",
+    agent_settings_section: "model",
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
@@ -661,6 +701,16 @@ mod tests {
                 s.sidebar_hidden,
                 s.copy_done_prefix,
                 s.copy_done_suffix,
+                s.agent_field_composer,
+                s.agent_field_endpoint,
+                s.agent_field_model,
+                s.agent_field_key,
+                s.agent_field_headers,
+                s.agent_key_hidden,
+                s.agent_needs_endpoint,
+                s.agent_setting_invalid,
+                s.agent_composer_section,
+                s.agent_settings_section,
                 s.pending_review,
                 s.net_wifi_section,
                 s.net_wifi_needs_ble,
