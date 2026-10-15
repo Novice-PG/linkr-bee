@@ -1276,9 +1276,40 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         }
         match self.ble_scan.poll() {
             Ok(true) => {
+                // Only boards that offer the serial service are listed. A
+                // keyboard on the bench is noise a user does not want to wait
+                // through, and the list this program can act on is the serial
+                // one — everything else is a device this bridge has nothing to
+                // say to.
+                let boards: Vec<crate::cli::FoundDevice> = self
+                    .ble_scan
+                    .devices
+                    .iter()
+                    .filter(|device| device.nus)
+                    .cloned()
+                    .collect();
+
+                // One board and no other answer: dial it. A bench with one
+                // board on it is the common case, and making the user pick
+                // from a list of one is a click that answers nothing. The
+                // dialog is for the case where two boards are on the air and
+                // nothing on a command line says which.
+                if boards.len() == 1 && self.dialog.is_none() {
+                    let name = boards[0].name.clone();
+                    self.connect_to_board(&boards[0].id);
+                    let s = self.strings();
+                    self.push_notice(Notice {
+                        text: format!("{} {}", s.link_opened, name.unwrap_or_default()),
+                        level: crate::event::NoticeLevel::Info,
+                    });
+                    return;
+                }
+
                 if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-                    pick.devices = self.ble_scan.devices.clone();
-                    pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
+                    pick.devices = boards;
+                    pick.cursor = pick
+                        .cursor
+                        .min(pick.devices.len().saturating_sub(1));
                 }
             }
             Ok(false) => {}

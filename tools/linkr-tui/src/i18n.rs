@@ -246,6 +246,8 @@ pub struct Strings {
     pub clipboard_empty: &'static str,
     /// Notice when a Bluetooth scan could not start.
     pub ble_scan_failed: &'static str,
+    /// Said when the user tries to switch device while connected.
+    pub switch_needs_disconnect: &'static str,
     /// Prefix of the notice naming how much was pasted.
     pub clipboard_pasted: &'static str,
     /// Who the user's own turns are labelled.
@@ -365,6 +367,7 @@ const ZH: Strings = Strings {
     agent_thread_section: "对话",
     clipboard_empty: "读不到剪贴板",
     ble_scan_failed: "无法开始搜索设备",
+    switch_needs_disconnect: "请先断开连接，再切换设备",
     clipboard_pasted: "已粘贴",
     agent_who_user: "你",
     agent_who_model: "模型",
@@ -494,6 +497,7 @@ const EN: Strings = Strings {
     agent_thread_section: "conversation",
     clipboard_empty: "the clipboard could not be read",
     ble_scan_failed: "the scan could not start",
+    switch_needs_disconnect: "Disconnect first, then switch device",
     clipboard_pasted: "Pasted",
     agent_who_user: "you",
     agent_who_model: "model",

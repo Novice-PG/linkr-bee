@@ -883,6 +883,20 @@ fn main() -> io::Result<()> {
     // rather than returned so a build with the interface off still has
     // something to answer, and an error out of the event loop is not dropped
     // on the floor.
+    // Open listening. A user who runs this on a bench has one board in front of
+    // them and did not ask for a chooser; asking them to open a scan is asking
+    // them to do the work the program can do itself. The scan runs, and the
+    // first board it hears that speaks the serial service is dialled — or, if
+    // two are in the air, the list is shown to pick from.
+    //
+    // Not on a link the command line already asked for: `--address` and
+    // `--bridge` name a board, and scanning past a named one would replace a
+    // deliberate choice with whatever else was advertising.
+    #[cfg(feature = "tui")]
+    if !app.session.is_live() && app.transport == linkr_tui::app::Transport::Ble {
+        let _ = app.start_ble_scan();
+    }
+
     #[cfg(feature = "tui")]
     let outcome = run(&mut app);
     #[cfg(not(feature = "tui"))]
@@ -2123,9 +2137,21 @@ mod tests {
         }
         assert_eq!(app.sidebar_cursor, 2);
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(
-            app.log.last().map(|n| n.text.as_str()),
-            Some("No other device to switch to yet.")
+        // Switching device now *looks* for one. It used to answer "no other
+        // device to switch to" without ever having asked the radio — the one
+        // action in the interface that answered a question it had not posed.
+        // The row opens the scan, so what it leaves behind is a scan running.
+        assert!(
+            app.ble_scan.is_running(),
+            "switch device did not start listening"
+        );
+        assert!(
+            app.dialog.is_some(),
+            "the scan's list is not open"
+        );
+        assert!(
+            app.log.last().map(|n| n.text.as_str()) != Some("No other device to switch to yet."),
+            "the old warning is gone"
         );
     }
 

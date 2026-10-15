@@ -170,17 +170,57 @@ pub fn labelled(label: &str, value: &str, separator: &str) -> String {
 pub fn activate(app: &mut App) {
     let views = View::ALL.len();
     match app.sidebar_cursor {
+        index if index == 1 || index == 2 => {
+            return;
+        }
+        _ => {}
         0 => {
             let notice = app.toggle_transport();
             app.push_notice(notice);
         }
-        1 => app.reconnect(),
-        2 => {
-            let text = app.strings().no_other_device.to_string();
-            app.push_notice(crate::app::Notice {
-                text,
-                level: crate::event::NoticeLevel::Warn,
-            });
+        1 | 2 => {
+            /* Connected, neither is reachable: disconnecting is how you change
+             * what is connected. Explained rather than silently ignored, because
+             * a row that looks the same and does nothing is worse than one that
+             * says why. */
+            if app.session.is_live() {
+                let text = app.strings().switch_needs_disconnect.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: crate::event::NoticeLevel::Warn,
+                });
+                return;
+            }
+            if app.sidebar_cursor == 2 {
+                /* Switching device IS looking for one. There used to be a
+                 * separate palette action for the scan and a warning here,
+                 * which left the sidebar row — the one place a user looks to
+                 * change who they are talking to — as the only action in the
+                 * interface that answered "no other device" without ever having
+                 * asked the radio. */
+                if let Err(why) = app.start_ble_scan() {
+                    let text = app.strings().ble_scan_failed.to_string();
+                    app.push_notice(crate::app::Notice {
+                        text: format!("{text}: {why}"),
+                        level: crate::event::NoticeLevel::Error,
+                    });
+                }
+                return;
+            }
+            app.reconnect()
+        }        2 => {
+            // Switching device IS looking for one. There used to be a separate
+            // palette action for the scan and a warning here, which left the
+            // sidebar row — the one place a user looks to change who they are
+            // talking to — as the only action in the interface that answered
+            // "there is no other device" without ever having asked the radio.
+            if let Err(why) = app.start_ble_scan() {
+                let text = app.strings().ble_scan_failed.to_string();
+                app.push_notice(crate::app::Notice {
+                    text: format!("{text}: {why}"),
+                    level: crate::event::NoticeLevel::Error,
+                });
+            }
         }
         index if index < 3 + views => app.set_view(View::ALL[index - 3]),
         index => {
@@ -260,10 +300,19 @@ pub fn rows(app: &App) -> Vec<Row> {
             .trailing(token),
         );
     }
-    for label in [s.connect, s.switch_device] {
-        let index = next_cursor();
-        rows.push(Row::at(label, action_style(index), ITEM_INDENT));
-    }
+	for label in [s.connect, s.switch_device] {
+		let index = next_cursor();
+		// Connected, both rows go dim. The web client is built this way and it
+		// is the honest shape: a session is one link, and picking another while
+		// this one holds the target would mean two things claiming the same
+		// console. Disconnecting is the action that opens the choice.
+		let style = if app.session.is_live() {
+			RowStyle::Hint
+		} else {
+			action_style(index)
+		};
+		rows.push(Row::at(label, style, ITEM_INDENT));
+	}
 
     // --- Views ------------------------------------------------------------
     rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
