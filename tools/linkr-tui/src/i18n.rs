@@ -285,6 +285,12 @@ pub struct Strings {
     pub agent_composer_section: &'static str,
     /// The model settings section heading.
     pub agent_settings_section: &'static str,
+    /// The word for an execution mode, in the assistant's own vocabulary.
+    pub agent_mode_auto: &'static str,
+    pub agent_mode_full: &'static str,
+    pub agent_mode_manual: &'static str,
+    /// The notice when the conversation was cleared.
+    pub agent_cleared: &'static str,
     /// The word for a finding awaiting review.
     pub pending_review: &'static str,
 
@@ -384,6 +390,10 @@ const ZH: Strings = Strings {
     agent_setting_invalid: "这一项没填对",
     agent_composer_section: "提问",
     agent_settings_section: "模型设置",
+    agent_mode_auto: "自动",
+    agent_mode_full: "全自动",
+    agent_mode_manual: "手动",
+    agent_cleared: "对话已清空",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
@@ -521,6 +531,10 @@ const EN: Strings = Strings {
     agent_setting_invalid: "that setting is not acceptable",
     agent_composer_section: "ask",
     agent_settings_section: "model",
+    agent_mode_auto: "auto",
+    agent_mode_full: "full auto",
+    agent_mode_manual: "manual",
+    agent_cleared: "Conversation cleared",
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
@@ -617,6 +631,23 @@ pub fn assert_bilingual(entries: &[Entry]) {
         assert!(!zh.trim().is_empty(), "a chinese string is empty");
         assert_ne!(en, zh, "{en:?} was never translated");
     }
+}
+
+/// Every word the execution modes need, in one place.
+///
+/// A `Strings` method rather than three fields consumed by callers, because the
+/// three names travel together and a caller picking one with an `if` would be a
+/// second translation of the same three modes.
+impl Strings {
+	/// The word for `mode`, in this language.
+	pub fn execution_mode(&self, mode: crate::exec::executor::Mode) -> &'static str {
+		use crate::exec::executor::Mode;
+		match mode {
+			Mode::Auto => self.agent_mode_auto,
+			Mode::FullAuto => self.agent_mode_full,
+			Mode::Manual => self.agent_mode_manual,
+		}
+	}
 }
 
 impl Lang {
@@ -728,6 +759,10 @@ mod tests {
                 s.agent_setting_invalid,
                 s.agent_composer_section,
                 s.agent_settings_section,
+                s.agent_mode_auto,
+                s.agent_mode_full,
+                s.agent_mode_manual,
+                s.agent_cleared,
                 s.pending_review,
                 s.net_wifi_section,
                 s.net_wifi_needs_ble,

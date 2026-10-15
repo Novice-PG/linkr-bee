@@ -446,7 +446,7 @@ fn refresh_notes(app: &mut App) {
 /// The report is the newest task as the task and everything before it as
 /// earlier tasks, which is the shape the builder asks for and the shape the view
 /// already holds.
-fn export_report(app: &mut App) {
+pub fn export_report(app: &mut App) {
     let key = app.agent_device_key();
     let zh = app.lang == crate::i18n::Lang::Zh;
     let task = app.assistant.tasks.first().map(|record| {

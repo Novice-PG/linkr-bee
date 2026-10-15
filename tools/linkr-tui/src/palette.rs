@@ -38,6 +38,16 @@ const CAT_CONNECTION: Entry = ["Connection", "连接"];
 const CAT_TRANSFER: Entry = ["Transfer", "传输"];
 const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
+const CAT_AGENT: Entry = ["Assistant", "助手"];
+
+const T_AGENT_CONFIG: Entry = ["Configure the assistant", "配置助手"];
+const T_AGENT_ASK: Entry = ["Ask the assistant", "向助手提问"];
+const T_AGENT_NOTE: Entry = ["Write a note", "写一条笔记"];
+const T_AGENT_MODE: Entry = ["Change execution mode", "切换执行模式"];
+const T_AGENT_REPORT: Entry = ["Export diagnostic report", "导出排查报告"];
+const T_AGENT_CLEAR: Entry = ["Clear the conversation", "清空对话"];
+const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
+const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
 
 // Titles.
 const T_VIEW_TERMINAL: Entry = ["Open terminal view", "打开终端视图"];
@@ -189,6 +199,69 @@ fn toggle_language(app: &mut App) {
 
 fn toggle_theme(app: &mut App) {
     let notice = app.toggle_theme();
+    app.push_notice(notice);
+}
+
+/// The assistant, opened on the field that configures it.
+///
+/// The endpoint is where somebody lands who has just been told "set the endpoint
+/// and model first", so it is the field the action focuses rather than the
+/// composer: a notice that names a field should open on that field.
+fn agent_configure(app: &mut App) {
+    app.set_view(View::Assistant);
+    app.assistant.focus = crate::views::assistant::AgentField::Endpoint;
+}
+
+fn agent_ask(app: &mut App) {
+    app.set_view(View::Assistant);
+    app.assistant.focus = crate::views::assistant::AgentField::Composer;
+}
+
+fn agent_note(app: &mut App) {
+    app.set_view(View::Assistant);
+    app.assistant.focus = crate::views::assistant::AgentField::Notes;
+}
+
+/// Cycle the execution mode and say which one it landed on.
+///
+/// The mode decides what the assistant may send unattended, so it is a thing a
+/// user changes by hand several times a session and should not have to find a
+/// field for.
+fn cycle_agent_mode(app: &mut App) {
+    use crate::exec::executor::Mode;
+    let next = app.assistant.mode.unwrap_or(Mode::Auto).next();
+    app.assistant.mode = Some(next);
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: format!("{}: {}", s.asst_mode_label, s.execution_mode(next)),
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+fn agent_report(app: &mut App) {
+    crate::views::assistant::export_report(app);
+}
+
+fn agent_clear(app: &mut App) {
+    app.assistant.display.clear();
+    let key = app.agent_device_key();
+    if let Some(store) = app.agent_store.as_mut() {
+        crate::agent::session::clear_session(store, &key);
+    }
+    let s = app.strings();
+    app.push_notice(crate::app::Notice {
+        text: s.agent_cleared.to_string(),
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+fn toggle_sidebar(app: &mut App) {
+    let notice = app.toggle_sidebar();
+    app.push_notice(notice);
+}
+
+fn copy_screen(app: &mut App) {
+    let notice = app.copy_screen();
     app.push_notice(notice);
 }
 
@@ -344,6 +417,62 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_APP,
         shortcut: "Ctrl+T",
         run: toggle_theme,
+    },
+    Action {
+        id: "agent.configure",
+        title: T_AGENT_CONFIG,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_configure,
+    },
+    Action {
+        id: "agent.ask",
+        title: T_AGENT_ASK,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_ask,
+    },
+    Action {
+        id: "agent.note",
+        title: T_AGENT_NOTE,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_note,
+    },
+    Action {
+        id: "agent.mode",
+        title: T_AGENT_MODE,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: cycle_agent_mode,
+    },
+    Action {
+        id: "agent.report",
+        title: T_AGENT_REPORT,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_report,
+    },
+    Action {
+        id: "agent.clear",
+        title: T_AGENT_CLEAR,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_clear,
+    },
+    Action {
+        id: "app.sidebar",
+        title: T_SIDEBAR,
+        category: CAT_APP,
+        shortcut: "",
+        run: toggle_sidebar,
+    },
+    Action {
+        id: "app.copy",
+        title: T_COPY,
+        category: CAT_APP,
+        shortcut: "",
+        run: copy_screen,
     },
     Action {
         id: "app.quit",
@@ -602,6 +731,14 @@ mod tests {
         "app.notices",
         "app.language",
         "app.theme",
+        "agent.configure",
+        "agent.ask",
+        "agent.note",
+        "agent.mode",
+        "agent.report",
+        "agent.clear",
+        "app.sidebar",
+        "app.copy",
         "app.quit",
     ];
 
@@ -626,6 +763,84 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "two actions share an id");
+    }
+
+    /// The assistant's actions land the user on the field that answers the
+    /// question they just asked. A notice saying "set the endpoint" that opened
+    /// on the composer would be a notice that sent them somewhere else.
+    #[test]
+    fn an_assistant_action_lands_on_its_field() {
+        let mut app = App::default();
+        agent_configure(&mut app);
+        assert_eq!(app.view, View::Assistant);
+        assert_eq!(
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Endpoint
+        );
+        agent_ask(&mut app);
+        assert_eq!(
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Composer
+        );
+        agent_note(&mut app);
+        assert_eq!(
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Notes
+        );
+    }
+
+    /// The mode cycles Auto → Full Auto → Manual → Auto, and each step says
+    /// which mode it landed on — which is the only way a user can tell a cycle
+    /// apart from scroll.
+    #[test]
+    fn the_mode_cycles_and_announces() {
+        let mut app = App::default();
+        let seen: Vec<&str> = std::iter::from_fn(|| {
+            cycle_agent_mode(&mut app);
+            let mode = app.assistant.mode?;
+            let last = app.notices.last()?;
+            assert!(
+                last.text.contains(app.strings().execution_mode(mode)),
+                "the notice did not name the new mode: {:?}",
+                last.text
+            );
+            Some(mode.as_str())
+        })
+        .take(3)
+        .collect();
+        // The unset default reads as Auto, so the first step off it is Full
+        // Auto — and that is the point of defaulting to the mode that cannot
+        // send anything.
+        assert_eq!(seen, vec!["full-auto", "manual", "auto"]);
+    }
+
+    /// Clearing the conversation wipes what is on screen *and* what is on disk:
+    /// a clear that left the store untouched would be undone by the next
+    /// restart, which is the one thing a clear must not do.
+    #[test]
+    fn clearing_the_conversation_is_durable() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-palette-clear-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            agent_store: Some(crate::agent::store::JsonFile::at(&path)),
+            ..App::default()
+        };
+        app.assistant.display.push(crate::agent::session::DisplayLine {
+            role: "user".into(),
+            text: "hello".into(),
+        });
+        agent_clear(&mut app);
+        assert!(app.assistant.display.is_empty());
+        assert!(
+            crate::agent::session::load_session(
+                app.agent_store.as_ref().expect("store"),
+                &app.agent_device_key()
+            )
+            .is_none(),
+            "the clear did not reach the store"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Every action is labelled in both languages, and the ids and shorthands

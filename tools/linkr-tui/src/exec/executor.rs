@@ -41,6 +41,28 @@ impl Mode {
             other => Err(format!("unknown execution mode: {other}")),
         }
     }
+
+    /// The mode as the settings file spells it, and what the prompt is built
+    /// from. The round partner of [`Mode::parse`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Manual => "manual",
+            Mode::FullAuto => "full-auto",
+        }
+    }
+
+    /// The next mode in the cycle, and where it starts.
+    ///
+    /// Auto first, because it is the recommended one; Manual last, because the
+    /// cycle should end on the mode that cannot send anything.
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Auto => Mode::FullAuto,
+            Mode::FullAuto => Mode::Manual,
+            Mode::Manual => Mode::Auto,
+        }
+    }
 }
 
 /// The externally-observed device/terminal status the machine reacts to.
