@@ -88,10 +88,6 @@ impl JsonFile {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // After the rename, so the file exists at its final name when the
-        // permission is taken away — restricting the temp file would leave the
-        // renamed one however the umask made it.
-        let _ = restrict(path);
         // Write beside it and rename, so an interrupted write leaves the old
         // file rather than a half-written one.
         let mut tmp = path.clone();
@@ -101,6 +97,12 @@ impl JsonFile {
             if std::fs::write(&tmp, &out).is_ok()
                 && std::fs::rename(&tmp, path).is_ok()
             {
+                // After the rename, not before. The file that stays is the one
+                // the umask made — 0664 on a group-friendly default — and this
+                // file holds the model's API key, so restricting it is the whole
+                // point. Doing it earlier restricts a path nothing has written,
+                // and the renamed file keeps whatever the umask gave it.
+                let _ = restrict(path);
                 return;
             }
             // A collision on the temp name is the only recoverable failure; a
@@ -391,14 +393,13 @@ mod tests {
 
     /// The atomic write leaves a single file behind and no temp litter, even
     /// across several mutations.
-    #[test]
     /// The file is 0600 on unix, because it holds the model's API key.
     ///
     /// The LAN token store next to it is restricted the same way and for the
     /// same reason; a credential that survives one `ls` is a credential that
     /// survived.
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn the_state_file_is_not_world_readable() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp("state-perm");

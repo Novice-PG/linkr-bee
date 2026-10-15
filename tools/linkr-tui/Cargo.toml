@@ -7,6 +7,11 @@ license = "Apache-2.0"
 repository = "https://github.com/radxa/linkr-bee"
 authors = ["Linkr Bee contributors"]
 
+[features]
+default = ["cli", "tui"]
+cli = []
+tui = []
+
 [[bin]]
 name = "linkr"
 path = "src/main.rs"

@@ -5,6 +5,11 @@
 //! library so it can be tested without a TTY.
 
 use std::io::{self, Stdout};
+
+// Only the build with a renderer installs a panic hook: a CLI build that fails
+// prints its own error and exits, and a hook that restored a terminal nobody
+// took over would be a hook doing nothing.
+#[cfg(feature = "tui")]
 use std::panic;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,6 +40,9 @@ use linkr_tui::{dialogs, palette};
 
 /// How often a frame is repainted with no input: the clock and the busy
 /// indicator move on this beat, and it is slow enough to cost nothing.
+/// The interface's beat. Only the build with a renderer pings it: the CLI half
+/// ends without a loop, so a tick constant there is a constant nobody reads.
+#[cfg(feature = "tui")]
 const TICK: Duration = Duration::from_millis(250);
 
 const ABOUT: &str = "Terminal over BLE Nordic UART Service for Linkr Bee bridge";
@@ -532,10 +540,15 @@ fn parse_size(prog: &str, raw: &str) -> (u16, u16) {
 /// Restores the terminal however the program leaves: on a normal return, on an
 /// error, and on a panic. Leaving a terminal in raw mode is the bug that makes
 /// a TUI unshippable, so it is handled in one place rather than at each exit.
+/// Entered when the interface takes the terminal over, undone however the
+/// program leaves. Only the build with a renderer has one: a CLI build never
+/// takes the terminal, so a guard would be guarding nothing.
+#[cfg(feature = "tui")]
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
+#[cfg(feature = "tui")]
 impl TerminalGuard {
     fn enter() -> io::Result<TerminalGuard> {
         enable_raw_mode()?;
@@ -568,6 +581,7 @@ impl TerminalGuard {
     }
 }
 
+#[cfg(feature = "tui")]
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         self.restore();
@@ -576,6 +590,8 @@ impl Drop for TerminalGuard {
 
 /// Undo raw mode and the alternate screen without a handle to the terminal,
 /// for the panic hook and for the guard's own drop.
+/// Undo raw mode and the alternate screen without a handle, for the panic hook.
+#[cfg(feature = "tui")]
 fn restore_best_effort() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
@@ -620,6 +636,11 @@ fn main() -> io::Result<()> {
 
     // A scan answers a question nothing else can — is the board on the air at
     // all — so it runs before a dial is even considered and stops afterwards.
+    //
+    // Gated on `cli` because it is the one request that needs no interface at
+    // all: in a build with the interface only, a `--scan` would have to open a
+    // terminal to do something that takes three seconds and prints three lines.
+    #[cfg(feature = "cli")]
     if args.scan {
         match cli::scan_devices(args.scan_timeout) {
             Ok(devices) => {
@@ -790,7 +811,13 @@ fn main() -> io::Result<()> {
     // that do the asking first, which is `--no-terminal` and
     // `--cli-then-tui` alike — what separates them is what happens *after*,
     // and that belongs below rather than in the condition here.
+    //
+    // Gated on `cli`. The mode is read with it, because in a build without it
+    // there is no branch that reads the mode and an unused binding is a warning
+    // the next reader has to explain.
+    #[cfg(feature = "cli")]
     let mode = Mode::from(&args, &prog);
+    #[cfg(feature = "cli")]
     if mode != Mode::Tui {
         if !args.quiet && app.session.is_live() {
             eprintln!("connected to {}", app.session.describe());
@@ -832,7 +859,17 @@ fn main() -> io::Result<()> {
         }
     }
 
-    run(&mut app)
+    // The interface half. Reached when the command line asked for it and the
+    // asking half did not end the program; compiled out of a build with no
+    // renderer, where there is nothing to hand `app` to. The result is bound
+    // rather than returned so a build with the interface off still has
+    // something to answer, and an error out of the event loop is not dropped
+    // on the floor.
+    #[cfg(feature = "tui")]
+    let outcome = run(&mut app);
+    #[cfg(not(feature = "tui"))]
+    let outcome: io::Result<()> = Ok(());
+    outcome
 }
 
 /// Bring the agent's durable state back into the view.
@@ -925,6 +962,8 @@ fn fit_pane(terminal: &Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io:
 }
 
 /// The event loop: paint, then wait for input or the next tick.
+/// The interface half, which a build without a renderer has no call to.
+#[cfg(feature = "tui")]
 fn run(app: &mut App) -> io::Result<()> {
     let mut guard = TerminalGuard::enter()?;
 
@@ -941,6 +980,8 @@ fn run(app: &mut App) -> io::Result<()> {
     outcome
 }
 
+/// The loop that drains the keyboard, on the same runtime the transport built.
+#[cfg(feature = "tui")]
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         // Resize before the pump: the bytes about to arrive are painted at the
