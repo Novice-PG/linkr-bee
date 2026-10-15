@@ -10,15 +10,18 @@
 //!
 //! The LLM transport is still outside this crate. A model is a network service
 //! the host process speaks to over HTTPS, and this crate is deliberately
-//! zero-dependency — so the transport is a seam, not a missing piece, and what
-//! went in around it is the part that decides what may be sent at all:
-//! [`policy`]. That module is where a prompt injection either lands or does not,
-//! and it was rewritten rather than transliterated because the version it is
-//! based on misses `rm -Rf` and `chmod -R`. See its header.
+//! zero-dependency — so the transport is a seam, not a missing piece.
+//!
+//! The execution policy is *not* missing and never was: it lives in
+//! `src/exec/approval.rs` and `src/exec/policy.rs`, which port it from the same
+//! `web/agent_execution_policy.js`, and which the assistant view reaches through
+//! `crate::exec::executor::Mode`. A second copy of it wrote itself into this
+//! module in `6e2681f` and `8abad99`, having been written without looking; it
+//! was removed in the commit that added this note, and nothing here referenced
+//! either copy.
 
 pub mod config;
 pub mod notes;
-pub mod policy;
 pub mod redact;
 pub mod report;
 pub mod session;
