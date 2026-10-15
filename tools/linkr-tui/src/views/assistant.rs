@@ -413,26 +413,17 @@ fn export_report(app: &mut App) {
         })
         .collect();
     let stamp = app.environment_stamp();
-    let generated = crate::agent::report::ReportExecution {
-        id: String::new(),
-        payload: String::new(),
-        delivery: String::new(),
-        execution_status: String::new(),
-        exit_code: None,
-        observation: String::new(),
-        error: String::new(),
-        download_path: String::new(),
-        download_bytes: None,
-        download_sha256: String::new(),
-        evidence: String::new(),
-    };
+    // An empty execution list, not a list holding one blank record. The view
+    // holds no execution log — the executor is what would fill one — and a
+    // report that renders a section header over an empty row is noise that
+    // looks like a failed execution rather than an absent one.
     let report = crate::agent::report::build_task_report(
         zh,
         &key,
         &format!("{stamp}"),
         task.as_ref(),
         &earlier,
-        &[generated],
+        &[],
         &notes,
     );
     let copied = crate::app::osc52_copy(&report);
