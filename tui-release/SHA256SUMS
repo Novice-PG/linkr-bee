@@ -2,5 +2,11 @@ df04e90333a825e7ad20302f1440f9b1fdc6066a820bb59f5adfad60cfd4b0b9  linux/linkr_1.
 f6750373bb131078cc34da8ef3a8880ac53a83a16bc144542c17a77d209a83c5  linux/linkr_1.0.0_arm64.deb
 4f360b91d603ba3100a64ed2ccb1b66dc28724b5e0b84e6dcf95b01d2a93acf8  linux/linkr_1.0.0_armhf.deb
 c3ed892ddf04d7e6af95adb3e8ab1846595afcf6138ea9329225a84e10c11378  linux/linkr_1.0.0_i386.deb
+82a6650c94d1e5e1a768b03e35df4c15d7de573b2df5fe99a52d5aa6d3b8d3ac  linux/linkr-1.0.0-aarch64-unknown-linux-gnu.tar.gz
+10f8f957e0ee105533e607a37547d2056b43ac475a3897df73d7f4f091e42571  linux/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+056b36d0ce58f649ddc899be531f19a1692a242f6b755de8615a0a1968fba695  macos/linkr-1.0.0-aarch64-apple-darwin.tar.gz
+002bd6e8e4bdd0d26ac0731b0a529705a6303fe4f04c88789075898f6b18a67b  macos/linkr-1.0.0-x86_64-apple-darwin.tar.gz
+846ea0b77394927ea871474ad42c101edcb97a762a0f03457c14876fe4d0c891  windows/linkr-1.0.0-aarch64-pc-windows-msvc.tar.gz
 a3cec1ec9c2e8f9341388a0cae552a407a51d3bf1804569b5db68d0e3af416f4  windows/linkr-1.0.0-i686-pc-windows-gnu.tar.gz
-9e29502851aef560d42d8f693179b494655637ae3413f2dc75c0b84b09bd5588  windows/linkr-1.0.0-x86_64-pc-windows-gnu.tar.gz
+bdea0973f9c2a22a408078ef733d4f33e819562b5a5582e3b931f08147c97d41  windows/linkr-1.0.0-x86_64-pc-windows-gnu.tar.gz
+f9ff3290dcf2ff1c0533cd8e2a55a6f1e7ef51870b740f517775adb0fca22365  windows/linkr-1.0.0-x86_64-pc-windows-msvc.tar.gz
