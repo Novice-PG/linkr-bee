@@ -95,6 +95,19 @@ impl BleScan {
     /// are all ordinary facts about the machine and all things a user can act
     /// on, unlike a bug in this program.
     pub fn start(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        self.listen(timeout, false)
+    }
+
+    /// Start the startup scan: the same listener, with one difference — it
+    /// stops at the first board that answers instead of at the end of the
+    /// window, because a start that waits out a full scan for a board already
+    /// in front of the user is a start that feels broken. See
+    /// [`crate::cli::scan_first_board`].
+    pub fn start_first_board(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        self.listen(timeout, true)
+    }
+
+    fn listen(&mut self, timeout: std::time::Duration, first_board: bool) -> Result<(), String> {
         if self.running {
             return Err("a scan is already running".to_string());
         }
@@ -108,7 +121,11 @@ impl BleScan {
         // back with nothing.
         let (fail_tx, fail_rx) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
-            let outcome = crate::cli::scan_devices(timeout);
+            let outcome = if first_board {
+                crate::cli::scan_first_board(timeout)
+            } else {
+                crate::cli::scan_devices(timeout)
+            };
             match outcome {
                 Ok(devices) => {
                     let _ = tx.send(devices);
@@ -331,6 +348,54 @@ const LAN_TOKEN_MASK: &str = "******";
 /// looking elsewhere, and three rows is not a history.
 pub const MAX_LOG: usize = 200;
 
+/// How long a WiFi action waits for its `@event wifi` ending before the
+/// status is read back instead.
+///
+/// The bridge's own WiFi operation gives up at thirty seconds, and this adds
+/// room for the radio's disconnect and recovery cycle — the web client sizes
+/// its fallback the same way. A bridge that sends no phases is then answered
+/// by the read rather than by waiting forever.
+const WIFI_EVENT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// A WiFi action whose `@event wifi` ending the network view is waiting on.
+///
+/// `@w=` and `@w off` are answered twice: first with an `OK` that only means
+/// the request was queued, and then with the phases of an asynchronous
+/// operation whose ending — `ready`, `failed` or `off` — carries the `FINAL`
+/// flag. The ending is the answer that matters, and remembering which
+/// operation this view asked for is what keeps a background lease renewal
+/// from claiming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiOperation {
+    /// The request id the action went out with, which its phases repeat.
+    pub id: u32,
+    /// The network the command named — the ending does not repeat it. Empty
+    /// for `@w off`, which names none.
+    pub ssid: String,
+    /// When to stop waiting for the ending and read the status back.
+    pub until: Instant,
+}
+
+impl WifiOperation {
+    /// The operation an accessory command starts, under the id it went out
+    /// with and the window its ending has.
+    ///
+    /// `@w=<ssid>,<password>` names the network it is bringing up; the
+    /// password is dropped right here and kept nowhere — only the frame has
+    /// a use for it.
+    fn new(id: u32, command: &str, until: Instant) -> WifiOperation {
+        WifiOperation {
+            id,
+            ssid: command
+                .strip_prefix("@w=")
+                .and_then(|rest| rest.split(',').next())
+                .unwrap_or("")
+                .to_string(),
+            until,
+        }
+    }
+}
+
 /// Everything one frame paints.
 ///
 /// Not `Clone`: the session owns a live link, and a second copy of a session is
@@ -401,6 +466,9 @@ pub struct App {
     pub diagnostics: DiagnosticsState,
     /// WiFi/WebDAV management state for the network view.
     pub network: crate::views::network::NetworkState,
+    /// The WiFi action whose `@event wifi` phases the view is still waiting
+    /// on, if any. See [`WifiOperation`].
+    pub wifi_operation: Option<WifiOperation>,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -442,6 +510,12 @@ pub struct App {
     /// printed frame from writing to the user's real settings file. See
     /// [`App::save_settings`].
     pub settings: Option<crate::settings::SettingsStore>,
+    /// Where tokens the bridge itself reported are remembered, keyed by the
+    /// address a LAN dial would go to. `None` until `main` opens it, which is
+    /// what keeps a test suite from writing a token into the user's real
+    /// store — and what a test sets to a store with no path of its own to
+    /// exercise the remembering without touching the disk.
+    pub lan_store: Option<crate::lan_token_store::TokenStore>,
     /// Whether a copy also goes to the desktop's own clipboard tool (`xclip`
     /// and its kin), and not only through OSC 52. `false` until `main` asks for
     /// it, which is also what the tests get: a suite that spawned `wl-copy`
@@ -498,6 +572,14 @@ pub struct App {
     /// Where the bytes on the wire are recorded, when the command line asked
     /// for them. See `trace`.
     pub trace: crate::trace::ByteTrace,
+    /// Where a trace asked for from the interface goes *instead of* standard
+    /// error, when standard error is the terminal this program is drawing in.
+    ///
+    /// Set by `main` once, before the first frame: the decision belongs to the
+    /// terminal the program was handed, and the App only carries it to the
+    /// palette's switch. `None` means stderr is the sink — a file, a pipe, or
+    /// a test harness, none of which the trace can hurt.
+    pub trace_file: Option<std::path::PathBuf>,
     /// Whether a typed line is held until Enter, as `--line-mode` asks.
     pub line_mode: bool,
     /// The line being held. Empty unless line mode is on, and cleared when the
@@ -573,6 +655,7 @@ impl Default for App {
             toast_until: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
+            wifi_operation: None,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -584,6 +667,7 @@ impl Default for App {
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             settings: None,
+            lan_store: None,
             desktop_clipboard: false,
             agent_client: None,
             agent_replies: Vec::new(),
@@ -593,6 +677,7 @@ impl Default for App {
             line_mode: false,
             pending_line: String::new(),
             trace: crate::trace::ByteTrace::none(),
+            trace_file: None,
             collect_output: false,
             output: VecDeque::new(),
             talk: Conversation::new(),
@@ -716,22 +801,28 @@ impl App {
         self.state.glyph()
     }
 
-    /// Toggle the theme and return the notice that announces it, so the caller
-    /// can log exactly one message and the wording stays in one place.
-    pub fn toggle_theme(&mut self) -> Notice {
-        self.theme = self.theme.toggled();
-        self.save_settings();
+    /// The theme's name in the interface language, so a notice, a picker row
+    /// and a setting all call it the same word.
+    pub fn theme_name(&self, choice: ThemeChoice) -> &'static str {
         let s = self.strings();
-        let name = match self.theme {
+        match choice {
             ThemeChoice::Dark => s.theme_dark,
             ThemeChoice::Light => s.theme_light,
             ThemeChoice::Nord => s.theme_nord,
             ThemeChoice::Gruvbox => s.theme_gruvbox,
             ThemeChoice::Solarized => s.theme_solarized,
             ThemeChoice::Dracula => s.theme_dracula,
-        };
+        }
+    }
+
+    /// Keep `choice` as the theme and remember it, returning the notice that
+    /// announces it so the caller can log exactly one message.
+    pub fn keep_theme(&mut self, choice: ThemeChoice) -> Notice {
+        self.theme = choice;
+        self.save_settings();
+        let s = self.strings();
         Notice {
-            text: format!("{}: {}", s.theme_switched_prefix, name),
+            text: format!("{}: {}", s.theme_switched_prefix, self.theme_name(choice)),
             level: NoticeLevel::Info,
         }
     }
@@ -859,6 +950,15 @@ impl App {
             // hang-up released lands on the ordinary way in.
             _ => Transport::Ble,
         };
+        // Switching to LAN is the same door the WiFi answer opens: the `@s?`
+        // that finds the token is asked now, while the BLE link is still up,
+        // so it is in hand by the time Connect is pressed — and a session
+        // with no link to ask over starts from what the store remembers for
+        // the address instead.
+        if self.transport == Transport::Lan {
+            let _ = self.ensure_lan_token();
+            self.seed_lan_token_from_store();
+        }
         self.save_settings();
         Notice {
             text: format!(
@@ -892,19 +992,59 @@ impl App {
         }
     }
 
-    /// Flip the standard-error trace and return the notice announcing it.
+    /// Flip the I/O trace and return the notice announcing it.
     ///
     /// A runtime switch rather than a command-line flag only, because the
     /// question a trace answers — "did what I typed get there" — is usually
     /// asked after something already went wrong.
+    ///
+    /// Where the lines go is the terminal's decision, made once in `main`: to
+    /// standard error when that is a place a trace can land, and to a file
+    /// when standard error *is* the screen — a trace written into the frame
+    /// being painted takes the frame with it. The notice names the file when
+    /// there is one, because a trace nobody can find is a trace nobody reads.
     pub fn toggle_debug_io(&mut self) -> Notice {
-        let on = !self.trace.tracing_stderr();
-        self.trace.set_stderr(on);
+        let on = !self.trace.tracing();
+        if on {
+            match self.trace_file.clone() {
+                Some(path) => {
+                    if self.trace.set_trace_file(&path).is_err() {
+                        // The file could not be opened; a broken screen is
+                        // still better than a silent switch that promised a
+                        // trace and kept none.
+                        self.trace.set_stderr(true);
+                    }
+                }
+                None => self.trace.set_stderr(true),
+            }
+        } else {
+            self.trace.stop_tracing();
+        }
         self.save_settings();
+        self.debug_io_notice(on)
+    }
+
+    /// The notice a launch owes a trace that was already on: the switch that
+    /// turned it on named the file, and a fresh launch writes a fresh one.
+    pub fn tracing_notice(&self) -> Option<Notice> {
+        self.trace.tracing().then(|| self.debug_io_notice(true))
+    }
+
+    /// The words a trace's state is announced with: on or off, and where the
+    /// lines go when they go to a file.
+    fn debug_io_notice(&self, on: bool) -> Notice {
         let s = self.strings();
         let word = if on { s.net_state_on } else { s.net_state_off };
+        let at = if on && self.trace.tracing() && !self.trace.tracing_stderr() {
+            self.trace_file
+                .as_ref()
+                .map(|path| format!(" → {}", path.display()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Notice {
-            text: format!("{}: {}", s.debug_io_label, word),
+            text: format!("{}: {}{at}", s.debug_io_label, word),
             level: NoticeLevel::Info,
         }
     }
@@ -950,7 +1090,19 @@ impl App {
     /// later run should open with, so the write follows the edit rather than
     /// waiting for a dial that may never happen.
     pub fn set_lan_host(&mut self, host: String) {
+        // The token row goes with the address: a bridge's token belongs to
+        // that bridge, so a row that was only showing what was remembered for
+        // the old one is re-read for the new one — while a token somebody
+        // typed by hand stays theirs.
+        if self.lan_token_is_the_remembered_copy() {
+            self.lan_token.clear();
+        }
         self.lan_host = host;
+        // The bridge's own report outranks a remembered older one: written
+        // first, so the seed below hands the row the current token rather
+        // than a copy of the one it replaces.
+        self.remember_captured_token();
+        self.seed_lan_token_from_store();
         self.save_settings();
     }
 
@@ -985,7 +1137,7 @@ impl App {
             theme: Some(self.theme),
             lang: Some(self.lang),
             enter: Some(self.enter),
-            debug_io: self.trace.tracing_stderr(),
+            debug_io: self.trace.tracing(),
         });
     }
 
@@ -1069,11 +1221,10 @@ impl App {
         // closes it — so a user who was on Bluetooth and picks LAN from the
         // palette has the field filled by the time the dial happens. A LAN
         // dial from a standing start has nothing to ask, and answers with the
-        // token the operator typed.
+        // token the operator typed; `ensure` is also a no-op when the session
+        // already has its answer.
         if let Dial::Lan { .. } = dial {
-            if self.ble_connected() {
-                let _ = self.ensure_lan_token();
-            }
+            let _ = self.ensure_lan_token();
         }
         let opened = dial.opened()?;
         // Remembered only once the link opened: a dial that failed is not
@@ -1191,7 +1342,8 @@ impl App {
         if !self.lan_status.token.is_empty() {
             return Some(self.lan_status.token.clone());
         }
-        crate::lan_token_store::TokenStore::load()
+        self.lan_store
+            .as_ref()?
             .token_for(host)
             .map(str::to_string)
     }
@@ -1202,12 +1354,111 @@ impl App {
         !self.lan_token.trim().is_empty() || !self.lan_status.token.is_empty()
     }
 
-    /// The token as the sidebar shows it: stars for one in hand, the unknown
-    /// placeholder for none. The store is not consulted — whether it holds a
+    /// Write a captured token into the store, keyed by the address a LAN dial
+    /// would go to: the row the user typed, or the board's own WiFi address —
+    /// the same fallback [`App::lan_host_effective`] takes.
+    ///
+    /// Nothing is said about it: the session already has the token, and a
+    /// notice about a cache would be noise over the link that works. A store
+    /// that cannot be written, or no address at all, loses nothing this
+    /// session needs.
+    fn remember_lan_token(&mut self, token: &str) {
+        let host = self.lan_host_effective();
+        if host.is_empty() {
+            return;
+        }
+        let Some(store) = self.lan_store.as_mut() else {
+            return;
+        };
+        if store.remember(&host, token).is_ok() {
+            let _ = store.save();
+        }
+    }
+
+    /// Keep a token the bridge itself reported, now that an address for it is
+    /// known.
+    ///
+    /// The store is keyed by the address a dial would go to, and the capture
+    /// can happen while no address is knowable yet — a Bluetooth session
+    /// starts without one and learns it from the WiFi status or from the row
+    /// somebody types it into. Whichever comes first is the first moment the
+    /// token can be kept.
+    fn remember_captured_token(&mut self) {
+        if self.lan_status.token.is_empty() {
+            return;
+        }
+        let token = self.lan_status.token.clone();
+        self.remember_lan_token(&token);
+    }
+
+    /// Whether the token row is only showing the copy remembered for the
+    /// address a LAN dial would go to, rather than something typed by hand.
+    ///
+    /// This is the TUI's stand-in for the web's dirty flag: the store's copy
+    /// may be replaced by what the bridge reports, and follows the address
+    /// when it changes, while a hand-typed token is somebody's own. An empty
+    /// row counts as replaceable, which is what lets a capture fill one.
+    fn lan_token_is_the_remembered_copy(&self) -> bool {
+        let typed = self.lan_token.trim();
+        if typed.is_empty() {
+            return true;
+        }
+        let host = self.lan_host_effective();
+        !host.is_empty()
+            && self
+                .lan_store
+                .as_ref()
+                .is_some_and(|store| store.token_for(&host) == Some(typed))
+    }
+
+    /// Fill the token row from the store, when the row is empty and something
+    /// is remembered for the address a dial would go to.
+    ///
+    /// The address, not the session: a token belongs to the bridge that
+    /// issued it, so a row showing one is a row saying "this bridge has been
+    /// here before".
+    pub fn seed_lan_token_from_store(&mut self) {
+        if !self.lan_token.trim().is_empty() {
+            return;
+        }
+        let host = self.lan_host_effective();
+        let Some(store) = self.lan_store.as_ref() else {
+            return;
+        };
+        if let Some(token) = store.token_for(&host) {
+            self.lan_token = token.to_string();
+        }
+    }
+
+    /// Drop what the store remembers for the address a LAN dial would go to.
+    ///
+    /// `token=none` is the bridge saying its LAN door has no key, and a store
+    /// that kept the old one would hand it to the next session's dial — where
+    /// it reads as a wrong token and a broken bridge rather than a key that
+    /// changed. A store that cannot be written loses nothing this session
+    /// needs.
+    fn forget_lan_token(&mut self) {
+        let host = self.lan_host_effective();
+        if host.is_empty() {
+            return;
+        }
+        let Some(store) = self.lan_store.as_mut() else {
+            return;
+        };
+        if store.forget(&host) {
+            let _ = store.save();
+        }
+    }
+
+    /// The token as the sidebar shows it: stars for one in hand, the bridge's
+    /// own `off` when `@s?` said there is no key to hold, and the unknown
+    /// placeholder otherwise. The store is not consulted — whether it holds a
     /// token is a file read, and a frame is not the place for one.
     pub fn lan_token_text(&self) -> String {
         if self.lan_token_hand() {
             LAN_TOKEN_MASK.to_string()
+        } else if matches!(self.lan_captured, LanCapture::None) {
+            self.strings().lan_token_off.to_string()
         } else {
             self.unknown().to_string()
         }
@@ -1530,12 +1781,13 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     };
                     if let Some((header, payload)) = outcome {
                         if !self.talk.offer(&header, &payload) {
-                            // An answer nobody asked for: a notification from
-                            // the bridge, or a reply to a question a previous
-                            // session left open. Neither is this session's to
-                            // interpret, and both would otherwise be dropped
-                            // with no trace of having arrived.
-                            let _ = (header, payload);
+                            // Not an answer to a question in flight: the
+                            // bridge talking on its own. WiFi provisioning is
+                            // the one that keeps talking past its `OK` — the
+                            // phases of `@event wifi` — and those belong to
+                            // the view; anything else is left uninterpreted
+                            // rather than guessed at.
+                            self.apply_wifi_events(&String::from_utf8_lossy(&payload));
                         }
                         // A scan streams: the bridge answers one network at a
                         // time rather than once at the end, and the list is
@@ -1570,6 +1822,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         if let Some(query) = self.talk.abandon(now) {
             self.report_unanswered(query);
         }
+        // An `@event wifi` ending that never came is given up on the same
+        // beat as an answer's own timeout, and the status is read back
+        // instead.
+        self.expire_wifi_operation(now);
         // A program that asks a question — where is the cursor, how wide is the
         // screen — blocks until it hears back, so the emulator's answers go out
         // on the tick that produced them. Always *after* the feed: an answer is
@@ -1601,6 +1857,12 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     level: NoticeLevel::Info,
                 });
             }
+            // The token is asked the moment there is a link to ask over, the
+            // way the web asks on connect: a user who later switches to LAN
+            // finds the row already in hand rather than learning a fetch is
+            // needed. Links that cannot carry the question (and sessions that
+            // already have their answer) are a no-op by design.
+            let _ = self.ensure_lan_token();
         } else if was_live && !now_live {
             // A quiet dial that died before it was ever announced has nothing
             // left to be quiet about; the next connection is its own news.
@@ -1690,7 +1952,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // A scan opened by hand asks; only the startup scan dials a lone
         // board, and that intent does not leak into this one.
         self.scan_connects_one = false;
-        self.begin_ble_scan()?;
+        self.begin_ble_scan(false)?;
         self.dialog = Some(crate::dialogs::Dialog::DevicePick(
             crate::dialogs::DevicePick {
                 devices: Vec::new(),
@@ -1708,9 +1970,13 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// asked for opens it before the first advertisement arrives — the wait is
     /// the answer's other half — where the startup scan has nothing to say
     /// until it has heard something to say.
-    fn begin_ble_scan(&mut self) -> Result<(), String> {
+    fn begin_ble_scan(&mut self, first_board: bool) -> Result<(), String> {
         self.ble_scan.reset();
-        self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
+        if first_board {
+            self.ble_scan.start_first_board(BLE_SCAN_TIMEOUT)?;
+        } else {
+            self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
+        }
         // A dialog is the top of the modal stack, so it takes the keyboard
         // from the palette rather than joining it underneath: the list is
         // what the next key is for.
@@ -1720,15 +1986,18 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
 
     /// Start the startup scan: the one that dials instead of asking.
     ///
-    /// Same scan and same list as [`App::start_ble_scan`], with two
-    /// differences at the end: a scan that hears exactly one board that speaks
-    /// the serial service dials it quietly — a user who runs this on a bench
-    /// has one board in front of them and did not ask for a chooser or for a
-    /// window announcing it — and only two or more boards put the list up,
-    /// because only then is there a choice to make.
+    /// Same list as [`App::start_ble_scan`], with two differences. The scan
+    /// ends at the first board that answers instead of at the end of the
+    /// window, so a start on a bench where the board is already advertising
+    /// does not sit through a full scan for an answer it has; and a scan that
+    /// hears exactly one board that speaks the serial service dials it quietly
+    /// — a user who runs this on a bench has one board in front of them and
+    /// did not ask for a chooser or for a window announcing it — where two or
+    /// more boards put the list up, because only then is there a choice to
+    /// make.
     pub fn start_ble_scan_connecting_one(&mut self) -> Result<(), String> {
         self.scan_connects_one = true;
-        self.begin_ble_scan()
+        self.begin_ble_scan(true)
     }
 
     /// Stop listening and close the list.
@@ -1875,16 +2144,24 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         self.ble_scan.reset();
     }
 
-    /// Ask for the LAN access token if it is not already in hand.
+    /// Ask for the LAN access token if nobody has yet, and let the caller
+    /// ignore the answer: the capture lands on whichever pump it arrives on.
     ///
     /// `@s?` is the only place the bridge reports its LAN access token, and a
-    /// LAN dial without one is a dial that gets refused. So a caller dialling
-    /// over LAN calls this first, and a link that has already been asked does
-    /// not ask twice: the token is remembered for the session.
+    /// LAN dial without one is a dial that gets refused, so this is called
+    /// wherever the LAN door opens — a link that has just come up, a network
+    /// that has just joined, a transport switched to LAN. Asked once per
+    /// session: the first answer is the session's, `token=none` (auth off)
+    /// counts as one, and a question already in flight is left to come back.
     ///
-    /// Asked here rather than on a flag because the alternative is a user who
-    /// has to know the token exists before they can learn it.
+    /// Asked rather than waited on because the alternative is a user who has
+    /// to know the token exists before they can learn it.
     pub fn ensure_lan_token(&mut self) -> Result<(), String> {
+        if !matches!(self.lan_captured, LanCapture::Unknown)
+            || self.talk.waiting() == Some(Query::Lan)
+        {
+            return Ok(());
+        }
         self.ask_device(Query::Lan)
     }
 
@@ -2008,11 +2285,19 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // the thing going to the bridge: only what is remembered and shown
         // goes through the scrubber.
         let shown = accessory::redact_command(command);
-        let (id, _) = self.talk.ask(query, Instant::now());
+        let now = Instant::now();
+        let (id, _) = self.talk.ask(query, now);
         let frame = crate::protocol::encode_management_request(id, command.as_bytes())
             .map_err(|why| why.message(false).to_string())?;
         if !self.session.send_management(frame) {
             return Err(self.strings().not_connected.to_string());
+        }
+        // A WiFi write is answered twice, and only the phases that follow its
+        // `OK` carry the ending; remembering the operation is what lets them
+        // land on this view. The deadline is for a bridge that never sends
+        // them. See [`WifiOperation`].
+        if query == Query::Wifi {
+            self.wifi_operation = Some(WifiOperation::new(id, command, now + WIFI_EVENT_FALLBACK));
         }
         self.trace.tx_command(&shown);
         self.network.loading = true;
@@ -2051,6 +2336,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             }
             match reply.query {
                 Query::Diagnostics => self.diagnostics.error = Some(error.clone()),
+                // Same reason as an unanswered `@s?`: the bridge saying "no"
+                // to the token question is not news the user can act on, and
+                // the capture is best effort either way.
+                Query::Lan => return,
                 _ => self.network.error = Some(error.clone()),
             }
             self.push_notice(Notice {
@@ -2076,8 +2365,27 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             // `@w?` is a status: the one network the bridge joined, or none.
             Query::Wifi => {
                 if let Some(status) = accessory::parse_wifi_status(&text) {
-                    self.network.wifi = Some(status);
+                    // `OK wifi=accepted` is the bridge saying the write was
+                    // queued, which is not a state the row can wear: the
+                    // ending arrives as `@event wifi` phases. The name it
+                    // carries is kept, though — the ending does not repeat it.
+                    if status.state == "accepted" {
+                        if let Some(operation) = self.wifi_operation.as_mut() {
+                            operation.ssid = status.ssid.clone();
+                        }
+                    } else {
+                        self.network.wifi = Some(status);
+                        // A keyboard standing on a scan result is moved off
+                        // it: with a network joined there is nothing left to
+                        // name.
+                        self.network.settle_focus();
+                    }
                 }
+                // Phases that arrived in the same breath as the `OK` were
+                // folded into this reply rather than reaching the
+                // notification path; they are this operation's ending too.
+                self.apply_wifi_events(&text);
+                self.note_wifi_connected();
             }
             // A scan goes to its own section of the view, filled as the
             // networks are heard — and it can fail *after* being accepted,
@@ -2108,12 +2416,31 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             // is.
             Query::Lan => {
                 if let Some(status) = accessory::parse_lan_status(&text) {
+                    // The row the user would type into is filled the way the
+                    // web fills its field, unless it holds a token somebody
+                    // typed: what was remembered for this address may be
+                    // replaced by the bridge's answer, a hand-typed token may
+                    // not. `token=none` is an answer too — the door has no key
+                    // right now, so the remembered copy of the old one goes
+                    // with it rather than being handed to the next dial as a
+                    // wrong token.
+                    let replaceable = self.lan_token_is_the_remembered_copy();
                     self.lan_status.ws = status.ws;
                     self.lan_status.token = status.token.clone();
                     if status.token.is_empty() {
                         self.lan_captured = LanCapture::None;
+                        if replaceable {
+                            self.lan_token.clear();
+                        }
+                        self.forget_lan_token();
                     } else {
                         self.lan_captured = LanCapture::Captured;
+                        if replaceable {
+                            self.lan_token = status.token.clone();
+                        }
+                        // The session has it now; the store keeps it for the
+                        // sessions that have no BLE link to ask over.
+                        self.remember_lan_token(&status.token);
                     }
                 }
             }
@@ -2125,6 +2452,141 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         }
     }
 
+    /// A network just came up: the LAN door is open.
+    ///
+    /// The token is asked for while the BLE session is still the bearer — the
+    /// way the web asks on connect — and a token captured before an address
+    /// was known is kept under the address that just arrived. Both calls know
+    /// when they have nothing to do.
+    fn note_wifi_connected(&mut self) {
+        if !self.network.wifi_connected() {
+            return;
+        }
+        let _ = self.ensure_lan_token();
+        self.remember_captured_token();
+    }
+
+    /// Fold every `@event wifi` phase in `text` into the view.
+    ///
+    /// Phases reach here from the notification path when nothing claimed
+    /// them, and from a reply's own lines when they arrived before its `OK`
+    /// was read.
+    fn apply_wifi_events(&mut self, text: &str) {
+        for event in text
+            .lines()
+            .filter_map(crate::protocol::parse_wifi_event)
+        {
+            self.apply_wifi_event(&event);
+        }
+    }
+
+    /// Apply one `@event wifi` phase.
+    ///
+    /// Only the action this view asked for drives it — or, with nothing in
+    /// flight, the bridge's own background lifecycle (`operation=0`):
+    /// somebody else's operation must not claim the join a user is waiting
+    /// on.
+    fn apply_wifi_event(&mut self, event: &crate::protocol::WifiEvent) {
+        let ours = match &self.wifi_operation {
+            Some(operation) => event.operation == operation.id,
+            None => event.operation == 0,
+        };
+        if !ours {
+            return;
+        }
+        match event.phase.as_str() {
+            // The radio still working: the row says loading rather than
+            // wearing a state the bridge has not reached yet.
+            "queued" | "connecting" | "dhcp" => {
+                if self.wifi_operation.is_some() {
+                    self.network.loading = true;
+                }
+            }
+            "ready" => {
+                let named = self.finish_wifi_operation();
+                if crate::protocol::wifi_provisioning_complete(event) {
+                    // A background ending does not repeat the name, so the
+                    // one already on the row survives it.
+                    let ssid = if named.is_empty() {
+                        self.network
+                            .wifi
+                            .as_ref()
+                            .map(|wifi| wifi.ssid.clone())
+                            .unwrap_or_default()
+                    } else {
+                        named
+                    };
+                    self.network.wifi = Some(accessory::WifiStatus {
+                        state: "connected".to_string(),
+                        ssid,
+                        ip: event.ip.clone(),
+                    });
+                    self.network.settle_focus();
+                    self.note_wifi_connected();
+                } else {
+                    // Ready without an address yet: the truth about the row
+                    // is in the status, so read it back rather than guess.
+                    let _ = self.ask_device(Query::Wifi);
+                }
+            }
+            // A failed operation leaves no network behind, and the code the
+            // firmware gave is the one useful thing to say about it.
+            "failed" => {
+                self.finish_wifi_operation();
+                self.network.wifi = Some(accessory::WifiStatus {
+                    state: "off".to_string(),
+                    ssid: String::new(),
+                    ip: String::new(),
+                });
+                self.network.error = Some(crate::text::fill(
+                    self.strings().net_wifi_failed,
+                    &[event.result.to_string()],
+                ));
+            }
+            "off" => {
+                self.finish_wifi_operation();
+                self.network.wifi = Some(accessory::WifiStatus {
+                    state: "off".to_string(),
+                    ssid: String::new(),
+                    ip: String::new(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// The operation is over: stop listening for its phases and stop showing
+    /// the view as in flight. Returns the network it named, which the ending
+    /// itself does not repeat.
+    fn finish_wifi_operation(&mut self) -> String {
+        self.network.loading = false;
+        self.wifi_operation
+            .take()
+            .map(|operation| operation.ssid)
+            .unwrap_or_default()
+    }
+
+    /// Give up on an `@event wifi` ending that never came, at `now`.
+    ///
+    /// Uncertain bridges are read, not waited out: when the window passes,
+    /// the action stops claiming events and the status is read back, so a
+    /// firmware that sends no phases still fills the row. The read is a
+    /// question like any other, so it waits for the channel rather than
+    /// replacing whatever is outstanding.
+    fn expire_wifi_operation(&mut self, now: Instant) {
+        let Some(operation) = &self.wifi_operation else {
+            return;
+        };
+        if now < operation.until || self.talk.waiting().is_some() {
+            return;
+        }
+        self.finish_wifi_operation();
+        if self.ask_device(Query::Wifi).is_err() {
+            // Nothing went out to clear the spinner against; stop it here.
+            self.network.loading = false;
+        }
+    }
+
     /// Say that a question went unanswered, and stop the view waiting on it.
     fn report_unanswered(&mut self, query: Query) {
         self.stop_waiting(query);
@@ -2132,6 +2594,11 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         let text = s.mgmt_no_answer.to_string();
         match query {
             Query::Diagnostics => self.diagnostics.error = Some(text.clone()),
+            // A `@s?` nobody answered is not a failure the user did anything
+            // about: the capture is best effort — the row still takes a token
+            // by hand and the store may already have one — and firmware that
+            // does not know the question should not get a toast per link.
+            Query::Lan => return,
             _ => self.network.error = Some(text.clone()),
         }
         self.push_notice(Notice {
@@ -2184,7 +2651,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     ///
     /// Returns the notice rather than pushing it, so the wording stays in one
     /// place with every other notice this key produces — `toggle_sidebar()` and
-    /// `toggle_theme()` do the same, and a caller that formats its own is a
+    /// `keep_theme()` do the same, and a caller that formats its own is a
     /// caller whose wording can drift from the language table.
     pub fn copy_screen(&mut self) -> Notice {
         let text = self.terminal.visible_text();
@@ -2321,6 +2788,29 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         }
     }
 
+    /// Ask the bridge what it is, for the diagnostics view's own key. Why not
+    /// is said out loud: a keystroke that does nothing is indistinguishable
+    /// from one that was not heard.
+    pub fn refresh_diagnostics(&mut self) {
+        if let Err(why) = self.ask_device(Query::Diagnostics) {
+            self.push_notice(Notice {
+                text: why,
+                level: NoticeLevel::Error,
+            });
+        }
+    }
+
+    /// Walk the diagnostics document towards its top.
+    pub fn scroll_diagnostics_up(&mut self, lines_up: usize) {
+        self.diagnostics.scroll = self.diagnostics.scroll.saturating_sub(lines_up);
+    }
+
+    /// Walk it towards its end. The painter pins a scroll past the last
+    /// screenful to that last screenful, so the document never scrolls onto
+    /// blank paper.
+    pub fn scroll_diagnostics_down(&mut self, lines_down: usize) {
+        self.diagnostics.scroll = self.diagnostics.scroll.saturating_add(lines_down);
+    }
 }
 
 /// The networks out of a `@w scan` reply.
@@ -2563,42 +3053,26 @@ mod tests {
         assert_eq!(app.baud_text(), "115200");
     }
 
-    /// A theme toggle flips the choice and returns the notice for it, in the
-    /// current language — the one place the wording is written.
+    /// Keeping a theme sets it and returns the notice for it, in the current
+    /// language — the one place the wording is written.
     #[test]
-    fn toggling_the_theme_announces_the_new_one() {
+    fn keeping_a_theme_announces_it_by_name() {
         let mut app = App {
             lang: Lang::Zh,
             ..App::default()
         };
-        let notice = app.toggle_theme();
+        let notice = app.keep_theme(ThemeChoice::Light);
         assert_eq!(app.theme, ThemeChoice::Light);
         assert_eq!(notice.text, "主题: 浅色");
         assert_eq!(notice.level, NoticeLevel::Info);
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Nord);
-        assert_eq!(notice.text, "主题: Nord");
+        assert_eq!(app.theme_name(ThemeChoice::Nord), "Nord");
 
         // The classics announce themselves by name, which is the same word in
         // either language.
         app.lang = Lang::En;
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Gruvbox);
+        let notice = app.keep_theme(ThemeChoice::Gruvbox);
         assert_eq!(notice.text, "Theme: Gruvbox");
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Dracula);
-        assert_eq!(notice.text, "Theme: Dracula");
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Solarized);
-        assert_eq!(notice.text, "Theme: Solarized");
-
-        // And the ring comes home.
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Dark);
-        assert_eq!(notice.text, "Theme: dark");
-        let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Light);
-        assert_eq!(notice.text, "Theme: light");
+        assert_eq!(app.theme_name(ThemeChoice::Solarized), "Solarized");
     }
 
     /// Closing the rail moves the focus with it. Otherwise the arrows would
@@ -3159,6 +3633,33 @@ mod tests {
         assert!(app.terminal.autoscroll);
     }
 
+    /// The diagnostics view's two keys do what its hint says: `r` asks the
+    /// bridge, and PgUp/PgDn walk the document — which opens at its top again
+    /// the moment a fresh read lands.
+    #[test]
+    fn the_diagnostics_view_refreshes_and_scrolls() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.refresh_diagnostics();
+        assert_eq!(app.talk.waiting(), Some(Query::Diagnostics), "r asked");
+        let id = asked_id(&wire);
+
+        app.scroll_diagnostics_down(10);
+        app.scroll_diagnostics_down(10);
+        assert_eq!(app.diagnostics.scroll, 20);
+        app.scroll_diagnostics_up(5);
+        assert_eq!(app.diagnostics.scroll, 15);
+        app.scroll_diagnostics_up(99);
+        assert_eq!(app.diagnostics.scroll, 0, "the top is as high as it goes");
+
+        app.scroll_diagnostics_down(10);
+        wire.feed_management(answer(
+            id,
+            "@info fw version=0.2.0 zephyr=4.4.1\n@info done",
+        ));
+        assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
+        assert_eq!(app.diagnostics.scroll, 0, "a new document opens at its top");
+    }
+
     /// Walking back down is a step towards the tail, and reaching the tail
     /// resumes following — a user who scrolled all the way back asked for the
     /// bottom, which is the one place the console follows the device again.
@@ -3691,6 +4192,380 @@ mod tests {
         assert_eq!(wifi.ip, "192.168.1.44");
     }
 
+    /// A joined network is a moment the LAN door opens: `@s?` is at the
+    /// bridge on the BLE link that is already up — nobody has to know the
+    /// token exists before they can learn it — and the answer leaves it in
+    /// hand, and in the row a LAN dial is built from, for the dial that
+    /// follows.
+    #[test]
+    fn a_joined_network_fetches_the_lan_token() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.ask_device(Query::Wifi).expect("asked");
+        let id = asked_id(&wire);
+        // No address in the answer: this is the session's capture, and
+        // nothing is remembered for a bridge with no address to file it
+        // under.
+        wire.feed_management(answer(id, "OK wifi=connected,ssid=BenchNet"));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+
+        assert_eq!(
+            app.talk.waiting(),
+            Some(Query::Lan),
+            "the token question is in the air"
+        );
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK ws=on token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| app.lan_token_hand()));
+        assert!(matches!(app.lan_captured, LanCapture::Captured));
+        assert_eq!(app.lan_status.token, "0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            app.lan_token, "0123456789abcdef0123456789abcdef",
+            "the row a LAN dial is built from is filled too, the way the web \
+             fills its field"
+        );
+        assert_eq!(
+            app.lan_token_text(),
+            LAN_TOKEN_MASK,
+            "and the row still shows that one is in hand, never which"
+        );
+    }
+
+    /// A join is answered twice: `OK wifi=accepted` only queues it, and the
+    /// ending — whether the radio came up, and on which address — arrives as
+    /// `@event wifi` phases. The row must follow the ending, not the ack.
+    #[test]
+    fn a_join_follows_its_events_past_the_ack() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.set_wifi("BenchNet", "hunter2").expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK wifi=accepted,ssid=BenchNet"));
+        assert!(pump_until(&mut app, |app| app.talk.waiting().is_none()));
+        assert!(
+            !app.network.wifi_connected(),
+            "queued is not a state the row may wear"
+        );
+        assert_eq!(
+            app.wifi_operation.as_ref().map(|operation| operation.id),
+            Some(id),
+            "the view is still waiting on that operation"
+        );
+
+        // The radio working is the view saying loading, not the old state
+        // getting a new name.
+        wire.feed_management(partial(
+            id,
+            &format!("@event wifi operation={id} phase=connecting result=0"),
+        ));
+        assert!(pump_until(&mut app, |app| app.network.loading));
+        assert!(!app.network.wifi_connected());
+
+        wire.feed_management(answer(
+            id,
+            &format!(
+                "@event wifi operation={id} phase=ready result=0 state=connected ip=192.168.4.20"
+            ),
+        ));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+        let wifi = app.network.wifi.clone().expect("the ending filled the row");
+        assert_eq!(wifi.ssid, "BenchNet", "the name the command carried");
+        assert_eq!(wifi.ip, "192.168.4.20");
+        assert!(
+            app.wifi_operation.is_none(),
+            "the ending closes the operation"
+        );
+        assert!(!app.network.loading, "and stops the spinner");
+    }
+
+    /// A failed join says which code the firmware gave and leaves no network
+    /// behind — the row goes back to saying there is none.
+    #[test]
+    fn a_failed_join_says_which_code_the_bridge_gave() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.set_wifi("Nope", "hunter2").expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK wifi=accepted,ssid=Nope"));
+        assert!(pump_until(&mut app, |app| app.talk.waiting().is_none()));
+
+        wire.feed_management(answer(
+            id,
+            &format!("@event wifi operation={id} phase=failed result=-5 error=no_ap"),
+        ));
+        assert!(pump_until(&mut app, |app| app.network.error.is_some()));
+        let error = app.network.error.clone().expect("worded");
+        assert!(error.contains("-5"), "{error} names the firmware's code");
+        assert_eq!(
+            app.network.wifi.as_ref().map(|wifi| wifi.state.as_str()),
+            Some("off"),
+            "a failed join leaves the row saying no network"
+        );
+        assert!(app.wifi_operation.is_none());
+        assert!(!app.network.loading);
+    }
+
+    /// Another operation's phases — a different request id — do not drive a
+    /// view that is waiting on its own join.
+    #[test]
+    fn another_operations_event_does_not_claim_the_join() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.set_wifi("BenchNet", "hunter2").expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK wifi=accepted,ssid=BenchNet"));
+        assert!(pump_until(&mut app, |app| app.talk.waiting().is_none()));
+
+        wire.feed_management(answer(
+            id + 1,
+            &format!(
+                "@event wifi operation={} phase=ready result=0 state=connected ip=10.9.9.9",
+                id + 1
+            ),
+        ));
+        // A beat for the event to be delivered and folded — into nothing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            !app.network.wifi_connected(),
+            "a stranger's ending is not this join's"
+        );
+        assert!(app.wifi_operation.is_some(), "and the join still waits");
+    }
+
+    /// With nothing of its own in flight the view still follows the bridge's
+    /// background lifecycle (`operation=0`): a link coming up or dropping
+    /// under it is the row's business either way.
+    #[test]
+    fn the_bridges_own_lifecycle_reaches_the_view() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        wire.feed_management(answer(
+            0,
+            "@event wifi operation=0 phase=ready result=0 state=connected ip=192.168.7.2",
+        ));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+        assert_eq!(
+            app.network.wifi.as_ref().map(|wifi| wifi.ip.as_str()),
+            Some("192.168.7.2")
+        );
+
+        wire.feed_management(answer(0, "@event wifi operation=0 phase=off result=0"));
+        assert!(pump_until(&mut app, |app| {
+            app.network
+                .wifi
+                .as_ref()
+                .is_some_and(|wifi| wifi.state == "off")
+        }));
+    }
+
+    /// Phases that arrive before the ack was read are folded into its reply
+    /// rather than dropped: the ending still lands.
+    #[test]
+    fn an_ending_folded_into_the_ack_still_lands() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.set_wifi("BenchNet", "hunter2").expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            &format!(
+                "OK wifi=accepted,ssid=BenchNet\n\
+                 @event wifi operation={id} phase=ready result=0 state=connected ip=192.168.4.20"
+            ),
+        ));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+        let wifi = app.network.wifi.clone().expect("the ending filled the row");
+        assert_eq!(wifi.ssid, "BenchNet");
+        assert_eq!(wifi.ip, "192.168.4.20");
+        assert!(app.wifi_operation.is_none());
+    }
+
+    /// A bridge that never sends the ending is read instead of waited out:
+    /// when the window passes, the status is asked for and the row fills from
+    /// that answer.
+    #[test]
+    fn a_join_without_an_ending_is_read_back_instead() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.set_wifi("BenchNet", "hunter2").expect("sent");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK wifi=accepted,ssid=BenchNet"));
+        assert!(pump_until(&mut app, |app| app.talk.waiting().is_none()));
+
+        // The window is a wall-clock one; this is the same pump with the
+        // clock a second past it.
+        app.expire_wifi_operation(
+            std::time::Instant::now()
+                + WIFI_EVENT_FALLBACK
+                + std::time::Duration::from_secs(1),
+        );
+        assert!(app.wifi_operation.is_none(), "the action stopped waiting");
+        assert_eq!(
+            app.talk.waiting(),
+            Some(Query::Wifi),
+            "the status is read back instead"
+        );
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK wifi=connected,ssid=BenchNet,ip=192.168.4.20",
+        ));
+        assert!(pump_until(&mut app, |app| app.network.wifi_connected()));
+        assert_eq!(
+            app.network.wifi.as_ref().map(|wifi| wifi.ip.as_str()),
+            Some("192.168.4.20")
+        );
+    }
+
+    /// The store is keyed by the address a dial would go to, and a Bluetooth
+    /// session starts without one: what the bridge reported is remembered the
+    /// moment an address becomes known — here, the WiFi status naming it.
+    #[test]
+    fn a_captured_token_is_remembered_once_the_address_is_known() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.lan_store = Some(crate::lan_token_store::TokenStore::default());
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK ws=on token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| matches!(
+            app.lan_captured,
+            LanCapture::Captured
+        )));
+        assert!(
+            app.lan_store.as_ref().is_some_and(|store| store.is_empty()),
+            "no address yet, so nothing is filed under an empty one"
+        );
+
+        app.ask_device(Query::Wifi).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK wifi=connected,ssid=BenchNet,ip=192.168.1.44",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.lan_store.as_ref().is_some_and(|store| !store.is_empty())
+        }));
+        assert_eq!(
+            app.lan_store
+                .as_ref()
+                .and_then(|store| store.token_for("192.168.1.44")),
+            Some("0123456789abcdef0123456789abcdef"),
+            "remembered under the address the dial would go to"
+        );
+    }
+
+    /// The other moment the address becomes known: somebody types it into the
+    /// row. The token the bridge reported goes in under it, so a later session
+    /// with no Bluetooth has something to seed the row from.
+    #[test]
+    fn naming_the_address_remembers_a_captured_token() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.lan_store = Some(crate::lan_token_store::TokenStore::default());
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK ws=on token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| matches!(
+            app.lan_captured,
+            LanCapture::Captured
+        )));
+
+        app.set_lan_host("203.0.113.9".into());
+        assert_eq!(
+            app.lan_store
+                .as_ref()
+                .and_then(|store| store.token_for("203.0.113.9")),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert!(app.lan_token_hand(), "and the row is in hand for the dial");
+    }
+
+    /// The token is asked for the moment a Bluetooth link comes up, the way
+    /// the web asks on connect: a user who switches to LAN later finds the row
+    /// already filled rather than learning a fetch is needed. Once per link,
+    /// not once per pump.
+    #[test]
+    fn a_bluetooth_link_asks_for_the_lan_token_as_it_comes_up() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        assert_eq!(
+            app.talk.waiting(),
+            Some(Query::Lan),
+            "the link coming up is the moment the token is asked"
+        );
+
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK ws=on token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            matches!(app.lan_captured, LanCapture::Captured)
+        }));
+        assert_eq!(app.lan_token, "0123456789abcdef0123456789abcdef");
+        assert!(
+            wire.take_management().is_empty(),
+            "asked once, not once per pump"
+        );
+    }
+
+    /// `token=none` is the bridge saying its LAN door has no key: the session
+    /// records that as an answer — not as "nothing heard yet" — and a LAN dial
+    /// carries no token at all.
+    #[test]
+    fn a_bridge_without_a_lan_token_says_so() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK ws=off token=none"));
+        assert!(pump_until(&mut app, |app| matches!(
+            app.lan_captured,
+            LanCapture::None
+        )));
+        assert!(app.lan_token.is_empty(), "there is no token to hold");
+        assert!(!app.lan_token_hand());
+        assert_eq!(
+            app.lan_token_text(),
+            app.strings().lan_token_off,
+            "the row says the door is open, not that nobody asked"
+        );
+
+        app.lan_host = "203.0.113.7".into();
+        let Dial::Lan { token, .. } = app.lan_dial().expect("an address is a dial") else {
+            panic!("a LAN dial");
+        };
+        assert_eq!(token, None, "auth off means no token goes to the socket");
+    }
+
+    /// A link that cannot carry the question is not asked it: a stdio session
+    /// has no management channel, and the capture stays quiet rather than
+    /// filling a view with an error nobody can act on.
+    #[test]
+    fn a_link_without_a_management_channel_is_not_asked_for_a_token() {
+        let (_app, wire) = connected(Lang::En);
+        assert!(
+            wire.take_management().is_empty(),
+            "a plain link has nothing to ask over"
+        );
+    }
+
+    /// A token somebody typed is theirs: setting a new address does not decide
+    /// it was meant for the old bridge and drop it, while a row that was only
+    /// showing the remembered copy follows the address.
+    #[test]
+    fn a_typed_token_survives_a_new_address() {
+        let mut app = App {
+            lan_token: "0123456789abcdef0123456789abcdef".into(),
+            ..App::default()
+        };
+        app.set_lan_host("203.0.113.9".into());
+        assert_eq!(
+            app.lan_token, "0123456789abcdef0123456789abcdef",
+            "an address change does not throw away what somebody typed"
+        );
+    }
+
     /// Setting the UART asks for the setting back, so the frame shows what the
     /// bridge is running rather than what was meant. A firmware that clamps
     /// 1000000 to something it can reach must therefore be believed.
@@ -3719,7 +4594,7 @@ mod tests {
         app.ask_device(Query::Diagnostics).expect("asked");
         assert!(app.diagnostics.loading);
         // Nothing answers. Wait past the conversation's own patience.
-        thread::sleep(crate::device::REPLY_TIMEOUT + Duration::from_millis(50));
+        thread::sleep(Query::Diagnostics.patience() + Duration::from_millis(50));
         app.pump();
         assert!(!app.diagnostics.loading, "it stopped waiting");
         assert!(app.diagnostics.error.is_some(), "and said why");

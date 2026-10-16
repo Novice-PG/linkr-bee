@@ -91,11 +91,49 @@ const ADDRESS_DIGITS: usize = 12;
 ///
 /// Ten seconds is long enough to catch a device that advertises on a slow
 /// interval — and these bridge firmwares do, to save power — and short enough
-/// that "wrong board" is answered rather than waited out.
+/// that "wrong board" is answered rather than waited out. The search ends the
+/// moment a candidate answers, so this is a ceiling and not a delay: a board
+/// in front of the user is dialled in the first second of it.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long to wait for the connection to complete once one is chosen.
+/// How often the adapter's results are looked at while listening.
+///
+/// BlueZ reports an advertisement as soon as it hears one, so a quarter of a
+/// second is invisible to the user and kind to the radio.
+const SCAN_POLL: Duration = Duration::from_millis(250);
+
+/// How long `open` waits for the reactor to report one way or the other.
+///
+/// The reactor retries inside this window rather than the caller retrying the
+/// link: the state of a failed attempt is known there, and the interface is
+/// owed the real reason the moment there is one — not twenty seconds of
+/// waiting for an answer that was never coming.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long one dial attempt may take before it counts as failed.
+///
+/// btleplug's own ceiling is half a minute; that is a bound on the D-Bus call,
+/// not on a person's patience, and a screen that says "connecting" for it is
+/// worse than an attempt that starts over from nothing.
+const DIAL_ATTEMPT: Duration = Duration::from_secs(8);
+
+/// The wall-clock budget every retry loop gets: three backoffs' worth.
+const RETRY_BUDGET: Duration = Duration::from_millis(2250);
+
+/// How long to wait between two attempts of the same operation.
+const RETRY_BACKOFF: Duration = Duration::from_millis(750);
+
+/// How often to look for a link somebody else is dialling, while a busy
+/// answer says one is being dialled right now.
+const RETRY_POLL: Duration = Duration::from_millis(250);
+
+/// How long a single BlueZ call may take before the adapter is called wedged.
+///
+/// Generous on purpose: a real GATT call completes in milliseconds, and only
+/// an adapter that has stopped answering reaches this. A call that never
+/// returned would hold the one reactor thread this link has forever, and a
+/// link that is quietly wedged looks exactly like a board that went silent.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How much data may be waiting to go out before the sender blocks.
 ///
@@ -367,10 +405,19 @@ fn radio(
         }
     };
 
-    let outcome = runtime.block_on(async move {
-        let peripheral = match find(selection).await {
-            Ok(peripheral) => peripheral,
-            Err(why) => return why,
+    runtime.block_on(async move {
+        // Every failing path reports through `ready`: `open` is waiting on
+        // exactly this channel, and a caller told "it took too long" when the
+        // answer was "there is no board on the air" has been told nothing.
+        let refuse = |why: String| {
+            let _ = ready.send(Err(io::Error::other(why)));
+        };
+        let (peripheral, dialled_here) = match find(selection).await {
+            Ok(found) => found,
+            Err(why) => {
+                refuse(why);
+                return;
+            }
         };
         let target = match peripheral
             .properties()
@@ -380,11 +427,22 @@ fn radio(
             Ok(properties) => properties
                 .and_then(|p| p.local_name)
                 .unwrap_or_else(|| "the device".to_string()),
-            Err(why) => return why,
+            Err(why) => {
+                refuse(why);
+                return;
+            }
         };
 
         if let Err(why) = wire(&peripheral).await {
-            return format!("connected to {target} but the link was refused: {why}");
+            // A refused link is still an up link as far as BlueZ is concerned,
+            // and hanging it up is only ours to do when the dial was: a link
+            // another client brought up has that client's session running
+            // over it.
+            if dialled_here {
+                let _ = peripheral.disconnect().await;
+            }
+            refuse(format!("connected to {target} but the link was refused: {why}"));
+            return;
         }
         // Reported only once the subscription is live. A read that succeeds
         // and a notify that never arrives looks exactly like a dead target,
@@ -394,18 +452,147 @@ fn radio(
         // The one signal that means "stop reading" to whoever is waiting on
         // us, sent once the loop above has decided the device went away.
         let _ = inbound.send(None);
-        format!("{target} went away")
     });
 
     // Kept alive to the last line so the connection outlives the loop that
     // used it; `runtime` dropping here is what hangs up anything the device
     // still has open.
     drop(runtime);
-    let _ = outcome;
 }
 
-/// Scan for `selection` and connect to it.
-async fn find(selection: &Selection) -> Result<Peripheral, String> {
+/// Dial the board, the way a bench with two clients needs it dialled.
+///
+/// * a link that is already up — from an earlier attempt, or because a second
+///   client got there first — is joined instead of dialled again;
+/// * `In Progress` means another client is dialling *right now*, and our own
+///   `Connect` is exactly what makes BlueZ cancel theirs, so the loop stops
+///   asking and watches for their link instead;
+/// * a transient `br-connection-*` answer means our own attempt died with
+///   nothing up, so the leftovers are cleared and it is tried again within
+///   the budget;
+/// * everything else is the answer, kept whole and worded by [`dial_error`].
+///
+/// `Ok(true)` when this call dialled the link, `Ok(false)` when it joined one
+/// that was already up: the difference is who may hang it up again.
+async fn dial(peripheral: &Peripheral) -> Result<bool, String> {
+    let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
+    loop {
+        if is_up(peripheral).await {
+            return Ok(false);
+        }
+        let error = match peripheral.connect_with_timeout(DIAL_ATTEMPT).await {
+            Ok(()) => return Ok(true),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        if is_transient(&text) && tokio::time::Instant::now() < deadline {
+            // Best effort: nothing was up, but BlueZ may still be holding the
+            // remains of the attempt, and a fresh `Connect` wants them gone.
+            let _ = peripheral.disconnect().await;
+            tokio::time::sleep(RETRY_BACKOFF).await;
+            continue;
+        }
+        if is_busy(&text) {
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(RETRY_POLL).await;
+                if is_up(peripheral).await {
+                    return Ok(false);
+                }
+            }
+        }
+        return Err(dial_error(&text));
+    }
+}
+
+/// `true` when BlueZ already reports a link — whether this session dialled it
+/// or another client did.
+async fn is_up(peripheral: &Peripheral) -> bool {
+    peripheral.is_connected().await.unwrap_or(false)
+}
+
+/// A failed dial as a sentence: the two answers that have an action in them
+/// name the action, and every other failure keeps its own words behind the
+/// one thing this function knows and the failure does not — that the question
+/// was "connect".
+fn dial_error(text: &str) -> String {
+    if is_busy(text) {
+        format!(
+            "the Bluetooth adapter is busy: {text} — another scan or connection is \
+             still running; retry in a second"
+        )
+    } else if is_transient(text) {
+        format!(
+            "the BLE link dropped mid-dial: {text} — the board or another client let \
+             go of the connection; retry in a second"
+        )
+    } else {
+        format!("the connection was refused: {text}")
+    }
+}
+
+/// `true` when BlueZ is saying somebody else owns the adapter: another scan or
+/// connection is already running. The D-Bus message is `In Progress`, the
+/// error name is `org.bluez.Error.InProgress`, and both have been seen in more
+/// than one casing.
+fn is_busy(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("in progress") || lowered.contains("inprogress")
+}
+
+/// BlueZ's transient `Connect` answers: the attempt died before any link came
+/// up — another client won the race, the controller gave up, or the board
+/// stopped answering mid-handshake. Nothing succeeded, so starting over is
+/// safe. The permanent refusals (`br-connection-rej-security`,
+/// `br-connection-params-rejected`, …) are deliberately not here.
+fn is_transient(text: &str) -> bool {
+    const TRANSIENT: [&str; 5] = [
+        "br-connection-canceled",
+        "br-connection-timeout",
+        "br-connection-failed",
+        "br-connection-adv-timeout",
+        "Not connected",
+    ];
+    TRANSIENT.iter().any(|needle| text.contains(needle))
+}
+
+/// Run `operation` again while BlueZ reports it busy and the budget lasts; the
+/// last failure is handed up as text when it is not.
+///
+/// Only `In Progress` is retried, and only because it is the failure where the
+/// operation demonstrably did **not** happen: BlueZ never started it, a second
+/// client holds the adapter — a second `linkr`, a phone app, or a session of
+/// ours that never tore down. Everything else keeps its own words.
+///
+/// Each attempt is bounded by [`CALL_TIMEOUT`]; a timeout is never retried,
+/// because the operation may have half landed and is reported instead.
+pub(crate) async fn retry_busy<T, F, Fut>(mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+{
+    let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
+    loop {
+        match tokio::time::timeout(CALL_TIMEOUT, operation()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error))
+                if is_busy(&error.to_string()) && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(RETRY_BACKOFF).await;
+            }
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_elapsed) => {
+                return Err(format!(
+                    "a Bluetooth call did not answer within {} s",
+                    CALL_TIMEOUT.as_secs()
+                ))
+            }
+        }
+    }
+}
+
+/// Scan for `selection` and connect to it, reporting whether the dial was
+/// this session's own — see [`dial`].
+async fn find(selection: &Selection) -> Result<(Peripheral, bool), String> {
     let manager = Manager::new()
         .await
         .map_err(|why| format!("no Bluetooth manager could be opened: {why}"))?;
@@ -419,20 +606,65 @@ async fn find(selection: &Selection) -> Result<Peripheral, String> {
             .to_string()
     })?;
 
-    adapter
-        .start_scan(ScanFilter::default())
-        .await
-        .map_err(|why| format!("the scan would not start: {why}"))?;
-    tokio::time::sleep(SCAN_TIMEOUT).await;
+    // Whatever BlueZ already knows answers first: a board the system has seen
+    // — by the startup scan, by an earlier session — needs no listening to be
+    // dialled, and this is what makes a remembered address feel instant.
+    let mut chosen = pick(&adapter, selection).await?;
+    if chosen.is_none() {
+        // Then the scan, which ends the moment the board answers rather than
+        // at the end of a fixed window: waiting ten seconds for an answer
+        // that arrived in the first one is ten seconds of the user watching a
+        // screen that says "connecting".
+        retry_busy(|| async { adapter.start_scan(ScanFilter::default()).await })
+            .await
+            .map_err(|why| format!("the scan would not start: {why}"))?;
+        let deadline = tokio::time::Instant::now() + SCAN_TIMEOUT;
+        loop {
+            chosen = pick(&adapter, selection).await?;
+            if chosen.is_some() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(SCAN_POLL).await;
+        }
+        let _ = adapter.stop_scan().await;
+    }
 
-    let mut candidates = Vec::new();
-    for candidate in adapter
+    let chosen = chosen.ok_or_else(|| match selection {
+        Selection::Any => "nothing advertising the Nordic UART Service was found within \
+         {} s — is the board powered?"
+            .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
+        Selection::Name(name) => format!("no Nordic UART device named “{name}” was found"),
+        Selection::Address(address) => {
+            format!("no Nordic UART device at {address} was found")
+        }
+    })?;
+
+    let dialled_here = dial(&chosen).await?;
+    Ok((chosen, dialled_here))
+}
+
+/// The first device that is a board this interface can talk to — it advertises
+/// the Nordic UART Service — and that `selection` accepts, or `None` while
+/// nobody like that has answered yet.
+///
+/// The service check is here and not in the scan's filter on purpose: a
+/// filtered scan only hears devices whose advertisement names the service,
+/// and a board whose advertisement is (or reads as) partial is still a board
+/// this bridge can dial. A device named by *address* is the exception, and is
+/// dialled on BlueZ's word alone: a bonded board that is not advertising right
+/// now has no UUIDs to check, and the characteristic check that matters happens
+/// once the link is up (`wire`).
+async fn pick(
+    adapter: &btleplug::platform::Adapter,
+    selection: &Selection,
+) -> Result<Option<Peripheral>, String> {
+    let candidates = adapter
         .peripherals()
         .await
-        .map_err(|why| format!("the scan's results could not be read: {why}"))?
-    {
+        .map_err(|why| format!("the scan's results could not be read: {why}"))?;
+    for candidate in candidates {
         // Reading properties can fail for a device that has just moved out of
-        // range; that is not interesting and must not end the scan.
+        // range; that is not interesting and must not end the search.
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
@@ -440,39 +672,23 @@ async fn find(selection: &Selection) -> Result<Peripheral, String> {
         let wanted = selection.accepts(
             properties.local_name.as_deref(),
             &candidate.id().to_string(),
-            None,
+            // BlueZ's identifier is a D-Bus path (`hci0/dev_EE_…`) while the
+            // user names the board by its address, so the address property is
+            // offered as well and either match counts.
+            Some(&properties.address.to_string()),
         );
-        if speaks_nus && wanted {
-            candidates.push(candidate);
+        let named_by_address = matches!(selection, Selection::Address(_));
+        if wanted && (speaks_nus || named_by_address) {
+            return Ok(Some(candidate));
         }
     }
-    let _ = adapter.stop_scan().await;
-
-    let chosen = candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| match selection {
-            Selection::Any => "nothing advertising the Nordic UART Service was found within \
-             {} s — is the board powered?"
-                .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
-            Selection::Name(name) => format!("no Nordic UART device named “{name}” was found"),
-            Selection::Address(address) => {
-                format!("no Nordic UART device at {address} was found")
-            }
-        })?;
-
-    chosen
-        .connect()
-        .await
-        .map_err(|why| format!("the connection was refused: {why}"))?;
-    Ok(chosen)
+    Ok(None)
 }
 
 /// Discover the service and subscribe to the characteristic that carries the
 /// target's output.
 async fn wire(peripheral: &Peripheral) -> Result<(), String> {
-    peripheral
-        .discover_services()
+    retry_busy(|| async { peripheral.discover_services().await })
         .await
         .map_err(|why| format!("the services could not be enumerated: {why}"))?;
 
@@ -491,8 +707,7 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         .iter()
         .find(|c| c.uuid == NUS_TX)
         .ok_or_else(|| "the notify characteristic vanished".to_string())?;
-    peripheral
-        .subscribe(out)
+    retry_busy(|| async { peripheral.subscribe(out).await })
         .await
         .map_err(|why| format!("notify could not be subscribed to: {why}"))?;
 
@@ -505,8 +720,7 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
             .iter()
             .find(|c| c.uuid == MGMT_RESPONSE)
             .ok_or_else(|| "the management notify characteristic vanished".to_string())?;
-        peripheral
-            .subscribe(responses)
+        retry_busy(|| async { peripheral.subscribe(responses).await })
             .await
             .map_err(|why| format!("the management channel could not be subscribed to: {why}"))?;
     }
@@ -597,10 +811,15 @@ async fn carry(
                             // handed to the Link Layer with whatever credit it
                             // has, and waiting for an acknowledgement per packet
                             // would cap the link well under the radio's rate.
-                            if peripheral
-                                .write(sink, &piece, WriteType::WithoutResponse)
-                                .await
-                                .is_err()
+                            // Busy retries stand in for the acknowledgement:
+                            // an `In Progress` chunk is one BlueZ never sent.
+                            if retry_busy(|| async {
+                                peripheral
+                                    .write(sink, &piece, WriteType::WithoutResponse)
+                                    .await
+                            })
+                            .await
+                            .is_err()
                             {
                                 return;
                             }
@@ -613,10 +832,13 @@ async fn carry(
                     Some(Frame::Management(frame)) => {
                         let Some(command) = command.as_ref() else { continue };
                         for piece in segment(&frame, MTU_WRITE_LIMIT) {
-                            if peripheral
-                                .write(command, &piece, WriteType::WithResponse)
-                                .await
-                                .is_err()
+                            if retry_busy(|| async {
+                                peripheral
+                                    .write(command, &piece, WriteType::WithResponse)
+                                    .await
+                            })
+                            .await
+                            .is_err()
                             {
                                 return;
                             }
@@ -775,6 +997,18 @@ mod tests {
             ),
             "and by the advertised address when the id is not a MAC"
         );
+        // The real failure on a Linux bench: BlueZ's id is a D-Bus path, and
+        // only the address property says which board it is. A client that
+        // offered only the id refused a board sitting in the cache under the
+        // address the user had typed.
+        assert!(
+            by_address.accepts(
+                Some("Linkr BLE UART-3"),
+                "hci0/dev_EE_C7_42_34_48_CF",
+                Some("EE:C7:42:34:48:CF")
+            ),
+            "a path-shaped id is matched by the address property"
+        );
         assert!(
             !by_address.accepts(Some("Linkr BLE UART-3"), "AA:BB:CC:DD:EE:FF", None),
             "another board is not this board"
@@ -904,6 +1138,61 @@ mod tests {
         assert!(
             keep_once(&mut last, line.clone()).is_some(),
             "after a different notification the same value is a new one"
+        );
+    }
+
+    /// A second client holding the adapter is an answer BlueZ gives in more
+    /// than one spelling, and every one of them means "try again in a moment",
+    /// not "no".
+    #[test]
+    fn busy_failures_are_recognised_in_every_spelling() {
+        assert!(is_busy("In Progress"), "the D-Bus message");
+        assert!(is_busy("org.bluez.Error.InProgress"), "the error name");
+        assert!(is_busy("IN PROGRESS"), "casing");
+        assert!(!is_busy("device not found matching: AA:BB:CC:DD:EE:FF"));
+        assert!(!is_busy("a Bluetooth call did not answer within 15 s"));
+        assert!(!is_busy(""));
+    }
+
+    /// The transient `Connect` answers are the ones worth another dial; a
+    /// permanent refusal is not, and retrying it would only delay the real
+    /// message by the length of the budget.
+    #[test]
+    fn only_transient_refusals_are_worth_another_dial() {
+        for transient in [
+            "br-connection-canceled",
+            "br-connection-timeout",
+            "br-connection-failed",
+            "br-connection-adv-timeout",
+            "Not connected",
+        ] {
+            assert!(is_transient(transient), "{transient} is transient");
+        }
+        assert!(
+            !is_transient("br-connection-rej-security"),
+            "a refusal is the answer"
+        );
+        assert!(!is_transient("In Progress"), "busy is waited out, not redialled");
+        assert!(!is_transient("device not found"));
+    }
+
+    /// A dial that failed anyway says what to do about it, and anything else
+    /// keeps BlueZ's own words behind the one thing the dial knows.
+    #[test]
+    fn a_failed_dial_names_the_next_step() {
+        let busy = dial_error("org.bluez.Error.InProgress");
+        assert!(busy.contains("adapter is busy"), "{busy}");
+        assert!(busy.contains("retry in a second"), "{busy}");
+
+        let dropped = dial_error("br-connection-canceled");
+        assert!(dropped.contains("dropped mid-dial"), "{dropped}");
+        assert!(dropped.contains("br-connection-canceled"), "{dropped}");
+
+        let refused = dial_error("br-connection-rej-security");
+        assert_eq!(
+            refused,
+            "the connection was refused: br-connection-rej-security",
+            "a permanent refusal is not dressed up"
         );
     }
 }

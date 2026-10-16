@@ -79,7 +79,7 @@ const T_HELP: Entry = ["Keyboard help", "键盘帮助"];
 const T_CHEAT: Entry = ["Cheat sheet", "速查参考"];
 const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
-const T_THEME: Entry = ["Toggle theme", "切换主题"];
+const T_THEME: Entry = ["Choose theme", "选择主题"];
 const T_QUIT: Entry = ["Quit the TUI", "退出 TUI"];
 
 /// One entry in the palette.
@@ -217,9 +217,9 @@ fn toggle_language(app: &mut App) {
     app.push_notice(message);
 }
 
-fn toggle_theme(app: &mut App) {
-    let notice = app.toggle_theme();
-    app.push_notice(notice);
+/// The theme picker, the same window `Ctrl+T` opens.
+fn choose_theme(app: &mut App) {
+    crate::dialogs::open_theme_pick(app);
 }
 
 /// The assistant's settings window, on the row that configures it.
@@ -500,7 +500,7 @@ pub const ACTIONS: &[Action] = &[
         title: T_THEME,
         category: CAT_APP,
         shortcut: "Ctrl+T",
-        run: toggle_theme,
+        run: choose_theme,
     },
     Action {
         id: "net.wifi_config",
@@ -868,6 +868,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 /// Open the palette.
 pub fn open(app: &mut App) {
     app.palette = Some(PaletteState::new());
+}
+
+/// Take a paste as query text.
+///
+/// A paste is typing that arrives at once: the query grows at its end, the
+/// selection goes back to the top, and the window is settled by the same rule
+/// a keystroke settles it. A newline has no meaning in a query, so it becomes
+/// a space rather than cutting the query in half.
+pub fn paste(app: &mut App, text: &str) {
+    let Some(state) = app.palette.as_mut() else {
+        return;
+    };
+    state
+        .query
+        .push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
+    state.selected = 0;
+    let total = matches(&state.query).len();
+    state.clamp_to(total);
+    state.follow(total, MAX_VISIBLE);
 }
 
 #[cfg(test)]
@@ -1393,8 +1412,8 @@ mod tests {
         assert_eq!(app.view, View::Assistant);
     }
 
-    /// A Control chord is not a query character: `Ctrl+T` still switches the
-    /// theme with the palette open.
+    /// A Control chord is not a query character: `Ctrl+T` leaves the query
+    /// alone and reaches the global handler, which opens the theme picker.
     #[test]
     fn a_control_chord_is_not_typed_into_the_query() {
         let mut app = App::default();

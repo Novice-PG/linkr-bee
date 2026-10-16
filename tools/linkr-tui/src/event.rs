@@ -40,7 +40,7 @@ pub enum NoticeLevel {
     Error,
 }
 
-/// The five centre-column views, in sidebar order. The F-key rota (`F2`–`F6`)
+/// The centre-column views, in sidebar order. The F-key rota (`F2`–`F5`)
 /// follows this order, so inserting a view in the middle shifts the rota with
 /// it instead of leaving a gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

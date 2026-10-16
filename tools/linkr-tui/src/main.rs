@@ -4,7 +4,7 @@
 //! hand over the terminal, and run the event loop. Everything else lives in the
 //! library so it can be tested without a TTY.
 
-use std::io::{self, Stdout};
+use std::io::{self, IsTerminal, Stdout};
 
 // Only the build with a renderer installs a panic hook: a CLI build that fails
 // prints its own error and exits, and a hook that restored a terminal nobody
@@ -17,6 +17,9 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -619,11 +622,30 @@ impl TerminalGuard {
             let _ = execute!(stdout, DisableBracketedPaste);
             return Err(err);
         }
+        /* The enhanced keyboard protocol, or a shifted chord is summed up by
+         * the terminal before this program ever sees it: a terminal that
+         * predates the protocol folds `Ctrl+Shift+letter` into
+         * `Ctrl+letter`, and the shift-latch chords then arrive as the plain
+         * ones. The protocol is how a terminal says which modifiers were
+         * really pressed. One that does not speak it ignores the request
+         * entirely, which is the reading this interface has always lived
+         * with. */
+        if let Err(err) = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        ) {
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = execute!(stdout, DisableBracketedPaste);
+            let _ = execute!(stdout, DisableMouseCapture);
+            return Err(err);
+        }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(TerminalGuard { terminal })
     }
 
     fn restore(&mut self) {
+        let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
         let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
         let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = disable_raw_mode();
@@ -646,6 +668,7 @@ impl Drop for TerminalGuard {
 fn restore_best_effort() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
+    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, LeaveAlternateScreen);
 }
 
@@ -778,6 +801,14 @@ fn main() -> io::Result<()> {
     // Connect should try before this run has dialled anything. A dial the
     // command line named replaces both below.
     app.lan_host = stored.lan_host.clone();
+    // The token row opens with what is remembered for that address, the way
+    // the web fills its field on load: a bridge that has been here before
+    // shows in hand before anything is dialled. A real session keeps the
+    // store for its captures too; a preview never writes one.
+    if storing {
+        app.lan_store = Some(linkr_tui::lan_token_store::TokenStore::load());
+    }
+    app.seed_lan_token_from_store();
     if !stored.address.is_empty() {
         app.last_dial = Some(Dial::Ble(Selection::Address(stored.address.clone())));
     }
@@ -792,12 +823,15 @@ fn main() -> io::Result<()> {
     if args.sample {
         app.diagnostics.apply(&views::sample_reply(), local_clock());
         app.terminal.push_text(views::terminal::SAMPLE);
-        // A little traffic history for the top bar's graph, so a previewed bar
+        // A little traffic history for the top bar's graphs, so a previewed bar
         // shows the instrument and not a flat line — the shape a boot log
-        // settles into: a burst, an echo, a prompt.
+        // settles into: a burst coming back, keystrokes trickling out.
         app.traffic
-            .window
+            .rx_window
             .extend([0u64, 0, 40, 180, 640, 1200, 900, 500, 240, 120]);
+        app.traffic
+            .tx_window
+            .extend([0u64, 60, 180, 480, 240, 120, 360, 180, 60, 30]);
         app.traffic.rate = 120;
         // Two announcements as well, so a previewed notice log has something to
         // show. They are the strings the notices really use, composed the way
@@ -885,8 +919,37 @@ fn main() -> io::Result<()> {
             }
         };
     }
+    // Where a trace goes is decided once, from what standard error is — not
+    // from whether a trace was asked for yet. The palette's switch can ask
+    // for one at any moment, and stderr being this terminal is a property of
+    // the terminal, not of the flag: a trace written there would push lines
+    // into the alternate screen behind the renderer's back, and the next
+    // differential paint cannot repair what it never recorded — the screen
+    // stays broken until it is repainted from scratch. So the decision is
+    // made here and carried by the App, and the switch reads it.
+    if io::stderr().is_terminal() {
+        app.trace_file = Some(linkr_tui::trace::default_trace_path());
+    }
     if args.debug_io || stored.debug_io {
-        app.trace = std::mem::take(&mut app.trace).with_stderr();
+        match app.trace_file.clone() {
+            Some(path) => {
+                if app.trace.set_trace_file(&path).is_ok() {
+                    // The switch that turned this on named the file; a fresh
+                    // launch writes a fresh one and owes the same sentence.
+                    if let Some(notice) = app.tracing_notice() {
+                        app.push_notice(notice);
+                    }
+                } else {
+                    // The file could not be opened; a broken screen is still
+                    // better than a silent switch that promised a trace and
+                    // kept none.
+                    app.trace.set_stderr(true);
+                }
+            }
+            // Standard error is a file or a pipe: exactly where a trace
+            // belongs, and where it has always gone.
+            None => app.trace.set_stderr(true),
+        }
     }
 
     // A script run: connect, ask, report, hang up. Reached for the two modes
@@ -953,12 +1016,24 @@ fn main() -> io::Result<()> {
     // that hears exactly one board that speaks the serial service dials it —
     // or, if two are in the air, the list is shown to pick from.
     //
+    // A board an earlier run dialled is dialled again by its address instead:
+    // the address is remembered precisely so the question "which board is
+    // this" does not have to be asked twice, and scanning for it first would
+    // make every launch as slow as the first one.
+    //
     // Not on a link the command line already asked for: `--address` and
     // `--bridge` name a board, and scanning past a named one would replace a
     // deliberate choice with whatever else was advertising.
     #[cfg(feature = "tui")]
     if !app.session.is_live() && app.transport == linkr_tui::app::Transport::Ble {
-        let _ = app.start_ble_scan_connecting_one();
+        match app.last_dial.clone() {
+            Some(dial @ Dial::Ble(_)) => {
+                app.dial_async(&dial, true);
+            }
+            _ => {
+                let _ = app.start_ble_scan_connecting_one();
+            }
+        }
     }
 
     #[cfg(feature = "tui")]
@@ -1151,15 +1226,27 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 // the device's own line editor as stray keys — which is the
                 // entire reason the terminal introduced the mode.
                 Event::Paste(text) => {
-                    // A paste is a *typing* gesture, so it goes through the
-                    // door a keystroke uses: line mode holds it until Enter
-                    // exactly as it would have held the characters, and the
-                    // echo, the trace and the tx counter all see it. The text
-                    // can span newlines, and a target that sees the whole block
-                    // is what was asked for — what a paste must not be is
-                    // chopped into per-line sends with an Enter guessed after
-                    // each one.
-                    app.paste(&text);
+                    // A paste goes where a field the user can see is asking
+                    // for one — a dialog's box, the palette's query, the
+                    // assistant's caret — and to the device only when the
+                    // device's own view is the one on screen without one. The
+                    // terminal's paste and the terminal being pasted *into*
+                    // are different things, and only the second is this.
+                    if !paste_into_shown_field(app, &text)
+                        && !app.overlay_open()
+                        && app.focus == Focus::Terminal
+                        && app.view == View::Terminal
+                    {
+                        // A paste is a *typing* gesture, so it goes through
+                        // the door a keystroke uses: line mode holds it until
+                        // Enter exactly as it would have held the characters,
+                        // and the echo, the trace and the tx counter all see
+                        // it. The text can span newlines, and a target that
+                        // sees the whole block is what was asked for — what a
+                        // paste must not be is chopped into per-line sends
+                        // with an Enter guessed after each one.
+                        app.paste(&text);
+                    }
                 }
                 // The wheel and the drag. Both need the mouse captured by the
                 // guard, and both are one gesture's worth of work: a notch
@@ -1210,8 +1297,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // A chord that asks for Shift may arrive as the uppercase character or as
+    // the lowercase one carrying the shift flag, depending on what the
+    // terminal's keyboard protocol reports — `Ctrl+Shift+R` is `R` on some and
+    // `r` plus SHIFT on others. The match below sees the uppercased spelling,
+    // so both land in the same arm; the key itself is untouched, because that
+    // is what a key falling through to the device sends.
+    let chord = match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Char(c.to_ascii_uppercase())
+        }
+        code => code,
+    };
     // Chords the interface owns, in every focus and every view.
-    match (key.code, ctrl) {
+    match (chord, ctrl) {
         (KeyCode::Char('q'), true) => {
             app.request_quit();
             return true;
@@ -1243,8 +1342,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         (KeyCode::Char('t'), true) => {
-            let notice = app.toggle_theme();
-            app.push_notice(notice);
+            // The picker's chord is a toggle, like the palette's: the key
+            // that opens the window also puts it away — and putting it away
+            // is cancel, because a preview nobody kept is not a choice.
+            dialogs::toggle_theme_pick(app);
             return false;
         }
         // The one-shot latches: `Ctrl+Shift+R/C/A` arm Shift/Ctrl/Alt for the
@@ -1326,9 +1427,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         // The clipboard, pasted as text. `V` is not a device key the way a
         // letter is, and a paste that reached the backend would be retyped by
-        // it as so many keystrokes.
+        // it as so many keystrokes. A field the user can see takes it first;
+        // with no field at all the assistant's caret is brought up, which has
+        // been the chord's promise since before the fields existed.
         (KeyCode::Char('V'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            crate::views::assistant::paste_into_focus(app);
+            if let Some(text) = views::assistant::take_clipboard(app) {
+                if !paste_into_shown_field(app, &text) && !app.overlay_open() {
+                    views::assistant::paste_into_focus(app, &text);
+                }
+            }
             return false;
         }
         // F1 is the help, not a view: the view rota starts at F2.
@@ -1370,6 +1477,28 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    // The diagnostics view is a document with two keys of its own: `r` asks
+    // the question the document is an answer to, and PgUp/PgDn walk it. Every
+    // other key falls through to nothing — there is no field to type into and
+    // no device listening on that screen.
+    if app.view == View::Diagnostics && !ctrl {
+        match key.code {
+            KeyCode::Char('r') => {
+                app.refresh_diagnostics();
+                return false;
+            }
+            KeyCode::PageUp => {
+                app.scroll_diagnostics_up(10);
+                return false;
+            }
+            KeyCode::PageDown => {
+                app.scroll_diagnostics_down(10);
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     // The network view is a form and takes the keyboard first: its rows are
     // what Enter means there, and falling through to "the device's" would type
     // a newline into the console every time somebody pressed an action.
@@ -1381,6 +1510,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // force: it has a composer, and a composer that types a newline into the
     // console on every Enter is not a composer.
     if app.view == View::Assistant && views::assistant::handle_key(app, key) {
+        return false;
+    }
+
+    // Only the terminal view is the device's keyboard. A key that reaches
+    // another view and no handler there meant nothing by it, and typing it
+    // blind into a console the user is not looking at is not what they meant
+    // either — so what is left is the device's only when its screen is up.
+    if app.view != View::Terminal {
         return false;
     }
 
@@ -1407,6 +1544,37 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.type_bytes(key.code == KeyCode::Enter, &bytes);
             }
         }
+    }
+    false
+}
+
+/// Put `text` where the caret the user can see is, and say whether a field
+/// took it.
+///
+/// The stack is the painter's: the palette, then the dialog, then whatever
+/// view is up. `false` means no field was on screen to paste into, and the
+/// caller decides what else a paste can mean there.
+fn paste_into_shown_field(app: &mut App, text: &str) -> bool {
+    if app.palette.is_some() {
+        palette::paste(app, text);
+        return true;
+    }
+    if matches!(app.dialog, Some(dialogs::Dialog::Settings(_))) {
+        views::assistant::paste_at_caret(app, text);
+        return true;
+    }
+    if let Some(dialogs::Dialog::Prompt(prompt)) = &mut app.dialog {
+        // A prompt's box is one line; a paste is not.
+        prompt
+            .field
+            .insert_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
+        return true;
+    }
+    // A dialog with no field has no caret of its own, and a paste must not
+    // reach past it to whatever is behind.
+    if app.dialog.is_none() && app.view == View::Assistant && app.focus == Focus::Terminal {
+        views::assistant::paste_at_caret(app, text);
+        return true;
     }
     false
 }
@@ -1841,6 +2009,31 @@ mod tests {
         );
     }
 
+    /// The diagnostics view hears the two keys its own hint names: `r` asks
+    /// the bridge, and PgUp/PgDn walk the document — keys that mean nothing on
+    /// any other screen.
+    #[test]
+    fn the_diagnostics_view_hears_its_own_keys() {
+        let mut app = App::default();
+        app.set_view(View::Diagnostics);
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.diagnostics.scroll, 20);
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.diagnostics.scroll, 10);
+        // `r` with no link is not silence: the notice says why it could not ask.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        );
+        assert!(!app.notices.is_empty(), "the refusal is said out loud");
+
+        // On any other view the keys are not the document's.
+        app.set_view(View::Terminal);
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.diagnostics.scroll, 10, "the terminal has its own scroll");
+    }
+
     /// Ctrl+Shift+K lands on the composer; Ctrl+Shift+S raises the settings
     /// window on the endpoint. Both are doors into the assistant, and a door
     /// that opened the view but left the keyboard elsewhere would save a
@@ -1946,9 +2139,115 @@ mod tests {
         ));
     }
 
-    /// Ctrl+T toggles the theme and says so, once.
+    /// A key nothing claimed is the device's *only* in the terminal view: the
+    /// other views show a screen those bytes would not land on, so a letter
+    /// typed while looking at them goes nowhere.
     #[test]
-    fn control_t_toggles_the_theme_and_announces_it() {
+    fn only_the_terminal_view_types_to_the_device() {
+        let mut app = App::default();
+        app.connect(
+            Dial::Stdio("-".into())
+                .open()
+                .expect("the loopback builds"),
+        )
+        .expect("the loopback opens");
+        for _ in 0..50 {
+            app.pump();
+            if app.connected() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.connected(), "the loopback came up");
+
+        let letter = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(!handle_key(&mut app, letter));
+        assert_eq!(app.tx, 1, "the terminal view sends what it does not claim");
+
+        for view in [View::Diagnostics, View::Network] {
+            app.set_view(view);
+            assert!(!handle_key(&mut app, letter));
+            assert_eq!(app.tx, 1, "{view:?} does not type into the console");
+        }
+
+        // The assistant keeps the letter for its composer, which is the
+        // handler's own doing and not the device's.
+        app.set_view(View::Assistant);
+        assert!(!handle_key(&mut app, letter));
+        assert_eq!(app.assistant.composer, "x");
+        assert_eq!(app.tx, 1, "the composer is not the wire");
+    }
+
+    /// A shifted chord is the same chord in either spelling a keyboard
+    /// protocol reports: `Ctrl+Shift+R` arrives as `R` where the protocol
+    /// reports the shifted character and as `r` carrying the shift flag where
+    /// it reports the base one, and both arm the Shift latch.
+    #[test]
+    fn a_shifted_chord_matches_in_either_spelling() {
+        let mut app = App::default();
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(app.latch.shift, "the lowercase spelling armed Shift");
+        handle_key(
+            &mut app,
+            KeyEvent::new(
+                KeyCode::Char('R'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert!(!app.latch.shift, "the uppercase spelling cancels what it armed");
+    }
+
+    /// A paste goes to the caret the user can see, in the painter's order: the
+    /// palette's query, a dialog's box, the assistant's field — and a dialog
+    /// with no field takes nothing rather than letting the paste reach past
+    /// it.
+    #[test]
+    fn a_paste_goes_where_the_caret_is_painted() {
+        let mut app = App::default();
+
+        // Nothing is up and no view asked: the caller decides what a paste
+        // means there, and for the terminal view that is the device.
+        assert!(!paste_into_shown_field(&mut app, "ls\n-l"));
+
+        palette::open(&mut app);
+        assert!(paste_into_shown_field(&mut app, "the\nme"));
+        assert_eq!(
+            app.palette.as_ref().map(|state| state.query.as_str()),
+            Some("the me"),
+            "the query took it as one line"
+        );
+        app.palette = None;
+
+        dialogs::prompt_wifi_ssid(&mut app);
+        assert!(paste_into_shown_field(&mut app, "Home\nNet"));
+        let Some(dialogs::Dialog::Prompt(prompt)) = &app.dialog else {
+            panic!("the prompt is up: {:?}", app.dialog);
+        };
+        assert_eq!(prompt.field.text, "Home Net");
+        app.dialog = None;
+
+        app.set_view(View::Assistant);
+        assert!(paste_into_shown_field(&mut app, "explain\nthe log"));
+        assert_eq!(app.assistant.composer, "explain the log");
+
+        dialogs::open_help(&mut app);
+        assert!(
+            !paste_into_shown_field(&mut app, "x"),
+            "a fieldless dialog is not a door past it"
+        );
+    }
+
+    /// Ctrl+T opens the theme picker — no more one-theme-per-press cycling —
+    /// and moving on the list previews by moving the theme itself: the frame
+    /// repaints under the cursor, and Escape puts back what was there.
+    #[test]
+    fn control_t_opens_the_theme_picker_and_the_arrows_preview() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
@@ -1957,9 +2256,71 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
-        assert_eq!(app.theme, ThemeChoice::Light);
+        let Some(dialogs::Dialog::ThemePick(pick)) = &app.dialog else {
+            panic!("Ctrl+T did not open the picker: {:?}", app.dialog);
+        };
+        assert_eq!(pick.cursor, 0, "the cursor starts on the live theme");
+        assert_eq!(app.theme, ThemeChoice::Dark, "and nothing has moved yet");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.theme, ThemeChoice::Light, "the preview is the theme");
+        assert!(app.notices.is_empty(), "a preview is not an announcement");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape closed the window");
+        assert_eq!(app.theme, ThemeChoice::Dark, "and put the old one back");
+    }
+
+    /// Enter keeps the theme under the cursor, says so once, and closes.
+    #[test]
+    fn the_picker_keeps_what_enter_lands_on() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        for _ in 0..2 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Enter closed the window");
+        assert_eq!(app.theme, ThemeChoice::Nord);
         assert_eq!(app.notices.len(), 1);
-        assert_eq!(app.notices[0].text, "Theme: light");
+        assert_eq!(app.notices[0].text, "Theme: Nord");
+    }
+
+    /// The chord that opened the window closes it, and closing is *cancel*: a
+    /// preview nobody kept is not a choice. A different window in the way is
+    /// left alone rather than replaced.
+    #[test]
+    fn control_t_again_cancels_and_leaves_other_windows_alone() {
+        let mut app = App::default();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.theme, ThemeChoice::Light);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert!(app.dialog.is_none());
+        assert_eq!(app.theme, ThemeChoice::Dark, "the preview was cancelled");
+
+        dialogs::open_help(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            matches!(app.dialog, Some(dialogs::Dialog::Help(_))),
+            "the help is still up"
+        );
+        assert_eq!(app.theme, ThemeChoice::Dark, "and the picker stayed away");
     }
 
     /// Ctrl+L clears the pane and nothing else — the device is not sent a
@@ -2429,8 +2790,12 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
-        assert_eq!(app.theme, ThemeChoice::Light, "Ctrl+T still switches");
-        assert_eq!(app.notices.len(), 1);
+        assert!(app.palette.is_none(), "the picker took the palette's place");
+        assert!(
+            matches!(app.dialog, Some(dialogs::Dialog::ThemePick(_))),
+            "Ctrl+T opened the picker"
+        );
+        assert_eq!(app.theme, ThemeChoice::Dark, "no theme moved without a pick");
 
         // Ctrl+Q sets the flag the loop reads.
         assert!(handle_key(
@@ -2470,12 +2835,14 @@ mod tests {
         assert_eq!(app.tx, 0, "the dialog swallowed the keystroke");
         assert!(app.dialog.is_some(), "and stayed open");
 
-        // The global chords are not swallowed.
+        // The global chords are not swallowed — but Ctrl+T is the one that
+        // defers to a window already up: replacing a half-typed prompt to
+        // show a theme would be a bad trade, so the picker stays away.
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
-        assert_eq!(app.theme, ThemeChoice::Light, "Ctrl+T still switches");
+        assert_eq!(app.theme, ThemeChoice::Dark, "the picker stayed away");
         assert!(app.dialog.is_some(), "and the dialog is still up");
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

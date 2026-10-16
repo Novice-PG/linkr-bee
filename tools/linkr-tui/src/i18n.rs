@@ -68,6 +68,8 @@ pub struct Strings {
     pub lan_token_yes: &'static str,
     /// The same, when it did not.
     pub lan_token_no: &'static str,
+    /// The token row when the bridge says its LAN door has no key.
+    pub lan_token_off: &'static str,
     /// The connect action.
     pub connect: &'static str,
     /// The same row once a link is up: pressing it hangs up. One row, two
@@ -180,6 +182,9 @@ pub struct Strings {
     pub net_results_section: &'static str,
     /// Shown when a scan failed after the bridge had accepted it.
     pub net_scan_failed: &'static str,
+    /// Shown when the bridge reported a failed WiFi operation, with the
+    /// firmware's own result code.
+    pub net_wifi_failed: &'static str,
     /// Shown when a scan has produced nothing.
     pub net_no_results: &'static str,
     /// The WebDAV section heading.
@@ -361,6 +366,7 @@ const ZH: Strings = Strings {
     lan_token_label: "局域网令牌",
     lan_token_yes: "有密钥",
     lan_token_no: "无密钥",
+    lan_token_off: "已关闭",
     connect: "连接",
     disconnect: "断开连接",
     switch_device: "切换设备",
@@ -445,6 +451,7 @@ const ZH: Strings = Strings {
     net_webdav_status: "[状态]",
     net_results_section: "扫描结果",
     net_scan_failed: "扫描失败",
+    net_wifi_failed: "WiFi 配网失败（result {}）。请检查密码与 2.4 GHz 信号后重试。",
     net_no_results: "暂无结果",
     net_webdav_section: "WebDAV 日志上传",
     net_url_label: "目标 URL",
@@ -504,6 +511,7 @@ const EN: Strings = Strings {
     lan_token_label: "LAN token",
     lan_token_yes: "token",
     lan_token_no: "no token",
+    lan_token_off: "auth off",
     connect: "Connect",
     disconnect: "Disconnect",
     switch_device: "Switch device",
@@ -597,6 +605,7 @@ const EN: Strings = Strings {
     net_webdav_status: "[Status]",
     net_results_section: "Scan results",
     net_scan_failed: "the scan failed",
+    net_wifi_failed: "WiFi provisioning failed (result {}). Check the password and 2.4 GHz coverage, then retry.",
     net_no_results: "no results yet",
     net_webdav_section: "WebDAV log upload",
     net_url_label: "Target URL",
@@ -764,6 +773,7 @@ mod tests {
                 s.lan_token_label,
                 s.lan_token_yes,
                 s.lan_token_no,
+                s.lan_token_off,
                 s.connect,
                 s.switch_device,
                 s.transport_locked,
@@ -835,6 +845,7 @@ mod tests {
                 s.net_wifi_off,
                 s.net_status,
                 s.net_results_section,
+                s.net_wifi_failed,
                 s.net_no_results,
                 s.net_webdav_section,
                 s.net_url_label,

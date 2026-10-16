@@ -15,7 +15,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The recording, for a session that may not have asked for one.
 #[derive(Debug, Default)]
@@ -24,6 +24,12 @@ pub struct ByteTrace {
     file: Option<File>,
     /// Whether both directions are traced to standard error.
     stderr: bool,
+    /// Where both directions are traced when standard error is the terminal
+    /// being drawn in: a trace written into that terminal would push lines
+    /// into the alternate screen behind the renderer's back, and the
+    /// differential paint cannot repair what it never recorded — so the trace
+    /// goes to a file the user can read instead.
+    trace_file: Option<File>,
 }
 
 impl ByteTrace {
@@ -33,6 +39,7 @@ impl ByteTrace {
         ByteTrace {
             file: None,
             stderr: false,
+            trace_file: None,
         }
     }
 
@@ -47,6 +54,7 @@ impl ByteTrace {
         Ok(ByteTrace {
             file: Some(file),
             stderr: false,
+            trace_file: None,
         })
     }
 
@@ -60,11 +68,18 @@ impl ByteTrace {
     /// session with no trace does not pay for one — and, more to the point, so
     /// a test can assert that it did not.
     pub fn is_active(&self) -> bool {
-        self.file.is_some() || self.stderr
+        self.file.is_some() || self.tracing()
     }
 
-    /// Whether both directions are being traced to standard error, which the
-    /// palette reads to know which way its switch points.
+    /// Whether both directions are being traced anywhere — standard error or
+    /// a file. The interface's switch reads this: the question it answers is
+    /// "is a trace being kept", not where the lines land.
+    pub fn tracing(&self) -> bool {
+        self.stderr || self.trace_file.is_some()
+    }
+
+    /// Whether both directions are being traced to standard error, which a
+    /// test reads to know which way the switch points there.
     pub fn tracing_stderr(&self) -> bool {
         self.stderr
     }
@@ -79,6 +94,38 @@ impl ByteTrace {
         self.stderr = on;
     }
 
+    /// Trace into `path` until told to stop, creating or appending to it.
+    ///
+    /// The sink for a trace asked for while standard error is the terminal
+    /// being drawn in. Owner-only where the platform has permissions: a trace
+    /// can carry what was typed, and what is typed can be a secret.
+    pub fn set_trace_file(&mut self, path: &Path) -> std::io::Result<()> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let _ = restrict(path);
+        self.stderr = false;
+        self.trace_file = Some(file);
+        Ok(())
+    }
+
+    /// Stop tracing, wherever it was going.
+    pub fn stop_tracing(&mut self) {
+        self.stderr = false;
+        self.trace_file = None;
+    }
+
+    /// One line of trace, to every sink that asked for one.
+    fn trace_line(&mut self, line: String) {
+        if self.stderr {
+            eprintln!("{line}");
+        }
+        if let Some(file) = self.trace_file.as_mut() {
+            // A full disk must not end the session: the trace is a record of
+            // the session, not a condition of it.
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+
     /// Bytes that arrived from the device.
     pub fn rx(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -90,15 +137,15 @@ impl ByteTrace {
             let _ = file.write_all(bytes);
             let _ = file.flush();
         }
-        if self.stderr {
-            eprintln!("rx {} bytes: {}", bytes.len(), debugged(bytes));
+        if self.tracing() {
+            self.trace_line(format!("rx {} bytes: {}", bytes.len(), debugged(bytes)));
         }
     }
 
     /// Bytes that left for the device down the stream, keystrokes and all.
     pub fn tx(&mut self, bytes: &[u8]) {
-        if self.stderr && !bytes.is_empty() {
-            eprintln!("tx {} bytes: {}", bytes.len(), debugged(bytes));
+        if self.tracing() && !bytes.is_empty() {
+            self.trace_line(format!("tx {} bytes: {}", bytes.len(), debugged(bytes)));
         }
     }
 
@@ -109,10 +156,35 @@ impl ByteTrace {
     /// terminal recording, or a CI log, none of which is a place a password
     /// belongs. See [`crate::accessory::redact_command`].
     pub fn tx_command(&mut self, command: &str) {
-        if self.stderr && !command.is_empty() {
-            eprintln!("tx command: {command}");
+        if self.tracing() && !command.is_empty() {
+            self.trace_line(format!("tx command: {command}"));
         }
     }
+}
+
+/// Where a trace goes when standard error is the terminal being drawn in: a
+/// fresh file per process in the temporary directory, named by pid so two
+/// sessions on one machine cannot write into each other's.
+///
+/// A file rather than stderr for the same reason the trace is a separate
+/// switch from `--log-file`: a trace is read *while* the session runs, and one
+/// that corrupts the screen it is meant to explain has explained nothing.
+pub fn default_trace_path() -> PathBuf {
+    std::env::temp_dir().join(format!("linkr-trace-{}.log", std::process::id()))
+}
+
+/// Take away the group and other bits where the platform has them.
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+/// Nothing to do on a platform whose files are not readable by others by
+/// default, or where the ACL is the user's business.
+#[cfg(not(unix))]
+fn restrict(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// How bytes are shown: printable ones as themselves and the rest as `\xNN`,
@@ -199,5 +271,34 @@ mod tests {
         trace.set_stderr(false);
         assert!(!trace.tracing_stderr());
         assert!(!trace.is_active(), "and back to recording nothing");
+    }
+
+    /// A trace asked for while standard error is the terminal goes to a file,
+    /// and the switch says so: this is the sink that keeps a trace from being
+    /// painted into the screen it is meant to explain.
+    #[test]
+    fn a_trace_can_go_to_a_file_instead_of_the_screen() {
+        let dir = std::env::temp_dir().join(format!("linkr-trace-file-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("trace.log");
+        let _ = std::fs::remove_file(&path);
+
+        let mut trace = ByteTrace::none();
+        trace.set_trace_file(&path).expect("the file opens");
+        assert!(trace.tracing(), "a trace is being kept");
+        assert!(!trace.tracing_stderr(), "and the screen is not the sink");
+        trace.tx(b"ls\r");
+        trace.rx(b"ok\n");
+        trace.tx_command("@w?");
+        trace.stop_tracing();
+        assert!(!trace.tracing(), "the switch goes back off");
+
+        let text = std::fs::read_to_string(&path).expect("the trace was written");
+        assert!(text.contains("tx 3 bytes: ls\\x0d"), "{text}");
+        assert!(text.contains("rx 3 bytes: ok\\x0a"), "{text}");
+        assert!(text.contains("tx command: @w?"), "{text}");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

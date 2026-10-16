@@ -34,6 +34,11 @@ const MAGIC: &str = "linkr";
 /// directory would have to guess.
 const DEFAULT_FILE: &str = "linkr-agent.json";
 
+/// The first key of the file, which marks it as this program's own. Only ever
+/// written by [`JsonFile::flush`] — and only once: a load used to leave a copy
+/// of it in the data, which the next flush wrote again behind the header.
+const MARKER: &str = "_linkr";
+
 /// `Debug` because `App` holds one and `App` is `Debug`; the path is the only
 /// thing anyone has ever wanted from it, so the data is summarised rather
 /// than dumped.
@@ -75,8 +80,11 @@ impl JsonFile {
     /// cheap because the object is small — a few tasks, a few notes — and is
     /// what keeps the file from holding a copy that disagrees with memory.
     fn flush(&self) {
-        let mut out = String::from("{\"_linkr\":\"1\"");
-        for (key, value) in &self.data {
+        // The marker is the file's own, written once here; a copy that an
+        // earlier load left in `data` must not ride along behind it, which is
+        // how a shipped file ended up with `_linkr` twice.
+        let mut out = format!("{{\"{MARKER}\":\"1\"");
+        for (key, value) in self.data.iter().filter(|(key, _)| key.as_str() != MARKER) {
             out.push_str(",\"");
             out.push_str(&escape(key));
             out.push_str("\":\"");
@@ -356,6 +364,31 @@ mod tests {
             Some("he said \"rm -rf /\"\nand then a tab\there")
         );
         assert_eq!(store.get("back").as_deref(), Some("a\\b"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The marker is written once, however many times the file is saved. A
+    /// load used to leave the marker in the data, and the next flush wrote the
+    /// copy behind the header — the file grew a second `"_linkr":"1"` on every
+    /// save, and one shipped config had two.
+    #[test]
+    fn the_file_marker_is_not_written_twice() {
+        const NAME: &str = "the_file_marker_is_not_written_twice";
+        let path = temp(NAME);
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = JsonFile::at(&path);
+            store.set("k", "v");
+        }
+        {
+            // A fresh handle over the file the first write made: the load
+            // picks the marker out of the JSON, and this save must not carry
+            // it back in as data.
+            let mut store = JsonFile::at(&path);
+            store.set("k", "v2");
+        }
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert_eq!(text.matches(MARKER).count(), 1, "the marker doubled: {text}");
         let _ = std::fs::remove_file(&path);
     }
 

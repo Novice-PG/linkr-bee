@@ -22,14 +22,21 @@ pub const SAMPLE_PERIOD: Duration = Duration::from_millis(250);
 /// How many samples the history holds: twelve seconds at [`SAMPLE_PERIOD`].
 pub const WINDOW: usize = 48;
 
-/// What the link has done lately, in both directions together.
+/// What the link has done lately, each direction kept apart.
+///
+/// The two directions are sampled separately because they are two facts: one
+/// series of their sum would show a burst that came in and a burst that went
+/// out as the same shape, and which way the bytes went is most of what a
+/// link's traffic has to say.
 #[derive(Debug, Clone, Default)]
 pub struct Traffic {
-    /// The recent rates, bytes a second, oldest first. The graph shows the
+    /// The recent rates of bytes received, oldest first. The graph shows the
     /// newest at its right edge and drops the oldest that do not fit.
-    pub window: VecDeque<u64>,
-    /// The newest reading, bytes a second. The graph alone is shape; this
-    /// number is what makes it scale.
+    pub rx_window: VecDeque<u64>,
+    /// The same for bytes sent.
+    pub tx_window: VecDeque<u64>,
+    /// The newest reading, bytes a second, both directions together. The graph
+    /// alone is shape; this number is what makes it scale.
     pub rate: u64,
     /// The counters and the clock time of the last sample taken: the state the
     /// next rate is measured against. `None` until the first sample, which has
@@ -54,14 +61,39 @@ impl Traffic {
             return;
         }
         let millis = elapsed.as_millis().max(1) as u64;
-        let bytes = rx.saturating_sub(prev_rx) + tx.saturating_sub(prev_tx);
-        self.rate = bytes.saturating_mul(1000) / millis;
-        if self.window.len() == WINDOW {
-            self.window.pop_front();
-        }
-        self.window.push_back(self.rate);
+        let rx_bytes = rx.saturating_sub(prev_rx);
+        let tx_bytes = tx.saturating_sub(prev_tx);
+        let rx_rate = rx_bytes.saturating_mul(1000) / millis;
+        let tx_rate = tx_bytes.saturating_mul(1000) / millis;
+        // The label's number is the two rates added rather than the byte
+        // counts divided, so the number and the two shapes were drawn from
+        // the same arithmetic and cannot disagree by a rounding.
+        self.rate = rx_rate.saturating_add(tx_rate);
+        record(&mut self.rx_window, rx_rate);
+        record(&mut self.tx_window, tx_rate);
         self.previous = Some((rx, tx, now));
     }
+
+    /// The tallest sample of either direction: the scale both graphs are drawn
+    /// on, so that two series sharing one instrument cannot be read against
+    /// two rulers — a trickle of keystrokes standing as tall as a torrent of
+    /// output is a graph that lies about which one was bigger.
+    pub fn scale(&self) -> u64 {
+        self.rx_window
+            .iter()
+            .chain(self.tx_window.iter())
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// One sample into a bounded history: the oldest leaves when the newest lands.
+fn record(window: &mut VecDeque<u64>, rate: u64) {
+    if window.len() == WINDOW {
+        window.pop_front();
+    }
+    window.push_back(rate);
 }
 
 #[cfg(test)]
@@ -78,11 +110,13 @@ mod tests {
         let mut traffic = Traffic::default();
         traffic.sample(10_000, 500, at(0));
         assert_eq!(traffic.rate, 0);
-        assert!(traffic.window.is_empty());
+        assert!(traffic.rx_window.is_empty());
+        assert!(traffic.tx_window.is_empty());
     }
 
     /// A rate is bytes over *time*, not over calls: the pump may run a
-    /// thousand times a second, and none of those turns is a sample.
+    /// thousand times a second, and none of those turns is a sample. The two
+    /// directions are sampled in the same turn, each from its own bytes.
     #[test]
     fn the_rate_is_per_second_however_often_the_pump_runs() {
         let mut traffic = Traffic::default();
@@ -90,11 +124,27 @@ mod tests {
         // 100 bytes each way in half a second: 200 + 200 bytes a second.
         traffic.sample(100, 100, at(500));
         assert_eq!(traffic.rate, 400);
-        assert_eq!(traffic.window.iter().copied().collect::<Vec<_>>(), vec![400]);
+        assert_eq!(traffic.rx_window.iter().copied().collect::<Vec<_>>(), vec![200]);
+        assert_eq!(traffic.tx_window.iter().copied().collect::<Vec<_>>(), vec![200]);
         // A call inside the period changes nothing.
         traffic.sample(500, 500, at(600));
         assert_eq!(traffic.rate, 400);
-        assert_eq!(traffic.window.len(), 1);
+        assert_eq!(traffic.rx_window.len(), 1);
+        assert_eq!(traffic.tx_window.len(), 1);
+    }
+
+    /// The directions are told apart, which is the whole reason there are two
+    /// windows: a link that only carried output must not read as one that also
+    /// carried keystrokes, and the label still names both together.
+    #[test]
+    fn the_directions_are_sampled_apart() {
+        let mut traffic = Traffic::default();
+        traffic.sample(0, 0, at(0));
+        traffic.sample(600, 200, at(1000));
+        assert_eq!(traffic.rx_window.back().copied(), Some(600));
+        assert_eq!(traffic.tx_window.back().copied(), Some(200));
+        assert_eq!(traffic.rate, 800, "the label is both directions together");
+        assert_eq!(traffic.scale(), 600, "both halves are drawn on one ruler");
     }
 
     /// A stretch longer than one period is the *average* over the stretch: a
@@ -119,7 +169,8 @@ mod tests {
     }
 
     /// The history is bounded: old samples leave from the front, so the newest
-    /// is always the last — the end the graph draws at its right edge.
+    /// is always the last — the end the graph draws at its right edge — and
+    /// both directions drop together, one clock for both.
     #[test]
     fn the_history_keeps_the_newest_samples() {
         let mut traffic = Traffic::default();
@@ -127,13 +178,19 @@ mod tests {
         for step in 0..(WINDOW as u64 + 10) {
             traffic.sample(step * 1_000, 0, at((step + 1) * 1_000));
         }
-        assert_eq!(traffic.window.len(), WINDOW);
+        assert_eq!(traffic.rx_window.len(), WINDOW);
+        assert_eq!(traffic.tx_window.len(), WINDOW);
         assert_eq!(
-            traffic.window.back().copied(),
+            traffic.rx_window.back().copied(),
             Some(1000),
             "the newest sample is the last one"
         );
-        assert_eq!(traffic.window.front().copied(), Some(1000), "old left");
+        assert_eq!(traffic.rx_window.front().copied(), Some(1000), "old left");
+        assert_eq!(
+            traffic.tx_window.back().copied(),
+            Some(0),
+            "the quiet direction is sampled just the same"
+        );
     }
 
     /// The exactly-on-time call counts: the period is a floor, the boundary
@@ -144,6 +201,7 @@ mod tests {
         traffic.sample(0, 0, at(0));
         traffic.sample(250, 0, at(250));
         assert_eq!(traffic.rate, 1000);
-        assert_eq!(traffic.window.len(), 1);
+        assert_eq!(traffic.rx_window.len(), 1);
+        assert_eq!(traffic.tx_window.len(), 1);
     }
 }

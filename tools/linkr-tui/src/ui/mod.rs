@@ -89,10 +89,24 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
     }
 }
 
+/// The column of air the page leaves on the left.
+///
+/// A frame painted flush against the terminal's edge looks glued to it, and a
+/// terminal is made of whole cells — there is no half a space to draw — so the
+/// smallest step there is, one column, is what "a little air" gets.
+const LEFT_AIR: u16 = 1;
+
 /// Paint one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = app.theme();
-    let area = frame.area();
+    // The page moves right; the window does not, so the right edge stays
+    // where it was and only the width gives up the column.
+    let full = frame.area();
+    let area = Rect {
+        x: full.x + LEFT_AIR,
+        width: full.width.saturating_sub(LEFT_AIR),
+        ..full
+    };
 
     // The page ground first, so no cell keeps the emulator's default background.
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
@@ -183,7 +197,19 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(label).style(chrome::bar_style(&theme)),
         label_area,
     );
-    frame.render_widget(chrome::traffic_graph(app, &theme), graph_area);
+    // Both directions, side by side and each behind its own arrow: one graph
+    // of the two together would be the same shape whether the bytes were
+    // coming or going, and which way they went is half the fact.
+    let [rx_half, tx_half] =
+        Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(graph_area);
+    let [rx_arrow, rx_area] =
+        Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(rx_half);
+    let [tx_arrow, tx_area] =
+        Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(tx_half);
+    frame.render_widget(Paragraph::new(Line::from(chrome::rx_arrow(&theme))), rx_arrow);
+    frame.render_widget(chrome::rx_graph(app, &theme), rx_area);
+    frame.render_widget(Paragraph::new(Line::from(chrome::tx_arrow(&theme))), tx_arrow);
+    frame.render_widget(chrome::tx_graph(app, &theme), tx_area);
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -230,8 +256,10 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(block, area);
         // The body is told the width the border left it, so a row can never be
         // laid out for the frame's width and then spill into the border.
+        let lines = body::lines(app, &theme, inner);
+        let offset = body::scroll_offset(app, lines.len(), inner.height as usize) as u16;
         frame.render_widget(
-            Paragraph::new(body::lines(app, &theme, inner)).style(ground),
+            Paragraph::new(lines).scroll((offset, 0)).style(ground),
             inner,
         );
     } else {
@@ -571,7 +599,7 @@ mod tests {
                 let before = row.split(DIVIDER_GLYPH).next().unwrap();
                 assert_eq!(
                     crate::text::columns(before),
-                    SIDEBAR_TEXT_WIDTH as usize,
+                    SIDEBAR_TEXT_WIDTH as usize + LEFT_AIR as usize,
                     "row {y} puts the rule in the wrong column: {row:?}"
                 );
             }
@@ -727,9 +755,15 @@ mod tests {
             ..App::default()
         };
         app.traffic.rate = 300;
+        // Both directions carry history, and different history — the halves
+        // must be told apart by their data as well as their colours — but RX
+        // leads on the scale, which is the shape a terminal session has.
         app.traffic
-            .window
+            .rx_window
             .extend([0u64, 0, 120, 900, 6000, 2000, 300]);
+        app.traffic
+            .tx_window
+            .extend([0u64, 900, 2400, 1600, 800, 400, 200]);
         app.clock = "19:52:50".to_string();
 
         let text = render_to_text(&app, 120, 30);
@@ -741,6 +775,39 @@ mod tests {
             .filter(|x| "▁▂▃▄▅▆▇█".contains(buffer[(*x, 0)].symbol()))
             .count();
         assert!(blocks >= 3, "the graph did not paint: {blocks} cells");
+        // One arrow per direction, in the colour its graph is drawn in — the
+        // pair the counters wear, and what says which half is which.
+        let arrow = |glyph: &str| {
+            (0..120u16)
+                .find(|x| buffer[(*x, 0)].symbol() == glyph)
+                .unwrap_or_else(|| panic!("the bar carries no {glyph}"))
+        };
+        let theme = app.theme();
+        let rx_head = arrow("↓");
+        let tx_head = arrow("↑");
+        assert_eq!(buffer[(rx_head, 0)].fg, theme.accent);
+        assert_eq!(buffer[(tx_head, 0)].fg, theme.focus);
+        assert!(rx_head < tx_head, "RX heads the left half and TX the right");
+        // The halves share the unit evenly rather than one eating the other:
+        // at this width the bar has 18 columns for the unit and both halves
+        // must get their arrow and some graph behind it.
+        assert!(
+            tx_head - rx_head >= 4 && 120 - tx_head >= 4,
+            "the halves are uneven: RX half {} cells, TX half {}",
+            tx_head - rx_head,
+            120 - tx_head
+        );
+        // And each half really paints in that colour: two series in two
+        // colours, not one series wearing both arrows.
+        let is_block = |x: u16| "▁▂▃▄▅▆▇█".contains(buffer[(x, 0)].symbol());
+        assert!(
+            (rx_head..tx_head).any(|x| is_block(x) && buffer[(x, 0)].fg == theme.accent),
+            "the RX half painted no accent blocks"
+        );
+        assert!(
+            (tx_head..120).any(|x| is_block(x) && buffer[(x, 0)].fg == theme.focus),
+            "the TX half painted no focus blocks"
+        );
 
         // The classic 80-column bar: the unit is the first thing given up.
         let narrow = render_to_text(&app, 80, 30);
@@ -772,7 +839,10 @@ mod tests {
         );
         assert_eq!(lines.len(), 40);
         let last = lines[39];
-        assert!(last.starts_with("[终端]"), "{last:?}");
+        assert!(
+            last.starts_with(" [终端]"),
+            "the air column, then the bar: {last:?}"
+        );
         assert!(last.contains("Ctrl+Q 退出"), "{last:?}");
         for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"]
         {

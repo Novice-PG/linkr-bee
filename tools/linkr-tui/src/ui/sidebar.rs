@@ -43,15 +43,14 @@ pub const CURSOR_MARKER: &str = "▸ ";
 /// with it, and it is the difference between a red row and a row the user can
 /// see is red *because it is the dangerous one*.
 ///
-/// The glyph travels with U+FE0E, the text-presentation selector, and that is
-/// the whole point of the second character. U+26A0 is emoji-capable: a terminal
-/// or a browser that resolves it to its *emoji* form draws it from a colour
-/// emoji font, where the glyph is wider than one cell — so the marker came back
-/// clipped down its right side in the rendered previews. U+FE0E asks for the
-/// text form, which every monospace font that has the character at all draws
-/// one cell wide. It costs nothing to measure: the selector is zero columns
-/// wide, so the marker still counts as the single column it paints into.
-pub const DANGER_MARKER: &str = "⚠\u{fe0e}";
+/// An ASCII `!` rather than the ⚠ the design previews drew. U+26A0 is
+/// emoji-capable, and a terminal that resolves it to the emoji form draws it
+/// two columns wide — twice the column the row reserved for it, which is why
+/// its right half came back clipped on exactly those terminals. The
+/// text-presentation selector only helps fonts that honour it; the colour of
+/// the row is what actually carries the warning, so the glyph only has to
+/// survive a monospace font, and `!` is in all of them.
+pub const DANGER_MARKER: &str = "!";
 
 /// What a sidebar row means, which decides how it is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +86,7 @@ pub struct Row {
     pub indent: u8,
     /// A dimmed tail after the text (` · ─`), which only the state row has.
     pub tail: Option<String>,
-    /// A marker after the text, in the danger colour: `reboot ⚠`. Only the
+    /// A marker after the text, in the danger colour: `reboot !`. Only the
     /// shortcuts that ask before running carry it.
     pub marker: Option<&'static str>,
 }

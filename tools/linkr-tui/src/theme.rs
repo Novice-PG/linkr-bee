@@ -529,9 +529,8 @@ pub enum ThemeChoice {
     Dracula,
 }
 
-/// Every theme the interface ships, in the order a toggle walks them: the
-/// web's own pair first, so the first press of Ctrl+T still swaps dark for
-/// light the way it always did, then the terminal classics.
+/// Every theme the interface ships, in the order the picker lists them: the
+/// web's own pair first, then the terminal classics.
 pub const THEMES: [ThemeChoice; 6] = [
     ThemeChoice::Dark,
     ThemeChoice::Light,
@@ -542,12 +541,6 @@ pub const THEMES: [ThemeChoice; 6] = [
 ];
 
 impl ThemeChoice {
-    /// The next one around the ring — what a toggle switches to.
-    pub fn toggled(self) -> ThemeChoice {
-        let at = THEMES.iter().position(|choice| *choice == self).unwrap_or(0);
-        THEMES[(at + 1) % THEMES.len()]
-    }
-
     /// Lowercase name, the spelling used in settings files.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -706,9 +699,8 @@ mod tests {
     /// The theme choice round-trips through its settings spelling, and an
     /// unknown value degrades to the default instead of failing.
     #[test]
-    fn theme_choice_toggles_and_parses() {
+    fn theme_choice_parses() {
         assert_eq!(ThemeChoice::default(), ThemeChoice::Dark);
-        assert_eq!(ThemeChoice::Dark.toggled(), ThemeChoice::Light);
         for choice in THEMES {
             assert_eq!(
                 ThemeChoice::from_name(choice.as_str()),
@@ -723,22 +715,6 @@ mod tests {
         assert_eq!(ThemeChoice::from_str_lossy(" LIGHT "), ThemeChoice::Light);
         assert_eq!(ThemeChoice::from_str_lossy("nonsense"), ThemeChoice::Dark);
         assert_eq!(ThemeChoice::from_name("nonsense"), None);
-    }
-
-    /// A toggle walks the whole ring before it comes home: every theme is
-    /// reachable from Ctrl+T, and no press is a no-op.
-    #[test]
-    fn the_toggle_visits_every_theme() {
-        let mut seen = Vec::new();
-        let mut choice = ThemeChoice::Dark;
-        for _ in 0..THEMES.len() {
-            choice = choice.toggled();
-            seen.push(choice);
-        }
-        assert_eq!(choice, ThemeChoice::Dark, "the ring does not close");
-        for theme in THEMES {
-            assert!(seen.contains(&theme), "{theme:?} was never reached");
-        }
     }
 
     /// Every choice maps to a theme, and the pair stays in step with the

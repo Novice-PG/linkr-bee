@@ -35,12 +35,16 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
 /// The top bar's right half: traffic counters, the link speed, autoscroll and
 /// the clock, in that order — the web client's status strip. It ends flush with
 /// the last column, so the strip's right edge does not move with the numbers.
+///
+/// The two counters wear the two graph colours — RX the accent, TX the focus
+/// blue — which is what lets the graph's halves go without a legend of their
+/// own.
 pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
     let s = app.strings();
     Line::from(vec![
-        Span::styled(format!("{} {}", s.rx, app.rx), theme.muted()),
+        Span::styled(format!("{} {}", s.rx, app.rx), theme.accent()),
         Span::styled(DOT.to_string(), theme.muted()),
-        Span::styled(format!("{} {}", s.tx, app.tx), theme.muted()),
+        Span::styled(format!("{} {}", s.tx, app.tx), theme.focus()),
         Span::styled(DOT.to_string(), theme.muted()),
         Span::styled(app.baud_text(), theme.muted()),
         Span::styled(DOT.to_string(), theme.muted()),
@@ -66,12 +70,12 @@ pub fn traffic_unit(bar_width: u16) -> u16 {
     }
 }
 
-/// The unit's label: the newest rate, in both directions together — the same
-/// number the graph's newest column measures. The spaces are part of the label
-/// so the rate is held off the clock's tail and the graph's head.
+/// The unit's label: the newest rate, in both directions together — the sum of
+/// the two newest columns the graphs draw. The spaces are part of the label so
+/// the rate is held off the clock's tail and the graphs' heads.
 ///
-/// The graph alone is shape, not scale: without this number a spike could just
-/// as well be a megabyte as a byte.
+/// The graphs alone are shape, not scale: without this number a spike could
+/// just as well be a megabyte as a byte.
 pub fn traffic_label(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         format!(" {}/s ", crate::text::human_bytes(app.traffic.rate)),
@@ -79,18 +83,50 @@ pub fn traffic_label(app: &App, theme: &Theme) -> Line<'static> {
     ))
 }
 
-/// The graph: the sampled rates, newest at the right edge, painted in the
-/// accent its label shares.
+/// The two graphs: the sampled rates of one direction each, newest at the
+/// right edge, RX in the accent and TX in the focus blue — the colours the
+/// counters wear, because one series of the two directions together could only
+/// ever show their sum.
 ///
 /// The data is reversed with the direction so the widget's own rule — it draws
 /// the first samples it is given and stops at the area's width — drops the
 /// *oldest* overhang rather than the newest. A graph whose right edge went
 /// stale would be worse than no graph.
-pub fn traffic_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
+pub fn rx_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
+    samples(
+        app.traffic.rx_window.iter().rev().copied(),
+        app.traffic.scale(),
+        theme.accent(),
+    )
+}
+
+/// The other direction's graph; see [`rx_graph`].
+pub fn tx_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
+    samples(
+        app.traffic.tx_window.iter().rev().copied(),
+        app.traffic.scale(),
+        theme.focus(),
+    )
+}
+
+/// One direction's samples as the widget both graphs are built from, on the
+/// one scale the two share.
+fn samples(data: impl IntoIterator<Item = u64>, scale: u64, style: Style) -> Sparkline<'static> {
     Sparkline::default()
-        .data(app.traffic.window.iter().rev().copied())
+        .data(data)
+        .max(scale)
         .direction(RenderDirection::RightToLeft)
-        .style(theme.accent())
+        .style(style)
+}
+
+/// The glyph that heads the RX graph, in the colour that graph is drawn in.
+pub fn rx_arrow(theme: &Theme) -> Span<'static> {
+    Span::styled("↓", theme.accent())
+}
+
+/// The glyph that heads the TX graph; see [`rx_arrow`].
+pub fn tx_arrow(theme: &Theme) -> Span<'static> {
+    Span::styled("↑", theme.focus())
 }
 
 /// The bottom bar's left half: which region has the keyboard, which view is
@@ -316,8 +352,8 @@ mod tests {
     }
 
     /// The label is the rate in human bytes, held off its neighbours by a
-    /// space each side, in the same accent as the graph — the number and the
-    /// shape are one instrument.
+    /// space each side, in the accent the unit has always worn — it names the
+    /// scale both graphs share, not either direction on its own.
     #[test]
     fn the_traffic_label_names_the_rate_in_human_bytes() {
         let theme = Theme::DARK;
@@ -481,8 +517,11 @@ mod tests {
                 );
             }
         }
+        // The counters wear the two graph colours, and both move with the
+        // theme like everything else.
         let light_right = top_right(&app, &Theme::LIGHT);
-        assert_eq!(light_right.spans[0].style.fg, Some(Theme::LIGHT.muted));
+        assert_eq!(light_right.spans[0].style.fg, Some(Theme::LIGHT.accent));
+        assert_eq!(light_right.spans[2].style.fg, Some(Theme::LIGHT.focus));
         assert_ne!(
             light_right.spans[0].style.fg,
             top_right(&app, &Theme::DARK).spans[0].style.fg

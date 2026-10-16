@@ -60,6 +60,10 @@ pub struct DiagnosticsState {
     /// `HH:MM:SS` of the last successful read. Stamped by the caller, so the
     /// state never reads a clock itself and a frame stays reproducible.
     pub updated: Option<String>,
+    /// How far down the document the view is scrolled, in lines. `0` is the
+    /// top; the painter pins a value past the last screenful to that last
+    /// screenful rather than to blank paper.
+    pub scroll: usize,
 }
 
 impl DiagnosticsState {
@@ -80,6 +84,9 @@ impl DiagnosticsState {
         self.loading = false;
         self.error = None;
         self.updated = Some(stamp);
+        // A fresh read opens at its top: a scroll left where the last document
+        // ended would hide both the new stamp and the row it describes.
+        self.scroll = 0;
     }
 
     /// Whether the grid has anything to draw.
@@ -731,6 +738,7 @@ mod tests {
     fn folding_a_reply_in_stamps_the_time_it_was_handed() {
         let mut state = DiagnosticsState {
             loading: true,
+            scroll: 5,
             ..DiagnosticsState::default()
         };
         state.apply(&crate::views::sample_reply(), "19:08:06".to_string());
@@ -739,6 +747,7 @@ mod tests {
         assert!(!state.loading);
         assert_eq!(state.raw.len(), SAMPLE.len());
         assert_eq!(state.updated.as_deref(), Some("19:08:06"));
+        assert_eq!(state.scroll, 0, "a fresh read opens at its top");
     }
 
     /// A reply with no `@info` line must not blank a good grid.

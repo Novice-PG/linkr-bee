@@ -31,6 +31,22 @@ pub fn ground(app: &App, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
+/// The first line a framed body starts painting at, for the views that keep a
+/// scroll of their own.
+///
+/// Only the diagnostics document has one. A scroll past its last screenful is
+/// pinned to that screenful rather than to blank paper, the way the pane's own
+/// scroll arithmetic pins its window to the ends of the history.
+pub fn scroll_offset(app: &App, total: usize, height: usize) -> usize {
+    match app.view {
+        View::Diagnostics => app
+            .diagnostics
+            .scroll
+            .min(total.saturating_sub(height)),
+        _ => 0,
+    }
+}
+
 /// The body of a view, as lines for the area it was given.
 ///
 /// The pane is handed the whole rectangle rather than a width because the
@@ -67,6 +83,23 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    /// Only the diagnostics document scrolls, and a scroll past its last
+    /// screenful is pinned to that screenful instead of to blank paper.
+    #[test]
+    fn only_the_diagnostics_document_scrolls() {
+        let mut app = App::default();
+        app.set_view(View::Diagnostics);
+        app.diagnostics.scroll = 50;
+        assert_eq!(scroll_offset(&app, 30, 10), 20, "pinned to the last screen");
+        app.diagnostics.scroll = 3;
+        assert_eq!(scroll_offset(&app, 30, 10), 3);
+        app.diagnostics.scroll = 8;
+        assert_eq!(scroll_offset(&app, 5, 10), 0, "a short document cannot scroll");
+        app.set_view(View::Network);
+        app.diagnostics.scroll = 50;
+        assert_eq!(scroll_offset(&app, 30, 10), 0, "other views have no scroll");
     }
 
     /// The serial terminal is the only full-bleed view: it takes the terminal

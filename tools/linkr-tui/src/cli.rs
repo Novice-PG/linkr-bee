@@ -621,6 +621,18 @@ pub struct FoundDevice {
     pub rssi: Option<i16>,
 }
 
+/// Which answer a scan is after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// Everything the room has to say, until `timeout` runs out: the `--scan`
+    /// list and the picker's own scan, where the user asked what is around.
+    TheWindowEnds,
+    /// The first board that can be dialled, or `timeout`: the startup dial's
+    /// scan, where a second board nobody asked about is not worth the wait of
+    /// the whole window.
+    ABoardAnswers,
+}
+
 /// Listen for `timeout` and report every device that answered.
 ///
 /// The scan is the one command that answers a question nothing else can — "is
@@ -628,9 +640,32 @@ pub struct FoundDevice {
 /// prints even the devices it cannot use: a Linkr Bee that is advertising but
 /// not offering the serial service is a different problem from one that is
 /// switched off, and the list is how you tell them apart.
-pub fn scan_devices(timeout: std::time::Duration) -> Result<Vec<FoundDevice>, String> {
-    // Its own reactor on its own thread, for the same reason the BLE link
-    // builds one: this program is synchronous and the radio library is not.
+pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
+    listen(timeout, Until::TheWindowEnds)
+}
+
+/// Listen until the first board answers, or `timeout` runs out.
+///
+/// The shape the startup dial runs. The same list comes back, but the scan
+/// ends the moment a serial-service device is heard: a board in range answers
+/// within a scan interval or two, and waiting out the whole window for a
+/// second board that may not exist is the difference between a start that
+/// feels instant and one the user goes looking at the radio for. A bench with
+/// two boards is what the `--scan` list is for, where the user asked.
+pub fn scan_first_board(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
+    listen(timeout, Until::ABoardAnswers)
+}
+
+/// How often the scan's results are looked at while a scan is listening.
+///
+/// BlueZ reports an advertisement as soon as it hears one, so a quarter of a
+/// second is invisible to the user and kind to the radio.
+const SCAN_POLL: Duration = Duration::from_millis(250);
+
+/// The body both scans share: one reactor of its own on its own thread, for the
+/// same reason the BLE link builds one — this program is synchronous and the
+/// radio library is not.
+fn listen(timeout: Duration, until: Until) -> Result<Vec<FoundDevice>, String> {
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -655,31 +690,25 @@ pub fn scan_devices(timeout: std::time::Duration) -> Result<Vec<FoundDevice>, St
                         .to_string(),
                 );
             };
-            adapter
-                .start_scan(btleplug::api::ScanFilter::default())
-                .await
-                .map_err(|why| format!("the scan would not start: {why}"))?;
-            tokio::time::sleep(timeout).await;
-
-            let mut found = Vec::new();
-            for candidate in adapter
-                .peripherals()
-                .await
-                .map_err(|why| format!("the scan's results could not be read: {why}"))?
-            {
-                // A device that has just gone out of range cannot introduce
-                // itself; that is not interesting and must not end the scan.
-                let Ok(Some(properties)) = candidate.properties().await else {
-                    continue;
-                };
-                found.push(FoundDevice {
-                    name: properties.local_name,
-                    id: candidate.id().to_string(),
-                    nus: properties
-                        .services
-                        .contains(&crate::transport::ble::NUS_SERVICE),
-                    rssi: properties.rssi,
-                });
+            // A second client holding the adapter answers `In Progress`; the
+            // retry gives it a moment to let go instead of failing a scan the
+            // user just asked for.
+            crate::transport::ble::retry_busy(|| async {
+                adapter
+                    .start_scan(btleplug::api::ScanFilter::default())
+                    .await
+            })
+            .await
+            .map_err(|why| format!("the scan would not start: {why}"))?;
+            let deadline = Instant::now() + timeout;
+            let mut found: Vec<FoundDevice>;
+            loop {
+                found = heard(&adapter).await?;
+                let answered = found.iter().any(|device| device.nus);
+                if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(SCAN_POLL).await;
             }
             let _ = adapter.stop_scan().await;
             found.sort_by(|left, right| {
@@ -697,6 +726,31 @@ pub fn scan_devices(timeout: std::time::Duration) -> Result<Vec<FoundDevice>, St
     })
     .join()
     .map_err(|_| "the scan's own thread panicked".to_string())?
+}
+
+/// What the adapter has heard so far, as the rows the list shows.
+async fn heard(adapter: &btleplug::platform::Adapter) -> Result<Vec<FoundDevice>, String> {
+    let mut found = Vec::new();
+    for candidate in adapter
+        .peripherals()
+        .await
+        .map_err(|why| format!("the scan's results could not be read: {why}"))?
+    {
+        // A device that has just gone out of range cannot introduce
+        // itself; that is not interesting and must not end the scan.
+        let Ok(Some(properties)) = candidate.properties().await else {
+            continue;
+        };
+        found.push(FoundDevice {
+            name: properties.local_name,
+            id: candidate.id().to_string(),
+            nus: properties
+                .services
+                .contains(&crate::transport::ble::NUS_SERVICE),
+            rssi: properties.rssi,
+        });
+    }
+    Ok(found)
 }
 
 /// What the command line asked the bridge to do instead of opening a terminal.
@@ -735,37 +789,19 @@ impl Requests {
     }
 }
 
-/// How long an answer is waited for, which is not the same for every question.
+/// How long a dialled link has to finish coming up.
 ///
-/// A WiFi scan is the reason this exists. Everything else is answered out of
-/// the bridge's own state in a few milliseconds, but a scan is the board's
-/// radio listening on every channel in turn — the reference client gives it
-/// minutes, and a client that gave it the ordinary reply timeout would report
-/// "the bridge did not answer" for a scan that was simply still running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Patience {
-    /// The ordinary management reply timeout.
-    Normal,
-    /// Long enough for a scan of every 2.4 GHz channel.
-    Scan,
-    /// Waiting for a dialled link to finish coming up.
-    Connect,
-}
+/// The BLE transport itself gives a dial twenty seconds before calling the
+/// link dead; this waits beside the same clock rather than inventing a second
+/// one.
+const CONNECT_WINDOW: Duration = Duration::from_secs(20);
 
-impl Patience {
-    /// How long this waits, as a duration.
-    pub fn timeout(self) -> Duration {
-        match self {
-            Patience::Normal => crate::device::REPLY_TIMEOUT,
-            // Matches the reference client's `WIFI_SCAN_TIMEOUT`.
-            Patience::Scan => Duration::from_secs(90),
-            // The BLE transport itself gives a dial twenty seconds before
-            // calling the link dead; this waits beside the same clock rather
-            // than inventing a second one.
-            Patience::Connect => Duration::from_secs(20),
-        }
-    }
-}
+/// A little longer than a question's own patience.
+///
+/// The conversation gives up a question itself — see `device::Query::patience`
+/// — and this clock is only the outer bound for the pumps in between, so it
+/// must never cut off a window the conversation still holds open.
+const SETTLE_SLACK: Duration = Duration::from_millis(500);
 
 /// How a script run reports what it saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,17 +867,10 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format) -> i32 {
     if requests.wifi_scan {
         match app.scan_wifi() {
             Err(why) => failed += report(format, "wifi-scan", false, &why),
-            // The one request given the long timeout: a scan is the board's
-            // radio working through every channel, and the ordinary reply
-            // timeout would call a running scan a silent bridge.
-            Ok(()) => {
-                failed += wait_and_report_with(
-                    app,
-                    crate::device::Query::WifiScan,
-                    format,
-                    Patience::Scan,
-                )
-            }
+            // The question carries its own long patience: a scan is the
+            // board's radio working through every channel, and the ordinary
+            // reply timeout would call a running scan a silent bridge.
+            Ok(()) => failed += wait_and_report(app, crate::device::Query::WifiScan, format),
         }
     }
 
@@ -912,11 +941,11 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
 
 /// Pump until a dialled link is connected enough to be asked things.
 ///
-/// The wait is bounded by [`Patience::Connect`]. A link that never gets there
+/// The wait is bounded by [`CONNECT_WINDOW`]. A link that never gets there
 /// is not this loop's to report: every request that follows says for itself
 /// that nothing went out, which is the report a user can act on.
 fn wait_for_connected(app: &mut App) {
-    let deadline = Instant::now() + Patience::Connect.timeout();
+    let deadline = Instant::now() + CONNECT_WINDOW;
     while app.session.is_live() && !app.connected() && Instant::now() < deadline {
         app.pump();
         thread::sleep(Duration::from_millis(5));
@@ -924,22 +953,13 @@ fn wait_for_connected(app: &mut App) {
 }
 
 /// Wait for one answer and print what it said. Returns 1 when it failed.
+///
+/// The wait is the question's own patience with a little room on top: what
+/// ends it is the answer, the question's own timeout, or the link going away
+/// — and the report afterwards reads whichever of those happened off the
+/// state it left.
 fn wait_and_report(app: &mut App, query: crate::device::Query, format: Format) -> i32 {
-    wait_and_report_with(app, query, format, Patience::Normal)
-}
-
-/// As [`wait_and_report`], for a question the bridge takes longer to answer.
-fn wait_and_report_with(
-    app: &mut App,
-    query: crate::device::Query,
-    format: Format,
-    patience: Patience,
-) -> i32 {
-    // Waited for here and not inside the send, because an answer arrives on a
-    // later pump than the question that asked for it — and leaving before it
-    // lands is how a script reports "the bridge said nothing" when in fact it
-    // was simply not given time.
-    if !settle(app, format, patience) {
+    if !settle(app, format, query.patience() + SETTLE_SLACK) {
         let why = app
             .diagnostics
             .error
@@ -951,11 +971,15 @@ fn wait_and_report_with(
     report_query(app, query, format)
 }
 
-/// Pump until the question asked has been answered, or until the conversation
-/// itself gives up. Returns whether an answer arrived.
-fn settle(app: &mut App, format: Format, patience: Patience) -> bool {
-    let deadline =
-        std::time::Instant::now() + patience.timeout() + std::time::Duration::from_millis(500);
+/// Pump until the question asked is no longer outstanding, or until `window`
+/// runs out. Returns whether the wait ended on its own.
+///
+/// "No longer outstanding" is not the same as "answered": the conversation
+/// ends a question by timing it out too, and the caller reads the difference
+/// off the state that ending left. What this returns is only whether the wait
+/// had to be cut off from the outside.
+fn settle(app: &mut App, format: Format, window: Duration) -> bool {
+    let deadline = std::time::Instant::now() + window;
     while app.waiting_on_device() {
         if std::time::Instant::now() > deadline {
             return false;
@@ -1034,10 +1058,17 @@ fn report(format: Format, what: &str, ok: bool, detail: &str) -> i32 {
 
 /// Print what a read came back with.
 fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
-    let ok = match query {
-        crate::device::Query::Diagnostics => app.diagnostics.error.is_none(),
-        _ => app.network.error.is_none(),
+    // A read that did not arrive — nothing answered, or what answered could
+    // not be read — is reported with its reason. An empty reply next to
+    // `ok=false` reads as a read that came back empty rather than one that
+    // never happened, which sends the reader to the wrong half of the link.
+    let error = match query {
+        crate::device::Query::Diagnostics => &app.diagnostics.error,
+        _ => &app.network.error,
     };
+    if let Some(why) = error {
+        return report(format, query_name(query), false, why);
+    }
     let detail = match query {
         crate::device::Query::Diagnostics => app.diagnostics.raw.join("\n"),
         crate::device::Query::Uart => app
@@ -1050,16 +1081,8 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
         },
         // One network per line, in the order the bridge heard them. The scan
         // stream's own lines (`OK accepted`, `@scan done`) are already off the
-        // list — see `App`'s `scan_results`. A scan that failed while it was
-        // running has no list to show, and the words it failed with are the
-        // report a script can act on.
-        crate::device::Query::WifiScan => {
-            if app.network.scan_results.is_empty() {
-                app.network.error.clone().unwrap_or_default()
-            } else {
-                app.network.scan_results.join("\n")
-            }
-        }
+        // list — see `App`'s `scan_results`.
+        crate::device::Query::WifiScan => app.network.scan_results.join("\n"),
         crate::device::Query::Webdav => match &app.network.webdav {
             Some(webdav) => format!("webdav={},url={}", webdav.state, webdav.url),
             None => String::new(),
@@ -1086,11 +1109,7 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
     match format {
         Format::Text => {
             if detail.is_empty() {
-                println!(
-                    "{}: {}",
-                    query_name(query),
-                    if ok { "ok" } else { "failed" }
-                );
+                println!("{}: ok", query_name(query));
             } else {
                 for line in detail.lines() {
                     println!("{}: {}", query_name(query), line);
@@ -1102,16 +1121,12 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
             json_line(&[
                 ("event", "result"),
                 ("what", query_name(query)),
-                ("ok", &ok.to_string()),
+                ("ok", "true"),
                 ("reply", &detail.replace('\n', "\\n")),
             ])
         ),
     }
-    if ok {
-        0
-    } else {
-        1
-    }
+    0
 }
 
 /// One JSON object on one line, escaped by hand.

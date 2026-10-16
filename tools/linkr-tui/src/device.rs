@@ -24,6 +24,14 @@ use crate::protocol::{management_fragment_is_final, ManagementHeader};
 /// answer, and waiting longer only delays saying so.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a `@i?` read has before it is given up on.
+///
+/// Eight seconds, the window the web client gives the same collection. The
+/// `@info` blob is longer than one ATT notification can carry and the bridge
+/// sends it in fragments that have been seen seconds apart — a three-second
+/// window gave up on the first fragment of an answer that was on its way.
+pub const INFO_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// How long a scan has to say something before it is given up on.
 ///
 /// Longer than [`REPLY_TIMEOUT`] because a scan is the radio walking channels,
@@ -121,10 +129,10 @@ impl Query {
 
     /// How long this question has to say something before it is given up on.
     pub fn patience(self) -> Duration {
-        if self == Query::WifiScan {
-            SCAN_TIMEOUT
-        } else {
-            REPLY_TIMEOUT
+        match self {
+            Query::WifiScan => SCAN_TIMEOUT,
+            Query::Diagnostics => INFO_TIMEOUT,
+            _ => REPLY_TIMEOUT,
         }
     }
 }
@@ -340,6 +348,21 @@ mod tests {
         assert!(Query::WifiScan.complete(&["@scan done".into()]));
         assert!(Query::WifiScan.complete(&["@scan error".into()]));
         assert!(Query::WifiScan.complete(&["ERR scan=-16".into()]));
+    }
+
+    #[test]
+    fn every_question_gets_the_window_its_answer_needs() {
+        // The `@info` blob is the one management answer the bridge sends in
+        // fragments seconds apart; eight seconds is the window the web client
+        // gives it (`collectAccessoryDiagnostics`), and three were measured
+        // cutting off a first fragment that was on its way.
+        assert_eq!(Query::Diagnostics.patience(), INFO_TIMEOUT);
+        // A scan is the radio walking channels.
+        assert_eq!(Query::WifiScan.patience(), SCAN_TIMEOUT);
+        // The rest are answered out of the bridge's own state in milliseconds.
+        for query in [Query::Uart, Query::Wifi, Query::Webdav, Query::Lan] {
+            assert_eq!(query.patience(), REPLY_TIMEOUT, "{query:?}");
+        }
     }
 
     #[test]

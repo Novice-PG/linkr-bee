@@ -174,8 +174,8 @@ const LEVEL_WARN: Entry = ["warn", "警告"];
 const LEVEL_ERROR: Entry = ["error", "错误"];
 
 const HELP_NOTE: Entry = [
-    "Every other key goes to the device: the letters, the cursor keys, Home/End, Delete — and Tab, which completes on the target. While the pane has the keyboard and a link is up, Ctrl+C interrupts the device too.",
-    "其余按键都会发送到设备：字母、方向键、Home/End、Delete，以及用于补全的 Tab。键盘在终端且已连接时，Ctrl+C 也发给设备（中断正在运行的程序）。",
+    "Every other key goes to the device while the terminal view is up: the letters, the cursor keys, Home/End, Delete — and Tab, which completes on the target. While the pane has the keyboard and a link is up, Ctrl+C interrupts the device too.",
+    "终端视图在前时，其余按键都会发送到设备：字母、方向键、Home/End、Delete，以及用于补全的 Tab。键盘在终端且已连接时，Ctrl+C 也发给设备（中断正在运行的程序）。",
 ];
 
 /// The help overlay's chord list. The keys stay literal — they are what the
@@ -210,7 +210,7 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ("End", ["Jump to the newest line", "跳到最新一行"]),
     ("Ctrl+L", ["Clear the pane", "清屏"]),
     ("Ctrl+Shift+Y", ["Copy the screen", "复制整屏"]),
-    ("Ctrl+T", ["Toggle the theme", "切换主题"]),
+    ("Ctrl+T", ["Choose the theme", "选择主题"]),
     ("Ctrl+Q", ["Quit", "退出"]),
 ];
 
@@ -245,9 +245,19 @@ pub enum Dialog {
     /// state, so the paste chord and the painter agree about where the keys
     /// go — and this carries only how far the body has been scrolled.
     Settings(usize),
+    /// The themes the interface ships, with the keyboard's cursor on one.
+    ThemePick(ThemePick),
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
+const THEME_TITLE: Entry = ["Theme", "主题"];
+/// The keys, in the order the window is used: move, keep, back out. "Keep"
+/// rather than "apply" because the preview has already applied — Enter is what
+/// makes the choice outlive the window.
+const THEME_KEYS: Entry = [
+    "↑↓ preview · Enter keep · Esc cancel",
+    "↑↓ 预览 · 回车确定 · Esc 取消",
+];
 /// The picker's two outcomes say *what is happening*; the legend under them
 /// says which keys are live. They are separate lines so that neither states
 /// the other's business — a scanning window that read `Scanning… Esc cancels`
@@ -307,6 +317,21 @@ impl DevicePick {
     pub fn scroll(&self) -> usize {
         0
     }
+}
+
+/// The themes the interface ships, waiting for a pick.
+///
+/// A list rather than a ring to walk: stepping one theme per press is fine for
+/// the web's own dark/light pair and useless for six palettes — the way to
+/// *choose* is to see them all at once. Moving the cursor previews by setting
+/// the theme itself, so what is on screen is always what Enter would keep, and
+/// `original` is what Escape puts back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemePick {
+    /// Which theme the keyboard is on, an index into [`crate::theme::THEMES`].
+    pub cursor: usize,
+    /// The theme that was live when the window opened — Escape restores it.
+    pub original: crate::theme::ThemeChoice,
 }
 
 /// The cheat sheet: the commands the web's chips send, in four groups, with a
@@ -397,6 +422,17 @@ impl Field {
     pub fn insert(&mut self, ch: char) {
         self.text.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+    }
+
+    /// Insert `text` at the caret: a paste is typing that arrived at once.
+    ///
+    /// The text is taken as it comes; a field that is one line long is fixed
+    /// by its caller before it gets here, because only the caller knows
+    /// whether a newline means a line break or was just the clipboard's
+    /// ending.
+    pub fn insert_str(&mut self, text: &str) {
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
     }
 
     /// Remove the character before the caret.
@@ -573,7 +609,11 @@ impl Dialog {
             | Dialog::Notices(offset)
             | Dialog::Settings(offset)
             | Dialog::Cheat(Cheat { scroll: offset, .. }) => *offset,
-            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::DevicePick(_) | Dialog::Uart(_) => 0,
+            Dialog::Confirm(_)
+            | Dialog::Prompt(_)
+            | Dialog::DevicePick(_)
+            | Dialog::Uart(_)
+            | Dialog::ThemePick(_) => 0,
         }
     }
 }
@@ -589,6 +629,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Cheat(_) => entry(CHEAT_TITLE, lang),
         Dialog::Uart(_) => entry(UART_TITLE, lang),
         Dialog::Settings(_) => entry(SETTINGS_TITLE, lang),
+        Dialog::ThemePick(_) => entry(THEME_TITLE, lang),
     }
 }
 
@@ -611,6 +652,7 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
             }
         }
         Dialog::Settings(_) => entry(SETTINGS_KEYS, lang),
+        Dialog::ThemePick(_) => entry(THEME_KEYS, lang),
     };
     Line::from(Span::styled(text, theme.muted()))
 }
@@ -675,6 +717,39 @@ pub fn open_uart(app: &mut App) {
 /// notice that names the endpoint, and "write a note".
 pub fn open_settings(app: &mut App) {
     raise(app, Dialog::Settings(0));
+}
+
+/// Raise the theme picker, on the theme that is live right now.
+pub fn open_theme_pick(app: &mut App) {
+    let cursor = crate::theme::THEMES
+        .iter()
+        .position(|choice| *choice == app.theme)
+        .unwrap_or(0);
+    raise(
+        app,
+        Dialog::ThemePick(ThemePick {
+            cursor,
+            original: app.theme,
+        }),
+    );
+}
+
+/// `Ctrl+T`: open the theme picker, or put it away.
+///
+/// The chord that opened the window closes it, the way the palette's does —
+/// and closing is *cancel*: a preview nobody kept is not a choice, so the
+/// theme the window opened on comes back. A different window in the way is
+/// left alone rather than replaced; a theme is not worth somebody's
+/// half-typed prompt.
+pub fn toggle_theme_pick(app: &mut App) {
+    match &app.dialog {
+        Some(Dialog::ThemePick(pick)) => {
+            app.theme = pick.original;
+            app.dialog = None;
+        }
+        Some(_) => {}
+        None => open_theme_pick(app),
+    }
 }
 
 /// Ask which network to join. The password is asked for next, by the prompt
@@ -954,6 +1029,22 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 })
                 .collect()
         }
+        Dialog::ThemePick(pick) => crate::theme::THEMES
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                // One row per theme, cursor included: the window is the list,
+                // and moving on it repaints the frame in the theme under the
+                // cursor — which is why the row's own style is as ordinary as
+                // the others'.
+                let style = if index == pick.cursor {
+                    theme.selected()
+                } else {
+                    theme.text()
+                };
+                Line::from(Span::styled(app.theme_name(*choice), style))
+            })
+            .collect(),
         Dialog::Cheat(cheat) => cheat_body(cheat, lang, theme, width),
         Dialog::Notices(_) => {
             if app.log.is_empty() {
@@ -1194,6 +1285,30 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // paging keys move the *window*, and a form key moves the caret, so
         // that key's window has to follow — a caret left on a row nothing
         // paints is a keystroke that lands where the user cannot see it.
+        Dialog::ThemePick(mut pick) => match key.code {
+            // Escape puts back the theme the window opened on: a preview is
+            // not a choice until Enter makes it one.
+            KeyCode::Esc => app.theme = pick.original,
+            // Moving the cursor *is* the preview — the frame repaints in the
+            // theme under it, so the six are compared on the screen rather
+            // than from memory.
+            KeyCode::Up => {
+                pick.cursor = pick.cursor.saturating_sub(1);
+                app.theme = crate::theme::THEMES[pick.cursor];
+                app.dialog = Some(Dialog::ThemePick(pick));
+            }
+            KeyCode::Down => {
+                let last = crate::theme::THEMES.len() - 1;
+                pick.cursor = (pick.cursor + 1).min(last);
+                app.theme = crate::theme::THEMES[pick.cursor];
+                app.dialog = Some(Dialog::ThemePick(pick));
+            }
+            KeyCode::Enter => {
+                let notice = app.keep_theme(crate::theme::THEMES[pick.cursor]);
+                app.push_notice(notice);
+            }
+            _ => app.dialog = Some(Dialog::ThemePick(pick)),
+        },
         Dialog::Settings(offset) => {
             if key.code == KeyCode::Esc {
                 crate::views::assistant::close_settings(app);

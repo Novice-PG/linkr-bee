@@ -516,8 +516,8 @@ pub fn parse_wifi_event(text: &str) -> Option<WifiEvent> {
 
 /// Whether a WiFi event represents completed provisioning: the `ready` phase
 /// with a usable IPv4 address. `ip=ready`/`ip=down` only mean "no address yet".
-pub fn wifi_provisioning_complete(event: &Option<WifiEvent>) -> bool {
-    matches!(event, Some(e) if e.phase == "ready" && is_ipv4_address(&e.ip))
+pub fn wifi_provisioning_complete(event: &WifiEvent) -> bool {
+    event.phase == "ready" && is_ipv4_address(&event.ip)
 }
 
 /// Whether a string looks like an IPv4 address — the web client's heuristic for
@@ -808,11 +808,12 @@ mod tests {
 
     #[test]
     fn provisioning_requires_a_real_ip() {
-        let ready = parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=10.0.0.4");
+        let ready = parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=10.0.0.4")
+            .expect("parses");
         assert!(wifi_provisioning_complete(&ready));
-        let ip_ready = parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=ready");
+        let ip_ready =
+            parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=ready").expect("parses");
         assert!(!wifi_provisioning_complete(&ip_ready));
-        assert!(!wifi_provisioning_complete(&None));
     }
 
     #[test]
