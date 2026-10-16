@@ -224,6 +224,9 @@ impl Drop for StreamWriter {
 
 // --- the device that is not a device -----------------------------------------
 
+/// The shell prompt the loopback prints, spelled once.
+const PROMPT: &str = "linkr@bee:~$ ";
+
 /// A tiny shell standing in for the board, so `--bridge -` shows a populated
 /// terminal on a machine with no hardware.
 #[derive(Default)]
@@ -251,27 +254,96 @@ impl LoopbackDevice {
     fn banner(&self) {
         self.push(
             "Linkr Bee loopback device (no radio attached)\r\n\
-             Type a command; try: help, version, uname -a, df -h\r\n\
-             linkr@bee:~$ ",
+             Type a command; try: help, version, uname -a, df -h\r\n",
         );
+        self.push(PROMPT);
     }
 
     /// The reply to one complete line, as the board would print it.
+    ///
+    /// A hair more shell than the banner admits, because the CLI's `exec`
+    /// completion rule (`cmd; echo "LINKR_RC:$?"`) has to be answerable
+    /// without hardware: `echo`, `true`, `false`, `$?` and `;`-separated
+    /// lists are understood, and a `sleep` or a `sudo` password prompt is
+    /// left hanging the way a real one would be. The banner's own commands
+    /// keep their exact answers, and anything else stays "not found".
     fn reply(&self, line: &str) {
         let command = line.trim();
-        let answer = match command {
-            "" => String::new(),
-            "help" => "help version uname df reboot\r\n".to_string(),
-            "version" => "linkr-bee 1.0.0 (loopback)\r\n".to_string(),
-            "uname -a" => "Linux bee 6.6.0-linkr #1 SMP aarch64 GNU/Linux\r\n".to_string(),
-            "df -h" => "Filesystem      Size  Used Avail Use% Mounted on\r\n\
-                 /dev/root        28G  7.4G   19G  29% /\r\n\
-                 tmpfs           196M     0  196M   0% /run\r\n"
-                .to_string(),
-            other => format!("sh: {other}: not found\r\n"),
+        if command.is_empty() {
+            return;
+        }
+        let mut status = 0;
+        for segment in command.split(';') {
+            match self.run_segment(segment.trim(), status) {
+                Some(next) => status = next,
+                // A segment that keeps the shell waiting — a sleep, or a
+                // terminal reading a password — means nothing after it on
+                // the line runs and no prompt comes back until the far side
+                // types. The exec contract's timeout and needs_input paths
+                // are what this is for.
+                None => return,
+            }
+        }
+        self.push(PROMPT);
+    }
+
+    /// Run one `;`-list segment. `None` when the segment left the shell
+    /// waiting rather than returning a status; the status returned is what
+    /// `$?` sees in the segment that follows.
+    fn run_segment(&self, segment: &str, status: i32) -> Option<i32> {
+        let words: Vec<String> = segment
+            .split_whitespace()
+            .map(|word| word.trim_matches('"').replace("$?", &status.to_string()))
+            .collect();
+        let (head, rest) = match words.split_first() {
+            Some((head, rest)) => (head.as_str(), rest.join(" ")),
+            None => return Some(status),
         };
-        self.push(&answer);
-        self.push("linkr@bee:~$ ");
+        match head {
+            // The shell builtins the CLI's exec contract is built on.
+            "echo" => {
+                self.push(&format!("{rest}\r\n"));
+                Some(0)
+            }
+            "true" => Some(0),
+            "false" => Some(1),
+            // As far as anything here can tell it never finishes: nothing is
+            // printed and no prompt follows, so an `exec` that waits for one
+            // waits out its own deadline instead.
+            "sleep" => None,
+            // A terminal reading a password: the prompt has no newline
+            // because a real one does not, and naming what it waits for is
+            // the classifier's job (`serial::console`), not this device's.
+            "sudo" => {
+                self.push("[sudo] password for root: ");
+                None
+            }
+            // What the banner documents, with the exact answers it promised.
+            "help" => {
+                self.push("help version uname df reboot\r\n");
+                Some(0)
+            }
+            "version" => {
+                self.push("linkr-bee 1.0.0 (loopback)\r\n");
+                Some(0)
+            }
+            "uname" if rest == "-a" => {
+                self.push("Linux bee 6.6.0-linkr #1 SMP aarch64 GNU/Linux\r\n");
+                Some(0)
+            }
+            "df" if rest == "-h" => {
+                self.push(
+                    "Filesystem      Size  Used Avail Use% Mounted on\r\n\
+                     /dev/root        28G  7.4G   19G  29% /\r\n\
+                     tmpfs           196M     0  196M   0% /run\r\n",
+                );
+                Some(0)
+            }
+            _ => {
+                self.push(&format!("sh: {segment}: not found\r\n"));
+                Some(127)
+            }
+        }
     }
 }
 
@@ -296,7 +368,7 @@ impl LinkWriter for DeviceWriter {
                     if !line.trim().is_empty() {
                         self.device.reply(&line);
                     } else {
-                        self.device.push("linkr@bee:~$ ");
+                        self.device.push(PROMPT);
                     }
                 }
                 0x08 | 0x7f => {
@@ -540,5 +612,97 @@ mod tests {
         let reply = collect_text(&handle, "not found");
         let text = String::from_utf8_lossy(&reply);
         assert!(text.contains("not found"), "{text:?}");
+    }
+
+    /// The little shell the CLI's exec contract needs: `echo`, an exit status
+    /// carried through `$?` into the marker line, and the shell convention
+    /// for a command that was never there.
+    #[test]
+    fn the_loopback_speaks_the_exec_contract() {
+        let handle = LinkHandle::start(Box::new(StdioBridge::loopback())).expect("opens");
+        let _ = collect_text(&handle, "linkr@bee:~$ ");
+
+        handle.send(b"echo ok; echo \"LINKR_RC:$?\"\n".to_vec());
+        let reply = collect_text(&handle, "LINKR_RC:0");
+        let text = String::from_utf8_lossy(&reply);
+        assert!(text.contains("ok\r\n"), "the echo did not answer: {text:?}");
+        assert!(text.contains("LINKR_RC:0"), "no marker line: {text:?}");
+
+        handle.send(b"nosuch; echo \"LINKR_RC:$?\"\n".to_vec());
+        let reply = collect_text(&handle, "LINKR_RC:127");
+        let text = String::from_utf8_lossy(&reply);
+        assert!(
+            text.contains("sh: nosuch: not found"),
+            "the unknown command was not reported: {text:?}"
+        );
+        assert!(text.contains("LINKR_RC:127"), "no 127 marker: {text:?}");
+    }
+
+    /// What is typed is echoed and then answered: a line arrives in the reply
+    /// buffer as it was sent, before the device's own answer to it.
+    #[test]
+    fn the_loopback_echoes_before_it_answers() {
+        let handle = LinkHandle::start(Box::new(StdioBridge::loopback())).expect("opens");
+        let _ = collect_text(&handle, "linkr@bee:~$ ");
+        handle.send(b"echo hello\n".to_vec());
+        let reply = collect_text(&handle, "hello\r\n");
+        let text = String::from_utf8_lossy(&reply);
+        let typed = text.find("echo hello").expect("the typed line was echoed");
+        let answer = text.find("hello\r\n").expect("the answer arrived");
+        assert!(typed <= answer, "the answer overtook the echo: {text:?}");
+    }
+
+    /// `sleep` never comes back: nothing is printed and no prompt follows,
+    /// which is the case the CLI's timeout path exists for.
+    #[test]
+    fn the_loopback_never_finishes_a_sleep() {
+        let handle = LinkHandle::start(Box::new(StdioBridge::loopback())).expect("opens");
+        let _ = collect_text(&handle, "linkr@bee:~$ ");
+        handle.send(b"sleep 9\n".to_vec());
+        thread::sleep(Duration::from_millis(80));
+        let after = drain_text(&handle);
+        assert!(
+            after.contains("sleep 9"),
+            "the echo of the typed line never arrived: {after:?}"
+        );
+        assert!(
+            !after.contains("linkr@bee:~$ "),
+            "a prompt came back for a command that never finished: {after:?}"
+        );
+    }
+
+    /// A `sudo` prompt is the CLI's `needs_input` case, so the loopback has
+    /// to leave one hanging: the prompt arrives and nothing else does, not
+    /// even a prompt of its own.
+    #[test]
+    fn the_loopback_leaves_a_password_prompt_hanging() {
+        let handle = LinkHandle::start(Box::new(StdioBridge::loopback())).expect("opens");
+        let _ = collect_text(&handle, "linkr@bee:~$ ");
+        handle.send(b"sudo id\n".to_vec());
+        let reply = collect_text(&handle, "[sudo] password for root: ");
+        let text = String::from_utf8_lossy(&reply);
+        assert!(text.contains("[sudo] password for root: "), "{text:?}");
+        // The point of the case is the silence after the prompt: give a shell
+        // that was going to answer anyway a moment to prove it will not.
+        thread::sleep(Duration::from_millis(80));
+        let after = drain_text(&handle);
+        assert!(
+            !after.contains("linkr@bee:~$ "),
+            "a prompt followed the password prompt: {after:?}"
+        );
+    }
+
+    /// Everything the handle has received since the last drain, as text.
+    fn drain_text(handle: &LinkHandle) -> String {
+        let bytes: Vec<u8> = handle
+            .drain()
+            .into_iter()
+            .filter_map(|event| match event {
+                LinkEvent::Data(chunk) => Some(chunk),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
