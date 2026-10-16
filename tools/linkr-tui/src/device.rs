@@ -24,6 +24,14 @@ use crate::protocol::{management_fragment_is_final, ManagementHeader};
 /// answer, and waiting longer only delays saying so.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a scan has to say something before it is given up on.
+///
+/// Longer than [`REPLY_TIMEOUT`] because a scan is the radio walking channels,
+/// not the management task answering: the bridge's own watchdog releases a
+/// wedged scan at fifteen seconds and says `@scan error` then, so anything
+/// slower than this is a bridge that is not going to speak at all.
+pub const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A question the host asks the bridge about itself.
 ///
 /// These four are what the diagnostics and network surfaces show, and each is
@@ -39,6 +47,12 @@ pub enum Query {
     Uart,
     /// `@w?` — whether the bridge has joined a network, and on what address.
     Wifi,
+    /// `@w scan` — what networks the bridge's radio can hear.
+    ///
+    /// Its own question rather than a shape of [`Query::Wifi`]: a scan is
+    /// answered in pieces over several messages and ends with a line of its
+    /// own, where a status is one message that ends in `OK`.
+    WifiScan,
     /// `@d?` — whether log upload is on, and where it goes.
     Webdav,
     /// `@s?` — LAN access state, and the token the bridge expects.
@@ -52,6 +66,7 @@ impl Query {
             Query::Diagnostics => crate::accessory::DIAGNOSTICS_COMMAND,
             Query::Uart => crate::accessory::UART_QUERY_COMMAND,
             Query::Wifi => crate::accessory::WIFI_QUERY_COMMAND,
+            Query::WifiScan => crate::accessory::WIFI_SCAN_COMMAND,
             Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
         }
@@ -70,12 +85,46 @@ impl Query {
             Query::Diagnostics => lines
                 .iter()
                 .any(|line| line.trim().eq_ignore_ascii_case("@info done")),
+            // A scan is answered in pieces, and the first of them is `OK
+            // accepted` — which the OK-shape rule below would read as the whole
+            // answer and close the question on. Its real ending is its own
+            // terminator; an `ERR` reply ends it too, because a refused scan
+            // has nothing after it.
+            Query::WifiScan => {
+                let ended = lines
+                    .iter()
+                    .any(|line| crate::accessory::is_scan_terminator(line));
+                ended
+                    || !crate::accessory::reply_status(&lines.join("\n"))
+                        .error
+                        .is_empty()
+            }
             Query::Uart | Query::Wifi | Query::Webdav | Query::Lan => {
                 crate::accessory::reply_status(&lines.join("\n")).ok
                     || !crate::accessory::reply_status(&lines.join("\n"))
                         .error
                         .is_empty()
             }
+        }
+    }
+
+    /// Whether the answer may keep arriving after a piece the bridge marked
+    /// final.
+    ///
+    /// A scan is the one that does: its first piece is `OK accepted`, and the
+    /// flag on it says *that piece* is whole — not that the answer is. The
+    /// networks and the `@scan done` behind it belong to the same answer, so
+    /// the frame's flag is not what closes this question.
+    pub fn streams(self) -> bool {
+        self == Query::WifiScan
+    }
+
+    /// How long this question has to say something before it is given up on.
+    pub fn patience(self) -> Duration {
+        if self == Query::WifiScan {
+            SCAN_TIMEOUT
+        } else {
+            REPLY_TIMEOUT
         }
     }
 }
@@ -198,10 +247,9 @@ impl Conversation {
     /// answer has been taken, so late fragments cannot extend a reply that has
     /// already been read.
     pub fn take_reply(&mut self) -> Option<Reply> {
-        let done = self
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.finalised || p.query.complete(&p.lines));
+        let done = self.pending.as_ref().is_some_and(|p| {
+            (p.finalised && !p.query.streams()) || p.query.complete(&p.lines)
+        });
         if !done {
             return None;
         }
@@ -230,7 +278,7 @@ impl Conversation {
         let overdue = self
             .pending
             .as_ref()
-            .is_some_and(|p| now.duration_since(p.since) >= REPLY_TIMEOUT);
+            .is_some_and(|p| now.duration_since(p.since) >= p.query.patience());
         if !overdue {
             return None;
         }
@@ -271,6 +319,7 @@ mod tests {
         assert_eq!(Query::Diagnostics.command(), "@i?");
         assert_eq!(Query::Uart.command(), "@u?");
         assert_eq!(Query::Wifi.command(), "@w?");
+        assert_eq!(Query::WifiScan.command(), "@w scan");
         assert_eq!(Query::Webdav.command(), "@d?");
     }
 
@@ -282,6 +331,15 @@ mod tests {
         // An error is an ending too: the answer arrived, it just said no.
         assert!(Query::Wifi.complete(&["ERR ssid too long".into()]));
         assert!(!Query::Webdav.complete(&["thinking".into()]));
+        // A scan's acceptance is not an ending; its own terminator is.
+        assert!(!Query::WifiScan.complete(&["OK accepted".into()]));
+        assert!(!Query::WifiScan.complete(&[
+            "OK accepted".into(),
+            "@scan result BenchNet wpa2 ch=6 -54dBm".into(),
+        ]));
+        assert!(Query::WifiScan.complete(&["@scan done".into()]));
+        assert!(Query::WifiScan.complete(&["@scan error".into()]));
+        assert!(Query::WifiScan.complete(&["ERR scan=-16".into()]));
     }
 
     #[test]
@@ -377,6 +435,48 @@ mod tests {
         let reply = talk.take_reply().expect("answered");
         assert!(!reply.status.ok);
         assert_eq!(reply.status.error, "ERR ssid too long");
+    }
+
+    /// A scan is answered in pieces, and the acceptance is not the answer.
+    ///
+    /// The first piece carries FINAL because that *message* is whole; the
+    /// networks and the ending behind it are the same answer, so a question
+    /// closed on the acceptance dropped every one of them.
+    #[test]
+    fn a_scan_is_not_over_when_it_is_accepted() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let (id, _) = talk.ask(Query::WifiScan, start);
+        let (accepted, body) = response(id, "OK accepted", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&accepted, &body));
+        assert!(
+            talk.take_reply().is_none(),
+            "the acceptance is not the answer"
+        );
+        let (result, body) = response(id, "@scan result BenchNet wpa2 ch=6 -54dBm", 0);
+        assert!(talk.offer(&result, &body));
+        assert!(talk.take_reply().is_none(), "nor is a network");
+        let (done, body) = response(id, "@scan done", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&done, &body));
+        let reply = talk.take_reply().expect("the terminator ends it");
+        assert_eq!(reply.query, Query::WifiScan);
+        assert_eq!(reply.lines.len(), 3, "nothing is dropped on the way");
+        assert_eq!(talk.waiting(), None);
+    }
+
+    /// A scan is the radio walking channels, so it is given longer than a
+    /// question answered out of the bridge's own state.
+    #[test]
+    fn a_scan_is_given_the_time_its_radio_needs() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        talk.ask(Query::WifiScan, start);
+        assert_eq!(
+            talk.abandon(start + REPLY_TIMEOUT),
+            None,
+            "still scanning, and not yet a silent bridge"
+        );
+        assert_eq!(talk.abandon(start + SCAN_TIMEOUT), Some(Query::WifiScan));
     }
 
     #[test]

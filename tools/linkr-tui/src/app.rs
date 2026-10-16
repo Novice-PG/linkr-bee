@@ -262,8 +262,12 @@ pub struct App {
     /// which shrinks the rail rather than dropping it.
     pub sidebar_visible: bool,
     pub transport: Transport,
-    /// True when a CLI flag pinned the transport, so the sidebar says `locked`.
+    /// True while switching the transport is refused: a dial took the link out
+    /// on one kind, or a command-line flag named it.
     pub transport_locked: bool,
+    /// True when the command line pinned the transport. A dial's lock is
+    /// released with the link; this one is the operator's and outlives it.
+    pub transport_pinned: bool,
     /// The device the session targets (or, once connected, the one it found).
     pub device_name: String,
     pub rx: u64,
@@ -415,6 +419,7 @@ impl Default for App {
             sidebar_visible: true,
             transport: Transport::default(),
             transport_locked: false,
+            transport_pinned: false,
             device_name: "Linkr BLE UART".to_string(),
             rx: 0,
             tx: 0,
@@ -816,8 +821,11 @@ impl App {
         // Remembered only once the link opened: a dial that failed is not
         // something `connect` should try again behind the user's back.
         self.last_dial = Some(dial.clone());
-        // A dial the command line decided cannot be switched from the keyboard,
-        // which is exactly what the sidebar's `locked` suffix says.
+        // Locked for as long as the link is up: a keypress that switched the
+        // label under a live link would make the sidebar's `locked` suffix a
+        // lie. Hanging up releases it — see `disconnect` — which is what makes
+        // switching the transport and dialling again a sequence the user can
+        // actually perform.
         self.transport_locked = true;
         self.connect(link)
     }
@@ -857,6 +865,11 @@ impl App {
         let name = self.session.describe().to_string();
         self.session.close();
         self.state = ConnectionState::Disconnected;
+        // The lock a dial took out went with the dial: with the link down
+        // there is nothing left for it to protect, and switching the transport
+        // is exactly what hanging up is for. A transport the command line
+        // named stays locked — that pin is the operator's, not a dial's.
+        self.transport_locked = self.transport_pinned;
         let text = format!("{}{}", self.strings().link_closed, name);
         self.push_notice(Notice {
             text,
@@ -1095,7 +1108,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                         // The last line may be half a name while its frame is
                         // still in flight. It is corrected by the next one,
                         // which is what a streaming list looks like on the wire.
-                        if self.talk.waiting() == Some(Query::Wifi) {
+                        if self.talk.waiting() == Some(Query::WifiScan) {
                             let partial = scan_results(self.talk.pending_lines());
                             if !partial.is_empty() {
                                 self.network.scan_results = partial;
@@ -1339,20 +1352,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
         }
         if devices.len() == 1 && connect_single {
-            // Named when it has a name, addressed when it has none: an
-            // announcement with a hole in it is one the user has to finish
-            // themselves.
-            let name = devices[0]
-                .name
-                .clone()
-                .unwrap_or_else(|| devices[0].id.clone());
-            if self.connect_to_board(&devices[0].id) {
-                let s = self.strings();
-                self.push_notice(Notice {
-                    text: format!("{}{}", s.link_opened, name),
-                    level: crate::event::NoticeLevel::Info,
-                });
-            }
+            // The link coming up is announced by the pump, which sees every
+            // dial's Connected edge; saying it here as well put the same
+            // sentence on the toast twice for the one dial this path makes.
+            self.connect_to_board(&devices[0].id);
         }
     }
 
@@ -1415,7 +1418,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::Webdav => {
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -1472,8 +1475,11 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// of networks says nothing about what the board can reach from where it
     /// is bolted down.
     pub fn scan_wifi(&mut self) -> Result<(), String> {
-        let command = accessory::wifi_command("scan", "", "")?;
-        self.send_accessory(&command, Query::Wifi)
+        self.send_accessory(Query::WifiScan.command(), Query::WifiScan)?;
+        // A new scan replaces the old list: rows left over from the last one
+        // under a running scan read as networks this one has found.
+        self.network.scan_results.clear();
+        Ok(())
     }
 
     /// Point log upload at `url`, or turn it off when there is none.
@@ -1511,8 +1517,14 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         self.trace.tx_command(&shown);
         self.network.loading = true;
         self.network.error = None;
+        // The label names what the command does, and a scan is not a status
+        // read: `@w scan` may take twenty seconds and fills a list.
+        let prefix = match query {
+            Query::WifiScan => self.strings().net_scan,
+            _ => self.strings().net_status,
+        };
         self.push_notice(Notice {
-            text: format!("{} {shown}", self.strings().net_status),
+            text: format!("{prefix} {shown}"),
             level: NoticeLevel::Info,
         });
         Ok(())
@@ -1525,7 +1537,13 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // "loading…" underneath an error.
         self.stop_waiting(reply.query);
         if !reply.status.ok {
-            let error = reply.status.error.clone();
+            // A scan that failed says so in its own words rather than an `ERR`
+            // line, and those words are not a sentence to put in front of a
+            // user: the failure gets one notice whichever shape it arrived in.
+            let error = match reply.query {
+                Query::WifiScan => self.strings().net_scan_failed.to_string(),
+                _ => reply.status.error.clone(),
+            };
             match reply.query {
                 Query::Diagnostics => self.diagnostics.error = Some(error.clone()),
                 _ => self.network.error = Some(error.clone()),
@@ -1547,18 +1565,30 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     self.baud = Some(settings.baud);
                 }
             }
-            // `@w?` and `@w scan` are the same question on the wire and two
-            // different answers to read. A status names one network; a scan
-            // lists many, and a list is not something to squeeze into the
-            // status slot — it goes to its own section of the view.
+            // `@w?` is a status: the one network the bridge joined, or none.
             Query::Wifi => {
                 if let Some(status) = accessory::parse_wifi_status(&text) {
                     self.network.wifi = Some(status);
+                }
+            }
+            // A scan goes to its own section of the view, filled as the
+            // networks are heard — and it can fail *after* being accepted,
+            // with `@scan error`, which is the failure the acceptance's `OK`
+            // would otherwise hide from the status rule above.
+            Query::WifiScan => {
+                let refused = reply
+                    .lines
+                    .iter()
+                    .any(|line| accessory::is_scan_error(line));
+                if refused {
+                    let text = self.strings().net_scan_failed.to_string();
+                    self.network.error = Some(text.clone());
+                    self.push_notice(Notice {
+                        text,
+                        level: NoticeLevel::Error,
+                    });
                 } else {
-                    let results = scan_results(&reply.lines);
-                    if !results.is_empty() {
-                        self.network.scan_results = results;
-                    }
+                    self.network.scan_results = scan_results(&reply.lines);
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -1605,7 +1635,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::Webdav => self.network.loading = false,
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
+                self.network.loading = false
+            }
             Query::Lan => self.lan_status.loading = false,
         }
     }
@@ -1779,17 +1811,30 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
 /// a word where a network name belongs. Everything else is taken as it came,
 /// which is the honest thing to do with a list whose shape is the firmware's
 /// to choose.
+/// The networks in a scan answer, as the list shows them.
+///
+/// Each network arrives enveloped — `@scan result <ssid> <security> ch=<n>
+/// <rssi>dBm` — and the envelope is the wire's, not the user's: the list wants
+/// what the radio found. The acceptance, the scan's own ending, and any
+/// stray `OK`/`ERR` line that rode the same stream are not networks.
 fn scan_results(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            !accessory::starts_with_word(&lower, "ok")
-                && !accessory::starts_with_word(&lower, "err")
+        .filter_map(|line| {
+            let body = line.strip_prefix("@scan result ").unwrap_or(line).trim();
+            if body.is_empty() || accessory::is_scan_terminator(body) {
+                return None;
+            }
+            let lower = body.to_ascii_lowercase();
+            if accessory::starts_with_word(&lower, "ok")
+                || accessory::starts_with_word(&lower, "err")
+            {
+                return None;
+            }
+            Some(body.to_string())
         })
-        .map(|line| line.to_string())
         .collect()
 }
 
@@ -1950,6 +1995,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Terminal);
         assert_eq!(app.transport, Transport::Ble);
         assert!(!app.transport_locked);
+        assert!(!app.transport_pinned);
         assert!(app.autoscroll);
         assert_eq!(app.baud, None);
         assert_eq!(app.link_level, None);
@@ -2328,6 +2374,46 @@ mod tests {
             .terminal
             .visible_text()
             .contains("aarch64")));
+    }
+
+    /// Hanging up releases the lock a dial took out: with the link down there
+    /// is nothing left for it to protect, and switching the transport to dial
+    /// again is what hanging up is for.
+    #[test]
+    fn hanging_up_unlocks_the_transport_a_dial_locked() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dial(&Dial::Stdio("-".to_string()))
+            .expect("the loopback opens");
+        assert!(app.transport_locked, "a dialled link cannot be switched");
+        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+
+        app.disconnect();
+        assert!(!app.transport_locked, "the lock went when the link did");
+        let notice = app.toggle_transport();
+        assert_eq!(notice.level, NoticeLevel::Info, "switching works again");
+        assert_ne!(app.transport, Transport::Stdio);
+    }
+
+    /// A transport the command line named stays locked through a hang-up: that
+    /// pin is the operator's, not a dial's.
+    #[test]
+    fn hanging_up_keeps_a_transport_the_command_line_pinned_locked() {
+        let mut app = App {
+            lang: Lang::En,
+            transport_pinned: true,
+            ..App::default()
+        };
+        app.dial(&Dial::Stdio("-".to_string()))
+            .expect("the loopback opens");
+        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+
+        app.disconnect();
+        assert!(app.transport_locked, "a pinned transport stays pinned");
+        let notice = app.toggle_transport();
+        assert_eq!(notice.level, NoticeLevel::Warn);
     }
 
     /// A device's *questions* are answered on the wire.
@@ -2977,21 +3063,40 @@ mod tests {
     /// A scan's answer is a list, and it goes to the view's own list rather
     /// than into the status slot: squeezing nine networks into "the network you
     /// are on" would show one where the board saw nine.
+    ///
+    /// The wire shape is the firmware's: the request is accepted with `OK
+    /// accepted`, a line per network follows with no final flag, and `@scan
+    /// done` ends the stream. The list shows what is inside the wire's
+    /// envelope, and nothing of the envelope itself.
     #[test]
     fn a_wifi_scan_answer_fills_the_results_list() {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "OK scan=9\nBenchNet -58 6\nGuest -71 11"));
+        wire.feed_management(answer(id, "OK accepted"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
+        wire.feed_management(partial(id, "@scan result Guest open ch=11 -71dBm"));
+
         assert!(pump_until(&mut app, |app| !app
             .network
             .scan_results
             .is_empty()));
+        assert!(
+            app.waiting_on_device(),
+            "an accepted scan is not a finished one"
+        );
+        wire.feed_management(answer(id, "@scan done"));
+        assert!(pump_until(&mut app, |app| !app.waiting_on_device()));
         assert_eq!(
             app.network.scan_results,
-            vec!["BenchNet -58 6".to_string(), "Guest -71 11".to_string()],
-            "the status line is dropped and the networks are kept"
+            vec![
+                "BenchNet wpa2 ch=6 -54dBm".to_string(),
+                "Guest open ch=11 -71dBm".to_string(),
+            ],
+            "the envelope is the wire's and the networks are the list's"
         );
+        assert!(!app.network.loading, "the scan said it is finished");
+        assert!(app.network.error.is_none(), "and not with an error");
         assert!(app.network.wifi.is_none(), "a list is not a status");
     }
 
@@ -3007,13 +3112,12 @@ mod tests {
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
 
-        // One result line, without the final flag. The firmware streams a scan
-        // exactly this way — `wifi_scan_respond()` in the firmware sends each
-        // result with flags 0 and only `@scan done` carries FINAL — so this is
-        // the real shape, not a convenience. A body with an `OK` line in it
-        // would be recognised as a finished answer by shape alone, which is why
-        // the status line is deliberately absent here.
-        wire.feed_management(partial(id, "BenchNet -58 6"));
+        // The real shape: an acceptance, then results with flags 0 — only
+        // `@scan done` carries FINAL — so a body with an `OK` line in it would
+        // be recognised as a finished answer by shape alone. The acceptance is
+        // what says the rest is coming.
+        wire.feed_management(answer(id, "OK accepted"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
 
         assert!(pump_until(&mut app, |app| !app
             .network
@@ -3021,12 +3125,65 @@ mod tests {
             .is_empty()));
         assert_eq!(
             app.network.scan_results,
-            vec!["BenchNet -58 6".to_string()],
+            vec!["BenchNet wpa2 ch=6 -54dBm".to_string()],
             "the first network is visible before the scan ends"
         );
         assert!(
             app.network.loading,
             "still waiting: the scan has not said it is finished"
+        );
+    }
+
+    /// The acceptance carries FINAL because that *message* is whole, not
+    /// because the answer is. Read as the answer's end — which it was — every
+    /// network behind it fell to "an answer nobody asked for", and a bridge
+    /// answering perfectly looked like a broken scan.
+    #[test]
+    fn a_scan_is_not_over_when_it_is_accepted() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.scan_wifi().expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK accepted"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
+        wire.feed_management(answer(id, "@scan done"));
+
+        assert!(pump_until(&mut app, |app| !app.network.loading));
+        assert_eq!(
+            app.network.scan_results,
+            vec!["BenchNet wpa2 ch=6 -54dBm".to_string()],
+            "the answer behind the acceptance is still this conversation's"
+        );
+        assert!(app.network.error.is_none());
+        assert!(!app.waiting_on_device());
+    }
+
+    /// A scan can fail *after* it was accepted — the radio gives up and says
+    /// `@scan error` — and what the user sees is a sentence, not the bridge's
+    /// own line sitting in the list as if it were a network.
+    #[test]
+    fn a_scan_that_failed_says_so_instead_of_showing_the_line() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.scan_wifi().expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK accepted"));
+        wire.feed_management(answer(id, "@scan error"));
+
+        assert!(pump_until(&mut app, |app| !app.network.loading));
+        assert_eq!(
+            app.network.error,
+            Some("the scan failed".to_string()),
+            "the failure is a sentence, not `@scan error`"
+        );
+        assert!(
+            app.network.scan_results.is_empty(),
+            "no rows for a scan that found nothing"
+        );
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.text.contains("scan")),
+            "the failure is announced wherever the user is: {:?}",
+            app.notices
         );
     }
 

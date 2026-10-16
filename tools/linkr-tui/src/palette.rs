@@ -567,12 +567,35 @@ pub const ACTIONS: &[Action] = &[
 pub struct PaletteState {
     pub query: String,
     pub selected: usize,
+    /// The first row the window shows.
+    ///
+    /// Kept here rather than derived from `selected`: the window must *hold*
+    /// while the cursor moves inside it and only step when the cursor reaches
+    /// an edge, and the same selection means different windows depending on
+    /// which edge it came from.
+    pub window: usize,
 }
 
 impl PaletteState {
     /// A fresh overlay on an empty query.
     pub fn new() -> PaletteState {
         PaletteState::default()
+    }
+
+    /// Move the window so the selection is inside it, and no further.
+    ///
+    /// This is what makes the list hold still: a selection already between the
+    /// window's first and last row leaves it alone, and only one that has
+    /// walked off an edge pulls the window to itself — by the one row it went
+    /// past, so the list walks rather than jumps.
+    pub fn follow(&mut self, total: usize, visible: usize) {
+        let last = total.saturating_sub(visible);
+        self.window = self.window.min(last);
+        if self.selected < self.window {
+            self.window = self.selected;
+        } else if visible > 0 && self.selected >= self.window + visible {
+            self.window = self.selected + 1 - visible;
+        }
     }
 
     /// Move down one match, wrapping past the last row back to the first.
@@ -627,13 +650,20 @@ pub fn matches(query: &str) -> Vec<usize> {
 /// How many rows the overlay paints at once.
 pub const MAX_VISIBLE: usize = 14;
 
-/// First visible row for `selected`. The window stays full while it scrolls:
-/// a window that shrank near the end would resize the overlay under the user's
-/// cursor.
-pub fn window_start(selected: usize, total: usize, visible: usize) -> usize {
-    selected
-        .saturating_sub(visible / 2)
-        .min(total.saturating_sub(visible))
+/// First visible row: the window the state holds, pulled back so the selection
+/// is inside it and the window stays full.
+///
+/// The window is adjusted here as well as in the key handler because the room
+/// a terminal gives the overlay is not always [`MAX_VISIBLE`], and a selection
+/// outside the painted rows would be a cursor the user cannot see.
+pub fn window_start(state: &PaletteState, total: usize, visible: usize) -> usize {
+    let mut start = state.window.min(total.saturating_sub(visible));
+    if state.selected < start {
+        start = state.selected;
+    } else if visible > 0 && state.selected >= start + visible {
+        start = state.selected + 1 - visible;
+    }
+    start
 }
 
 /// The overlay's border title, spaces included so the painter can pass it on
@@ -673,7 +703,7 @@ pub fn lines_in(
         return out;
     }
     let visible = visible.clamp(1, MAX_VISIBLE);
-    let start = window_start(state.selected, found.len(), visible);
+    let start = window_start(state, found.len(), visible);
     for (row, index) in found.iter().skip(start).take(visible).enumerate() {
         let action = &ACTIONS[*index];
         let here = start + row == state.selected;
@@ -769,9 +799,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     // Typing may have shrunk the list under the selection; put it back in range
-    // before the next frame paints nothing.
+    // before the next frame paints nothing. The window follows the selection
+    // here rather than inside each key arm, so every way the selection moves —
+    // a step, Home/End, a query that rewrote the list — holds or scrolls by the
+    // same rule.
     if let Some(state) = app.palette.as_mut() {
-        state.clamp_to(matches(&state.query).len());
+        let total = matches(&state.query).len();
+        state.clamp_to(total);
+        state.follow(total, MAX_VISIBLE);
     }
     true
 }
@@ -1034,27 +1069,57 @@ mod tests {
         assert!(matches("nothing-matches-this-at-all").is_empty());
     }
 
-    /// The window stays full and scrolls one row at a time, so the overlay does
-    /// not resize under the cursor.
+    /// The window holds still while the cursor is inside it, and steps by the
+    /// one row the cursor reached past when it is not — the list walks at the
+    /// edge instead of scroll under a cursor parked in the middle.
     #[test]
-    fn the_window_stays_full_while_scrolling() {
+    fn the_window_holds_until_the_cursor_reaches_an_edge() {
         let total = ACTIONS.len();
         let visible = MAX_VISIBLE;
-        let mut previous = 0;
-        for selected in 0..total {
-            let start = window_start(selected, total, visible);
-            assert!(
-                start + visible <= total,
-                "selected {selected}: window overflows"
-            );
-            assert!(
-                start <= selected && selected < start + visible,
-                "selected {selected} is off screen"
-            );
-            assert!(start - previous <= 1, "the window jumped");
-            previous = start;
+        let mut state = PaletteState::new();
+
+        // A first screenful of steps leaves the window where it was.
+        for _ in 0..visible - 1 {
+            state.step_down(total);
+            state.follow(total, visible);
         }
-        assert_eq!(window_start(total - 1, total, visible), total - visible);
+        assert_eq!(state.selected, visible - 1);
+        assert_eq!(state.window, 0, "the window moved with the cursor inside it");
+
+        // One more row is one row of list.
+        state.step_down(total);
+        state.follow(total, visible);
+        assert_eq!(state.selected, visible);
+        assert_eq!(state.window, 1, "the window follows by the row it went past");
+
+        // Up again: the cursor re-enters the window and it holds.
+        state.step_up(total);
+        state.follow(total, visible);
+        state.step_up(total);
+        state.follow(total, visible);
+        assert_eq!(state.window, 1, "the window does not run ahead of the cursor");
+        assert!(state.window <= state.selected && state.selected < state.window + visible);
+
+        // The ends hold the window full, and the cursor stays on screen.
+        state.selected = total - 1;
+        state.follow(total, visible);
+        assert_eq!(state.window, total - visible);
+        state.selected = 0;
+        state.follow(total, visible);
+        assert_eq!(state.window, 0);
+
+        // A stale window — a query that grew the list under a scrolled one — is
+        // pulled back into range rather than painting past the end.
+        state.window = total + 5;
+        state.selected = total - 1;
+        assert_eq!(window_start(&state, total, visible), total - visible);
+
+        // And a painted window smaller than MAX_VISIBLE still shows the
+        // selection, whatever the state holds.
+        state.window = 3;
+        state.selected = 9;
+        let start = window_start(&state, total, 5);
+        assert!(start <= state.selected && state.selected < start + 5);
     }
 
     /// The selection wraps at both ends and survives a shrinking query.
@@ -1070,6 +1135,7 @@ mod tests {
         let mut state = PaletteState {
             query: "term".to_string(),
             selected: 99,
+            ..PaletteState::new()
         };
         state.clamp_to(matches(&state.query).len());
         assert!(state.selected < matches(&state.query).len());
@@ -1125,6 +1191,7 @@ mod tests {
             &PaletteState {
                 query: "no-such-action".into(),
                 selected: 0,
+                ..PaletteState::new()
             },
             Lang::Zh,
             MAX_VISIBLE,

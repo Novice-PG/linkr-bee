@@ -134,8 +134,14 @@ pub enum Dialog {
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
-const PICK_SCANNING: Entry = ["Scanning… Esc cancels", "正在扫描… Esc 取消"];
-const PICK_EMPTY: Entry = ["No board answered. Enter scans again", "没有设备应答。回车重新扫描"];
+/// The picker's two outcomes say *what is happening*; the legend under them
+/// says which keys are live. They are separate lines so that neither states
+/// the other's business — a scanning window that read `Scanning… Esc cancels`
+/// twice, once in the body and once above the keys, was saying it twice.
+const PICK_SCANNING: Entry = ["Scanning…", "正在扫描…"];
+const PICK_SCANNING_KEYS: Entry = ["Esc cancels", "Esc 取消"];
+const PICK_EMPTY: Entry = ["No board answered.", "没有设备应答。"];
+const PICK_EMPTY_KEYS: Entry = ["Enter scans again · Esc close", "回车重新扫描 · Esc 关闭"];
 const PICK_KEYS: Entry = ["↑↓ move · Enter connect · Esc close", "↑↓ 选择 · 回车连接 · Esc 关闭"];
 
 /// The boards a Bluetooth scan heard, and which one the keyboard is on.
@@ -374,9 +380,9 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         Dialog::Prompt(_) => entry(PROMPT_KEYS, lang),
         Dialog::DevicePick(pick) => {
             if pick.scanning {
-                entry(PICK_SCANNING, lang)
+                entry(PICK_SCANNING_KEYS, lang)
             } else if pick.devices.is_empty() {
-                entry(PICK_EMPTY, lang)
+                entry(PICK_EMPTY_KEYS, lang)
             } else {
                 entry(PICK_KEYS, lang)
             }
@@ -1789,6 +1795,45 @@ mod pick_tests {
         };
         assert_eq!(pick.rows(), 0);
         assert!(pick.selected().is_none());
+    }
+
+    /// The picker's body says what is happening and its legend says which keys
+    /// are live. They are different sentences: a scanning window that printed
+    /// the same words in both places was saying it twice, once above the keys.
+    #[test]
+    fn the_picker_does_not_say_the_same_thing_twice() {
+        let app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        for scanning in [true, false] {
+            let dialog = Dialog::DevicePick(DevicePick {
+                devices: Vec::new(),
+                cursor: 0,
+                scanning,
+                message: String::new(),
+            });
+            let body_text: String = lines(&dialog, &app, 70, 20)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let legend_text: String = legend(&dialog, app.lang, &Theme::DARK)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(!legend_text.is_empty());
+            assert!(
+                !body_text.contains(&legend_text),
+                "scanning={scanning}: the legend repeats the body: {body_text:?}"
+            );
+        }
     }
 
     /// A cursor left over from a longer list is clamped by the app, not by the

@@ -158,8 +158,14 @@ pub struct Strings {
     pub net_wifi_off: &'static str,
     /// The status action.
     pub net_status: &'static str,
+    /// The WebDAV status action. Its own words, not the WiFi status's: the
+    /// WebDAV row said `[WiFi status]` for a while, which named the wrong
+    /// section of the very view it sits in.
+    pub net_webdav_status: &'static str,
     /// The scan-results section heading.
     pub net_results_section: &'static str,
+    /// Shown when a scan failed after the bridge had accepted it.
+    pub net_scan_failed: &'static str,
     /// Shown when a scan has produced nothing.
     pub net_no_results: &'static str,
     /// The WebDAV section heading.
@@ -396,7 +402,9 @@ const ZH: Strings = Strings {
     net_connect: "[连接 WiFi]",
     net_wifi_off: "[WiFi 关闭]",
     net_status: "[WiFi 状态]",
+    net_webdav_status: "[状态]",
     net_results_section: "扫描结果",
+    net_scan_failed: "扫描失败",
     net_no_results: "暂无结果",
     net_webdav_section: "WebDAV 日志上传",
     net_url_label: "目标 URL",
@@ -532,7 +540,9 @@ const EN: Strings = Strings {
     net_connect: "[Connect WiFi]",
     net_wifi_off: "[WiFi off]",
     net_status: "[WiFi status]",
+    net_webdav_status: "[Status]",
     net_results_section: "Scan results",
+    net_scan_failed: "the scan failed",
     net_no_results: "no results yet",
     net_webdav_section: "WebDAV log upload",
     net_url_label: "Target URL",

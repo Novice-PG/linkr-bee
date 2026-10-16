@@ -743,6 +743,7 @@ fn main() -> io::Result<()> {
         theme: args.theme,
         state: preview_state,
         transport_locked: args.transport.is_some(),
+        transport_pinned: args.transport.is_some(),
         ..App::default()
     };
     // The agent's durable state, opened once here rather than lazily per call:

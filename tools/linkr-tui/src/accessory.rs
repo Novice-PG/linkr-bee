@@ -25,6 +25,10 @@ impl AccessoryLimits {
 pub const DIAGNOSTICS_COMMAND: &str = "@i?";
 pub const UART_QUERY_COMMAND: &str = "@u?";
 pub const WIFI_QUERY_COMMAND: &str = "@w?";
+/// `@w scan` — the bridge's radio walks the channels. The answer streams: an
+/// acceptance, a line per network, and `@scan done` (or `@scan error`) at the
+/// end; see [`crate::device::Query::WifiScan`].
+pub const WIFI_SCAN_COMMAND: &str = "@w scan";
 pub const WEBDAV_QUERY_COMMAND: &str = "@d?";
 
 /// `@s?` — the WebSocket/LAN settings, and the only place the bridge reports
@@ -203,6 +207,19 @@ pub fn reply_status(text: &str) -> ReplyStatus {
         ok: lines.iter().any(|l| starts_with_word(l, "ok")),
         error: String::new(),
     }
+}
+
+/// Whether a management line is the scan stream's own ending rather than a
+/// network: `@scan done`, or `@scan error` when the radio gave up after the
+/// request had been accepted. Both are events of the same stream the results
+/// travel in, so whoever reads that stream has to know them apart.
+pub fn is_scan_terminator(line: &str) -> bool {
+    is_scan_error(line) || line.trim().eq_ignore_ascii_case("@scan done")
+}
+
+/// Whether the scan's ending says it failed.
+pub fn is_scan_error(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case("@scan error")
 }
 
 /// `OK uart=115200,8,N,1,none` -> settings.

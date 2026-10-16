@@ -735,6 +735,8 @@ pub enum Patience {
     Normal,
     /// Long enough for a scan of every 2.4 GHz channel.
     Scan,
+    /// Waiting for a dialled link to finish coming up.
+    Connect,
 }
 
 impl Patience {
@@ -744,6 +746,10 @@ impl Patience {
             Patience::Normal => crate::device::REPLY_TIMEOUT,
             // Matches the reference client's `WIFI_SCAN_TIMEOUT`.
             Patience::Scan => Duration::from_secs(90),
+            // The BLE transport itself gives a dial twenty seconds before
+            // calling the link dead; this waits beside the same clock rather
+            // than inventing a second one.
+            Patience::Connect => Duration::from_secs(20),
         }
     }
 }
@@ -770,6 +776,11 @@ pub enum Format {
 /// would have two `OK`s arriving in no order anyone can rely on.
 pub fn run_requests(app: &mut App, requests: &Requests, format: Format) -> i32 {
     app.collect_output = true;
+    // The dial opened the link; the session reports itself connected a pump
+    // later. Asking in between came back "not connected — nothing was sent"
+    // for a link that was up a moment after the question, which is a wrong
+    // answer about the one state the user had just watched come up.
+    wait_for_connected(app);
     let mut failed = 0;
 
     for query in &requests.queries {
@@ -811,8 +822,12 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format) -> i32 {
             // radio working through every channel, and the ordinary reply
             // timeout would call a running scan a silent bridge.
             Ok(()) => {
-                failed +=
-                    wait_and_report_with(app, crate::device::Query::Wifi, format, Patience::Scan)
+                failed += wait_and_report_with(
+                    app,
+                    crate::device::Query::WifiScan,
+                    format,
+                    Patience::Scan,
+                )
             }
         }
     }
@@ -880,6 +895,19 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
         ),
     );
     false
+}
+
+/// Pump until a dialled link is connected enough to be asked things.
+///
+/// The wait is bounded by [`Patience::Connect`]. A link that never gets there
+/// is not this loop's to report: every request that follows says for itself
+/// that nothing went out, which is the report a user can act on.
+fn wait_for_connected(app: &mut App) {
+    let deadline = Instant::now() + Patience::Connect.timeout();
+    while app.session.is_live() && !app.connected() && Instant::now() < deadline {
+        app.pump();
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Wait for one answer and print what it said. Returns 1 when it failed.
@@ -957,6 +985,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Diagnostics => "info",
         crate::device::Query::Uart => "uart",
         crate::device::Query::Wifi => "wifi",
+        crate::device::Query::WifiScan => "wifi-scan",
         crate::device::Query::Webdav => "webdav",
         crate::device::Query::Lan => "lan",
     }
@@ -1006,6 +1035,10 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
             Some(wifi) => format!("wifi={},ssid={},ip={}", wifi.state, wifi.ssid, wifi.ip),
             None => String::new(),
         },
+        // One network per line, in the order the bridge heard them. The scan
+        // stream's own lines (`OK accepted`, `@scan done`) are already off the
+        // list — see `App`'s `scan_results`.
+        crate::device::Query::WifiScan => app.network.scan_results.join("\n"),
         crate::device::Query::Webdav => match &app.network.webdav {
             Some(webdav) => format!("webdav={},url={}", webdav.state, webdav.url),
             None => String::new(),
@@ -1324,6 +1357,24 @@ mod tests {
         }
         assert!(app.connected(), "the memory link opens");
         (app, wire)
+    }
+
+    /// A dialled link is not asked anything until the session says it is
+    /// connected. The bug this pins: a script run sent its first request
+    /// between the dial and the session's own connected state, and the answer
+    /// was "not connected — nothing was sent" for a link that was up a moment
+    /// later.
+    #[test]
+    fn a_dialled_link_is_waited_for_before_it_is_asked() {
+        let mut app = App::default();
+        let wire = crate::transport::testing::MemoryLink::new();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(
+            !app.connected(),
+            "the state arrives with a pump, not with the dial"
+        );
+        wait_for_connected(&mut app);
+        assert!(app.connected(), "and the wait was what brought it");
     }
 
     /// Values the shell could offer are listed once, so `--transport` completes

@@ -343,7 +343,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     for (row, word) in [
         (NetworkRow::WebdavSet, s.net_set),
         (NetworkRow::WebdavOff, s.net_disable),
-        (NetworkRow::WebdavStatus, s.net_status),
+        (NetworkRow::WebdavStatus, s.net_webdav_status),
     ] {
         lines.push(action_row(word, s.net_ble_only, on(row), width, theme));
     }
