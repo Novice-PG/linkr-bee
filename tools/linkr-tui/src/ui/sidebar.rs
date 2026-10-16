@@ -18,7 +18,7 @@
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
-use crate::app::App;
+use crate::app::{App, Transport};
 use crate::dialogs::{self, ConfirmAction};
 use crate::event::View;
 use crate::text::clip_to;
@@ -139,6 +139,23 @@ pub fn targets(app: &App) -> Vec<String> {
         &app.transport_text(),
         s.label_separator,
     )];
+    // A LAN dial is described by two rows the keyboard owns: the address it
+    // goes to and the token it carries. A Bluetooth dial names its device
+    // once a link is up, and that row reports rather than chooses — which is
+    // what keeps it out of the cursor's list.
+    let lan = app.transport == Transport::Lan;
+    if lan {
+        out.push(labelled(
+            s.lan_host_label,
+            &app.lan_host_text(),
+            s.label_separator,
+        ));
+        out.push(labelled(
+            s.lan_token_label,
+            &app.lan_token_text(),
+            s.label_separator,
+        ));
+    }
     // One row that says `Connect` when there is nothing to connect to and
     // `Disconnect` when there is: the label is the state, so the row under the
     // cursor always names what Enter will do.
@@ -150,7 +167,11 @@ pub fn targets(app: &App) -> Vec<String> {
         }
         .to_string(),
     );
-    out.push(s.switch_device.to_string());
+    // Switching devices is looking for a board on the radio; a LAN session
+    // has no radios to look through, so the row is not there to press.
+    if !lan {
+        out.push(s.switch_device.to_string());
+    }
     for view in View::ALL {
         out.push(app.lang.view_name(view).to_string());
     }
@@ -178,61 +199,82 @@ pub fn labelled(label: &str, value: &str, separator: &str) -> String {
 /// `Tab` is the documented way to move it, and a row activation that moved it
 /// too would make that key mean two things.
 pub fn activate(app: &mut App) {
+    // The list grows and shrinks with the transport, which trades the
+    // switch-device row for the LAN host and token rows; a cursor left past
+    // the end would light no row and swallow Enter, so it is pulled back
+    // before anything reads it.
+    app.sidebar_cursor = app.sidebar_cursor.min(app.sidebar_rows().saturating_sub(1));
+    let cursor = app.sidebar_cursor;
+    let lan = app.transport == Transport::Lan;
+    // Walked in the order `rows` draws them rather than matched on numbers: a
+    // row plan that changes shape (LAN's two rows, the switch-device row only
+    // on a radio) cannot then disagree with what Enter does.
+    let mut at = 0usize;
+    let mut next = || {
+        let here = at;
+        at += 1;
+        here
+    };
+    if cursor == next() {
+        let notice = app.toggle_transport();
+        app.push_notice(notice);
+        return;
+    }
+    if lan && cursor == next() {
+        dialogs::prompt_lan_host(app);
+        return;
+    }
+    if lan && cursor == next() {
+        dialogs::prompt_lan_token(app);
+        return;
+    }
+    if cursor == next() {
+        // The row is `Disconnect` while a link is up, so pressing it hangs up
+        // — the same toggle the web client has. When there is nothing live it
+        // is `Connect` again and re-dials.
+        if app.session.is_live() {
+            app.disconnect();
+        } else {
+            app.reconnect();
+        }
+        return;
+    }
+    if !lan && cursor == next() {
+        if app.session.is_live() {
+            let text = app.strings().switch_needs_disconnect.to_string();
+            app.push_notice(crate::app::Notice {
+                text,
+                level: crate::event::NoticeLevel::Warn,
+            });
+            return;
+        }
+        // Switching device IS looking for one. There used to be a
+        // separate palette action for the scan and a warning here,
+        // which left the sidebar row — the one place a user looks to
+        // change who they are talking to — as the only action in the
+        // interface that answered "there is no other device" without
+        // ever having asked the radio.
+        if let Err(why) = app.start_ble_scan() {
+            let text = app.strings().ble_scan_failed.to_string();
+            app.push_notice(crate::app::Notice {
+                text: format!("{text}: {why}"),
+                level: crate::event::NoticeLevel::Error,
+            });
+        }
+        return;
+    }
     let views = View::ALL.len();
-    match app.sidebar_cursor {
-        0 => {
-            let notice = app.toggle_transport();
-            app.push_notice(notice);
-        }
-        // The two connection rows are one toggle with the web client's shape:
-        // while a link is up the first says `Disconnect` and hangs up, and the
-        // second is dimmed — switching is what disconnecting is for, so the
-        // row says so rather than looking live and doing nothing.
-        index if index == 1 || index == 2 => {
-            if index == 1 {
-                // The row is `Disconnect` while a link is up, so pressing it
-                // hangs up — the same toggle the web client has. When there
-                // is nothing live it is `Connect` again and re-dials.
-                if app.session.is_live() {
-                    app.disconnect();
-                } else {
-                    app.reconnect();
-                }
-                return;
-            }
-            if app.session.is_live() {
-                let text = app.strings().switch_needs_disconnect.to_string();
-                app.push_notice(crate::app::Notice {
-                    text,
-                    level: crate::event::NoticeLevel::Warn,
-                });
-                return;
-            }
-            // Switching device IS looking for one. There used to be a
-            // separate palette action for the scan and a warning here,
-            // which left the sidebar row — the one place a user looks to
-            // change who they are talking to — as the only action in the
-            // interface that answered "there is no other device" without
-            // ever having asked the radio.
-            if let Err(why) = app.start_ble_scan() {
-                let text = app.strings().ble_scan_failed.to_string();
-                app.push_notice(crate::app::Notice {
-                    text: format!("{text}: {why}"),
-                    level: crate::event::NoticeLevel::Error,
-                });
-            }
-        }
-        index if index < 3 + views => app.set_view(View::ALL[index - 3]),
-        index => {
-            let Some(quick) = app.quick_send.get(index - (3 + views)).cloned() else {
-                return;
-            };
-            if quick.dangerous {
-                dialogs::ask(app, ConfirmAction::Send(quick.command));
-            } else {
-                app.send_command(&quick.command);
-            }
-        }
+    if cursor < at + views {
+        app.set_view(View::ALL[cursor - at]);
+        return;
+    }
+    let Some(quick) = app.quick_send.get(cursor - (at + views)).cloned() else {
+        return;
+    };
+    if quick.dangerous {
+        dialogs::ask(app, ConfirmAction::Send(quick.command));
+    } else {
+        app.send_command(&quick.command);
     }
 }
 
@@ -274,48 +316,62 @@ pub fn rows(app: &App) -> Vec<Row> {
         action_style(transport),
         ITEM_INDENT,
     ));
-    rows.push(Row::at(
-        labelled(s.device_label, &app.device_name, s.label_separator),
-        RowStyle::Label,
-        ITEM_INDENT,
-    ));
-    // A LAN link shows its address, which is the one thing about it a user can
-    // act on — it goes in a browser, in a ping, in a bookmark. It rides the
-    // device row as a trailer rather than taking a row of its own, because the
-    // address belongs to the same connection the name does and a sidebar that
-    // grew a row per address would be a sidebar that grew a gap.
-    let lan = app.session.lan_host();
-    if !lan.is_empty() {
-        let token = if app.session.lan_secured() {
-            s.lan_token_yes
-        } else {
-            s.lan_token_no
-        };
-        rows.push(
-            Row::at(
-                labelled(s.lan_address_label, lan, s.label_separator),
-                RowStyle::Label,
-                ITEM_INDENT,
-            )
-            .trailing(token),
+    if app.transport == Transport::Lan {
+        // What a LAN dial is built from, in two rows the keyboard owns: the
+        // address and the token. While a link is up it is that link's own
+        // address being shown, with the token's presence riding along as the
+        // trailer — the row reports the truth, and what Enter edits is the
+        // next dial.
+        let host = next_cursor();
+        let mut host_row = Row::at(
+            labelled(s.lan_host_label, &app.lan_host_text(), s.label_separator),
+            action_style(host),
+            ITEM_INDENT,
         );
+        if app.session.is_live() {
+            host_row = host_row.trailing(if app.session.lan_secured() {
+                s.lan_token_yes
+            } else {
+                s.lan_token_no
+            });
+        }
+        rows.push(host_row);
+        let token = next_cursor();
+        rows.push(Row::at(
+            labelled(s.lan_token_label, &app.lan_token_text(), s.label_separator),
+            action_style(token),
+            ITEM_INDENT,
+        ));
+    } else {
+        // The device names the link once one is up; it is read, not chosen,
+        // which is why it takes no cursor index.
+        rows.push(Row::at(
+            labelled(s.device_label, &app.device_name, s.label_separator),
+            RowStyle::Label,
+            ITEM_INDENT,
+        ));
     }
-    for label in [
+    let connect = next_cursor();
+    rows.push(Row::at(
         if app.session.is_live() {
             s.disconnect
         } else {
             s.connect
         },
-        s.switch_device,
-    ] {
+        action_style(connect),
+        ITEM_INDENT,
+    ));
+    // Switching devices is looking for a board on the radio; a LAN session has
+    // no radios to look through, so the row is not there to press. Connected,
+    // it goes dim instead: a session is one link, and picking another while
+    // this one holds the target would mean two things claiming the same
+    // console. Disconnecting is what opens the choice, so the connect row
+    // stays live as `Disconnect`. The cursor keeps its chip on the dim row
+    // rather than vanishing — a row the cursor cannot be on is a row that
+    // cannot explain itself.
+    if app.transport != Transport::Lan {
         let index = next_cursor();
-        // Connected, the switch-device row goes dim: a session is one link,
-        // and picking another while this one holds the target would mean two
-        // things claiming the same console. Disconnecting is what opens the
-        // choice, so the connect row stays live as `Disconnect`. The cursor
-        // keeps its chip on the dim row rather than vanishing — a row the
-        // cursor cannot be on is a row that cannot explain itself.
-        let style = if app.session.is_live() && index == 2 {
+        let style = if app.session.is_live() {
             if selected(index) {
                 RowStyle::Selected
             } else {
@@ -324,7 +380,7 @@ pub fn rows(app: &App) -> Vec<Row> {
         } else {
             action_style(index)
         };
-        rows.push(Row::at(label, style, ITEM_INDENT));
+        rows.push(Row::at(s.switch_device, style, ITEM_INDENT));
     }
 
     // --- Views ------------------------------------------------------------
@@ -1035,6 +1091,104 @@ mod tests {
             app.notices.last().map(|n| n.text.as_str()),
             Some(app.strings().switch_needs_disconnect)
         );
+    }
+
+    /// A LAN session's rows are the dial they build: an address and a token,
+    /// both cursable, where a Bluetooth session has a device name to read and a
+    /// switch-device row to press. The switch row is not there: there is no
+    /// radio to look through.
+    #[test]
+    fn the_lan_rows_are_the_dial_they_build() {
+        let mut app = app_en();
+        app.transport = Transport::Lan;
+
+        let planned = targets(&app);
+        assert_eq!(
+            planned.len(),
+            app.sidebar_rows(),
+            "the cursor can reach them all"
+        );
+        assert!(
+            !planned.contains(&app.strings().switch_device.to_string()),
+            "a LAN session has no device to switch to: {planned:?}"
+        );
+        assert!(planned[1].contains(app.strings().lan_host_label));
+        assert!(planned[2].contains(app.strings().lan_token_label));
+        assert_eq!(planned[3], app.strings().connect);
+
+        // The board's own address and a token in hand fill the rows; the token
+        // is stars, never the token.
+        app.network.wifi = Some(crate::accessory::WifiStatus {
+            state: "connected".into(),
+            ssid: "Bench".into(),
+            ip: "192.168.0.100".into(),
+        });
+        app.lan_status.token = "0123456789abcdef0123456789abcdef".into();
+        let planned = targets(&app);
+        assert!(planned[1].contains("192.168.0.100"), "{planned:?}");
+        assert!(planned[2].contains("******"), "{planned:?}");
+        assert!(
+            !planned[2].contains("0123456789"),
+            "the row spells the token out: {planned:?}"
+        );
+
+        // The painted rows carry the same words, and both are cursable.
+        let painted = rows(&app);
+        for text in [&planned[1], &planned[2]] {
+            let row = painted
+                .iter()
+                .find(|r| &r.text == text)
+                .unwrap_or_else(|| panic!("no row for {text:?}: {painted:?}"));
+            assert!(row.selectable(), "{text:?} is not selectable");
+        }
+        assert!(
+            !painted
+                .iter()
+                .any(|r| r.text == app.strings().switch_device),
+            "the switch row is painted in LAN mode"
+        );
+    }
+
+    /// Enter on the LAN rows is what sets them, and Enter on Connect builds the
+    /// dial from them — or says what the rows are missing.
+    #[test]
+    fn enter_on_the_lan_rows_opens_their_prompts() {
+        let mut app = app_en();
+        app.transport = Transport::Lan;
+        app.lan_host = "192.168.1.50".into();
+
+        app.sidebar_cursor = 1;
+        activate(&mut app);
+        match &app.dialog {
+            Some(crate::dialogs::Dialog::Prompt(prompt)) => {
+                assert_eq!(prompt.action, crate::dialogs::PromptAction::LanHost);
+                assert_eq!(prompt.answer(), "192.168.1.50", "the row is the field");
+            }
+            other => panic!("no host prompt: {other:?}"),
+        }
+
+        app.dialog = None;
+        app.sidebar_cursor = 2;
+        activate(&mut app);
+        match &app.dialog {
+            Some(crate::dialogs::Dialog::Prompt(prompt)) => {
+                assert_eq!(prompt.action, crate::dialogs::PromptAction::LanToken);
+                assert!(prompt.masked, "the token prompt opens masked");
+            }
+            other => panic!("no token prompt: {other:?}"),
+        }
+
+        // Connect with no address to go to says so rather than dialling
+        // nowhere.
+        app.dialog = None;
+        app.lan_host.clear();
+        app.sidebar_cursor = 3;
+        activate(&mut app);
+        assert_eq!(
+            app.notices.last().map(|n| n.text.as_str()),
+            Some(app.strings().lan_needs_host)
+        );
+        assert!(app.dialing.is_none(), "nothing was dialled");
     }
 
     /// The plan is the design's, row for row: the sections land where the

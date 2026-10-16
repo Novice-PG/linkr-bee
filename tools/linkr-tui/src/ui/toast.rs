@@ -8,11 +8,27 @@ use crate::theme::Theme;
 /// How many columns of padding sit inside a toast's border.
 const PADDING: usize = 2;
 
+/// How long before its time a toast starts to dim. The last stretch of a
+/// notice's life, which is warning enough to read it as leaving rather than as
+/// gone.
+const FADE: std::time::Duration = std::time::Duration::from_millis(700);
+
 /// A toast's body: the notice text, one line per notice, in the current theme.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    let now = std::time::Instant::now();
     app.notices
         .iter()
-        .map(|notice| Line::from(Span::styled(notice.text.clone(), theme.toast())))
+        .enumerate()
+        .map(|(index, notice)| {
+            // The dim belongs to the *stack*, not to the notice: the log
+            // keeps every word at full strength, and a notice that outlives
+            // its toast is read there.
+            let style = match app.toast_until.get(index) {
+                Some(until) if until.saturating_duration_since(now) < FADE => theme.muted(),
+                _ => theme.toast(),
+            };
+            Line::from(Span::styled(notice.text.clone(), style))
+        })
         .collect()
 }
 
@@ -84,6 +100,30 @@ mod tests {
             assert_eq!(line.spans[0].style.bg, Some(Theme::DARK.panel_3));
             assert_eq!(line.spans[0].style.fg, Some(Theme::DARK.text));
         }
+    }
+
+    /// A toast dims in its last stretch, and the dim is the stack's business
+    /// only: the notice the log holds keeps its full-strength words.
+    #[test]
+    fn a_toast_dims_before_it_goes() {
+        let mut app = App::default();
+        app.push_notice(notice("going", NoticeLevel::Info));
+        app.push_notice(notice("fresh", NoticeLevel::Info));
+        let now = std::time::Instant::now();
+        app.toast_until[0] = now;
+        app.toast_until[1] = now + crate::app::TOAST_LIFETIME;
+
+        let painted = lines(&app, &Theme::DARK);
+        assert_eq!(
+            painted[0].spans[0].style,
+            Theme::DARK.muted(),
+            "the one whose time is up dims"
+        );
+        assert_eq!(
+            painted[1].spans[0].style,
+            Theme::DARK.toast(),
+            "and a fresh one does not"
+        );
     }
 
     /// The box is as wide as the widest notice plus its chrome: a wide (CJK)

@@ -199,6 +199,48 @@ enum Outgoing {
 /// link while it is not being drained.
 const READ_CHUNK: usize = 4096;
 
+/// A link that is already open, waiting to be pumped.
+///
+/// The pairing a dial that cannot afford to wait builds: opening is the slow
+/// half — a radio takes seconds to come up — so a caller with a thread to
+/// spare pays for it there and sends the result back, rather than freezing
+/// the frame that is drawing. The link's identity rides along because
+/// [`Link::kind`], [`Link::describe`] and [`Link::lan_details`] can only be
+/// asked before the link is consumed, and the sidebar needs them after.
+pub struct OpenedLink {
+    /// Which link this is.
+    pub kind: LinkKind,
+    /// How the sidebar and the notices name it, e.g. `ble:EE:C7:42:34:48:CF`.
+    pub description: String,
+    /// The LAN address this link talks to, empty for links that are not LAN.
+    pub lan_host: String,
+    /// Whether this LAN link went out with a token.
+    pub lan_secured: bool,
+    reader: Box<dyn LinkReader>,
+    writer: Box<dyn LinkWriter>,
+}
+
+impl OpenedLink {
+    /// Open `link`, here, on the calling thread. Everything this costs is paid
+    /// before it returns.
+    pub fn open(link: Box<dyn Link>) -> io::Result<OpenedLink> {
+        let kind = link.kind();
+        let description = link.describe();
+        // Read before the link is consumed: the only thing that knows whether
+        // a token went out is the link itself.
+        let (lan_host, lan_secured) = link.lan_details().unwrap_or_default();
+        let (reader, writer) = link.open()?;
+        Ok(OpenedLink {
+            kind,
+            description,
+            lan_host,
+            lan_secured,
+            reader,
+            writer,
+        })
+    }
+}
+
 /// A running link: the event queue the loop drains and the door it writes
 /// through. Dropping the handle closes the link.
 #[derive(Debug)]
@@ -217,22 +259,28 @@ pub struct LinkHandle {
 impl LinkHandle {
     /// Open `link` and start pumping it.
     pub fn start(link: Box<dyn Link>) -> io::Result<LinkHandle> {
-        let kind = link.kind();
-        let description = link.describe();
-        let (reader, writer) = link.open()?;
+        Ok(LinkHandle::from_opened(OpenedLink::open(link)?))
+    }
+
+    /// Start pumping a link that is already open.
+    ///
+    /// The other half of [`Self::start`]: a caller that has already paid for
+    /// the open — possibly on a thread of its own — hands the halves here
+    /// rather than paying for them again on the thread that draws.
+    pub fn from_opened(opened: OpenedLink) -> LinkHandle {
         let (event_tx, events) = mpsc::channel();
         let (outgoing, command_rx) = mpsc::channel();
 
-        let reader = spawn_reader(reader, event_tx.clone());
-        let writer = spawn_writer(writer, command_rx, event_tx);
-        Ok(LinkHandle {
+        let reader = spawn_reader(opened.reader, event_tx.clone());
+        let writer = spawn_writer(opened.writer, command_rx, event_tx);
+        LinkHandle {
             events,
             outgoing,
             _reader: reader,
             _writer: writer,
-            kind,
-            description,
-        })
+            kind: opened.kind,
+            description: opened.description,
+        }
     }
 
     /// Which link this is.

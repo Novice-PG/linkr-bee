@@ -17,7 +17,7 @@ use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::session::{Dial, Session};
 use crate::theme::{Theme, ThemeChoice};
-use crate::transport::{Link, LinkEvent};
+use crate::transport::{Link, LinkEvent, OpenedLink};
 use crate::views::diagnostics::DiagnosticsState;
 use crate::views::terminal::TerminalPane;
 use crate::watch::{SerialWatch, WatchOptions};
@@ -179,6 +179,35 @@ impl BleScan {
     }
 }
 
+/// A dial running on a thread of its own, and where its link lands.
+///
+/// Opening a Bluetooth link takes seconds, which is the right contract for a
+/// command line — `open` returning means connected everywhere else — and a
+/// frozen frame for an interface. So a dial from the interface pays that wait
+/// on a thread of its own and the pump collects the opened link a tick later:
+/// the wait becomes a state the screen can show instead of a keyboard that
+/// does not answer.
+pub struct DialJob {
+    /// The dial, kept so the link can be described when it fails.
+    pub dial: Dial,
+    /// Whether this dial was the startup scan's own; its arrival is not
+    /// announced. See [`App::quiet_connect`].
+    pub quiet: bool,
+    /// Where the thread posts the opened link, or why it could not.
+    rx: std::sync::mpsc::Receiver<io::Result<OpenedLink>>,
+}
+
+impl std::fmt::Debug for DialJob {
+    /// Hand-written for the same reason [`BleScan`]'s is: the channel behind a
+    /// dial is not something a diagnostic should try to print.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialJob")
+            .field("dial", &self.dial)
+            .field("quiet", &self.quiet)
+            .finish()
+    }
+}
+
 /// What `@s?` reported: LAN access state and the token the bridge expects.
 ///
 /// Deliberately *not* part of the network view's state. A token is a secret and
@@ -236,6 +265,19 @@ pub enum Focus {
 
 /// How many toasts stack at once before the oldest is dropped.
 pub const MAX_NOTICES: usize = 3;
+
+/// How long a toast stands before it takes itself off the screen.
+///
+/// The old interface gave every message the same 2.2 s, which is enough to
+/// read a sentence and short enough that a stack of them cannot pile up in the
+/// corner. Each notice keeps its own clock, so a stack empties one row at a
+/// time and the box disappears with the last of them.
+pub const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_millis(2200);
+
+/// What a token in hand reads as in the sidebar: that one is there, never
+/// which. A fixed run of stars rather than one per character — the length of a
+/// secret has no business on a screen either.
+const LAN_TOKEN_MASK: &str = "******";
 
 /// How many notices the *log* keeps. Deeper than the toast stack, because the
 /// log dialog is where a user goes to find out what happened while they were
@@ -298,6 +340,11 @@ pub struct App {
     /// Findings from the panic/reboot watch.
     pub watch: Vec<String>,
     pub notices: Vec<Notice>,
+    /// When each toast in [`App::notices`] stops standing, parallel to it:
+    /// entry *i* is the deadline of `notices[i]`. Two vectors rather than a
+    /// stamped notice, so `Notice` stays what it always was — words and a
+    /// level — and every reader of the stack keeps reading one thing.
+    pub toast_until: Vec<Instant>,
     /// What the device last said when asked `@i?`, and whether a read is out.
     pub diagnostics: DiagnosticsState,
     /// WiFi/WebDAV management state for the network view.
@@ -306,6 +353,14 @@ pub struct App {
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
     pub lan_captured: LanCapture,
+    /// The LAN host a dial goes to, as typed — or seeded by the command line.
+    /// Empty means "ask the board's WiFi address", which is what the sidebar
+    /// shows while it is blank.
+    pub lan_host: String,
+    /// The LAN token a dial carries: what was typed or seeded by the command
+    /// line. A captured token lives in [`App::lan_status`] and the host's
+    /// store is consulted last — see [`App::lan_token_for`] for the order.
+    pub lan_token: String,
     /// A Bluetooth scan in flight, for the pick-a-board dialog.
     pub ble_scan: BleScan,
     /// Whether the scan in flight dials the board when one answers alone.
@@ -314,6 +369,14 @@ pub struct App {
     /// back when its scan answers, because the intent belongs to one scan and
     /// not to the session: the next scan, however it was started, asks.
     pub scan_connects_one: bool,
+    /// The dial in flight, when Connect was pressed. The open itself runs on
+    /// its own thread — a Bluetooth link takes seconds to come up, and seconds
+    /// of frozen keyboard is what this field exists to not have.
+    pub dialing: Option<DialJob>,
+    /// Whether the link now coming up was the startup scan's own. It is
+    /// announced to nobody: a program that announces its own routine has a
+    /// corner full of its own voice.
+    pub quiet_connect: bool,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -442,12 +505,17 @@ impl Default for App {
             ],
             watch: Vec::new(),
             notices: Vec::new(),
+            toast_until: Vec::new(),
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
+            lan_host: String::new(),
+            lan_token: String::new(),
             ble_scan: BleScan::default(),
             scan_connects_one: false,
+            dialing: None,
+            quiet_connect: false,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
@@ -565,14 +633,15 @@ impl App {
         self.state == ConnectionState::Connected && self.session.is_live()
     }
 
-    /// The transport as the sidebar shows it, with its lock suffix when a CLI
-    /// flag pinned it.
+    /// The transport as the sidebar shows it: the link's name, then the `◂▸`
+    /// that says Enter flips it — or the lock suffix when a dial or a flag has
+    /// taken the choice away.
     pub fn transport_text(&self) -> String {
         let s = self.strings();
         if self.transport_locked {
             format!("{} {}", self.transport.label(), s.transport_locked)
         } else {
-            self.transport.label().to_string()
+            format!("{} {}", self.transport.label(), s.transport_switch_hint)
         }
     }
 
@@ -654,15 +723,29 @@ impl App {
     ///
     /// One door for both: the toast stack is what is on screen and the log is
     /// what happened. Announcing through a second path would let the two
-    /// disagree about the same event.
+    /// disagree about the same event. Every toast is given its own deadline
+    /// here, so the stack empties one row at a time rather than all at once.
     pub fn push_notice(&mut self, notice: Notice) {
         self.notices.push(notice.clone());
+        self.toast_until.push(Instant::now() + TOAST_LIFETIME);
         while self.notices.len() > MAX_NOTICES {
             self.notices.remove(0);
+            self.toast_until.remove(0);
         }
         self.log.push(notice);
         while self.log.len() > MAX_LOG {
             self.log.remove(0);
+        }
+    }
+
+    /// Take every toast whose time is up off the screen, oldest first, so the
+    /// last one leaving takes the box with it. The log keeps every word; this
+    /// is only about the corner. Takes `now` so a test can watch a stack empty
+    /// without sleeping through it.
+    pub fn expire_notices(&mut self, now: Instant) {
+        while self.toast_until.first().is_some_and(|until| *until <= now) {
+            self.toast_until.remove(0);
+            self.notices.remove(0);
         }
     }
 
@@ -689,10 +772,15 @@ impl App {
         }
     }
 
-    /// Cycle the transport to the next link, and return the notice announcing
-    /// it. A locked transport cannot be switched: a command-line flag decided
-    /// it, or a dial did, and a keypress that quietly overrode either would
-    /// make the sidebar's `locked` suffix a lie.
+    /// Flip the transport between the two links a session can be carried over,
+    /// and return the notice announcing it.
+    ///
+    /// Two, not every [`Transport`] there is: `stdio` is how a driver or a
+    /// test attaches from a command line, and a session at a serial console is
+    /// never one of those, so a row that cycled through it offered a choice
+    /// the user could not mean. A locked transport cannot be switched at all:
+    /// a command-line flag decided it, or a dial did, and a keypress that
+    /// quietly overrode either would make the sidebar's `locked` suffix a lie.
     pub fn toggle_transport(&mut self) -> Notice {
         if self.transport_locked {
             return Notice {
@@ -700,11 +788,12 @@ impl App {
                 level: NoticeLevel::Warn,
             };
         }
-        let index = Transport::ALL
-            .iter()
-            .position(|kind| *kind == self.transport)
-            .unwrap_or(0);
-        self.transport = Transport::ALL[(index + 1) % Transport::ALL.len()];
+        self.transport = match self.transport {
+            Transport::Ble => Transport::Lan,
+            // `Lan` flips back, and a `stdio` a command line named and a
+            // hang-up released lands on the ordinary way in.
+            _ => Transport::Ble,
+        };
         Notice {
             text: format!(
                 "{}: {}",
@@ -751,12 +840,19 @@ impl App {
         self.view = view;
     }
 
-    /// How many sidebar rows the cursor can reach: the transport row, the two
-    /// connection actions, one row per view, and one per quick send. This is
-    /// the same number [`crate::ui::sidebar::targets`] produces, and a test
-    /// pins the two together so navigation can never walk off the list.
+    /// How many sidebar rows the cursor can reach: the transport row, the
+    /// connect row, then either the switch-device row or the LAN host and
+    /// token rows, one per view, and one per quick send. This is the same
+    /// number [`crate::ui::sidebar::targets`] produces, and a test pins the
+    /// two together so navigation can never walk off the list.
     pub fn sidebar_rows(&self) -> usize {
-        3 + View::ALL.len() + self.quick_send.len()
+        let connection = match self.transport {
+            // The LAN block trades the switch-device row for two of its own:
+            // an address and a token are what a LAN dial is built from.
+            Transport::Lan => 4,
+            _ => 3,
+        };
+        connection + View::ALL.len() + self.quick_send.len()
     }
 
     /// Move the sidebar cursor down one row, stopping on the last.
@@ -796,12 +892,25 @@ impl App {
     /// Open a link and start the session. The sidebar's transport follows the
     /// link that was actually opened, so the chrome can never name a link other
     /// than the one carrying the session.
+    ///
+    /// Opens on the calling thread. A caller that cannot afford the wait dials
+    /// through [`App::dial_async`] instead, which lands the same way.
     pub fn connect(&mut self, link: Box<dyn Link>) -> io::Result<()> {
-        let kind = link.kind();
-        self.session.connect(link)?;
+        self.adopt(OpenedLink::open(link)?);
+        Ok(())
+    }
+
+    /// Take a link that is already open, and move the interface onto it.
+    ///
+    /// The landing half of [`App::connect`], for a dial that paid for the open
+    /// on a thread of its own. The transport follows the link that was actually
+    /// opened, and the state says `connecting` until the link's threads report
+    /// it — the same beat-by-beat arrival a synchronous open gets.
+    fn adopt(&mut self, opened: OpenedLink) {
+        let kind = opened.kind;
+        self.session.adopt(opened);
         self.transport = kind;
         self.state = ConnectionState::Connecting;
-        Ok(())
     }
 
     /// Dial what the command line asked for.
@@ -817,7 +926,7 @@ impl App {
                 let _ = self.ensure_lan_token();
             }
         }
-        let link = dial.open()?;
+        let opened = dial.opened()?;
         // Remembered only once the link opened: a dial that failed is not
         // something `connect` should try again behind the user's back.
         self.last_dial = Some(dial.clone());
@@ -827,32 +936,203 @@ impl App {
         // switching the transport and dialling again a sequence the user can
         // actually perform.
         self.transport_locked = true;
-        self.connect(link)
+        self.adopt(opened);
+        Ok(())
     }
 
     /// Open the link again, or say why there is nothing to open.
     ///
-    /// This is the palette's `connect`: it re-dials the last link rather than
-    /// inventing one, so the pair of actions can never dial something the
-    /// command line did not name.
+    /// This is the palette's `connect` and the sidebar's `Connect` row. A LAN
+    /// dial is built from the rows the user is looking at; anything else
+    /// re-dials the last link rather than inventing one, so the actions can
+    /// never dial something the command line did not name. One dial at a time:
+    /// a link takes seconds to come up, and a second press while the first is
+    /// still in the air is answered with a sentence rather than a race.
     pub fn reconnect(&mut self) {
         if self.session.is_live() {
             return;
         }
-        let Some(dial) = self.last_dial.clone() else {
-            let text = self.strings().no_link.to_string();
+        if self.dialing.is_some() {
+            let text = self.strings().dialing.to_string();
             self.push_notice(Notice {
                 text,
                 level: NoticeLevel::Warn,
             });
             return;
+        }
+        let dial = match self.dial_for_connect() {
+            Ok(dial) => dial,
+            Err(text) => {
+                self.push_notice(Notice {
+                    text,
+                    level: NoticeLevel::Warn,
+                });
+                return;
+            }
         };
-        if let Err(err) = self.dial(&dial) {
-            let text = format!("{}{err}", self.strings().link_failed);
-            self.push_notice(Notice {
-                text,
-                level: NoticeLevel::Error,
-            });
+        self.dial_async(&dial, false);
+    }
+
+    /// The dial Connect would make.
+    ///
+    /// A LAN dial is built from the sidebar's rows rather than recalled from
+    /// the last one, because the rows are what the user is looking at and
+    /// changing before they press Connect.
+    fn dial_for_connect(&self) -> Result<Dial, String> {
+        if self.transport == Transport::Lan {
+            return self.lan_dial();
+        }
+        self.last_dial
+            .clone()
+            .ok_or_else(|| self.strings().no_link.to_string())
+    }
+
+    /// The LAN dial the sidebar rows describe, or the sentence saying why they
+    /// do not describe one.
+    pub fn lan_dial(&self) -> Result<Dial, String> {
+        let host = self.lan_host_effective();
+        if host.is_empty() {
+            return Err(self.strings().lan_needs_host.to_string());
+        }
+        let token = self.lan_token_for(&host);
+        Ok(Dial::Lan { host, token })
+    }
+
+    /// The address a LAN dial goes to: what was typed, then the board's own
+    /// WiFi address — the row the user would otherwise read off another view
+    /// and retype. The address of a link that is already up is not consulted
+    /// here: a dial and a live link cannot coexist on one session.
+    fn lan_host_effective(&self) -> String {
+        let typed = self.lan_host.trim();
+        if !typed.is_empty() {
+            return typed.to_string();
+        }
+        self.network
+            .wifi
+            .as_ref()
+            .map(|wifi| wifi.ip.trim().to_string())
+            .filter(|ip| !ip.is_empty())
+            .unwrap_or_default()
+    }
+
+    /// The host as the sidebar shows it. While a LAN link is up, that link's
+    /// own address wins: the row reports the truth, and what Enter edits is
+    /// the next dial.
+    pub fn lan_host_text(&self) -> String {
+        let live = self.session.lan_host();
+        if !live.is_empty() {
+            return live.to_string();
+        }
+        let host = self.lan_host_effective();
+        if host.is_empty() {
+            self.unknown().to_string()
+        } else {
+            host
+        }
+    }
+
+    /// The token a LAN dial carries, looking where one can be, in the order a
+    /// user would: the row they just typed into, the one the bridge reported
+    /// (`@s?`), the one remembered for this host.
+    fn lan_token_for(&self, host: &str) -> Option<String> {
+        let typed = self.lan_token.trim();
+        if !typed.is_empty() {
+            return Some(typed.to_string());
+        }
+        if !self.lan_status.token.is_empty() {
+            return Some(self.lan_status.token.clone());
+        }
+        crate::lan_token_store::TokenStore::load()
+            .token_for(host)
+            .map(str::to_string)
+    }
+
+    /// Whether a token is in hand. What the sidebar may say about one, and all
+    /// it may say: never the token itself.
+    pub fn lan_token_hand(&self) -> bool {
+        !self.lan_token.trim().is_empty() || !self.lan_status.token.is_empty()
+    }
+
+    /// The token as the sidebar shows it: stars for one in hand, the unknown
+    /// placeholder for none. The store is not consulted — whether it holds a
+    /// token is a file read, and a frame is not the place for one.
+    pub fn lan_token_text(&self) -> String {
+        if self.lan_token_hand() {
+            LAN_TOKEN_MASK.to_string()
+        } else {
+            self.unknown().to_string()
+        }
+    }
+
+    /// Open a link without stopping the interface.
+    ///
+    /// The whole dial — build and open — runs on a thread of its own and the
+    /// pump collects the answer, because the open is where a Bluetooth dial
+    /// spends its seconds. Returns whether the dial was started: a second
+    /// Connect pressed while one is in flight is not a second dial.
+    pub fn dial_async(&mut self, dial: &Dial, quiet: bool) -> bool {
+        if self.dialing.is_some() {
+            return false;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let opening = dial.clone();
+        // The *whole* dial goes out here, open included: a Bluetooth link takes
+        // seconds to come up, and the open is the seconds. All the frame sees
+        // of it is `connecting` in the state row.
+        std::thread::spawn(move || {
+            let _ = tx.send(opening.opened());
+        });
+        // The lock goes on at the *press*, not at the catch: what it protects
+        // is the choice the dial was built from, and a transport switched
+        // under a dial in flight would leave the sidebar naming a link that is
+        // not the one coming.
+        self.transport_locked = true;
+        self.state = ConnectionState::Connecting;
+        self.dialing = Some(DialJob {
+            dial: dial.clone(),
+            quiet,
+            rx,
+        });
+        true
+    }
+
+    /// Fold a finished dial in: the link, or the sentence saying why not.
+    ///
+    /// Called from the pump, so the frame shows the link coming up on the same
+    /// beat the rest of the session moves on.
+    fn poll_dial(&mut self) {
+        let Some(job) = self.dialing.as_ref() else {
+            return;
+        };
+        let outcome = match job.rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(io::Error::other("the dial thread ended without an answer"))
+            }
+        };
+        let job = self.dialing.take().expect("checked just above");
+        match outcome {
+            Ok(opened) => {
+                // Remembered only once the link opened: a dial that failed is
+                // not something `reconnect` should try again behind the user's
+                // back.
+                self.last_dial = Some(job.dial);
+                self.quiet_connect = job.quiet;
+                self.adopt(opened);
+            }
+            Err(why) => {
+                // The lock went on at the press; a dial that failed gives it
+                // back, the same way hanging up does.
+                self.quiet_connect = false;
+                self.transport_locked = self.transport_pinned;
+                self.session.fail();
+                let text = format!("{}{why}", self.strings().link_failed);
+                self.push_notice(Notice {
+                    text,
+                    level: NoticeLevel::Error,
+                });
+            }
         }
     }
 
@@ -1034,6 +1314,13 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
 
     pub fn pump(&mut self) {
         self.poll_ble_scan();
+        // Before the session is read, so a link that has just landed is
+        // already in `was_live` — the tick that catches a dial is the tick the
+        // link came up on, not one that finds it already there.
+        self.poll_dial();
+        // The toasts' own clock, on the same beat as everything else. The
+        // log keeps every word; the corner empties.
+        self.expire_notices(Instant::now());
 
         self.drain_agent_replies();
         let was_live = self.session.is_live();
@@ -1141,16 +1428,30 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             self.session.send(&reply);
         }
         let now_live = self.session.is_live();
-        if let Some(state) = self.session.state() {
+        if self.dialing.is_some() {
+            // A dial in flight is what the screen is about to be: the open
+            // waits on a radio, and the state the session last knew — the link
+            // before this one, or nothing at all — would paint a calm
+            // `disconnected` over a dial that is very much happening.
+            self.state = ConnectionState::Connecting;
+        } else if let Some(state) = self.session.state() {
             self.state = state;
         }
         if !was_connected && self.state == ConnectionState::Connected {
-            let text = format!("{}{}", self.strings().link_opened, describe);
-            self.push_notice(Notice {
-                text,
-                level: NoticeLevel::Info,
-            });
+            if std::mem::take(&mut self.quiet_connect) {
+                // The startup scan dialled this board itself: the link coming
+                // up is not news the interface owes the user.
+            } else {
+                let text = format!("{}{}", self.strings().link_opened, describe);
+                self.push_notice(Notice {
+                    text,
+                    level: NoticeLevel::Info,
+                });
+            }
         } else if was_live && !now_live {
+            // A quiet dial that died before it was ever announced has nothing
+            // left to be quiet about; the next connection is its own news.
+            self.quiet_connect = false;
             let s = self.strings();
             let (prefix, level) = if self.state == ConnectionState::Failed {
                 (s.link_failed, NoticeLevel::Error)
@@ -1227,12 +1528,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // A scan opened by hand asks; only the startup scan dials a lone
         // board, and that intent does not leak into this one.
         self.scan_connects_one = false;
-        self.ble_scan.reset();
-        self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
-        // A dialog is the top of the modal stack, so it takes the keyboard
-        // from the palette rather than joining it underneath: the list is
-        // what the next key is for.
-        self.palette = None;
+        self.begin_ble_scan()?;
         self.dialog = Some(crate::dialogs::Dialog::DevicePick(
             crate::dialogs::DevicePick {
                 devices: Vec::new(),
@@ -1244,17 +1540,33 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         Ok(())
     }
 
+    /// Start the scan itself, with no window of its own.
+    ///
+    /// The list, when there is one, is the caller's business: a scan the user
+    /// asked for opens it before the first advertisement arrives — the wait is
+    /// the answer's other half — where the startup scan has nothing to say
+    /// until it has heard something to say.
+    fn begin_ble_scan(&mut self) -> Result<(), String> {
+        self.ble_scan.reset();
+        self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
+        // A dialog is the top of the modal stack, so it takes the keyboard
+        // from the palette rather than joining it underneath: the list is
+        // what the next key is for.
+        self.palette = None;
+        Ok(())
+    }
+
     /// Start the startup scan: the one that dials instead of asking.
     ///
-    /// Same scan and same list as [`App::start_ble_scan`], with one difference
-    /// at the end: a scan that hears exactly one board that speaks the serial
-    /// service dials it, because a user who runs this on a bench has one board
-    /// in front of them and did not ask for a chooser. Two boards and the list
-    /// is up to pick from.
+    /// Same scan and same list as [`App::start_ble_scan`], with two
+    /// differences at the end: a scan that hears exactly one board that speaks
+    /// the serial service dials it quietly — a user who runs this on a bench
+    /// has one board in front of them and did not ask for a chooser or for a
+    /// window announcing it — and only two or more boards put the list up,
+    /// because only then is there a choice to make.
     pub fn start_ble_scan_connecting_one(&mut self) -> Result<(), String> {
-        self.start_ble_scan()?;
         self.scan_connects_one = true;
-        Ok(())
+        self.begin_ble_scan()
     }
 
     /// Stop listening and close the list.
@@ -1268,30 +1580,21 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         self.dialog = None;
     }
 
-    /// Dial the board with this address, and say which one it was.
+    /// Dial the board with this address.
     ///
     /// The address is what a scan result identifies a device by — a name is a
     /// substring, and two boards on a bench can both be called "Linkr Bee" —
-    /// so the dial takes the id and the notice repeats the name the user
-    /// picked so the log says what they meant and not just what went out.
-    ///
-    /// Returns whether the link was dialled: the scan that dials a lone board
-    /// announces it only when it caught, and a dial that failed must not be
-    /// announced as one that worked.
-    pub fn connect_to_board(&mut self, address: &str) -> bool {
+    /// so the dial takes the id, and the click that picked it was the user's
+    /// answer to "which one". `quiet` marks the startup scan's own dial: the
+    /// hall is caught off the board coming up, and nothing announces it.
+    pub fn connect_to_board(&mut self, address: &str, quiet: bool) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
-        if let Err(why) = self.dial(&crate::session::Dial::Ble(selection)) {
-            let text = format!("{}{why}", self.strings().link_failed);
-            self.push_notice(Notice {
-                text,
-                level: crate::event::NoticeLevel::Error,
-            });
-            return false;
+        if !self.dial_async(&crate::session::Dial::Ble(selection), quiet) {
+            return;
         }
         self.dialog = None;
         self.set_view(crate::event::View::Terminal);
         self.focus = crate::app::Focus::Terminal;
-        true
     }
 
     /// Fold whatever the background scan has seen into the open dialog.
@@ -1333,29 +1636,54 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// program can act on is the serial one — everything else is a device this
     /// bridge has nothing to say to.
     ///
-    /// The list is filled before the dial, so a dial that failed leaves the
-    /// boards on the screen to pick from rather than closing the list on the
-    /// way out.
-    ///
     /// One board and the scan was the startup one: dial it. A bench with one
     /// board on it is the common case, and making the user pick from a list of
-    /// one is a click that answers nothing. The dialog is for the case where
-    /// two boards are on the air and nothing on a command line says which —
-    /// and the empty list offers the rescan a board switched on too late needs.
+    /// one is a click that answers nothing. Two or more and the list is up to
+    /// pick from — the case where nothing on a command line says which. None,
+    /// at startup, says nothing at all: no window appeared while the scan
+    /// listened, so none is owed for its empty answer, and `Switch device` is
+    /// where a user who wants the list goes and asks.
+    ///
+    /// A scan the user opened asks from the start: its list is already on
+    /// screen, and it is filled here whether it found anything or not.
     fn settle_scan(&mut self, mut devices: Vec<crate::cli::FoundDevice>) {
         // Taken rather than read: the intent is the startup scan's alone, and a
         // scan that has answered cannot still hold it.
         let connect_single = std::mem::take(&mut self.scan_connects_one);
         devices.retain(|device| device.nus);
-        if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-            pick.devices = devices.clone();
-            pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
+        if connect_single {
+            // A user who moved on while the scan listened — switched the
+            // transport to LAN, dialled something by hand — is not waiting for
+            // this answer any more.
+            if self.session.is_live() || self.dialing.is_some() || self.transport != Transport::Ble
+            {
+                return;
+            }
+            match devices.as_slice() {
+                [board] => {
+                    // The link coming up is announced by the pump, which sees
+                    // every dial's Connected edge — except a quiet one, which
+                    // is what this is: nobody asked for this dial aloud.
+                    let id = board.id.clone();
+                    self.connect_to_board(&id, true);
+                }
+                [] => {}
+                _ => {
+                    self.dialog = Some(crate::dialogs::Dialog::DevicePick(
+                        crate::dialogs::DevicePick {
+                            devices,
+                            cursor: 0,
+                            scanning: false,
+                            message: String::new(),
+                        },
+                    ));
+                }
+            }
+            return;
         }
-        if devices.len() == 1 && connect_single {
-            // The link coming up is announced by the pump, which sees every
-            // dial's Connected edge; saying it here as well put the same
-            // sentence on the toast twice for the one dial this path makes.
-            self.connect_to_board(&devices[0].id);
+        if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+            pick.devices = devices;
+            pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
         }
     }
 
@@ -2020,14 +2348,15 @@ mod tests {
         assert_eq!(guarded, vec!["reboot"]);
     }
 
-    /// The transport row shows the lock only when a flag pinned the link.
+    /// The transport row shows the `◂▸` that says Enter flips it, and the lock
+    /// suffix only when a flag or a dial took the choice away.
     #[test]
     fn the_transport_row_carries_its_lock() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
-        assert_eq!(app.transport_text(), "BLE");
+        assert_eq!(app.transport_text(), "BLE ◂▸");
         app.transport_locked = true;
         assert_eq!(app.transport_text(), "BLE (locked)");
         app.transport = Transport::Lan;
@@ -2211,6 +2540,40 @@ mod tests {
         assert_eq!(app.notices.len(), MAX_NOTICES);
         let texts: Vec<&str> = app.notices.iter().map(|n| n.text.as_str()).collect();
         assert_eq!(texts, vec!["n2", "n3", "n4"]);
+    }
+
+    /// A toast lives its own 2.2 seconds and then takes itself off the stack,
+    /// one at a time — the box goes with the last one, and the log keeps every
+    /// word of all of them.
+    #[test]
+    fn toasts_expire_one_by_one() {
+        let mut app = App::default();
+        let now = Instant::now();
+        app.push_notice(Notice {
+            text: "first".into(),
+            level: NoticeLevel::Info,
+        });
+        app.push_notice(Notice {
+            text: "second".into(),
+            level: NoticeLevel::Info,
+        });
+        assert_eq!(app.toast_until.len(), app.notices.len(), "a deadline each");
+        assert!(
+            app.toast_until.iter().all(|until| *until > now),
+            "both are still standing"
+        );
+
+        // Time passes for the first toast and not for the second.
+        app.toast_until[0] = now;
+        app.toast_until[1] = now + TOAST_LIFETIME;
+        app.expire_notices(now);
+        let texts: Vec<&str> = app.notices.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(texts, vec!["second"], "the oldest went, and only it");
+
+        // Later still, the second one's time is up too.
+        app.expire_notices(now + TOAST_LIFETIME + std::time::Duration::from_millis(1));
+        assert!(app.notices.is_empty(), "and the box has nothing left to hold");
+        assert_eq!(app.log.len(), 2, "the log keeps them all");
     }
 
     /// The view rota walks all five and wraps in both directions: no view is
@@ -2579,25 +2942,35 @@ mod tests {
         assert_eq!(app.log.len(), MAX_LOG);
     }
 
-    /// The transport cycles through every link and wraps, so the row is never a
-    /// dead end — but a transport the command line pinned refuses, and says so.
+    /// The transport flips between the two links a session can be carried
+    /// over — `stdio` is a command line's way in, never a row's — and a pinned
+    /// one refuses, and says so.
     #[test]
-    fn the_transport_cycles_unless_it_is_locked() {
+    fn the_transport_flips_between_the_two_links_a_session_has() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
-        let start = app.transport;
-        let mut seen = vec![start];
-        for _ in 1..Transport::ALL.len() {
-            let notice = app.toggle_transport();
-            assert_eq!(notice.level, NoticeLevel::Info);
-            seen.push(app.transport);
+        assert_eq!(app.transport, Transport::Ble);
+        let notice = app.toggle_transport();
+        assert_eq!(notice.level, NoticeLevel::Info);
+        assert_eq!(notice.text, "Transport: LAN");
+        assert_eq!(app.transport, Transport::Lan);
+        let notice = app.toggle_transport();
+        assert_eq!(notice.text, "Transport: BLE");
+        assert_eq!(app.transport, Transport::Ble, "and it flips back");
+
+        // `stdio` never turns up in the cycle, however many presses it is
+        // given: it takes a command line to name one, and a row that offered
+        // it offered a link nobody had named. A `stdio` that was named and
+        // then released lands on the ordinary way in.
+        for _ in 0..4 {
+            app.toggle_transport();
+            assert_ne!(app.transport, Transport::Stdio);
         }
-        seen.sort_by_key(|kind| Transport::ALL.iter().position(|other| other == kind));
-        assert_eq!(seen, Transport::ALL.to_vec(), "every link is reachable");
+        app.transport = Transport::Stdio;
         app.toggle_transport();
-        assert_eq!(app.transport, start, "and it wraps back to where it began");
+        assert_eq!(app.transport, Transport::Ble);
 
         app.transport_locked = true;
         let before = app.transport;
@@ -2665,10 +3038,10 @@ mod tests {
         assert!(app.last_dial.is_none());
     }
 
-    /// A finished scan folds in the way the startup asked it to: only boards
-    /// that speak the serial service are listed, a lone one is dialled, a pair
-    /// is left to pick from, and a dial that failed leaves the list it meant
-    /// to choose from.
+    /// A finished scan folds in the way that opened it: only boards that speak
+    /// the serial service count, a lone board at startup is dialled without a
+    /// window, a pair leaves the list up to pick from, nothing heard says
+    /// nothing, and a scan the user asked for is always a list.
     #[test]
     fn a_scan_lists_serial_boards_and_dials_a_lone_one() {
         use crate::cli::FoundDevice;
@@ -2699,42 +3072,56 @@ mod tests {
 
         // A keyboard on the bench is not a board this program can dial, and it
         // does not count as "one board": the lone serial board is the one that
-        // gets the dial. The id is not an address, so the attempt fails the
-        // instant it is made — a real board is the same code with a different
-        // outcome — and the sentence it leaves in the log is the proof the
-        // attempt went out. A failed dial leaves the list it meant to choose
-        // from, reason and all.
+        // gets the dial — and the startup scan dials it without ever putting a
+        // window up. The id is not an address, so the attempt fails the instant
+        // the dial thread makes it — a real board is the same code with a
+        // different outcome — and the pump hands the sentence it leaves to the
+        // log.
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
         app.scan_connects_one = true;
-        app.dialog = Some(picker());
         app.settle_scan(vec![
             board("Keyboard", "ad:1a:2b:3c:4d:5e", false),
             board("Linkr Bee", "nonsense", true),
         ]);
-        assert_eq!(pick(&app).devices.len(), 1, "the keyboard was not listed");
+        assert!(app.dialog.is_none(), "the startup dial opens no window");
+        assert!(
+            pump_until(&mut app, |app| !app.log.is_empty()),
+            "the dial answers"
+        );
         let text = app.log.last().expect("a notice").text.clone();
         assert!(
             text.starts_with("connect failed: “nonsense” is not a Bluetooth address"),
             "the dial went out and failed, and said which address: {text}"
         );
 
-        // Two boards: nothing in the scan can choose, so the list stays up with
-        // both and no link is dialled.
+        // Two boards: nothing in the scan can choose, so the list goes up with
+        // both — the one case the startup scan has a question to ask — and no
+        // link is dialled.
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
         app.scan_connects_one = true;
-        app.dialog = Some(picker());
         app.settle_scan(vec![
             board("First", "AA:BB:CC:DD:EE:01", true),
             board("Second", "AA:BB:CC:DD:EE:02", true),
         ]);
         assert_eq!(pick(&app).devices.len(), 2, "both boards are listed");
         assert!(app.log.is_empty(), "nothing was dialled: {:?}", app.log);
+
+        // Nothing heard, and nobody asked aloud: no window, no notice. The row
+        // that asks is `Switch device`.
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.scan_connects_one = true;
+        app.settle_scan(vec![board("Keyboard", "ad:1a:2b:3c:4d:5e", false)]);
+        assert!(app.dialog.is_none(), "an empty answer opens no window");
+        assert!(app.log.is_empty(), "and says nothing");
 
         // A scan opened by hand is a question, not an errand: even one board is
         // left for the user to pick.
@@ -2766,13 +3153,151 @@ mod tests {
         assert!(!app.session.is_live());
         let before = app.log.len();
         app.reconnect();
-        assert!(app.session.is_live(), "the link is open again");
-        assert_eq!(
-            app.log.len(),
-            before,
-            "a re-dial that worked is not a toast"
+        assert!(app.dialing.is_some(), "the dial is in the air");
+        assert_eq!(app.log.len(), before, "the press itself is not a toast");
+        assert!(
+            pump_until(&mut app, |app| app.state == ConnectionState::Connected),
+            "the link is open again"
         );
-        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+        assert!(app.session.is_live());
+    }
+
+    /// A dial runs on its own thread: the call returns at once with the dial
+    /// still in the air, the pump collects the link a tick later, and the
+    /// transport is held from the press so the choice cannot move under it.
+    #[test]
+    fn a_dial_lands_through_the_pump() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        assert!(app.dial_async(&Dial::Stdio("-".into()), false));
+        assert!(app.dialing.is_some(), "the dial is in the air");
+        assert!(app.transport_locked, "and the choice is held");
+        assert_eq!(app.state, ConnectionState::Connecting);
+        assert!(
+            pump_until(&mut app, |app| app.state == ConnectionState::Connected),
+            "the loopback comes up"
+        );
+        assert!(app.dialing.is_none(), "the dial is collected");
+        assert_eq!(app.last_dial, Some(Dial::Stdio("-".into())));
+        let text = app.log.last().expect("the link is announced").text.clone();
+        assert!(text.starts_with("link open: "), "{text}");
+    }
+
+    /// The startup scan's own dial answers to nobody: the link comes up, and
+    /// the log says nothing about it. The next link is its own news.
+    #[test]
+    fn a_quiet_dial_lands_without_a_word() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        assert!(app.dial_async(&Dial::Stdio("-".into()), true));
+        assert!(pump_until(
+            &mut app,
+            |app| app.state == ConnectionState::Connected
+        ));
+        assert!(app.notices.is_empty(), "nothing was said: {:?}", app.notices);
+
+        app.disconnect();
+        app.reconnect();
+        assert!(pump_until(
+            &mut app,
+            |app| app.state == ConnectionState::Connected
+        ));
+        assert!(
+            app.notices.iter().any(|n| n.text.starts_with("link open: ")),
+            "the second link is announced"
+        );
+    }
+
+    /// A dial that fails says why, gives the transport back, and does not
+    /// remember itself: a failed dial is not something the next Connect should
+    /// try again behind the user's back.
+    #[test]
+    fn a_failed_dial_reports_and_unlocks() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dial_async(
+            &Dial::Ble(crate::transport::ble::Selection::Address("nonsense".into())),
+            false,
+        );
+        assert!(app.transport_locked, "the choice is held while it tries");
+        assert!(
+            pump_until(&mut app, |app| app.dialing.is_none()),
+            "the dial comes back"
+        );
+        let text = app.log.last().expect("a notice").text.clone();
+        assert!(
+            text.starts_with("connect failed: “nonsense” is not a Bluetooth address"),
+            "{text}"
+        );
+        assert!(!app.transport_locked, "the choice is given back");
+        assert_eq!(app.state, ConnectionState::Failed);
+        assert!(app.last_dial.is_none(), "nothing was remembered");
+    }
+
+    /// Connect pressed twice dials once: the second press is answered with a
+    /// sentence, not a race for the same link.
+    #[test]
+    fn a_second_connect_while_dialling_says_so() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dial_async(&Dial::Stdio("-".into()), false);
+        let before = app.log.len();
+        app.reconnect();
+        assert_eq!(app.log.len(), before + 1, "the press was answered");
+        assert_eq!(app.log.last().unwrap().text, "connecting…");
+        assert!(app.dialing.is_some(), "and the first dial is untouched");
+    }
+
+    /// The sidebar's LAN rows describe the dial: what was typed wins, the
+    /// board's own WiFi address is the fallback that saves retyping it, the
+    /// token comes from the field or the capture, and the row shows that one
+    /// exists and never which.
+    #[test]
+    fn the_lan_rows_describe_the_dial() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.transport = Transport::Lan;
+
+        // Nothing typed and no board address heard: nothing to dial.
+        assert!(app.lan_dial().is_err(), "an address is owed");
+        assert_eq!(app.lan_host_text(), app.unknown());
+        assert_eq!(app.lan_token_text(), app.unknown());
+
+        // A token in hand is shown as stars, and the row never spells it.
+        app.lan_status.token = "0123456789abcdef0123456789abcdef".into();
+        assert_eq!(app.lan_token_text(), "******");
+        assert!(!app.lan_token_text().contains("0123456789"));
+
+        // The board's own address is the fallback.
+        app.network.wifi = Some(crate::accessory::WifiStatus {
+            state: "connected".into(),
+            ssid: "Bench".into(),
+            ip: "192.168.0.100".into(),
+        });
+        let Dial::Lan { host, token } = app.lan_dial().expect("the board's address is a dial") else {
+            panic!("a LAN dial");
+        };
+        assert_eq!(host, "192.168.0.100");
+        assert_eq!(token.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+        assert_eq!(app.lan_host_text(), "192.168.0.100");
+
+        // What was typed beats the fallback, trimmed.
+        app.lan_host = " 192.168.1.50 ".into();
+        let Dial::Lan { host, .. } = app.lan_dial().expect("a typed host is a dial") else {
+            panic!("a LAN dial");
+        };
+        assert_eq!(host, "192.168.1.50");
+        assert_eq!(app.lan_host_text(), "192.168.1.50");
     }
 
     /// A modal takes the keyboard, and closing it gives the keyboard back.

@@ -11,7 +11,7 @@ use std::io;
 
 use crate::event::ConnectionState;
 use crate::transport::ble::Selection;
-use crate::transport::{Link, LinkEvent, LinkHandle, LinkKind};
+use crate::transport::{Link, LinkEvent, LinkHandle, LinkKind, OpenedLink};
 
 /// What the command line asked to dial.
 ///
@@ -69,6 +69,17 @@ impl Dial {
                 )))
             }
         }
+    }
+
+    /// The whole dial, on whatever thread calls it: the link is built *and*
+    /// opened here, and what comes back is ready to be pumped.
+    ///
+    /// [`Dial::open`] stops one step short on purpose — the command line wants
+    /// a description before anything touches a radio — but the interface wants
+    /// the opposite: the wait paid where it can be afforded. See
+    /// [`Session::adopt`].
+    pub fn opened(&self) -> io::Result<OpenedLink> {
+        OpenedLink::open(self.open()?)
     }
 
     /// The link kind this dial produces.
@@ -172,18 +183,28 @@ impl Session {
     /// Open `link` and move to `connecting`. The link's threads report
     /// `Opened` on their own, so this only gets the session ready to listen.
     pub fn connect(&mut self, link: Box<dyn Link>) -> io::Result<()> {
-        let describe = link.describe();
-        // Read before the link is moved into its handle: the sidebar shows the
-        // address and whether a token went with it, and the only place that
-        // knows is the link itself.
-        self.lan_host = link.lan_details().map(|(host, _)| host).unwrap_or_default();
-        self.lan_secured = link.lan_details().map(|(_, token)| token).unwrap_or(false);
-        self.kind = link.kind();
-        let handle = LinkHandle::start(link)?;
-        self.handle = Some(handle);
-        self.describe = describe;
-        self.state = Some(ConnectionState::Connecting);
+        // Open here, on the calling thread, and take it: the command line and
+        // the tests have nothing else on this thread to keep running. The
+        // interface dials through [`Dial::opened`] and [`Session::adopt`]
+        // instead, because its thread has a frame to draw.
+        self.adopt(OpenedLink::open(link)?);
         Ok(())
+    }
+
+    /// Take a link that is already open.
+    ///
+    /// The same landing as [`Session::connect`], from halves that were paid for
+    /// elsewhere — who pays is the caller's business, because the caller is the
+    /// one who knows whether it can afford the wait. The link's own threads
+    /// report `Opened` exactly as they do for a link this session opened
+    /// itself.
+    pub fn adopt(&mut self, opened: OpenedLink) {
+        self.kind = opened.kind;
+        self.lan_host = opened.lan_host.clone();
+        self.lan_secured = opened.lan_secured;
+        self.describe = opened.description.clone();
+        self.handle = Some(LinkHandle::from_opened(opened));
+        self.state = Some(ConnectionState::Connecting);
     }
 
     /// Hang up. The session drops its own opinion of the state rather than

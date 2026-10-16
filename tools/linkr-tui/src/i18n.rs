@@ -56,8 +56,10 @@ pub struct Strings {
     pub transport_label: &'static str,
     /// `Device: <name>` prefix.
     pub device_label: &'static str,
-    /// The LAN link's address, shown only for a LAN connection.
-    pub lan_address_label: &'static str,
+    /// `LAN host: <address>` — the row a LAN dial is built from.
+    pub lan_host_label: &'static str,
+    /// `LAN token: ******` — that one is in hand, never which.
+    pub lan_token_label: &'static str,
     /// Whether the live LAN link presented a token.
     pub lan_token_yes: &'static str,
     /// The same, when it did not.
@@ -72,6 +74,9 @@ pub struct Strings {
     pub switch_device: &'static str,
     /// Suffix on the transport row when a CLI flag pinned it.
     pub transport_locked: &'static str,
+    /// The `◂▸` marker on the transport row: Enter flips it between the two
+    /// links a session can be carried over.
+    pub transport_switch_hint: &'static str,
     /// Hint under the quick-send header.
     pub quick_send_hint: &'static str,
     /// Shown in the watch section when nothing has been found.
@@ -308,6 +313,10 @@ pub struct Strings {
     pub transport_is_locked: &'static str,
     /// Shown when there is nothing to dial — no bridge, no port.
     pub no_link: &'static str,
+    /// Shown when a LAN dial has no address to go to.
+    pub lan_needs_host: &'static str,
+    /// Shown when a dial is already in flight: one at a time.
+    pub dialing: &'static str,
     /// Shown when `switch device` has nothing to switch to: one device is
     /// known, so the action is a no-op that says so rather than doing nothing.
     pub no_other_device: &'static str,
@@ -326,13 +335,15 @@ const ZH: Strings = Strings {
     section_watch: "监控",
     transport_label: "传输方式",
     device_label: "设备",
-    lan_address_label: "局域网地址",
+    lan_host_label: "局域网主机",
+    lan_token_label: "局域网令牌",
     lan_token_yes: "有密钥",
     lan_token_no: "无密钥",
     connect: "连接",
     disconnect: "断开连接",
     switch_device: "切换设备",
     transport_locked: "（已锁定）",
+    transport_switch_hint: "◂▸",
     quick_send_hint: "Enter 发送 · reboot 先确认",
     watch_empty: "暂无发现",
     focus_terminal: "终端",
@@ -439,6 +450,8 @@ const ZH: Strings = Strings {
     language_en: "English",
     transport_is_locked: "传输方式已被锁定，无法切换。",
     no_link: "没有配置链路——无目标可连接。",
+    lan_needs_host: "请先填写局域网主机（板子的 WiFi IP）。",
+    dialing: "连接中…",
     no_other_device: "没有其他设备可切换。",
 };
 
@@ -455,13 +468,15 @@ const EN: Strings = Strings {
     section_watch: "Watch",
     transport_label: "Transport",
     device_label: "Device",
-    lan_address_label: "LAN address",
+    lan_host_label: "LAN host",
+    lan_token_label: "LAN token",
     lan_token_yes: "token",
     lan_token_no: "no token",
     connect: "Connect",
     disconnect: "Disconnect",
     switch_device: "Switch device",
     transport_locked: "(locked)",
+    transport_switch_hint: "◂▸",
     // Fits the 29-column sidebar with three columns to spare. The longer
     // `Enter sends · reboot asks first` overflowed the column and wrapped onto a
     // second row, which pushed every section below it one row down — the
@@ -577,6 +592,8 @@ const EN: Strings = Strings {
     language_en: "English",
     transport_is_locked: "The transport is pinned and cannot be switched.",
     no_link: "No link configured — nothing to dial.",
+    lan_needs_host: "Enter the bridge's LAN address first (the board's WiFi IP).",
+    dialing: "connecting…",
     no_other_device: "No other device to switch to yet.",
 };
 
@@ -685,12 +702,14 @@ mod tests {
                 s.section_watch,
                 s.transport_label,
                 s.device_label,
-                s.lan_address_label,
+                s.lan_host_label,
+                s.lan_token_label,
                 s.lan_token_yes,
                 s.lan_token_no,
                 s.connect,
                 s.switch_device,
                 s.transport_locked,
+                s.transport_switch_hint,
                 s.quick_send_hint,
                 s.watch_empty,
                 s.focus_terminal,
@@ -871,6 +890,11 @@ mod tests {
             ("autoscroll", zh.autoscroll, en.autoscroll),
             ("signal_unit", zh.signal_unit, en.signal_unit),
             ("value_unknown", zh.value_unknown, en.value_unknown),
+            (
+                "transport_switch_hint",
+                zh.transport_switch_hint,
+                en.transport_switch_hint,
+            ),
         ] {
             assert_eq!(zh, en, "{name} differs between the languages");
         }

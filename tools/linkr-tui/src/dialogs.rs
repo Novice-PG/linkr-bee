@@ -78,6 +78,8 @@ const PROMPT_KEYS: Entry = [
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
 const WEBDAV_TITLE: Entry = [" Log upload target ", " 日志上传目标 "];
+const LAN_HOST_TITLE: Entry = [" LAN host ", " 局域网主机 "];
+const LAN_TOKEN_TITLE: Entry = [" LAN token ", " 局域网令牌 "];
 
 const LEVEL_INFO: Entry = ["info", "信息"];
 const LEVEL_WARN: Entry = ["warn", "警告"];
@@ -215,6 +217,11 @@ pub struct Prompt {
     /// Where the caret is, as a byte offset into `text`. It only ever sits on a
     /// character boundary: every move here shifts it by a whole character.
     pub cursor: usize,
+    /// Whether the field shows stars instead of what was typed. Starts on for
+    /// an answer that is a secret — a token that reached a screenshot has to be
+    /// rotated — and Ctrl+R flips it either way, for as long as it takes to
+    /// check one character.
+    pub masked: bool,
     /// What agreeing to it does.
     pub action: PromptAction,
 }
@@ -231,6 +238,11 @@ pub enum PromptAction {
     WifiPassword,
     /// Where the device's log is uploaded to.
     WebdavUrl,
+    /// The address a LAN dial goes to, kept in the sidebar row it edits.
+    LanHost,
+    /// The token that dial carries. Held in the sidebar row and in the dial,
+    /// never in a notice or a log.
+    LanToken,
 }
 
 impl Prompt {
@@ -242,6 +254,7 @@ impl Prompt {
             placeholder: Self::placeholder(action),
             text: String::new(),
             cursor: 0,
+            masked: action == PromptAction::LanToken,
             action,
         }
     }
@@ -267,6 +280,14 @@ impl Prompt {
                 "Upload URL (http:// or https://)",
                 "上传地址（http:// 或 https://）",
             ],
+            PromptAction::LanHost => [
+                "The bridge's LAN address (the board's WiFi IP)",
+                "桥接的局域网地址（板子的 WiFi IP）",
+            ],
+            PromptAction::LanToken => [
+                "32 hex characters, blank when LAN auth is off (Ctrl+R shows it)",
+                "32 位十六进制，未启用鉴权时留空（Ctrl+R 切换显示）",
+            ],
         }
     }
 
@@ -277,6 +298,8 @@ impl Prompt {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
             PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
+            PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
+            PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
         }
     }
 
@@ -463,6 +486,22 @@ pub fn prompt_webdav_url(app: &mut App) {
     raise(app, Dialog::Prompt(prompt));
 }
 
+/// Ask for the address a LAN dial goes to. The sidebar row shows what the
+/// field holds, so an empty answer is an answer: the board's own WiFi address
+/// is the fallback a dial falls back to.
+pub fn prompt_lan_host(app: &mut App) {
+    let prompt = Prompt::with_text(LAN_HOST_TITLE, PromptAction::LanHost, &app.lan_host);
+    raise(app, Dialog::Prompt(prompt));
+}
+
+/// Ask for the token a LAN dial carries. Masked while it is typed, because a
+/// token that reached a screenshot has to be rotated; Ctrl+R shows it for as
+/// long as it takes to check one character.
+pub fn prompt_lan_token(app: &mut App) {
+    let prompt = Prompt::with_text(LAN_TOKEN_TITLE, PromptAction::LanToken, &app.lan_token);
+    raise(app, Dialog::Prompt(prompt));
+}
+
 /// A confirmation: what is about to happen, and what agreeing does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirm {
@@ -538,18 +577,32 @@ fn level_badge(level: NoticeLevel) -> (&'static str, Entry) {
 /// a `--print-frame` preview — and untestable.
 fn prompt_field(prompt: &Prompt, lang: Lang, theme: &Theme) -> Line<'static> {
     let (before, under, after) = prompt.split();
+    // A masked field shows one star per character, so revealing it does not
+    // move the caret — and the character under the caret stays exactly one
+    // cell (the split hands back a space at the end of the line, which stays
+    // a space).
+    let stars = |text: &str| "*".repeat(text.chars().count());
+    let (before, under, after) = if prompt.masked {
+        (
+            stars(before),
+            if under == " " { " ".to_string() } else { "*".to_string() },
+            stars(after),
+        )
+    } else {
+        (before.to_string(), under.to_string(), after.to_string())
+    };
     if prompt.text.is_empty() {
         // Nothing typed: the caret, then what shape of answer the field wants.
         return Line::from(vec![
             Span::styled(format!("  {before}"), theme.text()),
-            Span::styled(under.to_string(), theme.selected()),
+            Span::styled(under, theme.selected()),
             Span::styled(entry(prompt.placeholder, lang), theme.muted()),
         ]);
     }
     Line::from(vec![
         Span::styled(format!("  {before}"), theme.text()),
-        Span::styled(under.to_string(), theme.selected()),
-        Span::styled(after.to_string(), theme.text()),
+        Span::styled(under, theme.selected()),
+        Span::styled(after, theme.text()),
     ])
 }
 
@@ -720,6 +773,18 @@ pub fn lines(dialog: &Dialog, app: &App, width: u16, height: usize) -> Vec<Line<
 /// global handler rather than being swallowed here.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+R flips a masked field between stars and text, and is answered
+        // before the chord bail-out below because it belongs to the field.
+        // Every other chord stays global: `Ctrl+Q` must still quit and
+        // `Ctrl+T` still repaint with a modal in the way.
+        if key.code == KeyCode::Char('r') {
+            if let Some(Dialog::Prompt(prompt)) = &mut app.dialog {
+                if matches!(prompt.action, PromptAction::LanToken) {
+                    prompt.masked = !prompt.masked;
+                    return true;
+                }
+            }
+        }
         return false;
     }
     let Some(dialog) = app.dialog.take() else {
@@ -738,10 +803,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // nothing heard it scans again, which is what a bench with the
             // board switched on mid-dialog needs.
             KeyCode::Enter => match pick.selected() {
-                // The pick dials the board; whether the dial caught is the
-                // log's news, not the list's, so the answer is dropped here.
+                // The pick dials the board, and says so: a link the user
+                // asked for by name is news; whether it caught is the log's.
                 Some(device) => {
-                    app.connect_to_board(&device.id);
+                    app.connect_to_board(&device.id, false);
                 }
                 None if !pick.scanning => {
                     let _ = app.start_ble_scan();
@@ -904,6 +969,13 @@ fn start(app: &mut App, prompt: Prompt) {
             };
             ask(app, ConfirmAction::Accessory(command));
         }
+        // The address is a value the user came to set, so an empty answer is
+        // an answer: erase the field and the board's own WiFi address is what
+        // a dial falls back to.
+        PromptAction::LanHost => app.lan_host = answer.to_string(),
+        // The token goes into the sidebar row and nowhere else — no notice,
+        // no log, no report ever names it.
+        PromptAction::LanToken => app.lan_token = answer.to_string(),
     }
 }
 
@@ -1747,6 +1819,86 @@ mod tests {
             "the list moved while a different field had the caret"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- the LAN rows -----------------------------------------------
+
+    /// The token prompt opens masked — a token that reached a screenshot has
+    /// to be rotated — and Ctrl+R shows it for as long as it takes to check a
+    /// character. The stars are one per character, so revealing the field does
+    /// not move the caret.
+    #[test]
+    fn the_token_prompt_is_masked_and_ctrl_r_shows_it() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.lan_token = "abcd".into();
+        prompt_lan_token(&mut app);
+
+        let theme = app.theme();
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(painted.contains("****"), "the token is masked:\n{painted}");
+        assert!(
+            !painted.contains("abcd"),
+            "and not spelled out:\n{painted}"
+        );
+
+        // Ctrl+R is answered by the dialog itself, not the global handler.
+        assert!(handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        ));
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(
+            painted.contains("abcd"),
+            "Ctrl+R shows the field:\n{painted}"
+        );
+
+        assert!(handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        ));
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(
+            !painted.contains("abcd"),
+            "and Ctrl+R masks it again:\n{painted}"
+        );
+
+        // The address is a thing to read back, not a secret.
+        assert!(!Prompt::new(LAN_HOST_TITLE, PromptAction::LanHost).masked);
+    }
+
+    /// Both LAN prompts file their answer in the sidebar row they edit, and
+    /// nowhere else: the row is the field, so the next dial describes what was
+    /// typed.
+    #[test]
+    fn the_lan_prompts_write_the_sidebar_rows() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        prompt_lan_host(&mut app);
+        for ch in " 192.168.1.9 ".chars() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "the prompt closed");
+        assert_eq!(app.lan_host, "192.168.1.9", "the answer is trimmed in");
+
+        prompt_lan_token(&mut app);
+        for ch in "0123456789abcdef0123456789abcdef".chars() {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.lan_token, "0123456789abcdef0123456789abcdef",
+            "the token is in the row, and nowhere else"
+        );
+        assert!(
+            app.notices.is_empty(),
+            "nothing was announced about a token"
+        );
     }
 }
 

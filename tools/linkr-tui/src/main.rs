@@ -809,6 +809,13 @@ fn main() -> io::Result<()> {
             eprintln!("error: {err}");
             std::process::exit(2);
         }
+        // What the command line dialled is also what the sidebar's LAN rows
+        // describe from now on: an address named once must not have to be
+        // typed again to reconnect.
+        if let Dial::Lan { host, token } = &dial {
+            app.lan_host = host.clone();
+            app.lan_token = token.clone().unwrap_or_default();
+        }
         // `dial` already pinned it; a dial the command line decided cannot be
         // switched from the keyboard.
     } else {
