@@ -441,7 +441,9 @@ fn radio(
             if dialled_here {
                 let _ = peripheral.disconnect().await;
             }
-            refuse(format!("connected to {target} but the link was refused: {why}"));
+            refuse(format!(
+                "connected to {target} but the link was refused: {why}"
+            ));
             return;
         }
         // Reported only once the subscription is live. A read that succeeds
@@ -1172,7 +1174,10 @@ mod tests {
             !is_transient("br-connection-rej-security"),
             "a refusal is the answer"
         );
-        assert!(!is_transient("In Progress"), "busy is waited out, not redialled");
+        assert!(
+            !is_transient("In Progress"),
+            "busy is waited out, not redialled"
+        );
         assert!(!is_transient("device not found"));
     }
 
@@ -1190,8 +1195,7 @@ mod tests {
 
         let refused = dial_error("br-connection-rej-security");
         assert_eq!(
-            refused,
-            "the connection was refused: br-connection-rej-security",
+            refused, "the connection was refused: br-connection-rej-security",
             "a permanent refusal is not dressed up"
         );
     }

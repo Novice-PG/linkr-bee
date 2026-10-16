@@ -1081,11 +1081,7 @@ mod tests {
         activate(&mut app);
         assert!(app.session.is_live(), "the refusal did not hang up");
         assert!(!app.ble_scan.is_running(), "and no scan was started");
-        assert_eq!(
-            app.notices.len(),
-            before + 1,
-            "the refusal was silent"
-        );
+        assert_eq!(app.notices.len(), before + 1, "the refusal was silent");
         assert_eq!(
             app.notices.last().map(|n| n.text.as_str()),
             Some(app.strings().switch_needs_disconnect)
@@ -1161,7 +1157,11 @@ mod tests {
         match &app.dialog {
             Some(crate::dialogs::Dialog::Prompt(prompt)) => {
                 assert_eq!(prompt.action, crate::dialogs::PromptAction::LanHost);
-                assert_eq!(prompt.field.answer(), "192.168.1.50", "the row is the field");
+                assert_eq!(
+                    prompt.field.answer(),
+                    "192.168.1.50",
+                    "the row is the field"
+                );
             }
             other => panic!("no host prompt: {other:?}"),
         }

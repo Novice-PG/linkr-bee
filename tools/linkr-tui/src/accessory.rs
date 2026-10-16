@@ -348,7 +348,9 @@ pub fn parse_wifi_result(line: &str) -> WifiResult {
 /// same boundary, so it is found once.
 fn signal_at(value: &str) -> Option<(usize, i32)> {
     let line = value.trim_end();
-    let head = line.strip_suffix("dBm").or_else(|| line.strip_suffix("dB"))?;
+    let head = line
+        .strip_suffix("dBm")
+        .or_else(|| line.strip_suffix("dB"))?;
     let head = head.trim_end();
     let digits = head.trim_end_matches(|c: char| c.is_ascii_digit());
     let rest = digits.trim_end_matches(['+', '-']);
@@ -560,7 +562,11 @@ pub fn parse_lan_status(text: &str) -> Option<LanStatus> {
             .next()
             .unwrap_or("")
             .to_ascii_lowercase(),
-        token: if token == "none" { String::new() } else { token },
+        token: if token == "none" {
+            String::new()
+        } else {
+            token
+        },
     })
 }
 
@@ -840,8 +846,8 @@ mod lan_tests {
     /// comes back in — from the real web client's own parser.
     #[test]
     fn a_socket_status_reports_its_token() {
-        let status = parse_lan_status("OK ws=on token=0123456789abcdef0123456789abcdef")
-            .expect("parses");
+        let status =
+            parse_lan_status("OK ws=on token=0123456789abcdef0123456789abcdef").expect("parses");
         assert_eq!(status.ws, "on");
         assert_eq!(status.token, "0123456789abcdef0123456789abcdef");
     }
@@ -858,8 +864,8 @@ mod lan_tests {
     /// echoes; the wire is lowercase, so it is lowered here rather than rejected.
     #[test]
     fn a_token_is_lowered_because_the_wire_is() {
-        let status = parse_lan_status("OK ws=on token=ABCDEF0123456789ABCDEF0123456789")
-            .expect("parses");
+        let status =
+            parse_lan_status("OK ws=on token=ABCDEF0123456789ABCDEF0123456789").expect("parses");
         assert_eq!(status.token, "abcdef0123456789abcdef0123456789");
     }
 

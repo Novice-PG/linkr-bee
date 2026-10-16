@@ -265,7 +265,11 @@ mod tests {
             ("█".repeat(5), "░".repeat(5)),
             "half is half"
         );
-        assert_eq!(meter(1, 3, 3), ("█".into(), "░░".into()), "a third rounds up");
+        assert_eq!(
+            meter(1, 3, 3),
+            ("█".into(), "░░".into()),
+            "a third rounds up"
+        );
         assert_eq!(meter(9, 10, 10), ("█".repeat(9), "░".into()));
         // Over-full and no denominator never spill the width.
         assert_eq!(meter(20_000, 16384, 10), ("█".repeat(10), "".into()));

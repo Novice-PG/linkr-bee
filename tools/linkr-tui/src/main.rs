@@ -480,10 +480,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--lang" => {
                 let raw = value("--lang");
                 args.lang = Some(Lang::from_name(&raw).unwrap_or_else(|| {
-                    fail(
-                        prog,
-                        &format!("invalid value '{raw}' for '--lang <LANG>'"),
-                    )
+                    fail(prog, &format!("invalid value '{raw}' for '--lang <LANG>'"))
                 }));
             }
             "--theme" => {
@@ -1617,7 +1614,11 @@ fn toggle_latch(
         *flag
     };
     let s = app.strings();
-    let template = if armed { s.latch_armed } else { s.latch_disarmed };
+    let template = if armed {
+        s.latch_armed
+    } else {
+        s.latch_disarmed
+    };
     let text = linkr_tui::text::fill(template, &[name.to_string()]);
     app.push_notice(linkr_tui::app::Notice {
         text,
@@ -1687,8 +1688,7 @@ fn local_clock() -> String {
 ///
 /// A modal takes the wheel too: while one is up, the pane and the rail behind
 /// it are not what the user is scrolling.
-fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
-                cols: u16, rows: u16) {
+fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, rows: u16) {
     use crossterm::event::{MouseButton, MouseEventKind};
 
     // The modal answers the keyboard, and the wheel is a gesture the same way a
@@ -2018,8 +2018,14 @@ mod tests {
     fn the_diagnostics_view_hears_its_own_keys() {
         let mut app = App::default();
         app.set_view(View::Diagnostics);
-        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
         assert_eq!(app.diagnostics.scroll, 20);
         handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(app.diagnostics.scroll, 10);
@@ -2032,8 +2038,14 @@ mod tests {
 
         // On any other view the keys are not the document's.
         app.set_view(View::Terminal);
-        handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.diagnostics.scroll, 10, "the terminal has its own scroll");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.diagnostics.scroll, 10,
+            "the terminal has its own scroll"
+        );
     }
 
     /// Ctrl+Shift+K lands on the composer; Ctrl+Shift+S raises the settings
@@ -2111,12 +2123,8 @@ mod tests {
     #[test]
     fn ctrl_c_interrupts_the_device_while_the_pane_has_the_keyboard() {
         let mut app = App::default();
-        app.connect(
-            Dial::Stdio("-".into())
-                .open()
-                .expect("the loopback builds"),
-        )
-        .expect("the loopback opens");
+        app.connect(Dial::Stdio("-".into()).open().expect("the loopback builds"))
+            .expect("the loopback opens");
         for _ in 0..50 {
             app.pump();
             if app.connected() {
@@ -2147,12 +2155,8 @@ mod tests {
     #[test]
     fn only_the_terminal_view_types_to_the_device() {
         let mut app = App::default();
-        app.connect(
-            Dial::Stdio("-".into())
-                .open()
-                .expect("the loopback builds"),
-        )
-        .expect("the loopback opens");
+        app.connect(Dial::Stdio("-".into()).open().expect("the loopback builds"))
+            .expect("the loopback opens");
         for _ in 0..50 {
             app.pump();
             if app.connected() {
@@ -2202,7 +2206,10 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
         );
-        assert!(!app.latch.shift, "the uppercase spelling cancels what it armed");
+        assert!(
+            !app.latch.shift,
+            "the uppercase spelling cancels what it armed"
+        );
     }
 
     /// A paste goes to the caret the user can see, in the painter's order: the
@@ -2372,25 +2379,37 @@ mod tests {
         // Arm Ctrl for the next key.
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
         assert!(app.latch.ctrl, "Ctrl is armed");
         assert_eq!(app.log.last().map(|n| n.text.contains("Ctrl")), Some(true));
 
         // A plain 'c' goes out as Ctrl+C (0x03) — link or no link, the byte is
         // what the encoder builds — and the latch is spent by it.
-        let key = latch_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let key = latch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        );
         assert!(key.modifiers.contains(KeyModifiers::CONTROL));
         assert!(!app.latch.is_armed(), "one key spends the latch");
 
         // The same chord again cancels what it would have armed.
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
         assert!(!app.latch.is_armed(), "the chord toggles");
     }
@@ -2797,7 +2816,11 @@ mod tests {
             matches!(app.dialog, Some(dialogs::Dialog::ThemePick(_))),
             "Ctrl+T opened the picker"
         );
-        assert_eq!(app.theme, ThemeChoice::Dark, "no theme moved without a pick");
+        assert_eq!(
+            app.theme,
+            ThemeChoice::Dark,
+            "no theme moved without a pick"
+        );
 
         // Ctrl+Q sets the flag the loop reads.
         assert!(handle_key(
@@ -2998,10 +3021,7 @@ mod tests {
             app.ble_scan.is_running(),
             "switch device did not start listening"
         );
-        assert!(
-            app.dialog.is_some(),
-            "the scan's list is not open"
-        );
+        assert!(app.dialog.is_some(), "the scan's list is not open");
         assert!(
             app.log.last().map(|n| n.text.as_str()) != Some("No other device to switch to yet."),
             "the old warning is gone"
@@ -3077,7 +3097,10 @@ mod tests {
         assert_eq!(app.terminal.scroll, 3);
         wheel(&mut app, MouseEventKind::ScrollDown);
         assert_eq!(app.terminal.scroll, 0);
-        assert!(app.terminal.autoscroll, "the tail is where following resumes");
+        assert!(
+            app.terminal.autoscroll,
+            "the tail is where following resumes"
+        );
         wheel(&mut app, MouseEventKind::ScrollDown);
         assert_eq!(app.terminal.scroll, 0, "the walk stops at the tail");
     }

@@ -111,9 +111,7 @@ impl Failure {
             Failure::Rejected(status, body) => {
                 format!("the provider refused ({status}): {body}")
             }
-            Failure::Malformed => {
-                "the provider answered but sent no completion".to_string()
-            }
+            Failure::Malformed => "the provider answered but sent no completion".to_string(),
         }
     }
 }
@@ -217,11 +215,7 @@ impl AgentClient {
                     })
                 }
                 Ok((_, Progress::Failed(failure))) => return Err(failure),
-                Err(_) => {
-                    return Err(Failure::Unreachable(
-                        "the model took too long".to_string(),
-                    ))
-                }
+                Err(_) => return Err(Failure::Unreachable("the model took too long".to_string())),
             }
         }
     }
@@ -282,7 +276,11 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     let response = match request.send().await {
         Ok(response) => response,
         Err(why) => {
-            send(&reply, &job.task_id, Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))));
+            send(
+                &reply,
+                &job.task_id,
+                Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))),
+            );
             return;
         }
     };
@@ -291,7 +289,11 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         // Read the body whatever the status: a provider's reason for refusing is
         // the one thing worth showing, and it is redacted on the way out.
         let body = response.text().await.unwrap_or_default();
-        send(&reply, &job.task_id, Progress::Failed(Failure::Rejected(status, redact(&body, &key))));
+        send(
+            &reply,
+            &job.task_id,
+            Progress::Failed(Failure::Rejected(status, redact(&body, &key))),
+        );
         return;
     }
 
@@ -305,7 +307,11 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         let bytes = match chunk {
             Ok(bytes) => bytes,
             Err(why) => {
-                send(&reply, &job.task_id, Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))));
+                send(
+                    &reply,
+                    &job.task_id,
+                    Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))),
+                );
                 return;
             }
         };
@@ -418,10 +424,7 @@ fn usage_of(event: &str) -> Option<Usage> {
 /// appended to, because `…/v1//chat/completions` is a 404 on some gateways and
 /// `…/v1/chat/completions` is right on all of them.
 fn chat_url(endpoint: &str) -> String {
-    format!(
-        "{}/chat/completions",
-        endpoint.trim_end_matches('/').trim()
-    )
+    format!("{}/chat/completions", endpoint.trim_end_matches('/').trim())
 }
 
 /// The request body, written by hand.
@@ -489,7 +492,11 @@ pub fn parse_completion(text: &str) -> Option<Completion> {
 /// reports usage for some models and not others must not make the reply
 /// unusable.
 fn parse_usage(object: &str) -> Usage {
-    let number = |key: &str| field(object, key).and_then(|raw| raw.trim().parse().ok()).unwrap_or(0);
+    let number = |key: &str| {
+        field(object, key)
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or(0)
+    };
     Usage {
         input: number("prompt_tokens"),
         output: number("completion_tokens"),
@@ -832,7 +839,10 @@ mod tests {
     #[test]
     fn a_partial_event_is_kept_until_its_blank_line() {
         let mut buffer = "data: {\"choices\":[".to_string();
-        assert!(next_event(&buffer).is_none(), "an incomplete event was read");
+        assert!(
+            next_event(&buffer).is_none(),
+            "an incomplete event was read"
+        );
         buffer.push_str("{\"finish_reason\":\"stop\"}]}\n\n");
         let (event, rest) = next_event(&buffer).expect("now complete");
         assert_eq!(event, "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}");

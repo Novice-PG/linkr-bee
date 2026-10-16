@@ -155,7 +155,10 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
     // half that only ever said the view's name left the operator to count rows
     // to know what they were about to press.
     spans.push(Span::styled(app.view_name().to_string(), theme.text()));
-    spans.push(Span::styled(format!(" / {}", focus_detail(app, s)), theme.muted()));
+    spans.push(Span::styled(
+        format!(" / {}", focus_detail(app, s)),
+        theme.muted(),
+    ));
     spans.push(Span::styled(DOT.to_string(), theme.muted()));
     spans.push(Span::styled(app.state_name().to_string(), state_style));
     // The latch, while one is armed: the announcement times out, the chip

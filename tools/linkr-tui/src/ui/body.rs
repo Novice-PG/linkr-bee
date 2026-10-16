@@ -39,10 +39,7 @@ pub fn ground(app: &App, theme: &Theme) -> ratatui::style::Style {
 /// scroll arithmetic pins its window to the ends of the history.
 pub fn scroll_offset(app: &App, total: usize, height: usize) -> usize {
     match app.view {
-        View::Diagnostics => app
-            .diagnostics
-            .scroll
-            .min(total.saturating_sub(height)),
+        View::Diagnostics => app.diagnostics.scroll.min(total.saturating_sub(height)),
         _ => 0,
     }
 }
@@ -96,7 +93,11 @@ mod tests {
         app.diagnostics.scroll = 3;
         assert_eq!(scroll_offset(&app, 30, 10), 3);
         app.diagnostics.scroll = 8;
-        assert_eq!(scroll_offset(&app, 5, 10), 0, "a short document cannot scroll");
+        assert_eq!(
+            scroll_offset(&app, 5, 10),
+            0,
+            "a short document cannot scroll"
+        );
         app.set_view(View::Network);
         app.diagnostics.scroll = 50;
         assert_eq!(scroll_offset(&app, 30, 10), 0, "other views have no scroll");

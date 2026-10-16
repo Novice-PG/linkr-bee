@@ -576,7 +576,11 @@ mod tests {
             .iter()
             .find(|span| span.content.contains('█'))
             .expect("the meter is on the row");
-        assert_eq!(half_fill.style.fg, Some(theme.accent), "half is not a warning");
+        assert_eq!(
+            half_fill.style.fg,
+            Some(theme.accent),
+            "half is not a warning"
+        );
     }
 
     /// A pane without room for the meter, a reply without a pair and a pair

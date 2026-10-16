@@ -258,9 +258,9 @@ impl TerminalPane {
     /// [`DOUBLE_CLICK`] picks the word under the pointer instead; anything
     /// else starts a new, one-cell selection.
     pub fn press(&mut self, line: usize, col: usize) {
-        let double = self.last_press.is_some_and(|(at, cell)| {
-            cell == (line, col) && at.elapsed() < DOUBLE_CLICK
-        });
+        let double = self
+            .last_press
+            .is_some_and(|(at, cell)| cell == (line, col) && at.elapsed() < DOUBLE_CLICK);
         self.last_press = Some((std::time::Instant::now(), (line, col)));
         if double {
             if let Some(word) = self.word_at(line, col) {
@@ -312,7 +312,8 @@ impl TerminalPane {
     /// The text of the selection in force, if there is one and it covers
     /// anything.
     pub fn selected_text(&self) -> Option<String> {
-        self.selection.map(|selection| selection_text(self, selection))
+        self.selection
+            .map(|selection| selection_text(self, selection))
     }
 
     /// The word or run under a point, as a selection — what a double-click
@@ -589,7 +590,12 @@ pub fn selection_text(pane: &TerminalPane, selection: Selection) -> String {
 /// numbers. `None` for a point outside the pane or on a filler row below the
 /// newest line — the pane's rows are where its text is, and a press on the
 /// blank ground under it is a press on nothing.
-pub fn cell_at(pane: &TerminalPane, height: usize, row: usize, col: usize) -> Option<(usize, usize)> {
+pub fn cell_at(
+    pane: &TerminalPane,
+    height: usize,
+    row: usize,
+    col: usize,
+) -> Option<(usize, usize)> {
     let line = (*visible_lines(pane, height).get(row)?)?;
     Some((line, col))
 }
@@ -1124,7 +1130,11 @@ mod tests {
             anchor: (0, 0),
             head: (0, 1),
         };
-        assert_eq!(selection_text(&wide, half), "中", "half a glyph is not text");
+        assert_eq!(
+            selection_text(&wide, half),
+            "中",
+            "half a glyph is not text"
+        );
         let whole = Selection {
             anchor: (0, 0),
             head: (0, 3),

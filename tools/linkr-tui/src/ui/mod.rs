@@ -65,10 +65,7 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
     if !sidebar {
         return Regions {
             top_bar,
-            sidebar: Rect {
-                width: 0,
-                ..middle
-            },
+            sidebar: Rect { width: 0, ..middle },
             centre: middle,
             bottom_bar,
         };
@@ -191,7 +188,11 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     // The counters win the row, then the unit, then the left half — the order
     // the information is missed in.
     let unit = chrome::traffic_unit(area.width);
-    let unit = if right_width + unit < area.width { unit } else { 0 };
+    let unit = if right_width + unit < area.width {
+        unit
+    } else {
+        0
+    };
     if unit == 0 {
         draw_bar(frame, app, area, left, right);
         return;
@@ -203,11 +204,8 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let label = chrome::traffic_label(app, &theme);
     let label_width = (label.width() as u16).min(unit);
-    let [label_area, graph_area] = Layout::horizontal([
-        Constraint::Length(label_width),
-        Constraint::Min(0),
-    ])
-    .areas(unit_area);
+    let [label_area, graph_area] =
+        Layout::horizontal([Constraint::Length(label_width), Constraint::Min(0)]).areas(unit_area);
     frame.render_widget(
         Paragraph::new(label).style(chrome::bar_style(&theme)),
         label_area,
@@ -215,15 +213,20 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Both directions, side by side and each behind its own arrow: one graph
     // of the two together would be the same shape whether the bytes were
     // coming or going, and which way they went is half the fact.
-    let [rx_half, tx_half] =
-        Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(graph_area);
+    let [rx_half, tx_half] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(graph_area);
     let [rx_arrow, rx_area] =
         Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(rx_half);
     let [tx_arrow, tx_area] =
         Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(tx_half);
-    frame.render_widget(Paragraph::new(Line::from(chrome::rx_arrow(&theme))), rx_arrow);
+    frame.render_widget(
+        Paragraph::new(Line::from(chrome::rx_arrow(&theme))),
+        rx_arrow,
+    );
     frame.render_widget(chrome::rx_graph(app, &theme), rx_area);
-    frame.render_widget(Paragraph::new(Line::from(chrome::tx_arrow(&theme))), tx_arrow);
+    frame.render_widget(
+        Paragraph::new(Line::from(chrome::tx_arrow(&theme))),
+        tx_arrow,
+    );
     frame.render_widget(chrome::tx_graph(app, &theme), tx_area);
 }
 
@@ -565,13 +568,20 @@ mod tests {
             let open = regions(area(w, h), true);
             let closed = regions(area(w, h), false);
             assert_eq!(closed.top_bar, open.top_bar, "{w}x{h}: top bar moved");
-            assert_eq!(closed.bottom_bar, open.bottom_bar, "{w}x{h}: bottom bar moved");
+            assert_eq!(
+                closed.bottom_bar, open.bottom_bar,
+                "{w}x{h}: bottom bar moved"
+            );
             assert_eq!(closed.sidebar.width, 0, "{w}x{h}: rail kept width");
             assert_eq!(
-                closed.centre.width, open.sidebar.width + open.centre.width,
+                closed.centre.width,
+                open.sidebar.width + open.centre.width,
                 "{w}x{h}: centre did not gain the rail's column"
             );
-            assert_eq!(closed.centre.height, open.centre.height, "{w}x{h}: height moved");
+            assert_eq!(
+                closed.centre.height, open.centre.height,
+                "{w}x{h}: height moved"
+            );
         }
     }
 
@@ -583,7 +593,11 @@ mod tests {
         let r = regions(area(120, 40), false);
         assert_eq!(r.sidebar.width, 0);
         assert_eq!(r.sidebar.x, 0);
-        assert_eq!(r.sidebar.right(), r.centre.x, "the strip reaches into the centre");
+        assert_eq!(
+            r.sidebar.right(),
+            r.centre.x,
+            "the strip reaches into the centre"
+        );
     }
 
     /// A window too narrow for both halves yields sidebar width to the centre:
@@ -775,8 +789,14 @@ mod tests {
         // walked up the track.
         app.scroll_terminal(150);
         let back = thumb(&app);
-        assert!(!back.is_empty(), "the bar went away when it was needed most");
-        assert!(back[0] < following[0], "{back:?} did not move up from {following:?}");
+        assert!(
+            !back.is_empty(),
+            "the bar went away when it was needed most"
+        );
+        assert!(
+            back[0] < following[0],
+            "{back:?} did not move up from {following:?}"
+        );
 
         // Back at the tail, `scroll_terminal_down` resumes following, and the
         // bar is on the bottom row again.
@@ -851,8 +871,14 @@ mod tests {
         // The classic 80-column bar: the unit is the first thing given up.
         let narrow = render_to_text(&app, 80, 30);
         let head = narrow.lines().next().unwrap_or_default().to_string();
-        assert!(!head.contains("B/s"), "the graph stayed on a narrow bar: {head:?}");
-        assert!(head.contains("RX 0 · TX 0"), "the counters went with it: {head:?}");
+        assert!(
+            !head.contains("B/s"),
+            "the graph stayed on a narrow bar: {head:?}"
+        );
+        assert!(
+            head.contains("RX 0 · TX 0"),
+            "the counters went with it: {head:?}"
+        );
     }
 
     /// A rendered frame shows the designed chrome: the top bar's counters, every
@@ -883,8 +909,7 @@ mod tests {
             "the air column, then the bar: {last:?}"
         );
         assert!(last.contains("Ctrl+Q 退出"), "{last:?}");
-        for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"]
-        {
+        for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"] {
             assert!(text.contains(needle), "frame is missing {needle:?}\n{text}");
         }
         // The sidebar ends where the centre column begins.

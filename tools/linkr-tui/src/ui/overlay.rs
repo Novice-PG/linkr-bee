@@ -327,7 +327,10 @@ mod tests {
         let body = dialogs::body_height(&app, dialog, width.saturating_sub(2));
         let rect = centred(region, width, box_height(body, ceiling));
         let inner = app.theme().overlay_block("").inner(rect);
-        assert!(body > inner.height as usize - 1, "the help no longer overflows");
+        assert!(
+            body > inner.height as usize - 1,
+            "the help no longer overflows"
+        );
 
         let buffer = ui::render_buffer(&app, 80, 24).expect("a frame");
         let bar = inner.right() - 1;

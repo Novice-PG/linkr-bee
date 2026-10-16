@@ -98,12 +98,7 @@ pub const FLAGS: &[Flag] = &[
     ),
     Flag::with_choices(
         "--view",
-        &[
-            "terminal",
-            "diagnostics",
-            "network",
-            "assistant",
-        ],
+        &["terminal", "diagnostics", "network", "assistant"],
         "open on this view",
     ),
     Flag::with_choices(

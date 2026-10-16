@@ -1106,7 +1106,10 @@ mod tests {
     #[test]
     fn the_terminal_switches_are_remembered() {
         let mut path = std::env::temp_dir();
-        path.push(format!("linkr-palette-switches-{}.json", std::process::id()));
+        path.push(format!(
+            "linkr-palette-switches-{}.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let mut app = App {
             settings: Some(crate::settings::SettingsStore::at(&path)),
@@ -1132,10 +1135,12 @@ mod tests {
             agent_store: Some(crate::agent::store::JsonFile::at(&path)),
             ..App::default()
         };
-        app.assistant.display.push(crate::agent::session::DisplayLine {
-            role: "user".into(),
-            text: "hello".into(),
-        });
+        app.assistant
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "user".into(),
+                text: "hello".into(),
+            });
         agent_clear(&mut app);
         assert!(app.assistant.display.is_empty());
         assert!(
@@ -1222,20 +1227,29 @@ mod tests {
             state.follow(total, visible);
         }
         assert_eq!(state.selected, visible - 1);
-        assert_eq!(state.window, 0, "the window moved with the cursor inside it");
+        assert_eq!(
+            state.window, 0,
+            "the window moved with the cursor inside it"
+        );
 
         // One more row is one row of list.
         state.step_down(total);
         state.follow(total, visible);
         assert_eq!(state.selected, visible);
-        assert_eq!(state.window, 1, "the window follows by the row it went past");
+        assert_eq!(
+            state.window, 1,
+            "the window follows by the row it went past"
+        );
 
         // Up again: the cursor re-enters the window and it holds.
         state.step_up(total);
         state.follow(total, visible);
         state.step_up(total);
         state.follow(total, visible);
-        assert_eq!(state.window, 1, "the window does not run ahead of the cursor");
+        assert_eq!(
+            state.window, 1,
+            "the window does not run ahead of the cursor"
+        );
         assert!(state.window <= state.selected && state.selected < state.window + visible);
 
         // The ends hold the window full, and the cursor stays on screen.

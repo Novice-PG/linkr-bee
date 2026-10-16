@@ -102,9 +102,7 @@ impl JsonFile {
         let mut stamp = std::process::id();
         tmp.set_extension(format!("tmp{stamp:08x}"));
         loop {
-            if std::fs::write(&tmp, &out).is_ok()
-                && std::fs::rename(&tmp, path).is_ok()
-            {
+            if std::fs::write(&tmp, &out).is_ok() && std::fs::rename(&tmp, path).is_ok() {
                 // After the rename, not before. The file that stays is the one
                 // the umask made — 0664 on a group-friendly default — and this
                 // file holds the model's API key, so restricting it is the whole
@@ -287,7 +285,9 @@ fn default_path() -> Option<PathBuf> {
             return Some(Path::new(&dir).join(DEFAULT_FILE));
         }
     }
-    let home = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())?;
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
     if home.trim().is_empty() {
         return None;
     }
@@ -388,7 +388,11 @@ mod tests {
             store.set("k", "v2");
         }
         let text = std::fs::read_to_string(&path).expect("the file");
-        assert_eq!(text.matches(MARKER).count(), 1, "the marker doubled: {text}");
+        assert_eq!(
+            text.matches(MARKER).count(),
+            1,
+            "the marker doubled: {text}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -468,10 +472,9 @@ mod tests {
                     .map(|entry| entry.file_name())
                     .filter(|name| {
                         name.to_string_lossy().starts_with("linkr-store-test-")
-                            && name.to_string_lossy().ends_with(&format!(
-                                "{:08x}",
-                                std::process::id()
-                            ))
+                            && name
+                                .to_string_lossy()
+                                .ends_with(&format!("{:08x}", std::process::id()))
                     })
                     .collect()
             })

@@ -95,9 +95,17 @@ impl SettingsStore {
             lan_host: self.file.get(LAN_HOST).unwrap_or_default(),
             address: self.file.get(ADDRESS).unwrap_or_default(),
             view: self.file.get(VIEW).as_deref().and_then(View::from_name),
-            theme: self.file.get(THEME).as_deref().and_then(ThemeChoice::from_name),
+            theme: self
+                .file
+                .get(THEME)
+                .as_deref()
+                .and_then(ThemeChoice::from_name),
             lang: self.file.get(LANG).as_deref().and_then(Lang::from_name),
-            enter: self.file.get(ENTER).as_deref().and_then(EnterMode::from_name),
+            enter: self
+                .file
+                .get(ENTER)
+                .as_deref()
+                .and_then(EnterMode::from_name),
             debug_io: self.file.get(DEBUG_IO).as_deref() == Some("true"),
         }
     }
@@ -115,25 +123,22 @@ impl SettingsStore {
         self.file.set(TRANSPORT, transport);
         self.file.set(LAN_HOST, settings.lan_host.trim());
         self.file.set(ADDRESS, settings.address.trim());
-        self.file.set(
-            VIEW,
-            settings.view.map(View::as_str).unwrap_or_default(),
-        );
+        self.file
+            .set(VIEW, settings.view.map(View::as_str).unwrap_or_default());
         self.file.set(
             THEME,
             settings.theme.map(ThemeChoice::as_str).unwrap_or_default(),
         );
-        self.file.set(
-            LANG,
-            settings.lang.map(Lang::as_str).unwrap_or_default(),
-        );
+        self.file
+            .set(LANG, settings.lang.map(Lang::as_str).unwrap_or_default());
         self.file.set(
             ENTER,
             settings.enter.map(EnterMode::as_name).unwrap_or_default(),
         );
         // The one boolean, spelled the one way: anything else, a hand edit
         // included, reads as off rather than as an error.
-        self.file.set(DEBUG_IO, if settings.debug_io { "true" } else { "" });
+        self.file
+            .set(DEBUG_IO, if settings.debug_io { "true" } else { "" });
     }
 }
 

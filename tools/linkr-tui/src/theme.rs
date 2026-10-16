@@ -558,10 +558,7 @@ impl ThemeChoice {
     /// to its own default rather than to a guess.
     pub fn from_name(raw: &str) -> Option<ThemeChoice> {
         let raw = raw.trim().to_ascii_lowercase();
-        THEMES
-            .iter()
-            .copied()
-            .find(|choice| choice.as_str() == raw)
+        THEMES.iter().copied().find(|choice| choice.as_str() == raw)
     }
 
     /// Parse the settings-file spelling. Unknown values fall back to the

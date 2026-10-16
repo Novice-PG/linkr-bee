@@ -811,8 +811,8 @@ mod tests {
         let ready = parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=10.0.0.4")
             .expect("parses");
         assert!(wifi_provisioning_complete(&ready));
-        let ip_ready =
-            parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=ready").expect("parses");
+        let ip_ready = parse_wifi_event("@event wifi operation=1 phase=ready result=0 ip=ready")
+            .expect("parses");
         assert!(!wifi_provisioning_complete(&ip_ready));
     }
 

@@ -643,10 +643,7 @@ mod tests {
     fn scan_results_are_listed() {
         let theme = Theme::DARK;
         let mut a = app(Lang::En);
-        a.network.scan_results = vec![
-            "Home wpa2 ch=6 -48dBm".into(),
-            "Office".into(),
-        ];
+        a.network.scan_results = vec!["Home wpa2 ch=6 -48dBm".into(), "Office".into()];
         let text = body_text(&lines(&a, &theme, 80));
         assert!(text.contains("Home"), "{text}");
         assert!(text.contains("Office"), "{text}");
@@ -689,7 +686,11 @@ mod tests {
         state.settle_focus();
         assert_eq!(state.focus, NetworkRow::Scan, "a vanished result steps off");
         state.focus_next();
-        assert_eq!(state.focus, NetworkRow::Connect, "results are not walked into");
+        assert_eq!(
+            state.focus,
+            NetworkRow::Connect,
+            "results are not walked into"
+        );
     }
 
     /// The focus wraps, so walking up from the first row lands on the last and

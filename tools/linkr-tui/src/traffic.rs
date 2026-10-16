@@ -124,8 +124,14 @@ mod tests {
         // 100 bytes each way in half a second: 200 + 200 bytes a second.
         traffic.sample(100, 100, at(500));
         assert_eq!(traffic.rate, 400);
-        assert_eq!(traffic.rx_window.iter().copied().collect::<Vec<_>>(), vec![200]);
-        assert_eq!(traffic.tx_window.iter().copied().collect::<Vec<_>>(), vec![200]);
+        assert_eq!(
+            traffic.rx_window.iter().copied().collect::<Vec<_>>(),
+            vec![200]
+        );
+        assert_eq!(
+            traffic.tx_window.iter().copied().collect::<Vec<_>>(),
+            vec![200]
+        );
         // A call inside the period changes nothing.
         traffic.sample(500, 500, at(600));
         assert_eq!(traffic.rate, 400);

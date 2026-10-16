@@ -423,10 +423,12 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
 /// state a user would actually miss, and a bridge that loses it on a crash has
 /// lost the conversation, not a setting.
 fn push_turn(app: &mut App, role: &str, text: &str) {
-    app.assistant.display.push(crate::agent::session::DisplayLine {
-        role: role.to_string(),
-        text: text.to_string(),
-    });
+    app.assistant
+        .display
+        .push(crate::agent::session::DisplayLine {
+            role: role.to_string(),
+            text: text.to_string(),
+        });
     // The store keeps the last few turns; the view shows the same bound, so what
     // is on screen is what is on disk rather than more of one than the other.
     let keep = crate::agent::session::SESSION_MESSAGES;
@@ -485,8 +487,7 @@ fn add_note(app: &mut App) {
 /// which is where the user was looking when they pressed `d` twice.
 fn remove_note(app: &mut App) {
     let key = app.agent_device_key();
-    let Some((text, _)) = app.assistant.notes.get(app.assistant.note_cursor).cloned()
-    else {
+    let Some((text, _)) = app.assistant.notes.get(app.assistant.note_cursor).cloned() else {
         return;
     };
     // Notes are matched by text because that is what the view holds: the store's
@@ -553,14 +554,16 @@ fn refresh_notes(app: &mut App) {
 pub fn export_report(app: &mut App) {
     let key = app.agent_device_key();
     let zh = app.lang == crate::i18n::Lang::Zh;
-    let task = app.assistant.tasks.first().map(|record| {
-        crate::agent::report::ReportTask {
+    let task = app
+        .assistant
+        .tasks
+        .first()
+        .map(|record| crate::agent::report::ReportTask {
             goal: record.goal.clone(),
             status: record.status.clone(),
             summary: record.summary.clone(),
             plan: Vec::new(),
-        }
-    });
+        });
     let earlier: Vec<crate::agent::report::ReportEarlierTask> = app
         .assistant
         .tasks
@@ -663,15 +666,14 @@ fn submit_prompt(app: &mut App) {
     // model which execution mode it is in, and it was written for exactly this.
     // `Mode` is the executor's own enum; the policy it drives speaks
     // `ExecutionMode`, and the two are the same three names.
-    let mode = app.assistant.mode.unwrap_or(crate::exec::executor::Mode::Auto);
+    let mode = app
+        .assistant
+        .mode
+        .unwrap_or(crate::exec::executor::Mode::Auto);
     let execution_mode = match mode {
         crate::exec::executor::Mode::Auto => crate::exec::approval::ExecutionMode::Auto,
-        crate::exec::executor::Mode::Manual => {
-            crate::exec::approval::ExecutionMode::Manual
-        }
-        crate::exec::executor::Mode::FullAuto => {
-            crate::exec::approval::ExecutionMode::FullAuto
-        }
+        crate::exec::executor::Mode::Manual => crate::exec::approval::ExecutionMode::Manual,
+        crate::exec::executor::Mode::FullAuto => crate::exec::approval::ExecutionMode::FullAuto,
     };
     let messages = vec![
         crate::agent::runtime::ChatMessage {
@@ -694,9 +696,9 @@ fn submit_prompt(app: &mut App) {
     }
     if let (Some(client), Some(receiver)) = (
         app.agent_client.as_ref(),
-        app.agent_client.as_ref().and_then(|c| {
-            c.submit(&record.id, config, messages)
-        }),
+        app.agent_client
+            .as_ref()
+            .and_then(|c| c.submit(&record.id, config, messages)),
     ) {
         // One in flight at a time: two prompts answering out of order is a
         // harder problem than it looks, and a queue that answers them in order
@@ -720,8 +722,8 @@ fn save_settings(app: &mut App) {
     input.endpoint = app.assistant.endpoint.trim().to_string();
     input.model = app.assistant.model.trim().to_string();
     input.api_key = app.assistant.api_key.trim().to_string();
-    input.headers = crate::agent::config::parse_agent_headers(&app.assistant.headers)
-        .unwrap_or_default();
+    input.headers =
+        crate::agent::config::parse_agent_headers(&app.assistant.headers).unwrap_or_default();
     match crate::agent::config::validate_agent_config(&input) {
         Ok(validated) => {
             // Written where a restart will find it. `configured` alone would
@@ -922,7 +924,11 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
         let row = format!("{label}{value}{caret}");
         lines.push(Line::from(Span::styled(
             text::clip_to(&row, width as usize),
-            if focused { theme.accent() } else { theme.text() },
+            if focused {
+                theme.accent()
+            } else {
+                theme.text()
+            },
         )));
     }
     if let Some(notice) = &state.notice {
@@ -1275,8 +1281,14 @@ mod interaction {
         a.assistant.focus = AgentField::Endpoint;
         paste_into_focus(&mut a, "explain\nthe log");
         assert_eq!(a.view, crate::event::View::Assistant, "the caret came up");
-        assert_eq!(a.assistant.composer, "explain the log", "one line at a time");
-        assert_eq!(a.assistant.endpoint, "", "the unpainted row did not take it");
+        assert_eq!(
+            a.assistant.composer, "explain the log",
+            "one line at a time"
+        );
+        assert_eq!(
+            a.assistant.endpoint, "",
+            "the unpainted row did not take it"
+        );
 
         settings(&mut a, AgentField::Model);
         paste_into_focus(&mut a, "gpt\n-4");
@@ -1306,14 +1318,22 @@ mod interaction {
                 "revisit: {:?}",
                 a.assistant.focus
             );
-            assert_ne!(a.assistant.focus, AgentField::Composer, "the composer's row");
+            assert_ne!(
+                a.assistant.focus,
+                AgentField::Composer,
+                "the composer's row"
+            );
             seen.push(a.assistant.focus);
         }
         assert_eq!(seen.len(), SETTINGS.len(), "every setting, once");
         press_settings(&mut a, KeyCode::Tab);
         assert_eq!(a.assistant.focus, SETTINGS[0], "wraps forward");
         press_settings(&mut a, KeyCode::BackTab);
-        assert_eq!(a.assistant.focus, SETTINGS[SETTINGS.len() - 1], "wraps backward");
+        assert_eq!(
+            a.assistant.focus,
+            SETTINGS[SETTINGS.len() - 1],
+            "wraps backward"
+        );
     }
 
     /// Typing goes wherever the caret is, and the two halves do not leak into
@@ -1368,7 +1388,10 @@ mod interaction {
         let mut a = app();
         a.assistant.composer = "what is the uptime".to_string();
         press(&mut a, KeyCode::Enter);
-        assert!(a.assistant.tasks.is_empty(), "an unconfigured model queued work");
+        assert!(
+            a.assistant.tasks.is_empty(),
+            "an unconfigured model queued work"
+        );
         assert!(a.assistant.inbox.is_empty());
         assert_eq!(a.assistant.composer, "what is the uptime");
         assert!(!a.notices.is_empty());
@@ -1384,7 +1407,10 @@ mod interaction {
         assert_eq!(a.assistant.tasks.len(), 1);
         assert_eq!(a.assistant.tasks[0].goal, "df -h");
         assert_eq!(a.assistant.tasks[0].status, "asking");
-        assert!(a.assistant.composer.is_empty(), "the composer kept its text");
+        assert!(
+            a.assistant.composer.is_empty(),
+            "the composer kept its text"
+        );
     }
 
     /// A prompt with a configuration in hand actually goes to the transport, and
@@ -1483,7 +1509,12 @@ mod interaction {
         let rendered = lines(&a, &a.theme(), 60);
         let joined: String = rendered
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("Heading"), "the heading is gone: {joined}");
@@ -1516,7 +1547,10 @@ mod interaction {
         n.assistant.composer = "already".to_string();
         press(&mut n, KeyCode::Char('n'));
         assert!(n.assistant.awaiting.is_none(), "no did not answer");
-        assert_eq!(n.assistant.composer, "already", "a key leaked past the answer");
+        assert_eq!(
+            n.assistant.composer, "already",
+            "a key leaked past the answer"
+        );
     }
 }
 

@@ -129,12 +129,7 @@ mod tests {
         let names: Vec<&str> = View::ALL.iter().map(|v| v.as_str()).collect();
         assert_eq!(
             names,
-            vec![
-                "terminal",
-                "diagnostics",
-                "network",
-                "assistant"
-            ]
+            vec!["terminal", "diagnostics", "network", "assistant"]
         );
         let mut unique = names.clone();
         unique.sort_unstable();

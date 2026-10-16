@@ -605,7 +605,8 @@ const EN: Strings = Strings {
     net_webdav_status: "[Status]",
     net_results_section: "Scan results",
     net_scan_failed: "the scan failed",
-    net_wifi_failed: "WiFi provisioning failed (result {}). Check the password and 2.4 GHz coverage, then retry.",
+    net_wifi_failed:
+        "WiFi provisioning failed (result {}). Check the password and 2.4 GHz coverage, then retry.",
     net_no_results: "no results yet",
     net_webdav_section: "WebDAV log upload",
     net_url_label: "Target URL",
@@ -629,7 +630,8 @@ const EN: Strings = Strings {
     asst_mode_auto: "auto (only allowlisted commands run unattended)",
     asst_mode_manual: "manual (every send is confirmed)",
     asst_mode_full_auto: "full auto (destructive commands still ask)",
-    asst_full_auto_expired: "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
+    asst_full_auto_expired:
+        "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
     asst_usage_label: "Token usage",
     asst_awaiting: "awaiting approval",
     link_opened: "link open: ",
@@ -682,15 +684,15 @@ pub fn assert_bilingual(entries: &[Entry]) {
 /// three names travel together and a caller picking one with an `if` would be a
 /// second translation of the same three modes.
 impl Strings {
-	/// The word for `mode`, in this language.
-	pub fn execution_mode(&self, mode: crate::exec::executor::Mode) -> &'static str {
-		use crate::exec::executor::Mode;
-		match mode {
-			Mode::Auto => self.agent_mode_auto,
-			Mode::FullAuto => self.agent_mode_full,
-			Mode::Manual => self.agent_mode_manual,
-		}
-	}
+    /// The word for `mode`, in this language.
+    pub fn execution_mode(&self, mode: crate::exec::executor::Mode) -> &'static str {
+        use crate::exec::executor::Mode;
+        match mode {
+            Mode::Auto => self.agent_mode_auto,
+            Mode::FullAuto => self.agent_mode_full,
+            Mode::Manual => self.agent_mode_manual,
+        }
+    }
 }
 
 impl Lang {

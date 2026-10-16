@@ -23,7 +23,14 @@ const THUMB: &str = "┃";
 /// shows, and `viewport` how many rows it shows. Nothing is drawn when
 /// everything fits: ratatui's widget fills the whole track in that case, which
 /// reads as "there is more", the one thing it must never mean.
-pub fn draw(frame: &mut Frame, area: Rect, total: usize, top: usize, viewport: usize, style: Style) {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    total: usize,
+    top: usize,
+    viewport: usize,
+    style: Style,
+) {
     if total <= viewport || viewport == 0 || area.width == 0 || area.height == 0 {
         return;
     }
@@ -93,8 +100,7 @@ mod tests {
             );
         }
         // And a degenerate area is not a panic.
-        let mut terminal =
-            Terminal::new(TestBackend::new(1, 1)).expect("a test terminal paints");
+        let mut terminal = Terminal::new(TestBackend::new(1, 1)).expect("a test terminal paints");
         terminal
             .draw(|frame| draw(frame, Rect::new(0, 0, 1, 0), 100, 0, 10, Style::default()))
             .expect("a zero-height area draws nothing");

@@ -32,7 +32,6 @@ use crate::{dialogs, palette};
 /// link cannot exist without the chrome having a word for it.
 pub use crate::transport::LinkKind as Transport;
 
-
 /// Whether this session has a LAN token in hand, for the sidebar to say.
 ///
 /// Three states rather than a bool, because "no token" and "there is no token
@@ -534,9 +533,7 @@ pub struct App {
     /// a second prompt submitted while the first was still being answered
     /// dropped the first one's channel — the reply the user was waiting for,
     /// lost silently.
-    pub agent_replies: Vec<
-        std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>,
-    >,
+    pub agent_replies: Vec<std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
     /// The questions asked of the bridge about itself, and their answers.
@@ -1342,10 +1339,7 @@ impl App {
         if !self.lan_status.token.is_empty() {
             return Some(self.lan_status.token.clone());
         }
-        self.lan_store
-            .as_ref()?
-            .token_for(host)
-            .map(str::to_string)
+        self.lan_store.as_ref()?.token_for(host).map(str::to_string)
     }
 
     /// Whether a token is in hand. What the sidebar may say about one, and all
@@ -1589,10 +1583,7 @@ impl App {
             // close it.
             let mut closed = false;
             while let Ok(item) = receiver.try_recv() {
-                closed = !matches!(
-                    item.1,
-                    crate::agent::runtime::Progress::Delta(_)
-                );
+                closed = !matches!(item.1, crate::agent::runtime::Progress::Delta(_));
                 arrived.push(item);
             }
             if !closed {
@@ -1636,82 +1627,92 @@ impl App {
         }
     }
 
-/// Close one answer: file it, remember it, and say what it was.
-///
-/// Both `Done` and `Failed` come here, because the difference between them is
-/// one field — the summary and the status — and everything else a finished
-/// answer does is the same for both.
-fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::agent::runtime::Progress) {
-    let (summary, status, usage) = match &step {
-        crate::agent::runtime::Progress::Done(reported) => {
-            (found.summary.clone(), "answered", *reported)
-        }
-        _ => {
-            let failure = match &step {
-                crate::agent::runtime::Progress::Failed(failure) => failure.clone(),
-                _ => crate::agent::runtime::Failure::Malformed,
-            };
-            (failure.describe(), "failed", crate::agent::usage::Usage::default())
-        }
-    };
-
-    // The two numbers the view shows are a running total, so one more message is
-    // folded in rather than replacing the count.
-    {
-        let running = crate::agent::usage::Usage {
-            input: app.assistant.usage.0,
-            output: app.assistant.usage.1,
-            ..crate::agent::usage::Usage::default()
+    /// Close one answer: file it, remember it, and say what it was.
+    ///
+    /// Both `Done` and `Failed` come here, because the difference between them is
+    /// one field — the summary and the status — and everything else a finished
+    /// answer does is the same for both.
+    fn finish(
+        app: &mut App,
+        found: &crate::agent::tasks::TaskRecord,
+        step: crate::agent::runtime::Progress,
+    ) {
+        let (summary, status, usage) = match &step {
+            crate::agent::runtime::Progress::Done(reported) => {
+                (found.summary.clone(), "answered", *reported)
+            }
+            _ => {
+                let failure = match &step {
+                    crate::agent::runtime::Progress::Failed(failure) => failure.clone(),
+                    _ => crate::agent::runtime::Failure::Malformed,
+                };
+                (
+                    failure.describe(),
+                    "failed",
+                    crate::agent::usage::Usage::default(),
+                )
+            }
         };
-        let merged = crate::agent::usage::add_usage(&running, &usage);
-        app.assistant.usage = (merged.input, merged.output);
-    }
 
-    // The reply is the assistant's turn in the conversation. A failure is a turn
-    // too: the thread of what was asked and what came back is the record, and a
-    // gap in it is worse than a turn that says the model did not answer.
-    app.assistant.display.push(crate::agent::session::DisplayLine {
-        role: "assistant".to_string(),
-        text: summary.clone(),
-    });
-    let keep = crate::agent::session::SESSION_MESSAGES;
-    let from = app.assistant.display.len().saturating_sub(keep);
-    app.assistant.display.drain(..from);
-    // Persisted here rather than only at the view's Enter: the reply arrives on
-    // this beat, and a session saved on the question alone would lose every
-    // answer if the program ended between the two.
-    let key = app.agent_device_key();
-    let now = app.environment_stamp() * 1000;
-    if let Some(store) = app.agent_store.as_mut() {
-        let _ = crate::agent::session::save_session(
-            store,
-            &key,
-            &app.assistant.display,
-            &app.assistant.display,
-            now,
-        );
-    }
+        // The two numbers the view shows are a running total, so one more message is
+        // folded in rather than replacing the count.
+        {
+            let running = crate::agent::usage::Usage {
+                input: app.assistant.usage.0,
+                output: app.assistant.usage.1,
+                ..crate::agent::usage::Usage::default()
+            };
+            let merged = crate::agent::usage::add_usage(&running, &usage);
+            app.assistant.usage = (merged.input, merged.output);
+        }
 
-    // Whatever happened, the answer is in the store: a task that says "failed"
-    // is the record of a question that was asked.
-    let saved = crate::agent::tasks::TaskRecord {
-        summary,
-        status: status.to_string(),
-        ..found.clone()
-    };
-    if let Some(store) = app.agent_store.as_mut() {
-        crate::agent::tasks::TaskStore::new(&mut *store).save(&saved);
+        // The reply is the assistant's turn in the conversation. A failure is a turn
+        // too: the thread of what was asked and what came back is the record, and a
+        // gap in it is worse than a turn that says the model did not answer.
+        app.assistant
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "assistant".to_string(),
+                text: summary.clone(),
+            });
+        let keep = crate::agent::session::SESSION_MESSAGES;
+        let from = app.assistant.display.len().saturating_sub(keep);
+        app.assistant.display.drain(..from);
+        // Persisted here rather than only at the view's Enter: the reply arrives on
+        // this beat, and a session saved on the question alone would lose every
+        // answer if the program ended between the two.
+        let key = app.agent_device_key();
+        let now = app.environment_stamp() * 1000;
+        if let Some(store) = app.agent_store.as_mut() {
+            let _ = crate::agent::session::save_session(
+                store,
+                &key,
+                &app.assistant.display,
+                &app.assistant.display,
+                now,
+            );
+        }
+
+        // Whatever happened, the answer is in the store: a task that says "failed"
+        // is the record of a question that was asked.
+        let saved = crate::agent::tasks::TaskRecord {
+            summary,
+            status: status.to_string(),
+            ..found.clone()
+        };
+        if let Some(store) = app.agent_store.as_mut() {
+            crate::agent::tasks::TaskStore::new(&mut *store).save(&saved);
+        }
+        if let Some(slot) = app
+            .assistant
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == found.id)
+        {
+            slot.summary = saved.summary;
+            slot.status = saved.status;
+        }
     }
-    if let Some(slot) = app
-        .assistant
-        .tasks
-        .iter_mut()
-        .find(|task| task.id == found.id)
-    {
-        slot.summary = saved.summary;
-        slot.status = saved.status;
-    }
-}
 
     pub fn pump(&mut self) {
         self.poll_ble_scan();
@@ -2472,10 +2473,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// them, and from a reply's own lines when they arrived before its `OK`
     /// was read.
     fn apply_wifi_events(&mut self, text: &str) {
-        for event in text
-            .lines()
-            .filter_map(crate::protocol::parse_wifi_event)
-        {
+        for event in text.lines().filter_map(crate::protocol::parse_wifi_event) {
             self.apply_wifi_event(&event);
         }
     }
@@ -3258,7 +3256,10 @@ mod tests {
 
         // Later still, the second one's time is up too.
         app.expire_notices(now + TOAST_LIFETIME + std::time::Duration::from_millis(1));
-        assert!(app.notices.is_empty(), "and the box has nothing left to hold");
+        assert!(
+            app.notices.is_empty(),
+            "and the box has nothing left to hold"
+        );
         assert_eq!(app.log.len(), 2, "the log keeps them all");
     }
 
@@ -3975,20 +3976,20 @@ mod tests {
             ..App::default()
         };
         assert!(app.dial_async(&Dial::Stdio("-".into()), true));
-        assert!(pump_until(
-            &mut app,
-            |app| app.state == ConnectionState::Connected
-        ));
-        assert!(app.notices.is_empty(), "nothing was said: {:?}", app.notices);
+        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+        assert!(
+            app.notices.is_empty(),
+            "nothing was said: {:?}",
+            app.notices
+        );
 
         app.disconnect();
         app.reconnect();
-        assert!(pump_until(
-            &mut app,
-            |app| app.state == ConnectionState::Connected
-        ));
+        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
         assert!(
-            app.notices.iter().any(|n| n.text.starts_with("link open: ")),
+            app.notices
+                .iter()
+                .any(|n| n.text.starts_with("link open: ")),
             "the second link is announced"
         );
     }
@@ -4065,7 +4066,8 @@ mod tests {
             ssid: "Bench".into(),
             ip: "192.168.0.100".into(),
         });
-        let Dial::Lan { host, token } = app.lan_dial().expect("the board's address is a dial") else {
+        let Dial::Lan { host, token } = app.lan_dial().expect("the board's address is a dial")
+        else {
             panic!("a LAN dial");
         };
         assert_eq!(host, "192.168.0.100");
@@ -4400,9 +4402,7 @@ mod tests {
         // The window is a wall-clock one; this is the same pump with the
         // clock a second past it.
         app.expire_wifi_operation(
-            std::time::Instant::now()
-                + WIFI_EVENT_FALLBACK
-                + std::time::Duration::from_secs(1),
+            std::time::Instant::now() + WIFI_EVENT_FALLBACK + std::time::Duration::from_secs(1),
         );
         assert!(app.wifi_operation.is_none(), "the action stopped waiting");
         assert_eq!(
@@ -4450,7 +4450,9 @@ mod tests {
             "OK wifi=connected,ssid=BenchNet,ip=192.168.1.44",
         ));
         assert!(pump_until(&mut app, |app| {
-            app.lan_store.as_ref().is_some_and(|store| !store.is_empty())
+            app.lan_store
+                .as_ref()
+                .is_some_and(|store| !store.is_empty())
         }));
         assert_eq!(
             app.lan_store

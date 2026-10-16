@@ -142,10 +142,7 @@ const UART_PROMPT: Entry = [
     "Set the bridge UART: baud,data,parity,stop,flow",
     "设置桥接 UART：波特率,数据位,校验,停止位,流控",
 ];
-const UART_KEYS: Entry = [
-    "Enter send · Esc close",
-    "回车发送 · Esc 关闭",
-];
+const UART_KEYS: Entry = ["Enter send · Esc close", "回车发送 · Esc 关闭"];
 const UART_QUERYING: Entry = ["querying uart…", "正在查询 uart…"];
 const UART_SETTING: Entry = ["setting uart={}…", "正在设置 uart={}…"];
 
@@ -184,7 +181,10 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
     ("F2–F5", ["Switch the view", "切换视图"]),
-    ("Ctrl+Up", ["Focus the sidebar (Esc returns)", "聚焦侧栏（Esc 返回）"]),
+    (
+        "Ctrl+Up",
+        ["Focus the sidebar (Esc returns)", "聚焦侧栏（Esc 返回）"],
+    ),
     ("↑ / ↓", ["Walk the sidebar", "在侧栏中移动"]),
     ("Enter", ["Send the preset / activate", "发送预设 / 激活"]),
     (
@@ -266,7 +266,10 @@ const PICK_SCANNING: Entry = ["Scanning…", "正在扫描…"];
 const PICK_SCANNING_KEYS: Entry = ["Esc cancels", "Esc 取消"];
 const PICK_EMPTY: Entry = ["No board answered.", "没有设备应答。"];
 const PICK_EMPTY_KEYS: Entry = ["Enter scans again · Esc close", "回车重新扫描 · Esc 关闭"];
-const PICK_KEYS: Entry = ["↑↓ move · Enter connect · Esc close", "↑↓ 选择 · 回车连接 · Esc 关闭"];
+const PICK_KEYS: Entry = [
+    "↑↓ move · Enter connect · Esc close",
+    "↑↓ 选择 · 回车连接 · Esc 关闭",
+];
 
 /// The boards a Bluetooth scan heard, and which one the keyboard is on.
 ///
@@ -1567,10 +1570,7 @@ fn send_uart_spec(app: &mut App, uart: &mut Uart) {
             Err(why) => uart.error = Some(why),
             Ok(()) => {
                 uart.error = None;
-                uart.status = Some(fill(
-                    entry(UART_SETTING, app.lang),
-                    &[settings.spec()],
-                ));
+                uart.status = Some(fill(entry(UART_SETTING, app.lang), &[settings.spec()]));
             }
         },
     }
@@ -1744,8 +1744,18 @@ mod tests {
         let app = App::default();
         let shown = text_of(&lines(&Dialog::Help(0), &app, 60, 20));
         for key in [
-            "Ctrl+P", "F1", "F2–F5", "Ctrl+Up", "Enter", "Ctrl+C", "Ctrl+Shift+C", "Ctrl+Shift+Y",
-            "PgUp", "Ctrl+L", "Ctrl+T", "Ctrl+Q",
+            "Ctrl+P",
+            "F1",
+            "F2–F5",
+            "Ctrl+Up",
+            "Enter",
+            "Ctrl+C",
+            "Ctrl+Shift+C",
+            "Ctrl+Shift+Y",
+            "PgUp",
+            "Ctrl+L",
+            "Ctrl+T",
+            "Ctrl+Q",
         ] {
             assert!(shown.contains(key), "help is missing {key:?}\n{shown}");
         }
@@ -2056,9 +2066,10 @@ mod tests {
         open_uart(&mut app);
         let id = asked_id(&wire);
         wire.feed_management(answer(id, "OK uart=9600,7,e,2,rtscts"));
-        pump_until(&mut app, |app| {
-            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.field.text == "9600,7,e,2,rtscts")
-        });
+        pump_until(
+            &mut app,
+            |app| matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.field.text == "9600,7,e,2,rtscts"),
+        );
         let uart = uart_of(&app);
         assert_eq!(uart.field.text, "9600,7,e,2,rtscts");
         assert_eq!(uart.field.cursor, uart.field.text.len());
@@ -2095,9 +2106,10 @@ mod tests {
         // And the bridge's answer, when it comes, is what stays on the line.
         let id = u32::from_le_bytes([last[4], last[5], last[6], last[7]]);
         wire.feed_management(answer(id, "OK uart=9600,8,n,1,none"));
-        pump_until(&mut app, |app| {
-            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.status.as_deref() == Some("OK uart=9600,8,n,1,none"))
-        });
+        pump_until(
+            &mut app,
+            |app| matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.status.as_deref() == Some("OK uart=9600,8,n,1,none")),
+        );
     }
 
     /// A spec that does not parse is refused where it was typed, and nothing
@@ -2129,9 +2141,10 @@ mod tests {
         open_uart(&mut app);
         let id = asked_id(&wire);
         wire.feed_management(answer(id, "ERR format: @u=115200,8,n,1,n"));
-        pump_until(&mut app, |app| {
-            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.error.is_some())
-        });
+        pump_until(
+            &mut app,
+            |app| matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.error.is_some()),
+        );
         let uart = uart_of(&app);
         assert_eq!(uart.error.as_deref(), Some("ERR format: @u=115200,8,n,1,n"));
         assert!(uart.status.is_none());
@@ -2562,7 +2575,10 @@ mod tests {
         let shown = text_of(&lines(&dialog, &app, 70, 20));
         assert!(shown.contains("endpoint"), "{shown}");
         assert!(shown.contains("Device notes"), "{shown}");
-        assert!(shown.contains("disk"), "the note list is not painted:\n{shown}");
+        assert!(
+            shown.contains("disk"),
+            "the note list is not painted:\n{shown}"
+        );
         assert_eq!(title(&dialog, app.lang).trim(), "Assistant settings");
         assert!(!legend(&dialog, app.lang, &Theme::DARK).spans.is_empty());
 
@@ -2585,7 +2601,10 @@ mod tests {
             crate::views::assistant::AgentField::Endpoint,
         );
         for _ in 0..40 {
-            handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            );
         }
         let scrolled = app.dialog.clone().expect("the window closed on a page");
         assert!(scrolled.scroll() > 0, "PgDn scrolled nothing");
@@ -2704,7 +2723,10 @@ mod tests {
         );
         for word in ["one", "two"] {
             for ch in word.chars() {
-                handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                );
             }
             handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
@@ -2761,10 +2783,7 @@ mod tests {
         let theme = app.theme();
         let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
         assert!(painted.contains("****"), "the token is masked:\n{painted}");
-        assert!(
-            !painted.contains("abcd"),
-            "and not spelled out:\n{painted}"
-        );
+        assert!(!painted.contains("abcd"), "and not spelled out:\n{painted}");
 
         // Ctrl+R is answered by the dialog itself, not the global handler.
         assert!(handle_key(
@@ -2802,7 +2821,10 @@ mod tests {
         };
         prompt_lan_host(&mut app);
         for ch in " 192.168.1.9 ".chars() {
-            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
         }
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.dialog.is_none(), "the prompt closed");
@@ -2810,7 +2832,10 @@ mod tests {
 
         prompt_lan_token(&mut app);
         for ch in "0123456789abcdef0123456789abcdef".chars() {
-            handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
         }
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(

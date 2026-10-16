@@ -337,7 +337,8 @@ impl Screen {
                     self.push_scrollback(cells);
                 }
             }
-            self.cells.copy_within(gone * old_cols..self.rows * old_cols, 0);
+            self.cells
+                .copy_within(gone * old_cols..self.rows * old_cols, 0);
             for row in self.rows - gone..self.rows {
                 self.blank_row(row);
             }

@@ -29,10 +29,7 @@ pub fn device_identity(
 /// on (`JSON.stringify`). Identifiers are device ids/transports, so quoting
 /// only needs to handle embedded quotes.
 fn serde_json_like_array(parts: &[&str]) -> String {
-    let quoted: Vec<String> = parts
-        .iter()
-        .map(|p| json_string(p))
-        .collect();
+    let quoted: Vec<String> = parts.iter().map(|p| json_string(p)).collect();
     format!("[{}]", quoted.join(","))
 }
 

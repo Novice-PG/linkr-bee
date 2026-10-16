@@ -255,9 +255,10 @@ impl Conversation {
     /// answer has been taken, so late fragments cannot extend a reply that has
     /// already been read.
     pub fn take_reply(&mut self) -> Option<Reply> {
-        let done = self.pending.as_ref().is_some_and(|p| {
-            (p.finalised && !p.query.streams()) || p.query.complete(&p.lines)
-        });
+        let done = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| (p.finalised && !p.query.streams()) || p.query.complete(&p.lines));
         if !done {
             return None;
         }

@@ -7,8 +7,9 @@
 pub mod accessory;
 pub mod agent;
 pub mod app;
-pub mod clipboard;
+pub mod base64;
 pub mod cli;
+pub mod clipboard;
 pub mod device;
 pub mod dialogs;
 pub mod event;
@@ -24,7 +25,6 @@ pub mod text;
 pub mod theme;
 pub mod trace;
 pub mod traffic;
-pub mod base64;
 pub mod transport;
 pub mod ui;
 pub mod views;

@@ -25,7 +25,8 @@ use crate::serial::console::{inspect, ConsoleKind};
 pub const FULL_AUTO_WINDOW_MS: u64 = 15 * 60 * 1000;
 
 /// The same window as a [`Duration`], for the UI's own clock.
-pub const FULL_AUTO_WINDOW: std::time::Duration = std::time::Duration::from_millis(FULL_AUTO_WINDOW_MS);
+pub const FULL_AUTO_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(FULL_AUTO_WINDOW_MS);
 
 /// The three execution modes, matching the upstream strings exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

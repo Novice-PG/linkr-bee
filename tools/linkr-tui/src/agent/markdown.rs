@@ -338,8 +338,7 @@ mod tests {
         for width in 4..40 {
             for input in inputs {
                 for line in render(input, width, &Theme::DARK) {
-                    let joined: String =
-                        line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                     assert!(
                         joined.width() <= width,
                         "width {width}: {joined:?} is {} wide",
@@ -358,7 +357,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(joined.contains("echo **bold**"), "the fence was styled: {joined}");
+        assert!(
+            joined.contains("echo **bold**"),
+            "the fence was styled: {joined}"
+        );
     }
 
     /// The inline constructs a model actually emits.
@@ -399,7 +401,10 @@ mod tests {
         assert!(joined[0].contains("1. a"), "{joined:?}");
         assert!(joined[1].contains("2. b"), "{joined:?}");
         assert!(joined[3].contains("prose"));
-        assert!(joined[5].contains("1. c"), "the count did not restart: {joined:?}");
+        assert!(
+            joined[5].contains("1. c"),
+            "the count did not restart: {joined:?}"
+        );
     }
 
     /// A rule fills the width with something, and never more.
@@ -407,11 +412,7 @@ mod tests {
     fn a_rule_fills_the_width() {
         for width in [4usize, 10, 40] {
             let lines = render("---", width, &Theme::DARK);
-            let joined: String = lines[0]
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
+            let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(joined.width(), width, "width {width}: {joined:?}");
         }
     }
