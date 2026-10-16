@@ -309,6 +309,11 @@ jobs:
     permissions:
       # The one job that writes anything: a release upload.
       contents: write
+    env:
+      # No checkout in this job, so `gh` cannot read the repository out of a
+      # local git — "fatal: not a git repository" is that missing answer.
+      # Every `gh` call below is about this workflow's own repository.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Collect the archives
         uses: actions/download-artifact@v4
