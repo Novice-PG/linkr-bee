@@ -54,6 +54,10 @@ pub struct Strings {
     pub section_watch: &'static str,
     /// `Transport: <name>` prefix.
     pub transport_label: &'static str,
+    /// `Enter mode: <mode>` — the palette's cycle, announced.
+    pub enter_mode_label: &'static str,
+    /// `Debug I/O: <on|off>` — the trace switch, announced.
+    pub debug_io_label: &'static str,
     /// `Device: <name>` prefix.
     pub device_label: &'static str,
     /// `LAN host: <address>` — the row a LAN dial is built from.
@@ -97,6 +101,11 @@ pub struct Strings {
     pub hint_views: &'static str,
     /// The quit hint.
     pub hint_quit: &'static str,
+    /// The one-shot modifier latch: what arming announces, what cancelling
+    /// says, and the chip the bottom bar carries while one is armed.
+    pub latch_armed: &'static str,
+    pub latch_disarmed: &'static str,
+    pub latch_pending: &'static str,
 
     // --- views -----------------------------------------------------------
     /// Title of the serial terminal view.
@@ -223,6 +232,8 @@ pub struct Strings {
     pub asst_mode_auto: &'static str,
     pub asst_mode_manual: &'static str,
     pub asst_mode_full_auto: &'static str,
+    /// What the status line says when the unattended window elapses.
+    pub asst_full_auto_expired: &'static str,
     /// The token-usage row label.
     pub asst_usage_label: &'static str,
     /// The pending-approval row.
@@ -235,6 +246,15 @@ pub struct Strings {
     pub theme_dark: &'static str,
     /// The word for the light theme in a notice.
     pub theme_light: &'static str,
+    /// The word for the Nord theme in a notice. A palette's name is its own,
+    /// so these are the spelling in both languages.
+    pub theme_nord: &'static str,
+    /// The word for the Gruvbox theme in a notice.
+    pub theme_gruvbox: &'static str,
+    /// The word for the Solarized theme in a notice.
+    pub theme_solarized: &'static str,
+    /// The word for the Dracula theme in a notice.
+    pub theme_dracula: &'static str,
     /// "Sidebar shown" — the toast for the rail toggle.
     pub sidebar_shown: &'static str,
     /// "Sidebar hidden" — the same toggle, the other way.
@@ -334,6 +354,8 @@ const ZH: Strings = Strings {
     section_quick_send: "快捷发送",
     section_watch: "监控",
     transport_label: "传输方式",
+    enter_mode_label: "回车模式",
+    debug_io_label: "调试 I/O",
     device_label: "设备",
     lan_host_label: "局域网主机",
     lan_token_label: "局域网令牌",
@@ -353,6 +375,9 @@ const ZH: Strings = Strings {
     hint_help: "F1 帮助",
     hint_views: "F2-F5 视图",
     hint_quit: "Ctrl+Q 退出",
+    latch_armed: "{} 已武装：下一次按键会带上它",
+    latch_disarmed: "{} 已取消武装",
+    latch_pending: "待发",
     view_terminal: "串口终端",
     view_diagnostics: "诊断",
     view_network: "网络",
@@ -376,6 +401,10 @@ const ZH: Strings = Strings {
     theme_switched_prefix: "主题",
     theme_dark: "深色",
     theme_light: "浅色",
+    theme_nord: "Nord",
+    theme_gruvbox: "Gruvbox",
+    theme_solarized: "Solarized",
+    theme_dracula: "Dracula",
     sidebar_shown: "侧栏已显示",
     sidebar_hidden: "侧栏已隐藏",
     copy_done_prefix: "已复制",
@@ -439,6 +468,7 @@ const ZH: Strings = Strings {
     asst_mode_auto: "自动（仅白名单命令免确认）",
     asst_mode_manual: "手动（每次都确认）",
     asst_mode_full_auto: "全自动（危险命令仍确认）",
+    asst_full_auto_expired: "Full Auto 已到时并回退到 Auto，后续命令需要确认。",
     asst_usage_label: "Token 用量",
     asst_awaiting: "等待确认",
     link_opened: "链路已建立：",
@@ -467,6 +497,8 @@ const EN: Strings = Strings {
     section_quick_send: "Quick send",
     section_watch: "Watch",
     transport_label: "Transport",
+    enter_mode_label: "Enter mode",
+    debug_io_label: "Debug I/O",
     device_label: "Device",
     lan_host_label: "LAN host",
     lan_token_label: "LAN token",
@@ -490,6 +522,9 @@ const EN: Strings = Strings {
     hint_help: "F1 help",
     hint_views: "F2-F5 views",
     hint_quit: "Ctrl+Q quit",
+    latch_armed: "{} armed — the next key carries it",
+    latch_disarmed: "{} disarmed",
+    latch_pending: "armed",
     view_terminal: "Serial Terminal",
     view_diagnostics: "Diagnostics",
     view_network: "Network",
@@ -513,6 +548,10 @@ const EN: Strings = Strings {
     theme_switched_prefix: "Theme",
     theme_dark: "dark",
     theme_light: "light",
+    theme_nord: "Nord",
+    theme_gruvbox: "Gruvbox",
+    theme_solarized: "Solarized",
+    theme_dracula: "Dracula",
     sidebar_shown: "Sidebar shown",
     sidebar_hidden: "Sidebar hidden",
     copy_done_prefix: "Copied",
@@ -581,6 +620,7 @@ const EN: Strings = Strings {
     asst_mode_auto: "auto (only allowlisted commands run unattended)",
     asst_mode_manual: "manual (every send is confirmed)",
     asst_mode_full_auto: "full auto (destructive commands still ask)",
+    asst_full_auto_expired: "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
     asst_usage_label: "Token usage",
     asst_awaiting: "awaiting approval",
     link_opened: "link open: ",
@@ -650,6 +690,24 @@ impl Lang {
         match self {
             Lang::Zh => &ZH,
             Lang::En => &EN,
+        }
+    }
+
+    /// The spelling a command line or a settings file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Lang::Zh => "zh",
+            Lang::En => "en",
+        }
+    }
+
+    /// The language a name refers to. Unknown names give `None`, so a caller
+    /// can report the bad value instead of silently switching language.
+    pub fn from_name(name: &str) -> Option<Lang> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "zh" => Some(Lang::Zh),
+            "en" => Some(Lang::En),
+            _ => None,
         }
     }
 
@@ -742,6 +800,10 @@ mod tests {
                 s.theme_switched_prefix,
                 s.theme_dark,
                 s.theme_light,
+                s.theme_nord,
+                s.theme_gruvbox,
+                s.theme_solarized,
+                s.theme_dracula,
                 s.sidebar_shown,
                 s.sidebar_hidden,
                 s.copy_done_prefix,

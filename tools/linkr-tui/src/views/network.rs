@@ -294,6 +294,31 @@ fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
     ))
 }
 
+/// One scan row: the bars and the reading in front, then the name, then the
+/// radio's own notes.
+///
+/// The signal moves to the front because a list is read as a ranking — which
+/// of these is worth joining — and a number at the end of a row that may be
+/// clipped off is a number nobody sees. A line the firmware wrote without a
+/// reading gets no invented bars; its name simply starts where the others'
+/// names do.
+fn scan_row(result: &str) -> String {
+    let crate::accessory::WifiResult {
+        name,
+        signal_dbm,
+        rest,
+    } = crate::accessory::parse_wifi_result(result);
+    let tail = if rest.is_empty() {
+        name
+    } else {
+        format!("{name} {rest}")
+    };
+    match signal_dbm {
+        Some(dbm) => format!("{} {:>4}dBm  {tail}", text::signal_bars(dbm), dbm),
+        None => format!("{:12}{tail}", ""),
+    }
+}
+
 /// The whole body. The order is the design's: WiFi (note, ssid, password,
 /// actions), scan results, WebDAV (url, actions).
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
@@ -387,17 +412,18 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(note(&format!("  {}", s.net_no_results), width, theme));
     } else {
         for (index, result) in state.scan_results.iter().enumerate() {
+            let row = scan_row(result);
             if on(NetworkRow::ScanResult(index)) {
                 // The chip, as the form's fields wear it: the keyboard is
                 // here, and what pressing Enter takes is the name inside the
                 // line.
-                let chip = format!("▸ {result}");
+                let chip = format!("▸ {row}");
                 lines.push(Line::from(Span::styled(
                     text::clip_to(&chip, width as usize),
                     theme.selected(),
                 )));
             } else {
-                lines.push(note(&format!("  {result}"), width, theme));
+                lines.push(note(&format!("  {row}"), width, theme));
             }
         }
     }
@@ -635,15 +661,23 @@ mod tests {
         assert!(!text.contains("Password"), "{text}");
     }
 
-    /// Scan results are listed when the device reported any.
+    /// Scan results are listed, ranked by signal: the bars and the reading in
+    /// front, then the name, then the radio's own notes.
     #[test]
     fn scan_results_are_listed() {
         let theme = Theme::DARK;
         let mut a = app(Lang::En);
-        a.network.scan_results = vec!["Home  −58 dBm".into(), "Office".into()];
+        a.network.scan_results = vec![
+            "Home wpa2 ch=6 -48dBm".into(),
+            "Office".into(),
+        ];
         let text = body_text(&lines(&a, &theme, 80));
         assert!(text.contains("Home"), "{text}");
         assert!(text.contains("Office"), "{text}");
+        assert!(
+            text.contains("▂▄▆█  -48dBm  Home wpa2 ch=6"),
+            "the row leads with the signal it was heard at: {text}"
+        );
         assert!(!text.contains("no results yet"), "{text}");
     }
 

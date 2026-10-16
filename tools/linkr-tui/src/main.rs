@@ -22,7 +22,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::Terminal;
 
 use linkr_tui::app::{App, Focus, Transport};
@@ -33,6 +33,7 @@ use linkr_tui::i18n::Lang;
 use linkr_tui::lan_token_store::{self, TokenStore};
 use linkr_tui::serial::keys::{self, EnterMode, KeyModifiers as TerminalModifiers};
 use linkr_tui::session::Dial;
+use linkr_tui::settings::{Settings, SettingsStore};
 use linkr_tui::theme::ThemeChoice;
 use linkr_tui::transport::ble::Selection;
 use linkr_tui::ui;
@@ -127,8 +128,10 @@ impl OverlayPreview {
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
-    lang: Lang,
-    theme: ThemeChoice,
+    /// Only when the flag named one: a flag is a fact about this run, and the
+    /// settings file fills the gap when it did not.
+    lang: Option<Lang>,
+    theme: Option<ThemeChoice>,
     /// The previewed connection state, when the command line named one. Left
     /// unset so the default can depend on what else was asked for.
     state: Option<ConnectionState>,
@@ -182,8 +185,10 @@ struct Args {
     /// A file the WiFi password is read from, so it never reaches `argv` —
     /// where every other process on the machine can see it.
     wifi_key_file: Option<PathBuf>,
-    /// How the Enter key is sent on the wire.
-    enter: EnterMode,
+    /// How the Enter key is sent on the wire. `None` means the command line
+    /// did not name one, so the settings file's or the reference client's own
+    /// default stands.
+    enter: Option<EnterMode>,
     /// Echo what is typed into the pane, for a link that does not echo.
     local_echo: bool,
     /// Hold a typed line until Enter arrives, rather than sending it a key at
@@ -324,8 +329,8 @@ fn fail(prog: &str, message: &str) -> ! {
 
 fn parse_args(prog: &str, argv: &[String]) -> Args {
     let mut args = Args {
-        lang: Lang::default(),
-        theme: ThemeChoice::default(),
+        lang: None,
+        theme: None,
         state: None,
         view: None,
         print_frame: None,
@@ -348,7 +353,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         quiet: false,
         requests: cli::Requests::default(),
         wifi_key_file: None,
-        enter: EnterMode::default(),
+        enter: None,
         local_echo: false,
         line_mode: false,
         escape: cli::parse_escape("^]").expect("the documented default parses"),
@@ -452,9 +457,9 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             }
             "--enter" => {
                 let raw = value("--enter");
-                args.enter = EnterMode::from_name(&raw).unwrap_or_else(|| {
+                args.enter = Some(EnterMode::from_name(&raw).unwrap_or_else(|| {
                     fail(prog, &format!("invalid value '{raw}' for '--enter <MODE>'"))
-                });
+                }));
             }
             "--local-echo" => args.local_echo = true,
             "--line-mode" => args.line_mode = true,
@@ -471,25 +476,21 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--debug-io" => args.debug_io = true,
             "--lang" => {
                 let raw = value("--lang");
-                args.lang = match raw.as_str() {
-                    "zh" => Lang::Zh,
-                    "en" => Lang::En,
-                    other => fail(
+                args.lang = Some(Lang::from_name(&raw).unwrap_or_else(|| {
+                    fail(
                         prog,
-                        &format!("invalid value '{other}' for '--lang <LANG>'"),
-                    ),
-                };
+                        &format!("invalid value '{raw}' for '--lang <LANG>'"),
+                    )
+                }));
             }
             "--theme" => {
                 let raw = value("--theme");
-                args.theme = match raw.as_str() {
-                    "dark" => ThemeChoice::Dark,
-                    "light" => ThemeChoice::Light,
-                    other => fail(
+                args.theme = Some(ThemeChoice::from_name(&raw).unwrap_or_else(|| {
+                    fail(
                         prog,
-                        &format!("invalid value '{other}' for '--theme <THEME>'"),
-                    ),
-                };
+                        &format!("invalid value '{raw}' for '--theme <THEME>'"),
+                    )
+                }));
             }
             "--state" => {
                 let raw = value("--state");
@@ -738,9 +739,21 @@ fn main() -> io::Result<()> {
         ConnectionState::Connecting
     });
 
+    // The choices the last run left behind, read before the command line has
+    // its say: a flag is a fact about this run, and the file only fills the
+    // gaps. A preview reads none of it and keeps no store — the design's first
+    // frame is not the user's settings, and a command that only prints frames
+    // must not write to them either.
+    let storing = args.print_frame.is_none();
+    let settings = SettingsStore::load();
+    let stored = if storing {
+        settings.read()
+    } else {
+        Settings::default()
+    };
     let mut app = App {
-        lang: args.lang,
-        theme: args.theme,
+        lang: args.lang.or(stored.lang).unwrap_or_default(),
+        theme: args.theme.or(stored.theme).unwrap_or_default(),
         state: preview_state,
         transport_locked: args.transport.is_some(),
         transport_pinned: args.transport.is_some(),
@@ -753,14 +766,39 @@ fn main() -> io::Result<()> {
     load_agent_state(&mut app);
     if let Some(transport) = args.transport {
         app.transport = transport;
+    } else if let Some(transport) = stored.transport {
+        app.transport = transport;
     }
     if let Some(view) = args.view {
         app.view = view;
+    } else if let Some(view) = stored.view {
+        app.view = view;
+    }
+    // The remembered half of a dial: the LAN host as typed, and the board
+    // Connect should try before this run has dialled anything. A dial the
+    // command line named replaces both below.
+    app.lan_host = stored.lan_host.clone();
+    if !stored.address.is_empty() {
+        app.last_dial = Some(Dial::Ble(Selection::Address(stored.address.clone())));
+    }
+    if storing {
+        app.settings = Some(settings);
+        // A real session, drawn in a real terminal: the desktop's clipboard
+        // tool joins OSC 52. A preview never copies, and a test must not
+        // reach the machine's clipboard at all.
+        app.desktop_clipboard = true;
     }
     app.clock = local_clock();
     if args.sample {
         app.diagnostics.apply(&views::sample_reply(), local_clock());
         app.terminal.push_text(views::terminal::SAMPLE);
+        // A little traffic history for the top bar's graph, so a previewed bar
+        // shows the instrument and not a flat line — the shape a boot log
+        // settles into: a burst, an echo, a prompt.
+        app.traffic
+            .window
+            .extend([0u64, 0, 40, 180, 640, 1200, 900, 500, 240, 120]);
+        app.traffic.rate = 120;
         // Two announcements as well, so a previewed notice log has something to
         // show. They are the strings the notices really use, composed the way
         // the pump composes them, so the preview cannot show wording the
@@ -826,7 +864,7 @@ fn main() -> io::Result<()> {
     // read back from it: the pane asks `app` what to do with a keystroke, and
     // a flag that only changed a variable here would leave the pane using its
     // own default.
-    app.enter = args.enter;
+    app.enter = args.enter.or(stored.enter).unwrap_or_default();
     app.escape = args.escape;
     app.line_mode = args.line_mode;
     if args.local_echo {
@@ -847,7 +885,7 @@ fn main() -> io::Result<()> {
             }
         };
     }
-    if args.debug_io {
+    if args.debug_io || stored.debug_io {
         app.trace = std::mem::take(&mut app.trace).with_stderr();
     }
 
@@ -993,6 +1031,37 @@ fn read_first_line(path: &std::path::Path) -> Result<String, String> {
 /// The centre region — the terminal pane's area — for a frame of this size.
 fn pane_area(cols: u16, rows: u16) -> Rect {
     ui::regions(Rect::new(0, 0, cols, rows), true).centre
+}
+
+/// The centre region as the *paint* lays it out, rail shown or hidden.
+///
+/// Not [`pane_area`]: that is the emulator's width, which deliberately stays
+/// put when the rail is hidden so a toggle does not rewrap the device's whole
+/// history. A mouse point, though, is measured against what the user sees, so
+/// the drag asks this one and clamps to the emulated screen afterwards.
+fn painted_centre(app: &App, cols: u16, rows: u16) -> Rect {
+    ui::regions(Rect::new(0, 0, cols, rows), app.sidebar_visible).centre
+}
+
+/// The pane cell a mouse point is on, when it is on the pane at all: a point
+/// on another view's document or on the rail is not text.
+fn pane_cell_at(app: &App, cols: u16, rows: u16, column: u16, row: u16) -> Option<(usize, usize)> {
+    let centre = painted_centre(app, cols, rows);
+    if column < centre.x
+        || column >= centre.x + centre.width
+        || row < centre.y
+        || row >= centre.y + centre.height
+    {
+        return None;
+    }
+    let (screen_cols, _) = app.terminal.size();
+    let col = (column - centre.x).min(screen_cols.saturating_sub(1));
+    linkr_tui::views::terminal::cell_at(
+        &app.terminal,
+        centre.height as usize,
+        (row - centre.y) as usize,
+        col as usize,
+    )
 }
 
 /// Size the emulator for a frame of `cols`×`rows`, and hand back the pane it
@@ -1143,7 +1212,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     // Chords the interface owns, in every focus and every view.
     match (key.code, ctrl) {
-        (KeyCode::Char('q'), true) | (KeyCode::Char('c'), true) => {
+        (KeyCode::Char('q'), true) => {
+            app.request_quit();
+            return true;
+        }
+        // Ctrl+C is the key a serial console is for: it interrupts whatever
+        // is running on the other end. It is also the key every program quits
+        // with, and this is where those two duties meet — so the pane wins
+        // whenever it holds the keyboard and a link is live, and everywhere
+        // else (the rail, a form, no link at all) it still quits, as Ctrl+Q
+        // does from anywhere.
+        (KeyCode::Char('c'), true) => {
+            if app.pane_has_the_keyboard() && app.session.is_live() {
+                if let Some(bytes) = key_bytes(key, app.enter) {
+                    app.type_bytes(false, &bytes);
+                }
+                return false;
+            }
             app.request_quit();
             return true;
         }
@@ -1162,11 +1247,38 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.push_notice(notice);
             return false;
         }
-        // Ctrl+Shift+C puts the screen on the terminal's clipboard. Not the
-        // plain Ctrl+C, which is the quit chord and has been since the first
-        // version: a paste's counterpart must not be next to the key that
-        // ends the program.
+        // The one-shot latches: `Ctrl+Shift+R/C/A` arm Shift/Ctrl/Alt for the
+        // very next key. This is the old interface's scheme, kept because it
+        // is the only one that reaches *every* key — a mechanism that caught
+        // keys by chord would always be missing the chord that caught them.
+        // The same chord cancels what it armed. Arming needs the pane's
+        // screen to be the one that acts on it, so an overlay blocks it: a
+        // latch armed behind a form would go off somewhere the user is not
+        // looking.
+        (KeyCode::Char('R'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            if app.overlay_open() {
+                return false;
+            }
+            return toggle_latch(app, "Shift", |latch| &mut latch.shift);
+        }
         (KeyCode::Char('C'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            if app.overlay_open() {
+                return false;
+            }
+            return toggle_latch(app, "Ctrl", |latch| &mut latch.ctrl);
+        }
+        (KeyCode::Char('A'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            if app.overlay_open() {
+                return false;
+            }
+            return toggle_latch(app, "Alt", |latch| &mut latch.alt);
+        }
+        // Ctrl+Shift+Y puts the screen on the terminal's clipboard. `Y` and
+        // not `C`: `Ctrl+C` belongs to the device while the pane has the
+        // keyboard, and `Ctrl+Shift+C` belongs to the Ctrl latch — the copy
+        // chord had been one shift away from the quit chord, which is exactly
+        // where a chord pressed in a hurry must not be.
+        (KeyCode::Char('Y'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
             let notice = app.copy_screen();
             app.push_notice(notice);
             return false;
@@ -1224,13 +1336,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             dialogs::open_help(app);
             return false;
         }
-        (KeyCode::Tab, _) => {
-            app.focus = match app.focus {
-                Focus::Terminal => Focus::Sidebar,
-                Focus::Sidebar => Focus::Terminal,
-            };
-            return false;
-        }
+        // Tab is deliberately not a chord here. It is the most-used key a
+        // shell has — completion — so it belongs to the device whenever the
+        // pane holds the keyboard, and the forms that want it (the assistant's
+        // fields, the network rows) take it in their own handlers. The rail is
+        // entered with Ctrl+Up and left with Esc, both of which predate this
+        // and are what the help has listed all along.
         (KeyCode::F(number), _) => {
             if let Some(view) = View::from_fkey(number) {
                 app.set_view(view);
@@ -1277,10 +1388,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         // PageUp/PageDown walk the pane's own history rather than the device's
         // scroll buffer: without a VT screen there is no device scroll to walk.
+        // They do not spend the latch: a latch is a modifier for the next key
+        // sent, and a key that only scrolls the *view* is not sent.
         KeyCode::PageUp => app.scroll_terminal(10),
         KeyCode::PageDown => app.scroll_terminal_down(10),
         KeyCode::End => app.scroll_terminal_to_bottom(),
         _ => {
+            let key = latch_key(app, key);
             if let Some(bytes) = key_bytes(key, app.enter) {
                 // The escape byte is the wire's way out, and it is checked
                 // before the keystroke is sent: sending it and *then* leaving
@@ -1294,6 +1408,51 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
         }
     }
+    false
+}
+
+/// The key with whatever the latch armed merged into its modifiers, and the
+/// latch spent. Called only for keys that are the device's: a latch is that
+/// key's modifier and nothing more, which is what makes it one-shot by
+/// construction rather than by remembering to clear it.
+fn latch_key(app: &mut App, key: KeyEvent) -> KeyEvent {
+    let latch = app.latch.take();
+    if !latch.is_armed() {
+        return key;
+    }
+    let mut key = key;
+    if latch.ctrl {
+        key.modifiers |= KeyModifiers::CONTROL;
+    }
+    if latch.shift {
+        key.modifiers |= KeyModifiers::SHIFT;
+    }
+    if latch.alt {
+        key.modifiers |= KeyModifiers::ALT;
+    }
+    key
+}
+
+/// Arm or cancel one modifier of the latch, and say which: a latch is
+/// invisible until the key it was armed for, so the announcement is the only
+/// feedback the first press gets.
+fn toggle_latch(
+    app: &mut App,
+    name: &str,
+    which: fn(&mut linkr_tui::app::Latch) -> &mut bool,
+) -> bool {
+    let armed = {
+        let flag = which(&mut app.latch);
+        *flag = !*flag;
+        *flag
+    };
+    let s = app.strings();
+    let template = if armed { s.latch_armed } else { s.latch_disarmed };
+    let text = linkr_tui::text::fill(template, &[name.to_string()]);
+    app.push_notice(linkr_tui::app::Notice {
+        text,
+        level: linkr_tui::event::NoticeLevel::Info,
+    });
     false
 }
 
@@ -1360,7 +1519,7 @@ fn local_clock() -> String {
 /// it are not what the user is scrolling.
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
                 cols: u16, rows: u16) {
-    use crossterm::event::MouseEventKind;
+    use crossterm::event::{MouseButton, MouseEventKind};
 
     // The modal answers the keyboard, and the wheel is a gesture the same way a
     // key is. The box's own paging keys are how it moves; a notch over it does
@@ -1390,12 +1549,44 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
                 app.scroll_terminal_down(3);
             }
         }
+        // The drag. The pane is the one thing in the interface with text in it
+        // to select: every other view is a document the interface laid out, and
+        // its rows exist as a paint and nowhere else — there is no buffer a
+        // selection could name, so a drag there would be a drag on nothing.
+        // Which is why the guard is the *view* and not the focus: with the rail
+        // focused, the pane is still text under the pointer.
+        MouseEventKind::Down(MouseButton::Left) if app.view == View::Terminal => {
+            match pane_cell_at(app, cols, rows, mouse.column, mouse.row) {
+                Some((line, col)) => app.terminal.press(line, col),
+                // Inside the pane but past its text — the blank ground under
+                // the newest line — is a press on nothing: it clears.
+                None if painted_centre(app, cols, rows)
+                    .contains(Position::new(mouse.column, mouse.row)) =>
+                {
+                    app.terminal.deselect();
+                }
+                None => {}
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.view == View::Terminal => {
+            if let Some((line, col)) = pane_cell_at(app, cols, rows, mouse.column, mouse.row) {
+                app.terminal.drag_to(line, col);
+            }
+        }
+        // Whatever the gesture built, when the button comes up. A run — a drag,
+        // or a double-click's word — comes back as the text it covered, and
+        // goes on the clipboard; a bare click returns nothing and has already
+        // cleared.
+        MouseEventKind::Up(MouseButton::Left) if app.view == View::Terminal => {
+            if let Some(text) = app.terminal.release() {
+                if !text.trim().is_empty() {
+                    let notice = app.copy_text(&text);
+                    app.push_notice(notice);
+                }
+            }
+        }
         _ => {}
     }
-    // A wheel over the rail scrolls the rail; over the pane it scrolls the
-    // pane; neither is a page. The size is here for the drag that follows, and
-    // until then it is what a drag would need rather than a wheel.
-    let _ = (cols, rows);
 }
 
 #[cfg(test)]
@@ -1421,6 +1612,13 @@ mod tests {
         assert!(args(&["--line-mode"]).line_mode);
         assert!(!args(&[]).debug_io);
         assert!(args(&["--debug-io"]).debug_io);
+        assert_eq!(
+            args(&[]).enter,
+            None,
+            "unnamed, so the settings file decides"
+        );
+        assert_eq!(args(&["--enter", "lf"]).enter, Some(EnterMode::Lf));
+        assert_eq!(args(&["--enter", "CRLF"]).enter, Some(EnterMode::Crlf));
         assert_eq!(
             args(&["--log-file", "/tmp/rx.log"]).log_file.as_deref(),
             Some(std::path::Path::new("/tmp/rx.log"))
@@ -1518,8 +1716,10 @@ mod tests {
     #[test]
     fn defaults_are_the_designed_first_frame() {
         let parsed = args(&[]);
-        assert_eq!(parsed.lang, Lang::Zh);
-        assert_eq!(parsed.theme, ThemeChoice::Dark);
+        // Unset, not defaulted: the settings file fills these when no flag
+        // named one, and `parse_args` is not the place that knows the file.
+        assert_eq!(parsed.lang, None);
+        assert_eq!(parsed.theme, None);
         assert_eq!(parsed.state, None);
         assert_eq!(parsed.print_frame, None);
         assert!(!parsed.sample);
@@ -1534,8 +1734,8 @@ mod tests {
     #[test]
     fn flags_parse_to_their_state() {
         let parsed = args(&["--lang", "en", "--theme", "light", "--state", "connected"]);
-        assert_eq!(parsed.lang, Lang::En);
-        assert_eq!(parsed.theme, ThemeChoice::Light);
+        assert_eq!(parsed.lang, Some(Lang::En));
+        assert_eq!(parsed.theme, Some(ThemeChoice::Light));
         assert_eq!(parsed.state, Some(ConnectionState::Connected));
         for (raw, expected) in [
             ("disconnected", ConnectionState::Disconnected),
@@ -1598,7 +1798,7 @@ mod tests {
         // A flag straight after --print-frame is not swallowed as a size.
         let parsed = args(&["--print-frame", "--theme", "light"]);
         assert_eq!(parsed.print_frame, Some((100, 30)));
-        assert_eq!(parsed.theme, ThemeChoice::Light);
+        assert_eq!(parsed.theme, Some(ThemeChoice::Light));
     }
 
     /// The clock is always `HH:MM:SS`: eight characters, two colons.
@@ -1690,8 +1890,9 @@ mod tests {
         );
     }
 
-    /// Ctrl+Q and Ctrl+C stop the loop; a bare 'q' does not, so the terminal
-    /// stays open while the user is typing to the device.
+    /// Ctrl+Q and Ctrl+C stop the loop while nothing is connected; a bare 'q'
+    /// does not, so the terminal stays open while the user is typing to the
+    /// device.
     #[test]
     fn only_the_control_keys_quit() {
         let mut app = App::default();
@@ -1703,6 +1904,42 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
         ));
+        assert!(handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+    }
+
+    /// An open link and a pane holding the keyboard change Ctrl+C's meaning:
+    /// it interrupts the device, exactly as it would in any serial console.
+    /// The rail, a form and a dead link all keep the old one.
+    #[test]
+    fn ctrl_c_interrupts_the_device_while_the_pane_has_the_keyboard() {
+        let mut app = App::default();
+        app.connect(
+            Dial::Stdio("-".into())
+                .open()
+                .expect("the loopback builds"),
+        )
+        .expect("the loopback opens");
+        for _ in 0..50 {
+            app.pump();
+            if app.connected() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.connected(), "the loopback came up");
+
+        assert!(!handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+        assert!(!app.quit, "the interrupt did not quit the interface");
+        assert_eq!(app.tx, 1, "the interrupt byte left for the device");
+
+        // The rail has the keyboard: the chord is the program's again.
+        app.focus = Focus::Sidebar;
         assert!(handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
@@ -1739,13 +1976,17 @@ mod tests {
         assert_eq!(app.tx, 0, "clear is local, not a keystroke");
     }
 
-    /// Tab moves the focus between the sidebar and the terminal, and the
+    /// Tab belongs to the device — completion is the most-used key a shell
+    /// has — and the rail is entered with Ctrl+Up and left with Esc. The
     /// sidebar cursor never walks past the last selectable row.
     #[test]
-    fn tab_moves_the_focus_and_the_cursor_stops_at_the_end() {
+    fn tab_reaches_the_device_and_ctrl_up_moves_the_focus() {
         let mut app = App::default();
         assert_eq!(app.focus, Focus::Terminal);
         handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Terminal, "Tab did not steal the focus");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
         assert_eq!(app.focus, Focus::Sidebar);
         for _ in 0..100 {
             handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1756,6 +1997,39 @@ mod tests {
             handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         }
         assert_eq!(app.sidebar_cursor, 0);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Terminal, "Esc hands the keyboard back");
+    }
+
+    /// The one-shot latch: arming says which modifier, the next key carries it
+    /// and spends it, and the same chord cancels instead.
+    #[test]
+    fn the_latch_arms_a_modifier_for_the_next_key() {
+        let mut app = App::default();
+        // Arm Ctrl for the next key.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(app.latch.ctrl, "Ctrl is armed");
+        assert_eq!(app.log.last().map(|n| n.text.contains("Ctrl")), Some(true));
+
+        // A plain 'c' goes out as Ctrl+C (0x03) — link or no link, the byte is
+        // what the encoder builds — and the latch is spent by it.
+        let key = latch_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(key.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(!app.latch.is_armed(), "one key spends the latch");
+
+        // The same chord again cancels what it would have armed.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(!app.latch.is_armed(), "the chord toggles");
     }
 
     /// The pane's keys are the device's, and they go out as the byte sequences
@@ -2488,5 +2762,116 @@ mod tests {
         app.dialog = None;
         wheel(&mut app, MouseEventKind::ScrollUp);
         assert_eq!(app.terminal.scroll, 3);
+    }
+
+    /// A drag over the pane selects the cells it crossed and the release
+    /// copies them; a bare click on the pane clears; and with another view
+    /// showing there is no pane under the pointer to drag on.
+    #[test]
+    fn a_drag_over_the_pane_selects_and_copies() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let (cols, rows) = (100u16, 30u16);
+        let mut app = App::default();
+        app.terminal.push_text("hello world\r\nsecond line\r\n");
+        // The pane starts at x = 30, one row down (the top bar); the session's
+        // first line is its first row.
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), 30, 1),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Drag(MouseButton::Left), 34, 1),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Up(MouseButton::Left), 34, 1),
+            cols,
+            rows,
+        );
+        assert_eq!(app.terminal.selected_text().as_deref(), Some("hello"));
+        assert!(
+            app.notices
+                .last()
+                .is_some_and(|notice| notice.text.contains('5')),
+            "the copy announced how much went: {:?}",
+            app.notices.last().map(|notice| &notice.text)
+        );
+
+        // A click on the text, no drag: it clears.
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), 40, 1),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Up(MouseButton::Left), 40, 1),
+            cols,
+            rows,
+        );
+        assert_eq!(app.terminal.selected_text(), None);
+
+        // The pane is not showing: the same gesture paints nothing, because
+        // another view's document is not a buffer to select from.
+        app.set_view(View::Network);
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), 30, 1),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Drag(MouseButton::Left), 34, 1),
+            cols,
+            rows,
+        );
+        assert_eq!(app.terminal.selected_text(), None);
+    }
+
+    /// A press on the blank ground under the pane's text is a press on
+    /// nothing: it clears a selection instead of anchoring one.
+    #[test]
+    fn a_press_below_the_text_clears_the_selection() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (cols, rows) = (100u16, 30u16);
+        let mut app = App::default();
+        app.terminal.push_text("hello\r\n");
+        app.terminal.press(0, 0);
+        app.terminal.drag_to(0, 3);
+        assert!(app.terminal.selected_text().is_some());
+
+        // The pane's last painted row is blank ground: the session's screen is
+        // shorter than the pane the frame draws.
+        let ground = 1 + 27;
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 32,
+                row: ground,
+                modifiers: KeyModifiers::NONE,
+            },
+            cols,
+            rows,
+        );
+        assert_eq!(app.terminal.selected_text(), None, "the click cleared");
     }
 }

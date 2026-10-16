@@ -67,12 +67,16 @@ const T_FOCUS_TERMINAL: Entry = ["Focus the terminal", "聚焦终端"];
 const T_CONNECT: Entry = ["Connect", "连接"];
 const T_DISCONNECT: Entry = ["Disconnect", "断开连接"];
 const T_TRANSPORT: Entry = ["Switch the transport", "切换传输方式"];
+const T_UART_SETTINGS: Entry = ["UART settings…", "UART 设置…"];
 const T_AUTOSCROLL: Entry = ["Toggle autoscroll", "切换自动滚动"];
 const T_ECHO: Entry = ["Toggle local echo", "切换本地回显"];
+const T_ENTER_MODE: Entry = ["Cycle Enter mode", "循环切换回车模式"];
+const T_DEBUG_IO: Entry = ["Toggle debug I/O", "切换调试 I/O"];
 const T_CLEAR: Entry = ["Clear the terminal", "清屏"];
 const T_SAVE_LOG: Entry = ["Save the terminal log", "保存终端日志"];
 const T_SCROLL_BOTTOM: Entry = ["Scroll to the newest line", "滚动到最新一行"];
 const T_HELP: Entry = ["Keyboard help", "键盘帮助"];
+const T_CHEAT: Entry = ["Cheat sheet", "速查参考"];
 const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
 const T_THEME: Entry = ["Toggle theme", "切换主题"];
@@ -136,6 +140,10 @@ fn toggle_transport(app: &mut App) {
     app.push_notice(notice);
 }
 
+fn open_uart(app: &mut App) {
+    crate::dialogs::open_uart(app);
+}
+
 fn toggle_autoscroll(app: &mut App) {
     let on = !app.terminal.autoscroll;
     app.terminal.autoscroll = on;
@@ -146,6 +154,20 @@ fn toggle_autoscroll(app: &mut App) {
 
 fn toggle_echo(app: &mut App) {
     app.terminal.echo = !app.terminal.echo;
+}
+
+/// The Enter key's spelling, cycled: the notice names the new mode, because
+/// the notice is the only place it is ever named.
+fn cycle_enter(app: &mut App) {
+    let notice = app.cycle_enter_mode();
+    app.push_notice(notice);
+}
+
+/// `#debugInput` of `web/index.html`: both directions traced to stderr, so an
+/// I/O problem can be watched as it happens.
+fn toggle_debug_io(app: &mut App) {
+    let notice = app.toggle_debug_io();
+    app.push_notice(notice);
 }
 
 fn clear_terminal(app: &mut App) {
@@ -180,6 +202,10 @@ fn scroll_bottom(app: &mut App) {
 
 fn show_help(app: &mut App) {
     crate::dialogs::open_help(app);
+}
+
+fn show_cheat(app: &mut App) {
+    crate::dialogs::open_cheat(app);
 }
 
 fn show_notices(app: &mut App) {
@@ -383,6 +409,13 @@ pub const ACTIONS: &[Action] = &[
         shortcut: "",
         run: toggle_transport,
     },
+    Action {
+        id: "uart.settings",
+        title: T_UART_SETTINGS,
+        category: CAT_CONNECTION,
+        shortcut: "",
+        run: open_uart,
+    },
     // Terminal
     Action {
         id: "term.autoscroll",
@@ -397,6 +430,20 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_TERMINAL,
         shortcut: "",
         run: toggle_echo,
+    },
+    Action {
+        id: "term.enter_mode",
+        title: T_ENTER_MODE,
+        category: CAT_TERMINAL,
+        shortcut: "",
+        run: cycle_enter,
+    },
+    Action {
+        id: "term.debug_io",
+        title: T_DEBUG_IO,
+        category: CAT_TERMINAL,
+        shortcut: "",
+        run: toggle_debug_io,
     },
     Action {
         id: "term.clear",
@@ -426,6 +473,13 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_APP,
         shortcut: "F1",
         run: show_help,
+    },
+    Action {
+        id: "app.cheat_sheet",
+        title: T_CHEAT,
+        category: CAT_APP,
+        shortcut: "",
+        run: show_cheat,
     },
     Action {
         id: "app.notices",
@@ -834,12 +888,16 @@ mod tests {
         "connect",
         "disconnect",
         "transport.toggle",
+        "uart.settings",
         "term.autoscroll",
         "term.echo",
+        "term.enter_mode",
+        "term.debug_io",
         "term.clear",
         "term.save_log",
         "term.scroll_bottom",
         "app.help",
+        "app.cheat_sheet",
         "app.notices",
         "app.language",
         "app.theme",
@@ -980,6 +1038,67 @@ mod tests {
         // Auto — and that is the point of defaulting to the mode that cannot
         // send anything.
         assert_eq!(seen, vec!["full-auto", "manual", "auto"]);
+    }
+
+    /// The Enter-mode action walks the reference client's four modes and says
+    /// which one it landed on. The notice is the only place the mode is named,
+    /// so it has to name it at every step.
+    #[test]
+    fn the_enter_action_cycles_and_announces() {
+        let mut app = App::default();
+        let seen: Vec<&str> = std::iter::from_fn(|| {
+            cycle_enter(&mut app);
+            let last = app.notices.last()?;
+            assert!(
+                last.text.contains(app.enter.label()),
+                "the notice did not name the new mode: {:?}",
+                last.text
+            );
+            Some(app.enter.label())
+        })
+        .take(5)
+        .collect();
+        assert_eq!(seen, vec!["CR", "LF", "CRLF", "Raw", "CR"]);
+    }
+
+    /// The debug-I/O switch flips the trace and says which way it now points.
+    #[test]
+    fn the_debug_io_action_flips_the_trace() {
+        let mut app = App::default();
+        assert!(!app.trace.tracing_stderr(), "off until asked for");
+        let action = ACTIONS
+            .iter()
+            .find(|action| action.id == "term.debug_io")
+            .expect("the switch is registered");
+        (action.run)(&mut app);
+        assert!(app.trace.tracing_stderr(), "flipped on");
+        let last = app.notices.last().expect("it announced itself");
+        let s = app.strings();
+        assert!(last.text.contains(s.net_state_on), "{:?}", last.text);
+        (action.run)(&mut app);
+        assert!(!app.trace.tracing_stderr(), "and off again");
+        let last = app.notices.last().expect("it announced itself");
+        assert!(last.text.contains(s.net_state_off), "{:?}", last.text);
+    }
+
+    /// Both terminal switches outlive the run: a trace turned on to catch a
+    /// problem that only shows up on the next dial has to still be on when it
+    /// is dialled.
+    #[test]
+    fn the_terminal_switches_are_remembered() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-palette-switches-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            settings: Some(crate::settings::SettingsStore::at(&path)),
+            ..App::default()
+        };
+        cycle_enter(&mut app);
+        toggle_debug_io(&mut app);
+        let stored = crate::settings::SettingsStore::at(&path).read();
+        assert_eq!(stored.enter, Some(app.enter));
+        assert!(stored.debug_io);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Clearing the conversation wipes what is on screen *and* what is on disk:

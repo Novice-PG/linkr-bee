@@ -12,10 +12,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ratatui::layout::Rect;
 
 use crate::accessory::{self, UartSettings};
+use crate::clipboard::{osc52_copy, MAX_OSC52_CHARS};
 use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
 use crate::session::{Dial, Session};
+use crate::settings::Settings;
 use crate::theme::{Theme, ThemeChoice};
 use crate::transport::{Link, LinkEvent, OpenedLink};
 use crate::views::diagnostics::DiagnosticsState;
@@ -263,6 +265,51 @@ pub enum Focus {
     Terminal,
 }
 
+/// The one-shot modifier latch: modifiers a chord arms for the very next key,
+/// so keys the interface owns the chord of — and any combination a keyboard
+/// cannot easily produce — still reach the device.
+///
+/// The old interface armed the same three with `Ctrl+Shift+R/C/A`, and the
+/// scheme survives because it is the only one that covers *every* key: a
+/// mechanism that captured keys by chord would always be missing the chord it
+/// captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Latch {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Latch {
+    /// Whether anything is armed.
+    pub fn is_armed(&self) -> bool {
+        self.ctrl || self.shift || self.alt
+    }
+
+    /// Hand back what was armed and disarm in one go: the latch belongs to
+    /// one key, and that key is the one being encoded right now.
+    pub fn take(&mut self) -> Latch {
+        std::mem::take(self)
+    }
+
+    /// The names as the notice and the bottom bar show them, `Ctrl+Shift` the
+    /// way a chord is spelled. The words stay Latin in both languages, like
+    /// `RX` and `dBm`: they are what the key is called.
+    pub fn names(&self) -> String {
+        let mut names: Vec<&str> = Vec::new();
+        if self.ctrl {
+            names.push("Ctrl");
+        }
+        if self.shift {
+            names.push("Shift");
+        }
+        if self.alt {
+            names.push("Alt");
+        }
+        names.join("+")
+    }
+}
+
 /// How many toasts stack at once before the oldest is dropped.
 pub const MAX_NOTICES: usize = 3;
 
@@ -297,6 +344,8 @@ pub struct App {
     pub view: View,
     pub state: ConnectionState,
     pub focus: Focus,
+    /// The modifiers a latch chord armed for the next key. See [`Latch`].
+    pub latch: Latch,
     /// Whether the rail occupies its column. Ctrl+Up closes it to give the
     /// centre the whole band, and opens it again. It starts open, which is the
     /// designed layout; closing it is the user's call, never a response to a
@@ -314,6 +363,9 @@ pub struct App {
     pub device_name: String,
     pub rx: u64,
     pub tx: u64,
+    /// Traffic rates sampled off those counters: the top bar's graph and the
+    /// number beside it. Sampled by the pump, read by the frame.
+    pub traffic: crate::traffic::Traffic,
     /// The link speed once the device has reported one.
     pub baud: Option<u32>,
     /// The BLE link level the device reports (`L1`, `L2`). Unknown until the
@@ -385,6 +437,17 @@ pub struct App {
     /// touches the filesystem, and a `Default` that writes to the user's home
     /// directory is not a default anyone can run a test suite against.
     pub agent_store: Option<crate::agent::store::JsonFile>,
+    /// Where the interface's own choices are kept between runs. `None` until
+    /// `main` opens it — and `None` in a preview, which is what keeps a
+    /// printed frame from writing to the user's real settings file. See
+    /// [`App::save_settings`].
+    pub settings: Option<crate::settings::SettingsStore>,
+    /// Whether a copy also goes to the desktop's own clipboard tool (`xclip`
+    /// and its kin), and not only through OSC 52. `false` until `main` asks for
+    /// it, which is also what the tests get: a suite that spawned `wl-copy`
+    /// would be a suite that quietly replaced the user's clipboard with its
+    /// fixtures.
+    pub desktop_clipboard: bool,
     /// The model transport, started on first use rather than at boot: a thread
     /// and a Tokio runtime are not something a `Default` should cost.
     pub agent_client: Option<crate::agent::runtime::AgentClient>,
@@ -479,6 +542,7 @@ impl Default for App {
             view: View::Terminal,
             state: ConnectionState::Disconnected,
             focus: Focus::default(),
+            latch: Latch::default(),
             sidebar_visible: true,
             transport: Transport::default(),
             transport_locked: false,
@@ -486,6 +550,7 @@ impl Default for App {
             device_name: "Linkr BLE UART".to_string(),
             rx: 0,
             tx: 0,
+            traffic: crate::traffic::Traffic::default(),
             baud: None,
             link_level: None,
             signal_dbm: None,
@@ -518,6 +583,8 @@ impl Default for App {
             quiet_connect: false,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
+            settings: None,
+            desktop_clipboard: false,
             agent_client: None,
             agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
@@ -539,38 +606,6 @@ impl Default for App {
             quit: false,
         }
     }
-}
-
-/// The most characters of screen an OSC 52 copy will carry.
-///
-/// A full scrollback is far more than any emulator accepts in one sequence,
-/// and an over-long OSC 52 is not truncated — it is discarded whole. Trimming
-/// before the base64 turns "nothing arrives" into "the last of it arrives",
-/// which is what a capped copy means: keep the end, which is where the answer
-/// the user just read always is.
-const MAX_OSC52_CHARS: usize = 64 * 1024;
-
-/// Put `text` on the terminal's clipboard with OSC 52.
-///
-/// Written straight to stdout rather than through the frame: a clipboard copy
-/// is not a cell, and routing it through the buffer would either double it or
-/// put it inside a frame's diff. One long escape sequence, flushed, and the
-/// screen is untouched — the sequence carries no glyphs.
-///
-/// No ST terminator on purpose. The BEL form is the one every emulator that
-/// supports the sequence accepts, and the ST form ends in a byte that some
-/// terminals mistake for text.
-pub fn osc52_copy(text: &str) -> usize {
-    use std::io::Write;
-
-    if text.is_empty() {
-        return 0;
-    }
-    let payload = crate::base64::encode_base64(text.as_bytes());
-    let mut out = std::io::stdout().lock();
-    let _ = write!(out, "\x1b]52;c;{payload}\x07");
-    let _ = out.flush();
-    text.chars().count()
 }
 
 impl App {
@@ -685,10 +720,15 @@ impl App {
     /// can log exactly one message and the wording stays in one place.
     pub fn toggle_theme(&mut self) -> Notice {
         self.theme = self.theme.toggled();
+        self.save_settings();
         let s = self.strings();
         let name = match self.theme {
             ThemeChoice::Dark => s.theme_dark,
             ThemeChoice::Light => s.theme_light,
+            ThemeChoice::Nord => s.theme_nord,
+            ThemeChoice::Gruvbox => s.theme_gruvbox,
+            ThemeChoice::Solarized => s.theme_solarized,
+            ThemeChoice::Dracula => s.theme_dracula,
         };
         Notice {
             text: format!("{}: {}", s.theme_switched_prefix, name),
@@ -749,6 +789,30 @@ impl App {
         }
     }
 
+    /// Close the unattended window when its time is up, and say so.
+    ///
+    /// The mode is a policy the agent is *told* about, so nothing else would
+    /// notice the deadline passing; the pump is the one clock every caller
+    /// ticks. Takes `now` so a test can watch it elapse without sleeping
+    /// through the window.
+    pub fn expire_full_auto(&mut self, now: Instant) {
+        let Some(until) = self.assistant.full_auto_until else {
+            return;
+        };
+        if now < until {
+            return;
+        }
+        self.assistant.full_auto_until = None;
+        if self.assistant.mode == Some(crate::exec::executor::Mode::FullAuto) {
+            self.assistant.mode = Some(crate::exec::executor::Mode::Auto);
+        }
+        let text = self.strings().asst_full_auto_expired.to_string();
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Warn,
+        });
+    }
+
     /// Whether a modal has taken the keyboard, so the event loop can route the
     /// key to the overlay instead of the pane.
     pub fn overlay_open(&self) -> bool {
@@ -761,6 +825,7 @@ impl App {
             Lang::Zh => Lang::En,
             Lang::En => Lang::Zh,
         };
+        self.save_settings();
         let s = self.strings();
         let name = match self.lang {
             Lang::Zh => s.language_zh,
@@ -794,6 +859,7 @@ impl App {
             // hang-up released lands on the ordinary way in.
             _ => Transport::Ble,
         };
+        self.save_settings();
         Notice {
             text: format!(
                 "{}: {}",
@@ -809,6 +875,38 @@ impl App {
     /// way.
     pub fn request_quit(&mut self) {
         self.quit = true;
+    }
+
+    /// Cycle the Enter mode and return the notice announcing it.
+    ///
+    /// The notice is the only place the mode is named — nothing on screen
+    /// shows it — so it names the mode at every step, or a keystroke that
+    /// silently changed what Enter sends would be one nobody could learn.
+    pub fn cycle_enter_mode(&mut self) -> Notice {
+        self.enter = self.enter.next();
+        self.save_settings();
+        let s = self.strings();
+        Notice {
+            text: format!("{}: {}", s.enter_mode_label, self.enter.label()),
+            level: NoticeLevel::Info,
+        }
+    }
+
+    /// Flip the standard-error trace and return the notice announcing it.
+    ///
+    /// A runtime switch rather than a command-line flag only, because the
+    /// question a trace answers — "did what I typed get there" — is usually
+    /// asked after something already went wrong.
+    pub fn toggle_debug_io(&mut self) -> Notice {
+        let on = !self.trace.tracing_stderr();
+        self.trace.set_stderr(on);
+        self.save_settings();
+        let s = self.strings();
+        let word = if on { s.net_state_on } else { s.net_state_off };
+        Notice {
+            text: format!("{}: {}", s.debug_io_label, word),
+            level: NoticeLevel::Info,
+        }
     }
 
     /// The file a log save goes to when the user does not name one: the working
@@ -834,10 +932,61 @@ impl App {
     }
 
     /// Select a view.
-    ///
-    /// Select a view.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
+        self.save_settings();
+    }
+
+    /// Whether a typed key belongs to the pane: the rail is not focused, and
+    /// no form is up. The network and assistant views take the keyboard when
+    /// they are open — a composer must not type into the console — so "the
+    /// pane has the keyboard" is a question about the view as much as about
+    /// the focus, and the chords that hand a key to the device ask it.
+    pub fn pane_has_the_keyboard(&self) -> bool {
+        self.focus == Focus::Terminal && matches!(self.view, View::Terminal | View::Diagnostics)
+    }
+
+    /// Take a new LAN host from the prompt and keep it: the row is what a
+    /// later run should open with, so the write follows the edit rather than
+    /// waiting for a dial that may never happen.
+    pub fn set_lan_host(&mut self, host: String) {
+        self.lan_host = host;
+        self.save_settings();
+    }
+
+    /// Keep the choices a user would resent retyping.
+    ///
+    /// Called after each change worth remembering rather than at exit, so a
+    /// kill costs nothing; one small file write per user action, never per
+    /// keystroke. A test or a preview holds no store and this is a no-op,
+    /// which is what keeps the suite hermetic and `--print-frame` read-only.
+    fn save_settings(&mut self) {
+        let Some(store) = self.settings.as_mut() else {
+            return;
+        };
+        let stored = store.read();
+        store.write(&Settings {
+            // A `stdio` transport is a fact about this run — a flag built it
+            // — and is left out rather than written as a choice.
+            transport: match self.transport {
+                Transport::Stdio => stored.transport,
+                chosen => Some(chosen),
+            },
+            lan_host: self.lan_host.clone(),
+            // Only an addressed Bluetooth dial updates it; a LAN dial was not
+            // about a board and must not forget the one that was.
+            address: match &self.last_dial {
+                Some(Dial::Ble(crate::transport::ble::Selection::Address(address))) => {
+                    address.clone()
+                }
+                _ => stored.address,
+            },
+            view: Some(self.view),
+            theme: Some(self.theme),
+            lang: Some(self.lang),
+            enter: Some(self.enter),
+            debug_io: self.trace.tracing_stderr(),
+        });
     }
 
     /// How many sidebar rows the cursor can reach: the transport row, the
@@ -1118,6 +1267,7 @@ impl App {
                 // not something `reconnect` should try again behind the user's
                 // back.
                 self.last_dial = Some(job.dial);
+                self.save_settings();
                 self.quiet_connect = job.quiet;
                 self.adopt(opened);
             }
@@ -1321,6 +1471,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // The toasts' own clock, on the same beat as everything else. The
         // log keeps every word; the corner empties.
         self.expire_notices(Instant::now());
+        // The unattended window's clock, on that same beat: Full Auto is a
+        // promise that expires on time, not on the next keypress.
+        self.expire_full_auto(Instant::now());
 
         self.drain_agent_replies();
         let was_live = self.session.is_live();
@@ -1476,8 +1629,17 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             // And the half-typed line goes with it.
             self.pending_line.clear();
         }
+        // A signal reading belongs to a link that is up or on its way up: a
+        // dial that failed, a board that died, the user's own hang-up — with
+        // none of them is there a link the top bar should still be describing.
+        if !now_live && self.dialing.is_none() {
+            self.signal_dbm = None;
+        }
         self.rx = self.session.rx();
         self.tx = self.session.tx();
+        // The same beat the counters moved on: the graph is a clock, and this
+        // is the clock.
+        self.traffic.sample(self.rx, self.tx, now);
     }
 
     /// What the target has printed since the last call, for a caller with no
@@ -1585,12 +1747,21 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// The address is what a scan result identifies a device by — a name is a
     /// substring, and two boards on a bench can both be called "Linkr Bee" —
     /// so the dial takes the id, and the click that picked it was the user's
-    /// answer to "which one". `quiet` marks the startup scan's own dial: the
-    /// hall is caught off the board coming up, and nothing announces it.
-    pub fn connect_to_board(&mut self, address: &str, quiet: bool) {
+    /// answer to "which one". `rssi` is the signal the scan heard it at, and
+    /// `quiet` marks the startup scan's own dial: the hall is caught off the
+    /// board coming up, and nothing announces it.
+    pub fn connect_to_board(&mut self, address: &str, rssi: Option<i16>, quiet: bool) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
         if !self.dial_async(&crate::session::Dial::Ble(selection), quiet) {
             return;
+        }
+        // The signal the scan heard the board at. A connected board stops
+        // advertising, so the reading taken while listening is the last one
+        // there will be — and one taken from the air is worth more than the
+        // placeholder. The pump takes it back if this dial never lands: a
+        // reading belongs to a link that is up or on its way up.
+        if let Some(dbm) = rssi {
+            self.signal_dbm = Some(i32::from(dbm));
         }
         self.dialog = None;
         self.set_view(crate::event::View::Terminal);
@@ -1665,7 +1836,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     // every dial's Connected edge — except a quiet one, which
                     // is what this is: nobody asked for this dial aloud.
                     let id = board.id.clone();
-                    self.connect_to_board(&id, true);
+                    self.connect_to_board(&id, board.rssi, true);
                 }
                 [] => {}
                 _ => {
@@ -1873,6 +2044,11 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 Query::WifiScan => self.strings().net_scan_failed.to_string(),
                 _ => reply.status.error.clone(),
             };
+            if matches!(reply.query, Query::Uart) {
+                // The UART window shows the refusal where the user is looking;
+                // the notice below is the log's copy of the same fact.
+                crate::dialogs::uart_answered(self, &error, false);
+            }
             match reply.query {
                 Query::Diagnostics => self.diagnostics.error = Some(error.clone()),
                 _ => self.network.error = Some(error.clone()),
@@ -1893,6 +2069,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 if let Some(settings) = accessory::parse_uart_settings(&text) {
                     self.baud = Some(settings.baud);
                 }
+                // The UART window, when it is the one that asked, shows the
+                // bridge's own answer and takes the rate from it.
+                crate::dialogs::uart_answered(self, &text, true);
             }
             // `@w?` is a status: the one network the bridge joined, or none.
             Query::Wifi => {
@@ -1993,7 +2172,12 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // \r\n, \n or \r all arrive as the newline a paste means, and a \r
         // inside the block is the shape every terminal actually emits.
         let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.type_bytes(normalised.ends_with('\n'), &normalised)
+        // The block's own newlines then take the Enter mode's spelling, so a
+        // paste and the key that ends it agree about what a line ending is.
+        // Whether the block *ended* a line is read off the normalised text: it
+        // is the shape the user pasted, not the shape the wire wants.
+        let spelled = self.enter.spell(&normalised);
+        self.type_bytes(normalised.ends_with('\n'), &spelled)
     }
 
     /// Put the emulator's contents on the terminal's clipboard, and say so.
@@ -2002,27 +2186,30 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// place with every other notice this key produces — `toggle_sidebar()` and
     /// `toggle_theme()` do the same, and a caller that formats its own is a
     /// caller whose wording can drift from the language table.
-    ///
-    /// An empty screen is not a copy: the terminal is blank until the target
-    /// has said something, and "copied 0 chars" is worse than silence.
     pub fn copy_screen(&mut self) -> Notice {
         let text = self.terminal.visible_text();
-        let kept: String = text
-            .chars()
-            .take(MAX_OSC52_CHARS)
-            .collect();
+        self.copy_text(&text)
+    }
+
+    /// Put `text` on the clipboards and return the notice counting what went.
+    ///
+    /// Both doors at once: OSC 52 through the terminal the interface is drawn
+    /// in, and the desktop's own tool when the machine has one. The system
+    /// write is best-effort and silent — the escape sequence is the door that
+    /// works over SSH and in tmux, and a complaint about a missing `xclip` on
+    /// the way to a copy that *did* happen is noise, not information.
+    pub fn copy_text(&mut self, text: &str) -> Notice {
+        let kept: String = text.chars().take(MAX_OSC52_CHARS).collect();
         let copied = kept.chars().count();
         if copied > 0 {
             osc52_copy(&kept);
+            if self.desktop_clipboard {
+                let _ = crate::clipboard::write_system_clipboard(&kept);
+            }
         }
         let s = self.strings();
         Notice {
-            text: format!(
-                "{} {} {}",
-                s.copy_done_prefix,
-                copied,
-                s.copy_done_suffix
-            ),
+            text: format!("{} {} {}", s.copy_done_prefix, copied, s.copy_done_suffix),
             level: NoticeLevel::Info,
         }
     }
@@ -2080,7 +2267,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     ///
     /// One-shot commands go through this door: `send_bytes` refusing in
     /// silence is right for a keystroke and wrong for a preset, where the user
-    /// pressed a button and is owed an answer.
+    /// pressed a button and is owed an answer. The line's own newlines and its
+    /// ending are spelled the way the Enter mode asks, because a command sent
+    /// from a button is as much a line on the wire as one typed into the pane.
     pub fn send_command(&mut self, text: &str) -> bool {
         if !self.connected() {
             let message = self.strings().not_connected.to_string();
@@ -2090,9 +2279,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             });
             return false;
         }
-        let mut payload = text.as_bytes().to_vec();
-        if !payload.ends_with(b"\n") {
-            payload.push(b'\r');
+        let mut payload = self.enter.spell(text).into_bytes();
+        if !payload.ends_with(b"\n") && !payload.ends_with(b"\r") {
+            payload.extend_from_slice(self.enter.bytes().unwrap_or("\r").as_bytes());
         }
         self.send_bytes(&payload)
     }
@@ -2313,6 +2502,7 @@ mod multi_reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::testing::{answer, asked_id, asked_includes, partial};
     use std::thread;
     use std::time::Duration;
 
@@ -2386,11 +2576,28 @@ mod tests {
         assert_eq!(notice.text, "主题: 浅色");
         assert_eq!(notice.level, NoticeLevel::Info);
         let notice = app.toggle_theme();
-        assert_eq!(app.theme, ThemeChoice::Dark);
-        assert_eq!(notice.text, "主题: 深色");
+        assert_eq!(app.theme, ThemeChoice::Nord);
+        assert_eq!(notice.text, "主题: Nord");
 
+        // The classics announce themselves by name, which is the same word in
+        // either language.
         app.lang = Lang::En;
         let notice = app.toggle_theme();
+        assert_eq!(app.theme, ThemeChoice::Gruvbox);
+        assert_eq!(notice.text, "Theme: Gruvbox");
+        let notice = app.toggle_theme();
+        assert_eq!(app.theme, ThemeChoice::Dracula);
+        assert_eq!(notice.text, "Theme: Dracula");
+        let notice = app.toggle_theme();
+        assert_eq!(app.theme, ThemeChoice::Solarized);
+        assert_eq!(notice.text, "Theme: Solarized");
+
+        // And the ring comes home.
+        let notice = app.toggle_theme();
+        assert_eq!(app.theme, ThemeChoice::Dark);
+        assert_eq!(notice.text, "Theme: dark");
+        let notice = app.toggle_theme();
+        assert_eq!(app.theme, ThemeChoice::Light);
         assert_eq!(notice.text, "Theme: light");
     }
 
@@ -2574,6 +2781,41 @@ mod tests {
         app.expire_notices(now + TOAST_LIFETIME + std::time::Duration::from_millis(1));
         assert!(app.notices.is_empty(), "and the box has nothing left to hold");
         assert_eq!(app.log.len(), 2, "the log keeps them all");
+    }
+
+    /// Full Auto is a window, not a mode: when its time is up the mode falls
+    /// back to Auto and the log says why. The pump's tick, not a keypress, is
+    /// what closes it.
+    #[test]
+    fn full_auto_reverts_when_its_window_elapses() {
+        use crate::exec::executor::Mode;
+        let mut app = App::default();
+        crate::views::assistant::cycle_mode(&mut app); // Auto -> FullAuto
+        assert_eq!(app.assistant.mode, Some(Mode::FullAuto));
+        let until = app.assistant.full_auto_until.expect("the window is armed");
+
+        // Before the deadline nothing moves.
+        app.expire_full_auto(until - std::time::Duration::from_millis(1));
+        assert_eq!(app.assistant.mode, Some(Mode::FullAuto));
+        assert_eq!(app.assistant.full_auto_until, Some(until));
+
+        app.expire_full_auto(until);
+        assert_eq!(app.assistant.mode, Some(Mode::Auto), "the fallback");
+        assert_eq!(app.assistant.full_auto_until, None, "and the window shut");
+        let said = app.strings().asst_full_auto_expired;
+        assert!(
+            app.log.iter().any(|notice| notice.text == said),
+            "it said why: {:?}",
+            app.log
+        );
+
+        // And the pump is the clock that does it in the running app.
+        crate::views::assistant::cycle_mode(&mut app); // Auto -> FullAuto
+        assert_eq!(app.assistant.mode, Some(Mode::FullAuto));
+        app.assistant.full_auto_until = Some(Instant::now() - std::time::Duration::from_millis(1));
+        app.pump();
+        assert_eq!(app.assistant.mode, Some(Mode::Auto));
+        assert_eq!(app.assistant.full_auto_until, None);
     }
 
     /// The view rota walks all five and wraps in both directions: no view is
@@ -2779,6 +3021,35 @@ mod tests {
         assert!(app.transport_locked, "a pinned transport stays pinned");
         let notice = app.toggle_transport();
         assert_eq!(notice.level, NoticeLevel::Warn);
+    }
+
+    /// The signal reading belongs to the link: a dial carries the reading the
+    /// scan took of that board, and the pump takes it back once there is no
+    /// link left for the top bar to describe.
+    #[test]
+    fn the_signal_reading_belongs_to_the_link() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // A dial that never lands: the reading goes with the dial — the scan
+        // heard the board, and that is a fact worth showing while it is being
+        // reached — and the failure takes it back.
+        app.connect_to_board("nonsense", Some(-52), true);
+        assert_eq!(app.signal_dbm, Some(-52), "the reading went with the dial");
+        assert!(pump_until(&mut app, |app| app.dialing.is_none()));
+        assert_eq!(app.signal_dbm, None, "a failed dial leaves nothing showing");
+
+        // A live link keeps it; hanging up drops it.
+        app.dial(&Dial::Stdio("-".to_string()))
+            .expect("the loopback opens");
+        assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+        app.signal_dbm = Some(-40);
+        app.pump();
+        assert_eq!(app.signal_dbm, Some(-40), "a live link keeps its reading");
+        app.disconnect();
+        app.pump();
+        assert_eq!(app.signal_dbm, None, "hanging up takes the reading with it");
     }
 
     /// A device's *questions* are answered on the wire.
@@ -3051,6 +3322,10 @@ mod tests {
                 name: Some(name.to_string()),
                 id: id.to_string(),
                 nus,
+                // Signal is the picker's business; the scan's own tests are
+                // about which boards get dialled, not how loudly they were
+                // heard on the way.
+                rssi: None,
             }
         }
 
@@ -3350,91 +3625,6 @@ mod tests {
         assert!(pump_until(&mut app, |app| app.connected()));
         assert_eq!(app.transport, Transport::Ble);
         (app, wire)
-    }
-
-    /// Build one *unfinished* management fragment: a response in progress.
-    ///
-    /// A scan streams its results this way — the firmware sends each one with
-    /// no final flag, and only `@scan done` ends it — so a test that wants to
-    /// see the list grow needs this rather than `answer`'s finished frame.
-    fn partial(id: u32, body: &str) -> Vec<u8> {
-        let mut frame = Vec::new();
-        frame.extend_from_slice(b"LK");
-        frame.push(crate::protocol::MGMT_API_MAJOR);
-        frame.push(2);
-        frame.extend_from_slice(&id.to_le_bytes());
-        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&0u16.to_le_bytes());
-        frame.extend_from_slice(body.as_bytes());
-        frame
-    }
-
-    /// Build one management response for `id`, framed the way the bridge
-    /// frames them, ending with the flag that says the answer is complete.
-    fn answer(id: u32, body: &str) -> Vec<u8> {
-        let mut frame = Vec::new();
-        frame.extend_from_slice(b"LK");
-        frame.push(crate::protocol::MGMT_API_MAJOR);
-        frame.push(2);
-        frame.extend_from_slice(&id.to_le_bytes());
-        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&crate::protocol::MGMT_FLAG_FINAL.to_le_bytes());
-        frame.extend_from_slice(body.as_bytes());
-        frame
-    }
-
-    /// The management frames the host sent, once they have left for the wire.
-    ///
-    /// Polled rather than read once, because the bytes cross a thread on their
-    /// way out and asking immediately is asking before they have arrived.
-    fn asked_frames(wire: &crate::transport::testing::MemoryLink) -> Vec<Vec<u8>> {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let frames = wire.take_management();
-            if !frames.is_empty() || Instant::now() > deadline {
-                return frames;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    /// The id the host just asked with, read out of the frame it sent.
-    ///
-    /// Read from the bytes rather than parsed, because the header parser
-    /// accepts *responses* only — a request's own header is deliberately not
-    /// something it accepts, so that a reply can never be mistaken for the
-    /// question that caused it.
-    fn asked_id(wire: &crate::transport::testing::MemoryLink) -> u32 {
-        // The *last* frame, not the first: a link that has just opened is
-        // mid-sequence through the on-connect reads, so the frame this call is
-        // about is the latest one out — and the earlier ones belong to the
-        // questions that came before it.
-        let frames = asked_frames(wire);
-        assert!(!frames.is_empty(), "no question was asked");
-        let bytes = frames.last().expect("one frame");
-        assert_eq!(&bytes[..2], b"LK", "the magic");
-        assert_eq!(bytes[3], crate::protocol::MGMT_REQUEST_TYPE);
-        let expected = u16::from_le_bytes([bytes[8], bytes[9]]);
-        assert!(expected > 0, "nothing was asked");
-        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
-    }
-
-    /// The command body of the last question that went out.
-    ///
-    /// The management header is a fixed prefix, so the body is everything after
-    /// it: this is how a test says *which* question was asked without parsing
-    /// the frame properly, since parsing belongs to the protocol module.
-    /// Whether `expected` is among the questions that went out.
-    ///
-    /// All of them, not the last: opening a link asks the on-connect reads in
-    /// front of whatever a test then does, so the frame a test cares about is
-    /// rarely the newest one out. This is the assertion these tests actually
-    /// mean — "the command was sent" — stated directly rather than inferred
-    /// from a position that the hello has moved.
-    fn asked_includes(wire: &crate::transport::testing::MemoryLink, expected: &[u8]) -> bool {
-        asked_frames(wire)
-            .iter()
-            .any(|bytes| bytes[crate::protocol::MGMT_HEADER_SIZE..] == *expected)
     }
 
     /// Asking the bridge what it is must fill the grid it is drawn from.
@@ -3820,6 +4010,49 @@ mod tests {
         assert_eq!(sent, b"x");
     }
 
+    /// The Enter mode is a fact about the wire rather than about one key: a
+    /// command sent from a button is a line too, and it is spelled the same
+    /// way a typed one is.
+    #[test]
+    fn a_command_is_spelled_the_way_the_enter_mode_asks() {
+        use crate::serial::keys::EnterMode;
+        for (mode, expected) in [
+            (EnterMode::Raw, "version\r"),
+            (EnterMode::Cr, "version\r"),
+            (EnterMode::Lf, "version\n"),
+            (EnterMode::Crlf, "version\r\n"),
+        ] {
+            let (mut app, wire) = connected(Lang::Zh);
+            app.enter = mode;
+            assert!(app.send_command("version"));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut sent = Vec::new();
+            while sent.len() < expected.len() && Instant::now() < deadline {
+                sent.extend(wire.take_sent());
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(String::from_utf8_lossy(&sent), expected, "{mode:?}");
+        }
+    }
+
+    /// A paste's own newlines take the Enter mode's spelling too: a target
+    /// that wants `\r` does not want `\n` lines just because they arrived in
+    /// one gesture.
+    #[test]
+    fn a_paste_is_spelled_the_way_the_enter_mode_asks() {
+        use crate::serial::keys::EnterMode;
+        let (mut app, wire) = connected(Lang::Zh);
+        app.enter = EnterMode::Cr;
+        assert!(app.paste("a\nb\n"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut sent = Vec::new();
+        while sent.len() < 4 && Instant::now() < deadline {
+            sent.extend(wire.take_sent());
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(String::from_utf8_lossy(&sent), "a\rb\r");
+    }
+
     /// A half-typed line belongs to the session that typed it: carrying it into
     /// the next session would send a stranger your keystrokes.
     #[test]
@@ -3856,5 +4089,67 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         app.pump();
         assert!(app.watch.is_empty(), "{:?}", app.watch);
+    }
+
+    /// The choices a user would resent retyping are written the moment they
+    /// change, so a kill after any of them costs nothing.
+    #[test]
+    fn choices_are_written_as_they_change() {
+        let path = std::env::temp_dir().join(format!(
+            "linkr-tui-settings-app-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        app.settings = Some(crate::settings::SettingsStore::at(&path));
+        app.toggle_transport();
+        app.set_view(View::Network);
+        app.toggle_language();
+        let read = crate::settings::SettingsStore::at(&path).read();
+        assert_eq!(read.transport, Some(Transport::Lan));
+        assert_eq!(read.view, Some(View::Network));
+        assert_eq!(read.lang, Some(Lang::En));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The board's address outlives the run that dialled it — and a LAN dial,
+    /// which was never about a board, does not forget it.
+    #[test]
+    fn a_board_address_outlives_the_run() {
+        use crate::transport::ble::Selection;
+
+        let path = std::env::temp_dir().join(format!(
+            "linkr-tui-settings-address-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.settings = Some(crate::settings::SettingsStore::at(&path));
+        app.last_dial = Some(Dial::Ble(Selection::Address(
+            "EE:C7:42:34:48:CF".to_string(),
+        )));
+        app.set_view(View::Terminal);
+        assert_eq!(
+            crate::settings::SettingsStore::at(&path).read().address,
+            "EE:C7:42:34:48:CF"
+        );
+
+        app.last_dial = Some(Dial::Lan {
+            host: "192.168.0.100".to_string(),
+            token: None,
+        });
+        app.set_view(View::Terminal);
+        assert_eq!(
+            crate::settings::SettingsStore::at(&path).read().address,
+            "EE:C7:42:34:48:CF",
+            "a LAN dial is not about a board"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

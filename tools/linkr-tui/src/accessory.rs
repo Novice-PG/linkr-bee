@@ -46,6 +46,21 @@ pub struct UartSettings {
     pub flow: String,
 }
 
+impl UartSettings {
+    /// The spec the way the wire and the settings field spell it:
+    /// `baud,data,parity,stop,flow`, lower case.
+    pub fn spec(&self) -> String {
+        format!(
+            "{},{},{},{},{}",
+            self.baud,
+            self.data_bits,
+            self.parity.to_ascii_lowercase(),
+            self.stop_bits,
+            self.flow.to_ascii_lowercase()
+        )
+    }
+}
+
 /// Build `@u=<baud>,<data>,<parity>,<stop>,<flow>`.
 pub fn set_uart_command(s: &UartSettings) -> Result<String, String> {
     if !(AccessoryLimits::MIN_BAUD..=AccessoryLimits::MAX_BAUD).contains(&s.baud) {
@@ -69,10 +84,39 @@ pub fn set_uart_command(s: &UartSettings) -> Result<String, String> {
     if !AccessoryLimits::FLOW.contains(&flow.as_str()) {
         return Err("flow must be none or rtscts".to_string());
     }
-    Ok(format!(
-        "@u={},{},{},{},{}",
-        s.baud, s.data_bits, parity, s.stop_bits, flow
-    ))
+    Ok(format!("@u={}", s.spec()))
+}
+
+/// Parse `baud,data,parity,stop,flow` as a settings field or `--uart` spells
+/// it.
+///
+/// Refused here rather than by the bridge, for the same reason
+/// [`set_uart_command`] refuses: a value the firmware cannot take is a value
+/// the user should be told about before a round trip and not after. This is
+/// the shape only — the ranges are [`set_uart_command`]'s to enforce.
+pub fn parse_uart_spec(spec: &str) -> Result<UartSettings, String> {
+    let fields: Vec<&str> = spec.split(',').map(str::trim).collect();
+    if fields.len() != 5 {
+        return Err(format!(
+            "'{spec}' is not baud,data,parity,stop,flow — five fields, as in 115200,8,n,1,none"
+        ));
+    }
+    let baud: u32 = fields[0]
+        .parse()
+        .map_err(|_| format!("'{}' is not a baud rate", fields[0]))?;
+    let data_bits: u8 = fields[1]
+        .parse()
+        .map_err(|_| format!("'{}' is not a data-bit count", fields[1]))?;
+    let stop_bits: u8 = fields[3]
+        .parse()
+        .map_err(|_| format!("'{}' is not a stop-bit count", fields[3]))?;
+    Ok(UartSettings {
+        baud,
+        data_bits,
+        parity: fields[2].to_string(),
+        stop_bits,
+        flow: fields[4].to_string(),
+    })
 }
 
 /// Build `@w=<ssid>,<password>`, `@w off` or `@w scan`. A comma in an SSID
@@ -253,12 +297,58 @@ pub fn wifi_name_of(result: &str) -> String {
     name.trim().to_string()
 }
 
-/// Peel a trailing ` -54dBm` (or ` -54dB`) off `value`, when there is one.
-fn peel_signal(value: &mut String) {
-    let line = value.trim_end();
-    let Some(head) = line.strip_suffix("dBm").or_else(|| line.strip_suffix("dB")) else {
-        return;
+/// A scan line taken apart, in the shape a row can draw: the name, the signal
+/// when the firmware wrote a readable one, and what sits between them — the
+/// security and the channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiResult {
+    pub name: String,
+    /// The signal, in dBm, when the line carried a readable one.
+    pub signal_dbm: Option<i32>,
+    /// The radio's other notes, `wpa2 ch=6` shaped, with the signal peeled
+    /// off. Empty when the line had none.
+    pub rest: String,
+}
+
+/// Take a scan result apart: `MyNet wpa2 ch=6 -54dBm` becomes the name, the
+/// signal, and `wpa2 ch=6`.
+///
+/// The list wants the three separately — the bars go in front of the row, the
+/// name is what joining takes, and the rest is context — which is why this
+/// peels once and hands the pieces back rather than making every caller
+/// re-find the same boundary.
+pub fn parse_wifi_result(line: &str) -> WifiResult {
+    let body = line.trim();
+    let body = body.strip_prefix("@scan result ").unwrap_or(body).trim();
+    let (without_signal, signal_dbm) = match signal_at(body) {
+        Some((at, dbm)) => (body[..at].trim_end(), Some(dbm)),
+        None => (body, None),
     };
+    let name = wifi_name_of(without_signal);
+    // Peeled by truncation, so the name's byte length is where the rest
+    // starts; `get` rather than a slice because a name that was only
+    // whitespace would put the index out of range.
+    let rest = without_signal
+        .get(name.len()..)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    WifiResult {
+        name,
+        signal_dbm,
+        rest,
+    }
+}
+
+/// The signal at the end of a scan line: where its text begins — the index of
+/// the space before the number — and the number itself.
+///
+/// The firmware writes `@scan result <name> <security> ch=<n> <rssi>dBm`, and
+/// the signal is always last. The name-peeler and the signal reader need the
+/// same boundary, so it is found once.
+fn signal_at(value: &str) -> Option<(usize, i32)> {
+    let line = value.trim_end();
+    let head = line.strip_suffix("dBm").or_else(|| line.strip_suffix("dB"))?;
     let head = head.trim_end();
     let digits = head.trim_end_matches(|c: char| c.is_ascii_digit());
     let rest = digits.trim_end_matches(['+', '-']);
@@ -268,9 +358,20 @@ fn peel_signal(value: &mut String) {
     // number, not a signal with nothing to signal.
     if digits.len() == head.len() || rest.len() + 1 < digits.len() || end == rest.len() || end == 0
     {
-        return;
+        return None;
     }
-    value.truncate(end);
+    let number = line.get(end..)?.trim();
+    let number = number
+        .strip_suffix("dBm")
+        .or_else(|| number.strip_suffix("dB"))?;
+    Some((end, number.trim().parse::<i32>().ok()?))
+}
+
+/// Peel a trailing ` -54dBm` (or ` -54dB`) off `value`, when there is one.
+fn peel_signal(value: &mut String) {
+    if let Some((at, _)) = signal_at(value) {
+        value.truncate(at);
+    }
 }
 
 /// Peel a trailing ` ch=6` off `value`, when there is one.
@@ -655,6 +756,37 @@ mod tests {
         // A name that ends in a number is a name: there is no signal without
         // a signal's other fields.
         assert_eq!(wifi_name_of("Foo54dBm"), "Foo54dBm");
+    }
+
+    /// A scan line comes apart into the three pieces a row draws: the name a
+    /// join takes, the signal the bars are ranked by, and the radio's notes
+    /// between them.
+    #[test]
+    fn a_scan_result_line_comes_apart_into_name_signal_and_notes() {
+        let parsed = parse_wifi_result("@scan result My Home Network wpa2 ch=6 -48dBm");
+        assert_eq!(parsed.name, "My Home Network");
+        assert_eq!(parsed.signal_dbm, Some(-48));
+        assert_eq!(parsed.rest, "wpa2 ch=6");
+
+        // Both unit spellings, and a plus sign, are readable.
+        assert_eq!(
+            parse_wifi_result("BenchNet wpa2 ch=6 -54dB").signal_dbm,
+            Some(-54)
+        );
+        assert_eq!(
+            parse_wifi_result("BenchNet wpa2 ch=6 +54dBm").signal_dbm,
+            Some(54)
+        );
+
+        // No signal on the line: no reading to report, notes kept as found.
+        let open = parse_wifi_result("OpenNet open");
+        assert_eq!(open.name, "OpenNet");
+        assert_eq!(open.signal_dbm, None);
+        assert_eq!(open.rest, "open");
+        let bare = parse_wifi_result("Foo54dBm");
+        assert_eq!(bare.name, "Foo54dBm");
+        assert_eq!(bare.signal_dbm, None);
+        assert_eq!(bare.rest, "");
     }
 
     #[test]

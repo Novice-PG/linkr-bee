@@ -63,6 +63,22 @@ impl ByteTrace {
         self.file.is_some() || self.stderr
     }
 
+    /// Whether both directions are being traced to standard error, which the
+    /// palette reads to know which way its switch points.
+    pub fn tracing_stderr(&self) -> bool {
+        self.stderr
+    }
+
+    /// Turn the standard-error trace on or off while the session runs.
+    ///
+    /// A switch rather than a constructor-only option because the question a
+    /// trace answers — "did what I typed get there" — is usually asked *after*
+    /// something went wrong, and a switch that needed a restart would make the
+    /// user reproduce the problem to see it.
+    pub fn set_stderr(&mut self, on: bool) {
+        self.stderr = on;
+    }
+
     /// Bytes that arrived from the device.
     pub fn rx(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -167,5 +183,21 @@ mod tests {
         trace.tx(b"ignored");
         trace.tx_command("@w=ssid,secret");
         assert!(ByteTrace::none().with_stderr().is_active());
+    }
+
+    /// The standard-error trace can be switched on and off while the session
+    /// runs: the question it answers is asked after something already went
+    /// wrong, and a switch that needed a restart would make the user reproduce
+    /// the problem to watch it.
+    #[test]
+    fn the_stderr_trace_switches_at_runtime() {
+        let mut trace = ByteTrace::none();
+        assert!(!trace.tracing_stderr(), "off until asked for");
+        trace.set_stderr(true);
+        assert!(trace.tracing_stderr());
+        assert!(trace.is_active(), "a trace without a file is still a trace");
+        trace.set_stderr(false);
+        assert!(!trace.tracing_stderr());
+        assert!(!trace.is_active(), "and back to recording nothing");
     }
 }

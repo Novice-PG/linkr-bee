@@ -107,6 +107,38 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{:.1} {}", step, UNITS[at])
 }
 
+/// The four bars a WiFi list draws for a signal strength, strongest reading
+/// first: `▂▄▆█` at -55 dBm or better, one bar fewer for each ten less.
+///
+/// A number on its own is a measurement; four bars are a ranking, which is
+/// what a list is read for — which of these is worth joining. The thresholds
+/// are the usual WiFi ones, and the reading is the firmware's own.
+pub fn signal_bars(dbm: i32) -> &'static str {
+    match dbm {
+        -55.. => "▂▄▆█",
+        -65..=-56 => "▂▄▆_",
+        -75..=-66 => "▂▄__",
+        _ => "▂___",
+    }
+}
+
+/// A `width`-cell meter, split into filled and empty halves so a caller can
+/// colour them apart: `█` for the share of `used` in `total`, `░` for the
+/// rest — the glyph pair ratatui's own `Gauge` draws, for the rows that live
+/// inside a paragraph rather than in an area of their own.
+///
+/// `used` is clamped to `total`; a zero `total` is all track, because a share
+/// with no denominator is not a share.
+pub fn meter(used: u64, total: u64, width: usize) -> (String, String) {
+    // Wide arithmetic: a hostile `used/total` off the wire must not overflow,
+    // and half-up is what lets a share just past the middle fill the middle
+    // cell. A zero denominator is all track, hence the 1.
+    let used = u128::from(used.min(total));
+    let total = u128::from(total);
+    let filled = ((used * width as u128 + total / 2) / total.max(1)) as usize;
+    ("█".repeat(filled), "░".repeat(width - filled))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +236,51 @@ mod tests {
             fill("已保存 {} 字节到 {}", &["41".into(), "x.log".into()]),
             "已保存 41 字节到 x.log"
         );
+    }
+
+    /// The bars rank a reading the way a WiFi list does — full at -55 dBm or
+    /// better, one bar fewer for each ten less — and every reading gets at
+    /// least one bar rather than a blank that looks like a missing device.
+    #[test]
+    fn signal_bars_rank_a_reading() {
+        assert_eq!(signal_bars(-30), "▂▄▆█");
+        assert_eq!(signal_bars(-55), "▂▄▆█");
+        assert_eq!(signal_bars(-56), "▂▄▆_");
+        assert_eq!(signal_bars(-65), "▂▄▆_");
+        assert_eq!(signal_bars(-66), "▂▄__");
+        assert_eq!(signal_bars(-75), "▂▄__");
+        assert_eq!(signal_bars(-76), "▂___");
+        assert_eq!(signal_bars(-100), "▂___");
+        assert_eq!(columns(signal_bars(-54)), 4, "four columns, whichever bars");
+    }
+
+    /// A meter is `width` cells whatever the share: half up, clamped to the
+    /// ends, and all track when there is no denominator.
+    #[test]
+    fn a_meter_fills_in_proportion() {
+        assert_eq!(meter(0, 16384, 10), ("".into(), "░".repeat(10)));
+        assert_eq!(meter(16384, 16384, 10), ("█".repeat(10), "".into()));
+        assert_eq!(
+            meter(8192, 16384, 10),
+            ("█".repeat(5), "░".repeat(5)),
+            "half is half"
+        );
+        assert_eq!(meter(1, 3, 3), ("█".into(), "░░".into()), "a third rounds up");
+        assert_eq!(meter(9, 10, 10), ("█".repeat(9), "░".into()));
+        // Over-full and no denominator never spill the width.
+        assert_eq!(meter(20_000, 16384, 10), ("█".repeat(10), "".into()));
+        assert_eq!(meter(5, 0, 4), ("".into(), "░".repeat(4)));
+        assert_eq!(
+            meter(u64::MAX, u64::MAX, 10),
+            ("█".repeat(10), "".into()),
+            "the widest readings still add up"
+        );
+        // The two halves always add up to exactly the width asked for.
+        for (used, total) in [(0u64, 1u64), (1, 7), (999, 1000), (5, 2), (0, 0)] {
+            for width in [0usize, 1, 3, 10] {
+                let (fill, track) = meter(used, total, width);
+                assert_eq!(columns(&fill) + columns(&track), width, "{used}/{total}");
+            }
+        }
     }
 }

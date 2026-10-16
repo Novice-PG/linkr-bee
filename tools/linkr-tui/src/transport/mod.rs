@@ -399,6 +399,8 @@ pub mod testing {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[derive(Clone)]
     pub struct MemoryLink {
@@ -499,6 +501,96 @@ pub mod testing {
         fn closed_flag(&self) -> bool {
             *self.closed.lock().expect("link lock")
         }
+    }
+
+    /// Build one *unfinished* management fragment: a response in progress.
+    ///
+    /// A scan streams its results this way — the firmware sends each one with
+    /// no final flag, and only `@scan done` ends it — so a test that wants to
+    /// see the list grow needs this rather than `answer`'s finished frame.
+    pub fn partial(id: u32, body: &str) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"LK");
+        frame.push(crate::protocol::MGMT_API_MAJOR);
+        frame.push(2);
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&0u16.to_le_bytes());
+        frame.extend_from_slice(body.as_bytes());
+        frame
+    }
+
+    /// Build one management response for `id`, framed the way the bridge
+    /// frames them, ending with the flag that says the answer is complete.
+    pub fn answer(id: u32, body: &str) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"LK");
+        frame.push(crate::protocol::MGMT_API_MAJOR);
+        frame.push(2);
+        frame.extend_from_slice(&id.to_le_bytes());
+        frame.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        frame.extend_from_slice(&crate::protocol::MGMT_FLAG_FINAL.to_le_bytes());
+        frame.extend_from_slice(body.as_bytes());
+        frame
+    }
+
+    /// The management frames the host sent, once they have left for the wire.
+    ///
+    /// Polled until the wire falls quiet, not merely until the first frame
+    /// lands: the bytes cross a thread on their way out, so two asks sent back
+    /// to back can arrive a drain apart, and a test that stopped at the first
+    /// arrival would judge the conversation by whichever frame won the race.
+    pub fn asked_frames(wire: &MemoryLink) -> Vec<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut frames = Vec::new();
+        loop {
+            // A quiet puff of time: one hand-off may still be in flight when
+            // the previous one lands.
+            thread::sleep(Duration::from_millis(2));
+            let arrived = wire.take_management();
+            let past_deadline = Instant::now() > deadline;
+            if arrived.is_empty() && (!frames.is_empty() || past_deadline) {
+                return frames;
+            }
+            frames.extend(arrived);
+            if past_deadline {
+                return frames;
+            }
+        }
+    }
+
+    /// The id the host just asked with, read out of the frame it sent.
+    ///
+    /// Read from the bytes rather than parsed, because the header parser
+    /// accepts *responses* only — a request's own header is deliberately not
+    /// something it accepts, so that a reply can never be mistaken for the
+    /// question that caused it.
+    pub fn asked_id(wire: &MemoryLink) -> u32 {
+        // The *last* frame, not the first: a link that has just opened is
+        // mid-sequence through the on-connect reads, so the frame this call is
+        // about is the latest one out — and the earlier ones belong to the
+        // questions that came before it.
+        let frames = asked_frames(wire);
+        assert!(!frames.is_empty(), "no question was asked");
+        let bytes = frames.last().expect("one frame");
+        assert_eq!(&bytes[..2], b"LK", "the magic");
+        assert_eq!(bytes[3], crate::protocol::MGMT_REQUEST_TYPE);
+        let expected = u16::from_le_bytes([bytes[8], bytes[9]]);
+        assert!(expected > 0, "nothing was asked");
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+    }
+
+    /// Whether `expected` is among the questions that went out.
+    ///
+    /// All of them, not the last: opening a link asks the on-connect reads in
+    /// front of whatever a test then does, so the frame a test cares about is
+    /// rarely the newest one out. This is the assertion these tests actually
+    /// mean — "the command was sent" — stated directly rather than inferred
+    /// from a position that the hello has moved.
+    pub fn asked_includes(wire: &MemoryLink, expected: &[u8]) -> bool {
+        asked_frames(wire)
+            .iter()
+            .any(|bytes| bytes[crate::protocol::MGMT_HEADER_SIZE..] == *expected)
     }
 
     struct MemoryReader {

@@ -8,6 +8,7 @@
 pub mod body;
 pub mod chrome;
 pub mod overlay;
+pub mod scroll;
 pub mod sidebar;
 pub mod toast;
 
@@ -98,13 +99,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let regions = regions(area, app.sidebar_visible);
 
-    draw_bar(
-        frame,
-        app,
-        regions.top_bar,
-        chrome::top_left(app, &theme),
-        chrome::top_right(app, &theme),
-    );
+    draw_top_bar(frame, app, regions.top_bar);
     // Closed, the rail is a zero-width strip and the centre already owns the
     // band, so there is nothing to paint and no divider to draw.
     if app.sidebar_visible {
@@ -149,6 +144,46 @@ fn draw_bar(
         // truncated into nonsense.
         frame.render_widget(Paragraph::new(right).style(ground), area);
     }
+}
+
+/// The top bar: [`draw_bar`]'s split, plus the traffic unit at the right end —
+/// the newest rate and the graph behind it.
+///
+/// The unit takes a slice of its own, so the counters' strip is laid out
+/// against it rather than over it, and it is dropped whole when the bar cannot
+/// hold it: a bar that let the unit eat into the counters would move the
+/// numbers whenever the traffic changed. With the unit gone, the counters and
+/// the left half fall back to exactly what [`draw_bar`] does with them.
+fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let left = chrome::top_left(app, &theme);
+    let right = chrome::top_right(app, &theme);
+    let right_width = right.width() as u16;
+    // The counters win the row, then the unit, then the left half — the order
+    // the information is missed in.
+    let unit = chrome::traffic_unit(area.width);
+    let unit = if right_width + unit < area.width { unit } else { 0 };
+    if unit == 0 {
+        draw_bar(frame, app, area, left, right);
+        return;
+    }
+
+    let [bar_area, unit_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(unit)]).areas(area);
+    draw_bar(frame, app, bar_area, left, right);
+
+    let label = chrome::traffic_label(app, &theme);
+    let label_width = (label.width() as u16).min(unit);
+    let [label_area, graph_area] = Layout::horizontal([
+        Constraint::Length(label_width),
+        Constraint::Min(0),
+    ])
+    .areas(unit_area);
+    frame.render_widget(
+        Paragraph::new(label).style(chrome::bar_style(&theme)),
+        label_area,
+    );
+    frame.render_widget(chrome::traffic_graph(app, &theme), graph_area);
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -205,6 +240,13 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
             area,
         );
         draw_status_pill(frame, app, area);
+        // The pane's own scrollbar, when the history runs past the window: the
+        // bar rides the pane's right column, over the device's own output,
+        // because a whole column of the terminal is worth more than a gutter
+        // that is empty most of the time.
+        let (total, top, viewport) =
+            crate::views::terminal::scroll_position(&app.terminal, area.height as usize);
+        scroll::draw(frame, area, total, top, viewport, theme.scrollbar());
     }
 }
 
@@ -632,6 +674,79 @@ mod tests {
         // Wide enough, and it is back.
         let wide = render_to_text(&app, 110, 30);
         assert!(wide.contains('●'), "{wide}");
+    }
+
+    /// The pane carries its scrollbar only when its history runs past the
+    /// window, and the thumb walks up the right column as the user scrolls
+    /// back — resting on the bottom row while the view follows the tail.
+    #[test]
+    fn the_terminal_pane_carries_a_scrollbar_when_the_history_runs_past_it() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // The pane's last column, and the pane's rows: the middle band, minus
+        // the pill's own margin.
+        let column = 110 - 1;
+        let thumb = |app: &App| -> Vec<u16> {
+            let buffer = render_buffer(app, 110, 30).expect("a frame");
+            (1..29)
+                .filter(|y| buffer[(column, *y)].symbol() == "┃")
+                .collect()
+        };
+
+        assert!(thumb(&app).is_empty(), "a fresh pane drew a bar");
+
+        // More rows than the pane can show: the bar appears, its thumb on the
+        // bottom while the view follows the tail.
+        app.terminal.push_text(&"row\n".repeat(200));
+        let following = thumb(&app);
+        assert!(!following.is_empty(), "no bar with 200 rows of history");
+        assert_eq!(*following.last().unwrap(), 28, "the tail is not the bottom");
+
+        // Scrolled back, the thumb sits above where it did: the same content,
+        // walked up the track.
+        app.scroll_terminal(150);
+        let back = thumb(&app);
+        assert!(!back.is_empty(), "the bar went away when it was needed most");
+        assert!(back[0] < following[0], "{back:?} did not move up from {following:?}");
+
+        // Back at the tail, `scroll_terminal_down` resumes following, and the
+        // bar is on the bottom row again.
+        app.scroll_terminal_down(usize::MAX / 2);
+        assert_eq!(*thumb(&app).last().unwrap(), 28, "the tail did not resume");
+    }
+
+    /// The top bar's traffic unit shows when the bar has room: the rate's
+    /// label and the block graph at the right end. A bar too narrow to spare
+    /// the columns keeps its counters and nothing else.
+    #[test]
+    fn the_top_bar_shows_the_traffic_graph_when_it_fits() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.traffic.rate = 300;
+        app.traffic
+            .window
+            .extend([0u64, 0, 120, 900, 6000, 2000, 300]);
+        app.clock = "19:52:50".to_string();
+
+        let text = render_to_text(&app, 120, 30);
+        let head = text.lines().next().unwrap_or_default().to_string();
+        assert!(head.contains("300 B/s"), "no rate label: {head:?}");
+        assert!(head.contains("RX 0 · TX 0"), "the counters left: {head:?}");
+        let buffer = render_buffer(&app, 120, 30).expect("a frame");
+        let blocks = (0..120u16)
+            .filter(|x| "▁▂▃▄▅▆▇█".contains(buffer[(*x, 0)].symbol()))
+            .count();
+        assert!(blocks >= 3, "the graph did not paint: {blocks} cells");
+
+        // The classic 80-column bar: the unit is the first thing given up.
+        let narrow = render_to_text(&app, 80, 30);
+        let head = narrow.lines().next().unwrap_or_default().to_string();
+        assert!(!head.contains("B/s"), "the graph stayed on a narrow bar: {head:?}");
+        assert!(head.contains("RX 0 · TX 0"), "the counters went with it: {head:?}");
     }
 
     /// A rendered frame shows the designed chrome: the top bar's counters, every

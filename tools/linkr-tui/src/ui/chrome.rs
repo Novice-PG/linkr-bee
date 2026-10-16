@@ -6,6 +6,7 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{RenderDirection, Sparkline};
 
 use crate::app::App;
 use crate::theme::Theme;
@@ -49,6 +50,49 @@ pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
     ])
 }
 
+/// The traffic unit's width at the right end of a `bar_width`-wide top bar:
+/// the current rate and the graph behind it.
+///
+/// Zero when the bar is too narrow to spare the columns. The unit is the last
+/// thing the bar gained and the first it gives up, because the counters and
+/// the clock read without it — and a hijacked full-width strip would push the
+/// session's own state off a small terminal.
+pub fn traffic_unit(bar_width: u16) -> u16 {
+    match bar_width {
+        120.. => 24,
+        104..=119 => 18,
+        92..=103 => 13,
+        _ => 0,
+    }
+}
+
+/// The unit's label: the newest rate, in both directions together — the same
+/// number the graph's newest column measures. The spaces are part of the label
+/// so the rate is held off the clock's tail and the graph's head.
+///
+/// The graph alone is shape, not scale: without this number a spike could just
+/// as well be a megabyte as a byte.
+pub fn traffic_label(app: &App, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {}/s ", crate::text::human_bytes(app.traffic.rate)),
+        theme.accent(),
+    ))
+}
+
+/// The graph: the sampled rates, newest at the right edge, painted in the
+/// accent its label shares.
+///
+/// The data is reversed with the direction so the widget's own rule — it draws
+/// the first samples it is given and stops at the area's width — drops the
+/// *oldest* overhang rather than the newest. A graph whose right edge went
+/// stale would be worse than no graph.
+pub fn traffic_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
+    Sparkline::default()
+        .data(app.traffic.window.iter().rev().copied())
+        .direction(RenderDirection::RightToLeft)
+        .style(theme.accent())
+}
+
 /// The bottom bar's left half: which region has the keyboard, which view is
 /// showing, and the session state.
 pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
@@ -68,6 +112,16 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
     spans.push(Span::styled(format!(" / {}", focus_detail(app, s)), theme.muted()));
     spans.push(Span::styled(DOT.to_string(), theme.muted()));
     spans.push(Span::styled(app.state_name().to_string(), state_style));
+    // The latch, while one is armed: the announcement times out, the chip
+    // does not, so a user who looked away still sees what the next key will
+    // carry.
+    if app.latch.is_armed() {
+        spans.push(Span::styled(DOT.to_string(), theme.muted()));
+        spans.push(Span::styled(
+            format!("{} {}", app.latch.names(), s.latch_pending),
+            theme.warn(),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -245,6 +299,43 @@ mod tests {
             assert_eq!(line.spans[0].style.fg, style.fg, "{state:?}");
             assert_eq!(line.spans[0].content.trim_end(), glyph, "{state:?}");
         }
+    }
+
+    /// The traffic unit appears only where it fits: nothing on a classic
+    /// 80-column bar, a wider slice for the graph as the bar grows.
+    #[test]
+    fn the_traffic_unit_grows_with_the_bar() {
+        assert_eq!(traffic_unit(80), 0);
+        assert_eq!(traffic_unit(91), 0);
+        assert_eq!(traffic_unit(92), 13);
+        assert_eq!(traffic_unit(103), 13);
+        assert_eq!(traffic_unit(104), 18);
+        assert_eq!(traffic_unit(119), 18);
+        assert_eq!(traffic_unit(120), 24);
+        assert_eq!(traffic_unit(200), 24);
+    }
+
+    /// The label is the rate in human bytes, held off its neighbours by a
+    /// space each side, in the same accent as the graph — the number and the
+    /// shape are one instrument.
+    #[test]
+    fn the_traffic_label_names_the_rate_in_human_bytes() {
+        let theme = Theme::DARK;
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        assert_eq!(line_text(&traffic_label(&app, &theme)), " 0 B/s ");
+        app.traffic.rate = 1536;
+        assert_eq!(line_text(&traffic_label(&app, &theme)), " 1.5 KB/s ");
+        assert_eq!(
+            traffic_label(&app, &theme).spans[0].style.fg,
+            Some(theme.accent)
+        );
+        assert_eq!(
+            traffic_label(&app, &Theme::LIGHT).spans[0].style.fg,
+            Some(Theme::LIGHT.accent)
+        );
     }
 
     /// The right half reads counters, speed, autoscroll and the clock, in that

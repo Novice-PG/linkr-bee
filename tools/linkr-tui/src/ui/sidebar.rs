@@ -1162,7 +1162,7 @@ mod tests {
         match &app.dialog {
             Some(crate::dialogs::Dialog::Prompt(prompt)) => {
                 assert_eq!(prompt.action, crate::dialogs::PromptAction::LanHost);
-                assert_eq!(prompt.answer(), "192.168.1.50", "the row is the field");
+                assert_eq!(prompt.field.answer(), "192.168.1.50", "the row is the field");
             }
             other => panic!("no host prompt: {other:?}"),
         }

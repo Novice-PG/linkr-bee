@@ -16,6 +16,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::{dialogs, palette};
 
+use super::scroll;
+
 /// How much of the region a dialog asks for.
 const DIALOG_WIDTH_PERCENT: u16 = 78;
 
@@ -139,6 +141,15 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     let mut lines = dialogs::lines(dialog, app, inner.width, body_height);
     lines.push(dialogs::legend(dialog, app.lang, &theme));
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), inner);
+
+    // The bar spans the body rows and stops above the legend: the legend is
+    // chrome, and a thumb beside it would claim the key hints scroll.
+    let window = Rect {
+        height: body_height as u16,
+        ..inner
+    };
+    let top = dialog.scroll().min(body.saturating_sub(body_height));
+    scroll::draw(frame, window, body, top, body_height, theme.scrollbar());
 }
 
 fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, area: Rect) {
@@ -160,6 +171,18 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
     lines.push(Line::default());
     lines.push(palette::legend(app.lang, &theme));
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), inner);
+
+    // The list's own scrollbar, on the rows the list actually occupies: the
+    // query line and the separator above it are chrome, and the legend below
+    // it is too.
+    let found = palette::matches(&state.query);
+    let list = Rect {
+        y: inner.y + 2,
+        height: visible as u16,
+        ..inner
+    };
+    let top = palette::window_start(state, found.len(), visible);
+    scroll::draw(frame, list, found.len(), top, visible, theme.scrollbar());
 }
 
 #[cfg(test)]
@@ -258,6 +281,62 @@ mod tests {
         assert!(head.contains("RX"), "the top bar survived: {head:?}");
         let rail = with.lines().nth(1).unwrap_or_default();
         assert!(rail.contains("Connection"), "the rail survived: {rail:?}");
+    }
+
+    /// The palette's list carries the bar when its rows run past the window,
+    /// and drops it when a query narrows the list to what fits: a track with
+    /// nothing to scroll reads as "there is more", the one thing it must not
+    /// mean.
+    #[test]
+    fn the_palette_list_carries_a_scrollbar_only_when_it_overflows() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        crate::palette::open(&mut app);
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(text.contains('┃'), "no bar down the full list:\n{text}");
+
+        // A query with a handful of answers: nothing to scroll, so no bar.
+        let state = app.palette.as_mut().expect("the palette is up");
+        state.query = "uart".to_string();
+        state.selected = 0;
+        state.window = 0;
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(!text.contains('┃'), "a bar with nothing to scroll:\n{text}");
+        assert!(text.contains("UART"), "the query matched nothing:\n{text}");
+    }
+
+    /// A dialog body longer than its box carries the bar down the inner right
+    /// column, over the body rows only: the thumb starts flush with the body's
+    /// first row, and the legend row stays chrome.
+    #[test]
+    fn a_dialog_body_that_overflows_carries_a_scrollbar() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        crate::dialogs::open_help(&mut app);
+
+        // The box's own arithmetic, mirrored: the same helpers `paint_dialog`
+        // puts the box and its bar where they are.
+        let screen = area(80, 24);
+        let region = crate::ui::regions(screen, true).centre;
+        let (width, ceiling) = wanted(region, DIALOG_WIDTH_PERCENT, region.height);
+        let dialog = app.dialog.as_ref().expect("the help is up");
+        let body = dialogs::body_height(&app, dialog, width.saturating_sub(2));
+        let rect = centred(region, width, box_height(body, ceiling));
+        let inner = app.theme().overlay_block("").inner(rect);
+        assert!(body > inner.height as usize - 1, "the help no longer overflows");
+
+        let buffer = ui::render_buffer(&app, 80, 24).expect("a frame");
+        let bar = inner.right() - 1;
+        assert_eq!(buffer[(bar, inner.y)].symbol(), "┃", "the top of the track");
+        assert_ne!(
+            buffer[(bar, inner.bottom() - 1)].symbol(),
+            "┃",
+            "the legend row grew a bar"
+        );
     }
 
     /// The palette is the top of the modal stack: with a dialog under it the

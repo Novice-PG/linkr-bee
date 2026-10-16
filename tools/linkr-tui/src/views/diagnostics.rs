@@ -275,10 +275,9 @@ fn message(text: &str, style: ratatui::style::Style, width: u16) -> Line<'static
 /// wider than its pane wraps, and a wrapped row shifts every row below it.
 fn row_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
     let budget = width as usize;
-    let label = text::pad_to(&text::clip_to(label, LABEL_COLUMNS), LABEL_COLUMNS);
-    let head = format!("{label}{SEPARATOR}");
-    let head_columns = text::columns(&head);
+    let (label, head_columns) = label_field(label);
     if head_columns >= budget {
+        let head = format!("{label}{SEPARATOR}");
         return Line::from(Span::styled(text::clip_to(&head, budget), theme.focus()));
     }
     let value = text::clip_to(value, budget - head_columns);
@@ -286,6 +285,75 @@ fn row_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static
         Span::styled(label, theme.focus()),
         Span::styled(SEPARATOR, theme.muted()),
         Span::styled(value, theme.text()),
+    ])
+}
+
+/// The label field of a grid row: padded to [`LABEL_COLUMNS`] *columns* — so a
+/// CJK label pads the same as an English one — with the column count of the
+/// field and the separator that follows it: what a value has left of the
+/// pane's width.
+fn label_field(label: &str) -> (String, usize) {
+    let padded = text::pad_to(&text::clip_to(label, LABEL_COLUMNS), LABEL_COLUMNS);
+    let head_columns = text::columns(&padded) + text::columns(SEPARATOR);
+    (padded, head_columns)
+}
+
+/// The meter's cells: enough to read a proportion off, short enough to ride a
+/// row at the narrowest pane the grid still fits in.
+const METER_CELLS: usize = 10;
+
+/// The buffer occupancy that counts as "about to drop".
+const METER_WARN_PERCENT: u64 = 80;
+
+/// The UART buffer row: `<used>/<total> <meter> <pct>% · drop <n>` when the
+/// reply carries a buffer pair and the pane has room for the extra columns,
+/// the documented row otherwise.
+///
+/// The buffer is the one count in the grid with a ceiling, and the ceiling is
+/// the interesting part: a rising meter is a pipeline backing up, and the far
+/// end of it is drops. The share is taken from the same `used/total` the web
+/// client prints, so a reply the browser understands is a reply this row
+/// measures; anything else keeps the row exactly as it was.
+fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) -> Line<'static> {
+    let raw = fmt_uart_buffer(groups);
+    let pair = get(groups, "uart", "buffer")
+        .and_then(|buffer| buffer.split_once('/'))
+        .and_then(|(used, total)| Some((used.parse::<u64>().ok()?, total.parse::<u64>().ok()?)))
+        .filter(|(_, total)| *total > 0);
+    let Some((used, total)) = pair else {
+        return row_line(label, &raw, width, theme);
+    };
+
+    let budget = width as usize;
+    let (label, head_columns) = label_field(label);
+    if head_columns >= budget {
+        return row_line(&label, &raw, width, theme);
+    }
+
+    let (fill, track) = text::meter(used, total, METER_CELLS);
+    // The share as the reader's own percentage: the meter shows it, the
+    // number states it, and both come from the pair the device sent.
+    let percent = (used.min(total) * 100 + total / 2) / total;
+    let dropped = get(groups, "uart", "dropped").unwrap_or("0");
+    let value = format!("{used}/{total} {fill}{track} {percent}% · drop {dropped}");
+    if text::columns(&value) > budget - head_columns {
+        // No room for the meter: the row is the documented one, unshrunk.
+        return row_line(&label, &raw, width, theme);
+    }
+
+    let ink = if percent >= METER_WARN_PERCENT {
+        theme.warn()
+    } else {
+        theme.accent()
+    };
+    Line::from(vec![
+        Span::styled(label, theme.focus()),
+        Span::styled(SEPARATOR, theme.muted()),
+        Span::styled(format!("{used}/{total} "), theme.text()),
+        Span::styled(fill, ink),
+        Span::styled(track, theme.muted()),
+        Span::styled(format!(" {percent}%"), theme.muted()),
+        Span::styled(format!(" · drop {dropped}"), theme.text()),
     ])
 }
 
@@ -322,7 +390,11 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
 
     if state.has_data() {
         for (label, value) in value_rows(&state.groups, app.lang) {
-            lines.push(row_line(label, &value, width, theme));
+            if label == s.diag_label_uart_buffer {
+                lines.push(uart_buffer_row(label, &state.groups, width, theme));
+            } else {
+                lines.push(row_line(label, &value, width, theme));
+            }
         }
         // Groups beyond the six designed rows stay visible, so a grid never
         // hides something the firmware reports.
@@ -452,6 +524,91 @@ mod tests {
         assert_eq!(zh[4].0, "WiFi");
         assert_eq!(zh[5].0, "上传队列");
         assert_eq!(zh[0].1, rows[0].1);
+    }
+
+    /// The UART buffer row measures the pair the device sent: the meter fills
+    /// in proportion, the percentage names the same share, and the drop count
+    /// stays on the row.
+    #[test]
+    fn the_uart_buffer_row_measures_the_share_in_use() {
+        let theme = Theme::DARK;
+        let row_of = |reply: &[&str], width: u16| {
+            let (groups, _) = parse_info_lines(reply.iter().copied());
+            uart_buffer_row("UART Buffer", &groups, width, &theme)
+        };
+        let text_of = |line: &Line<'static>| -> String {
+            line.spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+
+        let half = row_of(&["@info uart buffer=8192/16384 dropped=2"], 60);
+        assert!(
+            text_of(&half).contains("8192/16384 █████░░░░░ 50% · drop 2"),
+            "{:?}",
+            text_of(&half)
+        );
+
+        // Full, empty and over-full all read as their own share.
+        let full = text_of(&row_of(&["@info uart buffer=16384/16384"], 60));
+        assert!(full.contains("100%"), "{full}");
+        let empty = text_of(&row_of(&["@info uart buffer=0/16384"], 60));
+        assert!(empty.contains("░░░░░░░░░░ 0%"), "{empty}");
+        let over = text_of(&row_of(&["@info uart buffer=20000/16384"], 60));
+        assert!(over.contains("██████████ 100%"), "{over}");
+
+        // A share near the ceiling wears the warning colour: the bar is the
+        // thing that has to catch an eye before the drops do.
+        let nearly = row_of(&["@info uart buffer=14746/16384"], 60); // 90%
+        let fill = nearly
+            .spans
+            .iter()
+            .find(|span| span.content.contains('█'))
+            .expect("the meter is on the row");
+        assert_eq!(fill.style.fg, Some(theme.warn));
+        let half_fill = half
+            .spans
+            .iter()
+            .find(|span| span.content.contains('█'))
+            .expect("the meter is on the row");
+        assert_eq!(half_fill.style.fg, Some(theme.accent), "half is not a warning");
+    }
+
+    /// A pane without room for the meter, a reply without a pair and a pair
+    /// with no denominator all keep the documented row: the meter is an extra,
+    /// never a substitute.
+    #[test]
+    fn the_uart_buffer_row_falls_back_to_the_documented_value() {
+        let theme = Theme::DARK;
+        let row_of = |reply: &[&str], width: u16| -> String {
+            let (groups, _) = parse_info_lines(reply.iter().copied());
+            uart_buffer_row("UART Buffer", &groups, width, &theme)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+
+        // The meter row wants 16 head columns and 34 of value: 40 is short on
+        // purpose, and the pane gets the row it always had.
+        let narrow = row_of(&["@info uart buffer=8192/16384 dropped=2"], 40);
+        assert!(!narrow.contains('█') && !narrow.contains('░'), "{narrow}");
+        assert!(narrow.contains("8192/16384 · drop 2"), "{narrow}");
+
+        for reply in [
+            &["@info uart dropped=2"][..],
+            &["@info uart buffer=ready"][..],
+            &["@info uart buffer=0/0"][..],
+            &["@info uart buffer=1"][..],
+        ] {
+            let wide = row_of(reply, 60);
+            assert!(
+                !wide.contains('█') && !wide.contains('░'),
+                "{reply:?} grew a meter: {wide}"
+            );
+        }
+        assert_eq!(
+            row_of(&["@info uart dropped=2"], 60),
+            "UART Buffer   │ – · drop 2"
+        );
     }
 
     /// The label field is 14 *columns*. A CJK label is two columns per glyph, so

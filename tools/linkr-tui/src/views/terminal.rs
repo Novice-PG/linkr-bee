@@ -89,6 +89,65 @@ impl Utf8Stream {
     }
 }
 
+/// A run of cells the pointer dragged over.
+///
+/// Anchored to the emulator's own line space — absolute line number,
+/// scrollback included — and not to the screen: scrolling with a selection on
+/// screen must carry the highlight with the text it names, and a selection
+/// pinned to a row number would instead stay where the finger was and slowly
+/// cover something the user did not choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+impl Selection {
+    /// The two ends in reading order, so no consumer has to care which way
+    /// the drag went.
+    pub fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// The columns this selection claims on one line, ends inclusive, or
+    /// `None` when the selection is not on that line at all. A line between
+    /// the ends is claimed to its own end, which the painter knows and this
+    /// does not, so it says `usize::MAX` and lets the loop stop where the
+    /// cells do.
+    pub fn columns_on(&self, line: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.ordered();
+        if line < start.0 || line > end.0 {
+            return None;
+        }
+        let first = if line == start.0 { start.1 } else { 0 };
+        let last = if line == end.0 { end.1 } else { usize::MAX };
+        Some((first, last))
+    }
+
+    /// Whether a cell is inside the run. Inclusive at both ends, the way a
+    /// terminal's selection always is.
+    pub fn covers(&self, line: usize, col: usize) -> bool {
+        self.columns_on(line)
+            .is_some_and(|(first, last)| col >= first && col <= last)
+    }
+}
+
+/// Two presses on the same cell inside this window are a double-click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What the pointer's button, still down, is building. A plain press starts
+/// a point that only becomes a run when the pointer actually moves — so a
+/// tap clears instead of copying one cell, and releasing a drag copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grabbed {
+    Point,
+    Run,
+}
+
 /// What the terminal pane holds: the device's screen, and how it is shown.
 #[derive(Debug, Clone)]
 pub struct TerminalPane {
@@ -103,6 +162,14 @@ pub struct TerminalPane {
     pub scroll: usize,
     /// Echo the keystrokes locally, for a device that does not echo them back.
     pub echo: bool,
+    /// The drag in progress, or the last one — kept on screen so a user can
+    /// see what a copy took.
+    selection: Option<Selection>,
+    /// What the button still down is building. See [`Grabbed`].
+    grabbed: Option<Grabbed>,
+    /// The last press: when and where. The second press on the same cell
+    /// inside [`DOUBLE_CLICK`] is a double, and a double picks a word.
+    last_press: Option<(std::time::Instant, (usize, usize))>,
 }
 
 impl Default for TerminalPane {
@@ -122,6 +189,9 @@ impl TerminalPane {
             autoscroll: true,
             scroll: 0,
             echo: false,
+            selection: None,
+            grabbed: None,
+            last_press: None,
         }
     }
 
@@ -176,6 +246,111 @@ impl TerminalPane {
         self.parser = Parser::new();
         self.decoder = Utf8Stream::default();
         self.scroll = 0;
+        // A selection over a screen that no longer exists is not a selection.
+        self.selection = None;
+        self.grabbed = None;
+        self.last_press = None;
+    }
+
+    // --- the mouse's side of the pane --------------------------------------
+
+    /// The press of a drag. A second press on the same cell inside
+    /// [`DOUBLE_CLICK`] picks the word under the pointer instead; anything
+    /// else starts a new, one-cell selection.
+    pub fn press(&mut self, line: usize, col: usize) {
+        let double = self.last_press.is_some_and(|(at, cell)| {
+            cell == (line, col) && at.elapsed() < DOUBLE_CLICK
+        });
+        self.last_press = Some((std::time::Instant::now(), (line, col)));
+        if double {
+            if let Some(word) = self.word_at(line, col) {
+                self.selection = Some(word);
+                // A word is already a run: releasing it copies, the same as
+                // if the pointer had drawn it.
+                self.grabbed = Some(Grabbed::Run);
+                return;
+            }
+        }
+        self.selection = Some(Selection {
+            anchor: (line, col),
+            head: (line, col),
+        });
+        self.grabbed = Some(Grabbed::Point);
+    }
+
+    /// Follow the pointer. The first of these is what turns a point into the
+    /// run it was always going to be — a press that never moves stays a tap.
+    pub fn drag_to(&mut self, line: usize, col: usize) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.head = (line, col);
+        }
+        if self.grabbed.is_some() {
+            self.grabbed = Some(Grabbed::Run);
+        }
+    }
+
+    /// The button came up: the text the gesture covered, when it was a run.
+    /// A plain click — nothing was dragged and no word was picked — copies
+    /// nothing and clears what was selected, which is what a terminal does
+    /// with a bare click on text.
+    pub fn release(&mut self) -> Option<String> {
+        match self.grabbed.take() {
+            Some(Grabbed::Run) => self.selected_text(),
+            _ => {
+                self.selection = None;
+                None
+            }
+        }
+    }
+
+    /// Forget the selection: the click was not on text at all.
+    pub fn deselect(&mut self) {
+        self.selection = None;
+        self.grabbed = None;
+    }
+
+    /// The text of the selection in force, if there is one and it covers
+    /// anything.
+    pub fn selected_text(&self) -> Option<String> {
+        self.selection.map(|selection| selection_text(self, selection))
+    }
+
+    /// The word or run under a point, as a selection — what a double-click
+    /// picks. Word characters, then spaces, then everything else: the three
+    /// buckets a terminal's double-click uses, so a path selects whole and a
+    /// `|` beside it does not come along.
+    pub fn word_at(&self, line: usize, col: usize) -> Option<Selection> {
+        let cells = self.vt.line(line)?;
+        if col >= cells.len() {
+            return None;
+        }
+        // A spacer is the right half of the glyph before it, and that glyph's
+        // column is where the pointer really is.
+        let at = if cells[col].spacer && col > 0 {
+            col - 1
+        } else {
+            col
+        };
+        let leads: Vec<usize> = cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| !cell.spacer)
+            .map(|(col, _)| col)
+            .collect();
+        let position = leads.iter().position(|&col| col >= at)?;
+        let class = glyph_class(cells[leads[position]].ch);
+        let mut first = position;
+        while first > 0 && glyph_class(cells[leads[first - 1]].ch) == class {
+            first -= 1;
+        }
+        let mut last = position;
+        while last + 1 < leads.len() && glyph_class(cells[leads[last + 1]].ch) == class {
+            last += 1;
+        }
+        Some(Selection {
+            anchor: (line, leads[first]),
+            head: (line, leads[last]),
+        })
     }
 
     /// Write the retained output to `path`, returning the bytes written.
@@ -250,12 +425,7 @@ pub fn wrap_rows(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Which lines the pane shows, as absolute indices into the emulator's line
-/// space.
-///
-/// The window ends at the newest line unless the user has scrolled back, so the
-/// cursor stays in view; scrolling past the top of the history lands on the top
-/// of the history rather than on blank space, because a scroll that can run off
-/// the end leaves the user staring at nothing with no way to tell why.
+/// space — the window [`scroll_position`] resolves, filled to `height`.
 ///
 /// `None` is a filler row *below* the newest line. A screen has a fixed number
 /// of rows, so the only time there is filler at all is a pane taller than the
@@ -267,15 +437,25 @@ pub fn visible_lines(pane: &TerminalPane, height: usize) -> Vec<Option<usize>> {
     if height == 0 {
         return Vec::new();
     }
+    let (total, start, _) = scroll_position(pane, height);
+    (start..start + height)
+        .map(|line| (line < total).then_some(line))
+        .collect()
+}
+
+/// The pane's window over its line space, as `(total, top, viewport)` — what a
+/// scrollbar needs, computed by the same arithmetic [`visible_lines`] windows
+/// with, so the bar and the text can never disagree about where the bottom is.
+///
+/// The window ends at the newest line unless the user has scrolled back, so
+/// the cursor stays in view; scrolling past the top of the history lands on
+/// the top of the history rather than on blank space.
+pub fn scroll_position(pane: &TerminalPane, height: usize) -> (usize, usize, usize) {
     let total = pane.vt.line_count();
     let back = if pane.autoscroll { 0 } else { pane.scroll };
     let end = total.saturating_sub(back).max(height.min(total));
     let start = end.saturating_sub(height);
-    let mut window: Vec<Option<usize>> = (start..end).map(Some).collect();
-    while window.len() < height {
-        window.push(None);
-    }
-    window
+    (total, start, height)
 }
 
 /// Where the cursor should be drawn, as `(absolute line, column)`, or `None`
@@ -339,8 +519,84 @@ fn cell_style(theme: &Theme, style: CellStyle) -> Style {
     out
 }
 
+/// The class a glyph counts as to a double-click. Three buckets: word
+/// characters (letters, digits, and the punctuation that lives inside paths
+/// and identifiers), spaces, and everything else — so clicking a `|` takes
+/// the `|` and not the command beside it.
+fn glyph_class(ch: char) -> u8 {
+    if ch.is_alphanumeric() || "_-./~:@#%+=".contains(ch) {
+        1
+    } else if ch == ' ' {
+        0
+    } else {
+        2
+    }
+}
+
+/// The text a selection covers: lines joined with `\n`, and each line's
+/// trailing plain blanks dropped.
+///
+/// Dropping them is what every terminal's copy does — copying a command must
+/// not also copy the rest of the row — while a *styled* blank is content: a
+/// reverse-video bar is a thing the device drew, and losing it would be the
+/// copy lying about the screen. A wide glyph the selection ends inside of
+/// comes along whole: half a character is not text.
+pub fn selection_text(pane: &TerminalPane, selection: Selection) -> String {
+    let (start, end) = selection.ordered();
+    let mut out = String::new();
+    for line in start.0..=end.0 {
+        if line > start.0 {
+            out.push('\n');
+        }
+        let Some(cells) = pane.vt.line(line) else {
+            continue;
+        };
+        let Some((first, last)) = selection.columns_on(line) else {
+            continue;
+        };
+        // A selection can outlive the columns it named: the pane narrows
+        // under a drag, and the cells it pointed at are gone. The line then
+        // contributes nothing — indexing `first` would be a crash, and
+        // copying whatever moved under the old columns would be a lie.
+        if first >= cells.len() {
+            continue;
+        }
+        let last = last.min(cells.len() - 1);
+        // A selection that ends on the right half of a wide glyph took the
+        // glyph: its lead cell is the last one included.
+        let first = if first > 0 && cells[first].spacer {
+            first - 1
+        } else {
+            first
+        };
+        let mut picked: Vec<&Cell> = cells
+            .get(first..=last)
+            .unwrap_or_default()
+            .iter()
+            .filter(|cell| !cell.spacer)
+            .collect();
+        while picked.last().is_some_and(|cell| cell.is_blank()) {
+            picked.pop();
+        }
+        for cell in picked {
+            out.push_str(&cell.glyph());
+        }
+    }
+    out
+}
+
+/// The cell a pane row and column point at, in the emulator's absolute line
+/// numbers. `None` for a point outside the pane or on a filler row below the
+/// newest line — the pane's rows are where its text is, and a press on the
+/// blank ground under it is a press on nothing.
+pub fn cell_at(pane: &TerminalPane, height: usize, row: usize, col: usize) -> Option<(usize, usize)> {
+    let line = (*visible_lines(pane, height).get(row)?)?;
+    Some((line, col))
+}
+
 /// One row of the screen as spans, clipped to `width`, with the cursor cell
-/// marked when it falls on this row.
+/// marked when it falls on this row and the selection columns, when given,
+/// painted over the device's own colours.
 ///
 /// Spacers are skipped rather than emitted: a wide glyph already claims two
 /// columns, and writing anything for its trailing half would push the rest of
@@ -350,6 +606,7 @@ fn row_line(
     cells: &[Cell],
     width: usize,
     cursor_col: Option<usize>,
+    selection: Option<(usize, usize)>,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
@@ -367,6 +624,9 @@ fn row_line(
         let mut style = cell_style(theme, cell.style);
         if cursor_col == Some(col) {
             style = style.add_modifier(Modifier::REVERSED);
+        }
+        if selection.is_some_and(|(first, last)| col >= first && col <= last) {
+            style = style.patch(theme.selection());
         }
         if style != run_style {
             if !run.is_empty() {
@@ -392,6 +652,7 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
     let width = area.width as usize;
     let height = area.height as usize;
     let cursor = cursor_of(app, pane);
+    let selection = pane.selection;
     visible_lines(pane, height)
         .into_iter()
         .map(|line| match line {
@@ -401,7 +662,8 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
                     Some((cursor_line, col)) if cursor_line == index => Some(col),
                     _ => None,
                 };
-                row_line(theme, cells, width, cursor_col)
+                let columns = selection.and_then(|selection| selection.columns_on(index));
+                row_line(theme, cells, width, cursor_col, columns)
             }
             None => Line::default(),
         })
@@ -417,7 +679,7 @@ pub fn rows(pane: &TerminalPane, width: usize, height: usize) -> Vec<String> {
         .map(|line| match line {
             Some(index) => {
                 let cells = pane.vt.line(index).unwrap_or(&[]);
-                let text = row_line(&theme, cells, width, None)
+                let text = row_line(&theme, cells, width, None, None)
                     .spans
                     .iter()
                     .map(|span| span.content.as_ref())
@@ -782,5 +1044,191 @@ mod tests {
             1,
             "the status bar was drawn more than once"
         );
+    }
+
+    /// A drag picks exactly the columns it crossed, and the text the
+    /// clipboard gets has the row's trailing padding dropped — copying a
+    /// command must not also copy the rest of the row.
+    #[test]
+    fn a_drag_selects_the_columns_it_crossed() {
+        let mut pane = sized(40, 6);
+        pane.push_text("hello world\r\nsecond line\r\n");
+        let part = Selection {
+            anchor: (0, 0),
+            head: (0, 4),
+        };
+        assert_eq!(selection_text(&pane, part), "hello");
+        // Across two lines: from `world` to `second`.
+        let across = Selection {
+            anchor: (0, 6),
+            head: (1, 6),
+        };
+        assert_eq!(selection_text(&pane, across), "world\nsecond");
+        // The whole row, padding and all, comes back trimmed.
+        let row = Selection {
+            anchor: (0, 0),
+            head: (0, 39),
+        };
+        assert_eq!(selection_text(&pane, row), "hello world");
+        // And a selection whose line has nothing on it is an empty line, not
+        // a missing one.
+        let blank = Selection {
+            anchor: (2, 0),
+            head: (2, 5),
+        };
+        assert_eq!(selection_text(&pane, blank), "");
+    }
+
+    /// A selection can outlive the columns it named: the pane is resized
+    /// after the drag began and before the button came up. Copying then reads
+    /// the line as it now is — dropping the columns that are gone — rather
+    /// than indexing past the shortened row.
+    #[test]
+    fn a_selection_wider_than_a_shrunk_line_copies_what_is_left() {
+        let mut pane = sized(40, 6);
+        pane.push_text("hello\r\n");
+        let end = Selection {
+            anchor: (0, 0),
+            head: (0, 39),
+        };
+        assert_eq!(selection_text(&pane, end), "hello");
+        // The pane narrows under the drag: the same selection now spans
+        // columns the line no longer has, and the surviving part is copied.
+        pane.set_size(20, 6);
+        assert_eq!(selection_text(&pane, end), "hello");
+        let past = Selection {
+            anchor: (0, 30),
+            head: (0, 39),
+        };
+        assert_eq!(selection_text(&pane, past), "", "the columns are gone");
+    }
+
+    /// Words, spaces and other punctuation pick in runs — the three buckets a
+    /// terminal's double-click uses — and a wide glyph the selection ends
+    /// inside of comes along whole.
+    #[test]
+    fn a_double_click_picks_the_run_under_the_pointer() {
+        let mut pane = sized(40, 6);
+        pane.push_text("cat ./src/main.rs | grep x\r\n");
+        let path = pane.word_at(0, 8).expect("the pointer is on a word");
+        assert_eq!(selection_text(&pane, path), "./src/main.rs");
+        let pipe = pane.word_at(0, 18).expect("the pointer is on the pipe");
+        assert_eq!(selection_text(&pane, pipe), "|");
+        let space = pane.word_at(0, 3).expect("the pointer is on the space");
+        assert_eq!(selection_text(&pane, space), "");
+        assert!(pane.word_at(0, 40).is_none(), "past the row's end");
+
+        let mut wide = sized(40, 6);
+        wide.push_text("中文 ok\r\n");
+        let half = Selection {
+            anchor: (0, 0),
+            head: (0, 1),
+        };
+        assert_eq!(selection_text(&wide, half), "中", "half a glyph is not text");
+        let whole = Selection {
+            anchor: (0, 0),
+            head: (0, 3),
+        };
+        assert_eq!(selection_text(&wide, whole), "中文");
+    }
+
+    /// A blank that carries a style is content — a reverse-video bar is a
+    /// thing the device drew — while plain padding is not.
+    #[test]
+    fn a_styled_blank_is_content() {
+        let mut pane = sized(40, 6);
+        pane.push_text("\x1b[7m \x1b[0mok\r\n");
+        let whole = Selection {
+            anchor: (0, 0),
+            head: (0, 3),
+        };
+        assert_eq!(selection_text(&pane, whole), " ok");
+    }
+
+    /// Press, drag, release: a tap clears and copies nothing, a drag copies
+    /// and leaves the highlight up so the user can see what went, and a
+    /// same-cell drag is still a drag — the event itself says the pointer
+    /// moved.
+    #[test]
+    fn a_click_clears_and_a_drag_copies() {
+        let mut pane = sized(40, 6);
+        pane.push_text("hello world\r\n");
+        pane.press(0, 0);
+        pane.drag_to(0, 4);
+        assert_eq!(pane.release().as_deref(), Some("hello"));
+        assert_eq!(
+            pane.selected_text().as_deref(),
+            Some("hello"),
+            "the highlight stays up"
+        );
+
+        // A single click on text, later, clears it.
+        pane.press(1, 2);
+        assert_eq!(pane.release(), None);
+        assert_eq!(pane.selected_text(), None);
+
+        pane.press(0, 1);
+        pane.drag_to(0, 1);
+        assert_eq!(pane.release().as_deref(), Some("e"));
+
+        // And a press on the blank ground below the text — no cell at all —
+        // is a press on nothing, which the caller routes here.
+        pane.deselect();
+        assert_eq!(pane.selected_text(), None);
+    }
+
+    /// Two presses on one cell inside the window are a double: the word comes
+    /// back on the release, without any drag in between.
+    #[test]
+    fn a_double_click_picks_the_word() {
+        let mut pane = sized(40, 6);
+        pane.push_text("cat ./src/main.rs\r\n");
+        pane.press(0, 8);
+        assert_eq!(pane.release(), None, "the first click clears");
+        pane.press(0, 8);
+        assert_eq!(pane.release().as_deref(), Some("./src/main.rs"));
+    }
+
+    /// A selection names the text, not the row it was drawn on: scrolling it
+    /// out of the window and back finds it on the same cells.
+    #[test]
+    fn a_selection_rides_the_text_it_names() {
+        let mut pane = sized(20, 3);
+        for line in 0..10 {
+            pane.push_text(&format!("line {line}\r\n"));
+        }
+        pane.press(0, 0);
+        pane.drag_to(0, 3);
+        assert_eq!(pane.release().as_deref(), Some("line"));
+        pane.autoscroll = false;
+        pane.scroll = 2;
+        assert_eq!(pane.selected_text().as_deref(), Some("line"));
+    }
+
+    /// The highlight is painted on the selected cells and only on them, over
+    /// whatever colours the device had put there.
+    #[test]
+    fn the_selection_paints_on_the_cells_it_covers() {
+        let mut pane = sized(20, 2);
+        pane.push_text("hello\r\n");
+        let cells = pane.vt.line(0).expect("the line exists").to_vec();
+        let line = row_line(&Theme::DARK, &cells, 20, None, Some((1, 3)));
+        let runs: Vec<(&str, Option<Color>)> = line
+            .spans
+            .iter()
+            .map(|span| (span.content.as_ref(), span.style.bg))
+            .collect();
+        // Three runs: the cell before, the selected cells, and the rest of
+        // the row — the highlight is its own run precisely because it is the
+        // only thing with the accent ground.
+        assert_eq!(runs.len(), 3, "the highlight is its own run: {runs:?}");
+        assert_eq!(runs[0].0, "h");
+        assert_ne!(runs[0].1, Some(Theme::DARK.accent));
+        assert_eq!(runs[1], ("ell", Some(Theme::DARK.accent)));
+        assert!(runs[2].0.starts_with('o'));
+        assert_ne!(runs[2].1, Some(Theme::DARK.accent));
+        // Without a selection the row paints as one run, colours untouched.
+        let plain = row_line(&Theme::DARK, &cells, 20, None, None);
+        assert_eq!(plain.spans.len(), 1);
     }
 }

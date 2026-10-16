@@ -113,6 +113,53 @@ impl EnterMode {
             EnterMode::Crlf => Some("\r\n"),
         }
     }
+
+    /// The name the command line and the settings file spell it. The round
+    /// partner of [`EnterMode::from_name`].
+    pub fn as_name(self) -> &'static str {
+        match self {
+            EnterMode::Raw => "raw",
+            EnterMode::Cr => "cr",
+            EnterMode::Lf => "lf",
+            EnterMode::Crlf => "crlf",
+        }
+    }
+
+    /// The short label the palette shows. Four words in every language,
+    /// because they are wire words rather than prose.
+    pub fn label(self) -> &'static str {
+        match self {
+            EnterMode::Raw => "Raw",
+            EnterMode::Cr => "CR",
+            EnterMode::Lf => "LF",
+            EnterMode::Crlf => "CRLF",
+        }
+    }
+
+    /// The next mode in the cycle, in the order the palette walks them: raw
+    /// first, because it is the absence of a translation rather than one of
+    /// the three.
+    pub fn next(self) -> EnterMode {
+        match self {
+            EnterMode::Raw => EnterMode::Cr,
+            EnterMode::Cr => EnterMode::Lf,
+            EnterMode::Lf => EnterMode::Crlf,
+            EnterMode::Crlf => EnterMode::Raw,
+        }
+    }
+
+    /// Spell a block's newlines the way this mode asks.
+    ///
+    /// A block — a paste, a preset — is as much a thing the wire sees as the
+    /// Enter key that follows it, so its own newlines are endings too. `Raw`
+    /// is the identity: the block is what it is, and only the key carries the
+    /// mode.
+    pub fn spell(self, text: &str) -> String {
+        match self.bytes() {
+            Some(ending) => text.replace('\n', ending),
+            None => text.to_string(),
+        }
+    }
 }
 
 /// The byte sequence for a named key, with optional application-cursor mode and
@@ -285,5 +332,36 @@ mod tests {
     fn unknown_keys_send_nothing() {
         let none = KeyModifiers::default();
         assert_eq!(terminal_key_sequence("F1", false, &none), "");
+    }
+
+    /// The cycle, the names and the labels are the same four the reference
+    /// client offers, and the round trip back to a name is exact — the
+    /// settings file a user hand-edits is spelled in these words.
+    #[test]
+    fn the_enter_modes_cycle_and_spell_themselves() {
+        let mut mode = EnterMode::default();
+        assert_eq!(mode, EnterMode::Raw, "raw is the default");
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(mode.label());
+            assert_eq!(EnterMode::from_name(mode.as_name()), Some(mode));
+            mode = mode.next();
+        }
+        assert_eq!(seen, vec!["Raw", "CR", "LF", "CRLF"]);
+        assert_eq!(mode, EnterMode::Raw, "four steps land where they started");
+        assert_eq!(EnterMode::from_name("  CRLF "), Some(EnterMode::Crlf));
+        assert_eq!(EnterMode::from_name("cr-lf"), None);
+    }
+
+    /// Spelling a block: the three named endings replace every newline in it,
+    /// and `Raw` sends the block as it is — it names no ending to replace one
+    /// with.
+    #[test]
+    fn a_block_is_spelled_the_way_the_mode_asks() {
+        assert_eq!(EnterMode::Raw.spell("a\nb"), "a\nb");
+        assert_eq!(EnterMode::Cr.spell("a\nb"), "a\rb");
+        assert_eq!(EnterMode::Lf.spell("a\nb"), "a\nb");
+        assert_eq!(EnterMode::Crlf.spell("a\nb"), "a\r\nb");
+        assert_eq!(EnterMode::Raw.spell("one line"), "one line");
     }
 }

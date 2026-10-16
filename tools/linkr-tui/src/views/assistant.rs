@@ -20,9 +20,11 @@ use ratatui::text::{Line, Span};
 
 use crate::agent::tasks::TaskRecord;
 use crate::app::App;
+use crate::clipboard::read_system_clipboard;
 use crate::exec::executor::Mode;
 use crate::text;
 use crate::theme::Theme;
+use std::time::Instant;
 
 /// Everything the assistant view knows.
 #[derive(Debug, Clone, Default)]
@@ -31,6 +33,13 @@ pub struct AssistantState {
     pub configured: bool,
     /// The execution mode in force.
     pub mode: Option<Mode>,
+    /// When the unattended window closes, if one is armed.
+    ///
+    /// The deadline belongs to the UI because the mode is a policy the agent is
+    /// *told*, not a live permission: nothing else would notice it elapsing,
+    /// and a countdown that reached zero without the mode moving would be a
+    /// lie.
+    pub full_auto_until: Option<Instant>,
     /// Token totals for the conversation.
     pub usage: (u64, u64),
     /// This device's task history, newest first.
@@ -184,6 +193,22 @@ fn mode_word(mode: Mode, app: &App) -> &'static str {
         Mode::Manual => s.asst_mode_manual,
         Mode::FullAuto => s.asst_mode_full_auto,
     }
+}
+
+/// ` · 14:59` while the unattended window is armed, nothing otherwise.
+///
+/// One read per frame, rounded up like the panel this comes from: the frame
+/// loop repaints on every tick, so the arithmetic is the timer, and a window
+/// that has just been armed reads `15:00` rather than `14:59`.
+fn full_auto_countdown(app: &App) -> String {
+    let Some(until) = app.assistant.full_auto_until else {
+        return String::new();
+    };
+    let seconds = until
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .div_ceil(1000);
+    format!(" · {}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// A section heading in the accent colour.
@@ -570,7 +595,7 @@ pub fn export_report(app: &mut App) {
         &[],
         &notes,
     );
-    let copied = crate::app::osc52_copy(&report);
+    let copied = crate::clipboard::osc52_copy(&report);
     let s = app.strings();
     app.push_notice(crate::app::Notice {
         text: format!("{} {} {}", s.copy_done_prefix, copied, s.copy_done_suffix),
@@ -760,7 +785,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     } else {
         let mode = state
             .mode
-            .map(|m| mode_word(m, app).to_string())
+            .map(|m| format!("{}{}", mode_word(m, app), full_auto_countdown(app)))
             .unwrap_or_else(|| s.asst_mode_auto.to_string());
         lines.push(field_row(
             &format!("  {}{}", s.asst_mode_label, s.label_separator),
@@ -1027,6 +1052,29 @@ mod tests {
         // looked for: the view kept the thread and gave up the filing cabinet.
         let window = body_text(&settings_lines(&a, &theme, 90));
         assert!(window.contains("wget is present"), "{window}");
+    }
+
+    /// The mode row counts the unattended window down while it is armed, and
+    /// says nothing once it is closed: one read per frame, so the arithmetic
+    /// is the timer.
+    #[test]
+    fn the_mode_row_counts_the_unattended_window_down() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::En);
+        assert_eq!(full_auto_countdown(&a), "", "no window is armed");
+
+        // The window starts at the pick, and a whole one reads `15:00`.
+        cycle_mode(&mut a);
+        assert_eq!(full_auto_countdown(&a), " · 15:00");
+        a.assistant.configured = true;
+        let text = body_text(&lines(&a, &theme, 90));
+        assert!(text.contains(" · 15:00"), "{text}");
+
+        // Every other mode closes it, and the row goes back to the mode's
+        // words alone.
+        cycle_mode(&mut a);
+        assert_eq!(a.assistant.mode, Some(Mode::Manual));
+        assert_eq!(full_auto_countdown(&a), "", "…and gone with the mode");
     }
 
     /// The view shows the conversation; the settings have their own window. A
@@ -1480,6 +1528,13 @@ mod interaction {
 pub fn cycle_mode(app: &mut App) {
     use crate::exec::executor::Mode;
     let next = app.assistant.mode.unwrap_or(Mode::Auto).next();
+    // Selecting Full Auto arms the unattended window; every other mode closes
+    // it — `Manual`, the one that cannot send anything, included. Landing on
+    // Full Auto afresh re-arms, so re-selecting it extends the window.
+    app.assistant.full_auto_until = match next {
+        Mode::FullAuto => Some(Instant::now() + crate::exec::executor::FULL_AUTO_WINDOW),
+        _ => None,
+    };
     app.assistant.mode = Some(next);
     let s = app.strings();
     app.push_notice(crate::app::Notice {
@@ -1503,89 +1558,6 @@ pub fn clear_conversation(app: &mut App) {
         text: s.agent_cleared.to_string(),
         level: crate::event::NoticeLevel::Info,
     });
-}
-
-/// The tool this platform reads its clipboard with, tried in this order.
-///
-/// One per platform, first that exists wins: a machine with both `xclip` and
-/// `wl-paste` (XWayland under Wayland, common) has both, and the order only
-/// matters in that the first found is the one used.
-const CLIPBOARD_READERS: &[&[&str]] = &[
-    &["wl-paste", "--no-newline"],
-    &["xclip", "-selection", "clipboard", "-o"],
-    &["xsel", "--clipboard", "--output"],
-    &["pbpaste"],
-    #[cfg(windows)]
-    &["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
-];
-
-/// The tool this platform writes its clipboard with.
-const CLIPBOARD_WRITERS: &[&[&str]] = &[
-    &["wl-copy", "--type", "text/plain"],
-    &["xclip", "-selection", "clipboard"],
-    &["xsel", "--clipboard", "--input"],
-    &["pbcopy"],
-    #[cfg(windows)]
-    &["clip"],
-];
-
-/// Read the system clipboard as text, or None when nothing can.
-///
-/// The terminal's own paste is a different door and arrives as a bracketed paste
-/// event; this is the one a *chord* takes, and it exists so a keystroke can do
-/// what a terminal's paste menu does. It is a subprocess because there is no
-/// portable clipboard API without a dependency this crate does not have, and the
-/// split the web client makes (`wl-paste` under
-/// `navigator.clipboard.readText()`) is the one to make here.
-pub fn read_system_clipboard() -> Option<String> {
-    for tool in CLIPBOARD_READERS {
-        let output = match std::process::Command::new(tool[0])
-            .args(&tool[1..])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Ok(output) => output,
-            Err(_) => continue,
-        };
-        if output.status.success() {
-            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
-        }
-    }
-    None
-}
-
-/// Put `text` on the system clipboard, or say why not.
-///
-/// The same tool list the reader uses, in the other direction. A tool that
-/// exists but is not usable — a `wl-copy` with no Wayland display — fails here,
-/// and the next one is tried.
-pub fn write_system_clipboard(text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("nothing to copy".to_string());
-    }
-    for tool in CLIPBOARD_WRITERS {
-        let mut child = match std::process::Command::new(tool[0])
-            .args(&tool[1..])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => continue,
-        };
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            if stdin.write_all(text.as_bytes()).is_ok() {
-                drop(child.stdin.take());
-                if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    Err("no clipboard tool worked".to_string())
 }
 
 /// Paste the system clipboard into whatever field has the caret.

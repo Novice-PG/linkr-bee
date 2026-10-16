@@ -91,7 +91,11 @@ pub const FLAGS: &[Flag] = &[
     ._choices(&["bash", "zsh", "fish"]),
     // Interface
     Flag::with_choices("--lang", &["zh", "en"], "interface language"),
-    Flag::with_choices("--theme", &["dark", "light"], "colour theme"),
+    Flag::with_choices(
+        "--theme",
+        &["dark", "light", "nord", "gruvbox", "dracula", "solarized"],
+        "colour theme",
+    ),
     Flag::with_choices(
         "--view",
         &[
@@ -611,6 +615,10 @@ pub struct FoundDevice {
     /// Whether it offers the Nordic UART Service, which is the only kind this
     /// program can dial.
     pub nus: bool,
+    /// How strong the advertisement was heard, in dBm. `None` when the
+    /// adapter's own report had no reading — a fresh scan on a busy adapter
+    /// can hear a device before it has a number for it.
+    pub rssi: Option<i16>,
 }
 
 /// Listen for `timeout` and report every device that answered.
@@ -670,6 +678,7 @@ pub fn scan_devices(timeout: std::time::Duration) -> Result<Vec<FoundDevice>, St
                     nus: properties
                         .services
                         .contains(&crate::transport::ble::NUS_SERVICE),
+                    rssi: properties.rssi,
                 });
             }
             let _ = adapter.stop_scan().await;
@@ -678,6 +687,10 @@ pub fn scan_devices(timeout: std::time::Duration) -> Result<Vec<FoundDevice>, St
                     .nus
                     .cmp(&left.nus)
                     .then_with(|| left.name.cmp(&right.name))
+                    // Two boards with one name are told apart by who is
+                    // closer: the stronger reading is the one the user is
+                    // probably standing next to.
+                    .then_with(|| right.rssi.cmp(&left.rssi))
             });
             Ok(found)
         })
@@ -793,7 +806,7 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format) -> i32 {
     // is what the bridge is doing and not what it was asked to do — see
     // `App::set_uart`.
     if let Some(spec) = &requests.uart {
-        match parse_uart_spec(spec).and_then(|settings| app.set_uart(&settings)) {
+        match crate::accessory::parse_uart_spec(spec).and_then(|settings| app.set_uart(&settings)) {
             Err(why) => failed += report(format, "uart", false, &why),
             Ok(()) => failed += wait_and_report(app, crate::device::Query::Uart, format),
         }
@@ -1101,36 +1114,6 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
     }
 }
 
-/// Parse `baud,data,parity,stop,flow` the way `--uart` takes it.
-///
-/// Refused here rather than by the bridge, for the same reason
-/// `accessory::set_uart_command` refuses: a value the firmware cannot take is a
-/// value the user should be told about before a round trip and not after.
-pub fn parse_uart_spec(spec: &str) -> Result<crate::accessory::UartSettings, String> {
-    let fields: Vec<&str> = spec.split(',').map(str::trim).collect();
-    if fields.len() != 5 {
-        return Err(format!(
-            "'{spec}' is not baud,data,parity,stop,flow — five fields, as in 115200,8,n,1,none"
-        ));
-    }
-    let baud: u32 = fields[0]
-        .parse()
-        .map_err(|_| format!("'{}' is not a baud rate", fields[0]))?;
-    let data_bits: u8 = fields[1]
-        .parse()
-        .map_err(|_| format!("'{}' is not a data-bit count", fields[1]))?;
-    let stop_bits: u8 = fields[3]
-        .parse()
-        .map_err(|_| format!("'{}' is not a stop-bit count", fields[3]))?;
-    Ok(crate::accessory::UartSettings {
-        baud,
-        data_bits,
-        parity: fields[2].to_string(),
-        stop_bits,
-        flow: fields[4].to_string(),
-    })
-}
-
 /// One JSON object on one line, escaped by hand.
 ///
 /// Written rather than brought in as a dependency for two reasons: the payload
@@ -1396,6 +1379,18 @@ mod tests {
         assert_eq!(transport.choices, &["ble", "lan", "stdio"]);
         let zsh = completion_script("zsh", "linkr").expect("script");
         assert!(zsh.contains("('ble' 'lan' 'stdio')"), "{zsh}");
+
+        // The theme choices are the themes: a palette that cannot be named on
+        // the command line is a palette half-shipped.
+        let theme = FLAGS
+            .iter()
+            .find(|flag| flag.name == "--theme")
+            .expect("documented");
+        let named: Vec<&str> = crate::theme::THEMES
+            .iter()
+            .map(|choice| choice.as_str())
+            .collect();
+        assert_eq!(theme.choices, named.as_slice());
     }
 
     /// Help and completion come from the same table, so they cannot disagree

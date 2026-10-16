@@ -151,6 +151,164 @@ impl Theme {
         ],
     };
 
+    /// The constants of the user's terminal classics, carried in as *roles*:
+    /// the same green-live/blue-focus/red-danger grammar as the web pair, with
+    /// each palette's own values. The terminal's sixteen are the palettes the
+    /// projects ship for xterm, so a device's own colours stay in character.
+    pub const NORD: Theme = Theme {
+        bg: Color::Rgb(0x2e, 0x34, 0x40),
+        panel: Color::Rgb(0x3b, 0x42, 0x52),
+        panel_2: Color::Rgb(0x40, 0x48, 0x59),
+        panel_3: Color::Rgb(0x4c, 0x56, 0x6a),
+        text: Color::Rgb(0xec, 0xef, 0xf4),
+        muted: Color::Rgb(0x8b, 0x95, 0xa9),
+        line: Color::Rgb(0x43, 0x4c, 0x5e),
+        line_strong: Color::Rgb(0x5a, 0x66, 0x7d),
+        accent: Color::Rgb(0xa3, 0xbe, 0x8c),
+        accent_strong: Color::Rgb(0xbc, 0xd3, 0xa6),
+        accent_ink: Color::Rgb(0x2e, 0x34, 0x40),
+        focus: Color::Rgb(0x88, 0xc0, 0xd0),
+        danger: Color::Rgb(0xbf, 0x61, 0x6a),
+        warn: Color::Rgb(0xeb, 0xcb, 0x8b),
+        terminal_bg: Color::Rgb(0x24, 0x29, 0x33),
+        terminal_fg: Color::Rgb(0xd8, 0xde, 0xe9),
+        ansi: [
+            Color::Rgb(0x3b, 0x42, 0x52),
+            Color::Rgb(0xbf, 0x61, 0x6a),
+            Color::Rgb(0xa3, 0xbe, 0x8c),
+            Color::Rgb(0xeb, 0xcb, 0x8b),
+            Color::Rgb(0x81, 0xa1, 0xc1),
+            Color::Rgb(0xb4, 0x8e, 0xad),
+            Color::Rgb(0x88, 0xc0, 0xd0),
+            Color::Rgb(0xe5, 0xe9, 0xf0),
+            Color::Rgb(0x4c, 0x56, 0x6a),
+            Color::Rgb(0xbf, 0x61, 0x6a),
+            Color::Rgb(0xa3, 0xbe, 0x8c),
+            Color::Rgb(0xeb, 0xcb, 0x8b),
+            Color::Rgb(0x81, 0xa1, 0xc1),
+            Color::Rgb(0xb4, 0x8e, 0xad),
+            Color::Rgb(0x8f, 0xbc, 0xbb),
+            Color::Rgb(0xec, 0xef, 0xf4),
+        ],
+    };
+
+    /// Warm and low-contrast, the way the Gruvbox project keeps it: the lime
+    /// green is the live colour and the aqua the focus, over four browns.
+    pub const GRUVBOX: Theme = Theme {
+        bg: Color::Rgb(0x28, 0x28, 0x28),
+        panel: Color::Rgb(0x32, 0x30, 0x2f),
+        panel_2: Color::Rgb(0x3c, 0x38, 0x36),
+        panel_3: Color::Rgb(0x50, 0x49, 0x45),
+        text: Color::Rgb(0xeb, 0xdb, 0xb2),
+        muted: Color::Rgb(0xa8, 0x99, 0x84),
+        line: Color::Rgb(0x3c, 0x38, 0x36),
+        line_strong: Color::Rgb(0x50, 0x49, 0x45),
+        accent: Color::Rgb(0xb8, 0xbb, 0x26),
+        accent_strong: Color::Rgb(0xd0, 0xd3, 0x4a),
+        accent_ink: Color::Rgb(0x28, 0x28, 0x28),
+        focus: Color::Rgb(0x83, 0xa5, 0x98),
+        danger: Color::Rgb(0xfb, 0x49, 0x34),
+        warn: Color::Rgb(0xfa, 0xbd, 0x2f),
+        terminal_bg: Color::Rgb(0x1d, 0x20, 0x21),
+        terminal_fg: Color::Rgb(0xeb, 0xdb, 0xb2),
+        ansi: [
+            Color::Rgb(0x28, 0x28, 0x28),
+            Color::Rgb(0xcc, 0x24, 0x1d),
+            Color::Rgb(0x98, 0x97, 0x1a),
+            Color::Rgb(0xd7, 0x99, 0x21),
+            Color::Rgb(0x45, 0x85, 0x88),
+            Color::Rgb(0xb1, 0x62, 0x86),
+            Color::Rgb(0x68, 0x9d, 0x6a),
+            Color::Rgb(0xa8, 0x99, 0x84),
+            Color::Rgb(0x92, 0x83, 0x74),
+            Color::Rgb(0xfb, 0x49, 0x34),
+            Color::Rgb(0xb8, 0xbb, 0x26),
+            Color::Rgb(0xfa, 0xbd, 0x2f),
+            Color::Rgb(0x83, 0xa5, 0x98),
+            Color::Rgb(0xd3, 0x86, 0x9b),
+            Color::Rgb(0x8e, 0xc0, 0x7c),
+            Color::Rgb(0xeb, 0xdb, 0xb2),
+        ],
+    };
+
+    /// The Solarized dark set: one neutral ramp, one accent per meaning. The
+    /// terminal's sixteen are exactly Solarized's own.
+    pub const SOLARIZED: Theme = Theme {
+        bg: Color::Rgb(0x00, 0x2b, 0x36),
+        panel: Color::Rgb(0x07, 0x36, 0x42),
+        panel_2: Color::Rgb(0x08, 0x40, 0x4f),
+        panel_3: Color::Rgb(0x0e, 0x4c, 0x5c),
+        text: Color::Rgb(0x93, 0xa1, 0xa1),
+        muted: Color::Rgb(0x58, 0x6e, 0x75),
+        line: Color::Rgb(0x0d, 0x46, 0x54),
+        line_strong: Color::Rgb(0x1c, 0x5b, 0x68),
+        accent: Color::Rgb(0x2a, 0xa1, 0x98),
+        accent_strong: Color::Rgb(0x4c, 0xc4, 0xb8),
+        accent_ink: Color::Rgb(0x00, 0x2b, 0x36),
+        focus: Color::Rgb(0x26, 0x8b, 0xd2),
+        danger: Color::Rgb(0xdc, 0x32, 0x2f),
+        warn: Color::Rgb(0xb5, 0x89, 0x00),
+        terminal_bg: Color::Rgb(0x00, 0x1f, 0x28),
+        terminal_fg: Color::Rgb(0x93, 0xa1, 0xa1),
+        ansi: [
+            Color::Rgb(0x07, 0x36, 0x42),
+            Color::Rgb(0xdc, 0x32, 0x2f),
+            Color::Rgb(0x85, 0x99, 0x00),
+            Color::Rgb(0xb5, 0x89, 0x00),
+            Color::Rgb(0x26, 0x8b, 0xd2),
+            Color::Rgb(0xd3, 0x36, 0x82),
+            Color::Rgb(0x2a, 0xa1, 0x98),
+            Color::Rgb(0xee, 0xe8, 0xd5),
+            Color::Rgb(0x00, 0x2b, 0x36),
+            Color::Rgb(0xcb, 0x4b, 0x16),
+            Color::Rgb(0x58, 0x6e, 0x75),
+            Color::Rgb(0x65, 0x7b, 0x83),
+            Color::Rgb(0x83, 0x94, 0x96),
+            Color::Rgb(0x6c, 0x71, 0xc4),
+            Color::Rgb(0x93, 0xa1, 0xa1),
+            Color::Rgb(0xfd, 0xf6, 0xe3),
+        ],
+    };
+
+    /// Dracula: a violet night with the project's own neon streaks, its
+    /// sixteen as the project ships them.
+    pub const DRACULA: Theme = Theme {
+        bg: Color::Rgb(0x28, 0x2a, 0x36),
+        panel: Color::Rgb(0x34, 0x37, 0x46),
+        panel_2: Color::Rgb(0x3c, 0x3f, 0x52),
+        panel_3: Color::Rgb(0x44, 0x47, 0x5a),
+        text: Color::Rgb(0xf8, 0xf8, 0xf2),
+        muted: Color::Rgb(0x62, 0x72, 0xa4),
+        line: Color::Rgb(0x3d, 0x41, 0x55),
+        line_strong: Color::Rgb(0x52, 0x5a, 0x7a),
+        accent: Color::Rgb(0x50, 0xfa, 0x7b),
+        accent_strong: Color::Rgb(0x7c, 0xff, 0xa0),
+        accent_ink: Color::Rgb(0x10, 0x32, 0x1c),
+        focus: Color::Rgb(0x8b, 0xe9, 0xfd),
+        danger: Color::Rgb(0xff, 0x55, 0x55),
+        warn: Color::Rgb(0xff, 0xb8, 0x6c),
+        terminal_bg: Color::Rgb(0x21, 0x22, 0x2c),
+        terminal_fg: Color::Rgb(0xf8, 0xf8, 0xf2),
+        ansi: [
+            Color::Rgb(0x21, 0x22, 0x2c),
+            Color::Rgb(0xff, 0x55, 0x55),
+            Color::Rgb(0x50, 0xfa, 0x7b),
+            Color::Rgb(0xf1, 0xfa, 0x8c),
+            Color::Rgb(0xbd, 0x93, 0xf9),
+            Color::Rgb(0xff, 0x79, 0xc6),
+            Color::Rgb(0x8b, 0xe9, 0xfd),
+            Color::Rgb(0xf8, 0xf8, 0xf2),
+            Color::Rgb(0x62, 0x72, 0xa4),
+            Color::Rgb(0xff, 0x6e, 0x6e),
+            Color::Rgb(0x69, 0xff, 0x94),
+            Color::Rgb(0xff, 0xff, 0xa5),
+            Color::Rgb(0xd6, 0xac, 0xff),
+            Color::Rgb(0xff, 0x92, 0xdf),
+            Color::Rgb(0xa4, 0xff, 0xff),
+            Color::Rgb(0xff, 0xff, 0xff),
+        ],
+    };
+
     /// Resolve a 256-colour palette index.
     ///
     /// The layout is the one the palette has had since xterm and every terminal
@@ -180,6 +338,10 @@ impl Theme {
         match choice {
             ThemeChoice::Dark => Theme::DARK,
             ThemeChoice::Light => Theme::LIGHT,
+            ThemeChoice::Nord => Theme::NORD,
+            ThemeChoice::Gruvbox => Theme::GRUVBOX,
+            ThemeChoice::Dracula => Theme::DRACULA,
+            ThemeChoice::Solarized => Theme::SOLARIZED,
         }
     }
 
@@ -225,6 +387,12 @@ impl Theme {
         Style::default().fg(self.line)
     }
 
+    /// The scrollbar's thumb: a touch stronger than the resting hairlines,
+    /// because the bar has to be findable on a ground that is not a border.
+    pub fn scrollbar(&self) -> Style {
+        Style::default().fg(self.line_strong)
+    }
+
     /// A panel surface (`--panel`), the ground bars and the sidebar sit on.
     pub fn panel(&self) -> Style {
         Style::default().bg(self.panel)
@@ -244,6 +412,15 @@ impl Theme {
             .bg(self.accent)
             .fg(self.accent_ink)
             .add_modifier(Modifier::BOLD)
+    }
+
+    /// A mouse selection over painted text: the same accent ground as the
+    /// sidebar's selected row, so the two highlights read as one idea. The
+    /// pane `patch`es this over the device's own colours rather than replacing
+    /// their style, which is what keeps bold and underline in the text the
+    /// selection covers.
+    pub fn selection(&self) -> Style {
+        Style::default().bg(self.accent).fg(self.accent_ink)
     }
 
     /// A sidebar / panel section header: the web's uppercase drawer heads.
@@ -342,15 +519,33 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     Light,
+    /// Jim Schmitz's Nord.
+    Nord,
+    /// Pavel Pertsev's Gruvbox.
+    Gruvbox,
+    /// Ethan Schoonover's Solarized, the dark set.
+    Solarized,
+    /// Zeno Rocha's Dracula.
+    Dracula,
 }
 
+/// Every theme the interface ships, in the order a toggle walks them: the
+/// web's own pair first, so the first press of Ctrl+T still swaps dark for
+/// light the way it always did, then the terminal classics.
+pub const THEMES: [ThemeChoice; 6] = [
+    ThemeChoice::Dark,
+    ThemeChoice::Light,
+    ThemeChoice::Nord,
+    ThemeChoice::Gruvbox,
+    ThemeChoice::Dracula,
+    ThemeChoice::Solarized,
+];
+
 impl ThemeChoice {
-    /// The other one — what a toggle switches to.
+    /// The next one around the ring — what a toggle switches to.
     pub fn toggled(self) -> ThemeChoice {
-        match self {
-            ThemeChoice::Dark => ThemeChoice::Light,
-            ThemeChoice::Light => ThemeChoice::Dark,
-        }
+        let at = THEMES.iter().position(|choice| *choice == self).unwrap_or(0);
+        THEMES[(at + 1) % THEMES.len()]
     }
 
     /// Lowercase name, the spelling used in settings files.
@@ -358,16 +553,28 @@ impl ThemeChoice {
         match self {
             ThemeChoice::Dark => "dark",
             ThemeChoice::Light => "light",
+            ThemeChoice::Nord => "nord",
+            ThemeChoice::Gruvbox => "gruvbox",
+            ThemeChoice::Solarized => "solarized",
+            ThemeChoice::Dracula => "dracula",
         }
+    }
+
+    /// The theme a name refers to: the settings-file spelling, case and
+    /// padding forgiven. Unknown names give `None`, so a caller can fall back
+    /// to its own default rather than to a guess.
+    pub fn from_name(raw: &str) -> Option<ThemeChoice> {
+        let raw = raw.trim().to_ascii_lowercase();
+        THEMES
+            .iter()
+            .copied()
+            .find(|choice| choice.as_str() == raw)
     }
 
     /// Parse the settings-file spelling. Unknown values fall back to the
     /// default rather than failing a whole settings load.
     pub fn from_str_lossy(raw: &str) -> ThemeChoice {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "light" => ThemeChoice::Light,
-            _ => ThemeChoice::Dark,
-        }
+        ThemeChoice::from_name(raw).unwrap_or_default()
     }
 }
 
@@ -502,11 +709,36 @@ mod tests {
     fn theme_choice_toggles_and_parses() {
         assert_eq!(ThemeChoice::default(), ThemeChoice::Dark);
         assert_eq!(ThemeChoice::Dark.toggled(), ThemeChoice::Light);
-        assert_eq!(ThemeChoice::Light.toggled(), ThemeChoice::Dark);
-        assert_eq!(ThemeChoice::from_str_lossy("light"), ThemeChoice::Light);
+        for choice in THEMES {
+            assert_eq!(
+                ThemeChoice::from_name(choice.as_str()),
+                Some(choice),
+                "{choice:?} does not parse back"
+            );
+            assert_eq!(
+                ThemeChoice::from_str_lossy(&choice.as_str().to_uppercase()),
+                choice
+            );
+        }
         assert_eq!(ThemeChoice::from_str_lossy(" LIGHT "), ThemeChoice::Light);
-        assert_eq!(ThemeChoice::from_str_lossy("dark"), ThemeChoice::Dark);
         assert_eq!(ThemeChoice::from_str_lossy("nonsense"), ThemeChoice::Dark);
+        assert_eq!(ThemeChoice::from_name("nonsense"), None);
+    }
+
+    /// A toggle walks the whole ring before it comes home: every theme is
+    /// reachable from Ctrl+T, and no press is a no-op.
+    #[test]
+    fn the_toggle_visits_every_theme() {
+        let mut seen = Vec::new();
+        let mut choice = ThemeChoice::Dark;
+        for _ in 0..THEMES.len() {
+            choice = choice.toggled();
+            seen.push(choice);
+        }
+        assert_eq!(choice, ThemeChoice::Dark, "the ring does not close");
+        for theme in THEMES {
+            assert!(seen.contains(&theme), "{theme:?} was never reached");
+        }
     }
 
     /// Every choice maps to a theme, and the pair stays in step with the
@@ -515,5 +747,47 @@ mod tests {
     fn choices_resolve_to_the_shipped_themes() {
         assert_eq!(Theme::for_choice(ThemeChoice::Dark), Theme::DARK);
         assert_eq!(Theme::for_choice(ThemeChoice::Light), Theme::LIGHT);
+        assert_eq!(Theme::for_choice(ThemeChoice::Nord), Theme::NORD);
+        assert_eq!(Theme::for_choice(ThemeChoice::Gruvbox), Theme::GRUVBOX);
+        assert_eq!(Theme::for_choice(ThemeChoice::Solarized), Theme::SOLARIZED);
+        assert_eq!(Theme::for_choice(ThemeChoice::Dracula), Theme::DRACULA);
+    }
+
+    /// Each classic palette is the one it says it is: ground and live colour
+    /// pinned, so a miscopied hex is caught here and not on the user's screen.
+    #[test]
+    fn the_classic_themes_are_the_ones_they_say() {
+        assert_eq!(Theme::NORD.bg, Color::Rgb(0x2e, 0x34, 0x40));
+        assert_eq!(Theme::NORD.accent, Color::Rgb(0xa3, 0xbe, 0x8c));
+        assert_eq!(Theme::GRUVBOX.bg, Color::Rgb(0x28, 0x28, 0x28));
+        assert_eq!(Theme::GRUVBOX.accent, Color::Rgb(0xb8, 0xbb, 0x26));
+        assert_eq!(Theme::SOLARIZED.bg, Color::Rgb(0x00, 0x2b, 0x36));
+        assert_eq!(Theme::SOLARIZED.accent, Color::Rgb(0x2a, 0xa1, 0x98));
+        assert_eq!(Theme::DRACULA.bg, Color::Rgb(0x28, 0x2a, 0x36));
+        assert_eq!(Theme::DRACULA.accent, Color::Rgb(0x50, 0xfa, 0x7b));
+    }
+
+    /// No two themes share a ground, and no palette loses a role into its own
+    /// ground: a vanished role is a bug no single screenshot catches.
+    #[test]
+    fn every_theme_stands_apart() {
+        for (index, choice) in THEMES.iter().enumerate() {
+            let theme = Theme::for_choice(*choice);
+            for other in THEMES.iter().skip(index + 1) {
+                let other = Theme::for_choice(*other);
+                assert_ne!(theme.bg, other.bg, "{choice:?} shares a ground");
+            }
+            for (role, value) in [
+                ("panel", theme.panel),
+                ("panel_3", theme.panel_3),
+                ("muted", theme.muted),
+                ("line", theme.line),
+                ("accent", theme.accent),
+                ("terminal_bg", theme.terminal_bg),
+            ] {
+                assert_ne!(value, theme.bg, "{choice:?}: {role} is the ground");
+                assert_ne!(value, theme.text, "{choice:?}: {role} is the text");
+            }
+        }
     }
 }

@@ -22,6 +22,7 @@
 //! dialog.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
@@ -67,6 +68,93 @@ const CONFIRM_SEND_DETAIL: Entry = [
     "设备会立即执行，且无法撤销。",
 ];
 
+// --- the cheat sheet ---------------------------------------------------------
+
+const CHEAT_TITLE: Entry = [" Cheat sheet ", " 速查参考 "];
+const CHEAT_KEYS: Entry = [
+    "↑↓ choose · Enter send · Esc close",
+    "↑↓ 选择 · 回车发送 · Esc 关闭",
+];
+const CHEAT_GRP_FILES: Entry = ["Files & Dirs", "文件与目录"];
+const CHEAT_GRP_SYS: Entry = ["System", "系统信息"];
+const CHEAT_GRP_NET: Entry = ["Network", "网络"];
+const CHEAT_GRP_PERM: Entry = ["Permissions & Processes", "权限与进程"];
+
+/// The commands the sheet offers, in the four groups the web's chips use
+/// (`web/app.js` `CHEATS`), in the same order.
+///
+/// Sent verbatim, placeholders included — `cd <dir>` goes out as `cd <dir>`,
+/// because that is what the web's click handler does with `data-cmd`, and the
+/// two clients must not disagree about what a row means. The placeholder is
+/// edited on the target, where the user can also see what it cost.
+const CHEAT_GROUPS: &[(Entry, &[(&str, Entry)])] = &[
+    (
+        CHEAT_GRP_FILES,
+        &[
+            ("ls -l", ["List in long format", "详细列表"]),
+            ("cd <dir>", ["Change directory", "切换目录"]),
+            ("pwd", ["Print working directory", "显示当前路径"]),
+            ("mkdir <dir>", ["Make directory", "创建目录"]),
+            ("cp -r a b", ["Copy recursively", "递归复制"]),
+            ("mv a b", ["Move / rename", "移动或重命名"]),
+            ("rm -rf <dir>", ["Force remove", "强制删除"]),
+            ("cat <file>", ["Show file content", "查看文件内容"]),
+            ("grep \"x\" <f>", ["Search text", "搜索文本"]),
+            ("find . -name \"*.c\"", ["Find files", "查找文件"]),
+        ],
+    ),
+    (
+        CHEAT_GRP_SYS,
+        &[
+            ("uname -a", ["Kernel info", "内核信息"]),
+            ("df -h", ["Disk usage", "磁盘使用"]),
+            ("free -h", ["Memory usage", "内存使用"]),
+            ("top", ["Process monitor", "进程监控"]),
+            ("uptime", ["System uptime", "运行时长"]),
+        ],
+    ),
+    (
+        CHEAT_GRP_NET,
+        &[
+            ("ip a", ["Network interfaces", "网络接口"]),
+            ("ping <host>", ["Ping a host", "连通测试"]),
+            ("ssh u@host", ["Remote login", "远程登录"]),
+            ("scp a u@h:", ["Secure copy", "安全拷贝"]),
+            ("curl -I <url>", ["Fetch headers", "请求响应头"]),
+        ],
+    ),
+    (
+        CHEAT_GRP_PERM,
+        &[
+            ("chmod 755 <f>", ["Change mode", "修改权限"]),
+            ("chown u:g <f>", ["Change owner", "修改属主"]),
+            ("ps aux", ["List processes", "进程列表"]),
+            ("kill -9 <pid>", ["Kill process", "终止进程"]),
+            ("sudo <cmd>", ["Run as root", "提权执行"]),
+        ],
+    ),
+];
+
+// --- the UART window ---------------------------------------------------------
+
+const UART_TITLE: Entry = [" UART settings ", " UART 设置 "];
+const UART_PROMPT: Entry = [
+    "Set the bridge UART: baud,data,parity,stop,flow",
+    "设置桥接 UART：波特率,数据位,校验,停止位,流控",
+];
+const UART_KEYS: Entry = [
+    "Enter send · Esc close",
+    "回车发送 · Esc 关闭",
+];
+const UART_QUERYING: Entry = ["querying uart…", "正在查询 uart…"];
+const UART_SETTING: Entry = ["setting uart={}…", "正在设置 uart={}…"];
+
+/// What the field starts at: the rate a bridge is most often at, and the shape
+/// the firmware's own `ERR` line spells out. Corrected by the answer the query
+/// brings, which is what makes the common case — change one number — a short
+/// edit rather than a typing exercise.
+const UART_DEFAULT: &str = "115200,8,n,1,none";
+
 // --- the prompts ----------------------------------------------------
 
 const PROMPT_KEYS: Entry = [
@@ -86,8 +174,8 @@ const LEVEL_WARN: Entry = ["warn", "警告"];
 const LEVEL_ERROR: Entry = ["error", "错误"];
 
 const HELP_NOTE: Entry = [
-    "Every other key goes to the device: the cursor keys, Home/End, Delete.",
-    "其余按键都会发送到设备：方向键、Home/End、Delete。",
+    "Every other key goes to the device: the letters, the cursor keys, Home/End, Delete — and Tab, which completes on the target. While the pane has the keyboard and a link is up, Ctrl+C interrupts the device too.",
+    "其余按键都会发送到设备：字母、方向键、Home/End、Delete，以及用于补全的 Tab。键盘在终端且已连接时，Ctrl+C 也发给设备（中断正在运行的程序）。",
 ];
 
 /// The help overlay's chord list. The keys stay literal — they are what the
@@ -96,12 +184,32 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
     ("F2–F5", ["Switch the view", "切换视图"]),
-    ("Tab", ["Move the focus", "切换焦点"]),
+    ("Ctrl+Up", ["Focus the sidebar (Esc returns)", "聚焦侧栏（Esc 返回）"]),
     ("↑ / ↓", ["Walk the sidebar", "在侧栏中移动"]),
     ("Enter", ["Send the preset / activate", "发送预设 / 激活"]),
+    (
+        "Ctrl+C",
+        [
+            "Interrupt the device (pane focused, link up)",
+            "中断设备（终端聚焦且已连接）",
+        ],
+    ),
+    (
+        "Ctrl+Shift+C",
+        ["Arm Ctrl for the next key", "武装 Ctrl 给下一个键"],
+    ),
+    (
+        "Ctrl+Shift+R",
+        ["Arm Shift for the next key", "武装 Shift 给下一个键"],
+    ),
+    (
+        "Ctrl+Shift+A",
+        ["Arm Alt for the next key", "武装 Alt 给下一个键"],
+    ),
     ("PgUp / PgDn", ["Scroll the pane", "滚动终端"]),
     ("End", ["Jump to the newest line", "跳到最新一行"]),
     ("Ctrl+L", ["Clear the pane", "清屏"]),
+    ("Ctrl+Shift+Y", ["Copy the screen", "复制整屏"]),
     ("Ctrl+T", ["Toggle the theme", "切换主题"]),
     ("Ctrl+Q", ["Quit", "退出"]),
 ];
@@ -124,6 +232,10 @@ pub enum Dialog {
     Prompt(Prompt),
     /// The boards a scan heard, waiting for a pick.
     DevicePick(DevicePick),
+    /// The cheat sheet, cursor included.
+    Cheat(Cheat),
+    /// The bridge's UART: a settings field with the bridge's answer under it.
+    Uart(Uart),
     /// The assistant's settings, scrolled to a row.
     ///
     /// Its own window rather than a section of the assistant view: five fields
@@ -197,109 +309,87 @@ impl DevicePick {
     }
 }
 
-/// A text field: a question, an answer, and what agreeing to it does.
+/// The cheat sheet: the commands the web's chips send, in four groups, with a
+/// cursor over them.
 ///
-/// A prompt rather than a second command line: the interface has no command
-/// line, and a settings value needs exactly one argument. Keeping it a dialog means it
-/// takes the keyboard the same way the others do, and that the answer is a
-/// value the tests can read.
+/// A cursor rather than a scroll offset alone, because Enter sends the row the
+/// cursor is on — so the row *is* the state. The sheet stays open after a send,
+/// which is what makes it a sheet to work from rather than a menu to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prompt {
-    /// The box's title, in both languages.
-    pub title: Entry,
-    /// The question, one line above the field.
-    pub label: Entry,
-    /// What the field shows while it is empty, so an empty box still says what
-    /// shape of answer it wants.
-    pub placeholder: Entry,
+pub struct Cheat {
+    /// Which command the keyboard is on, counted over the commands only; the
+    /// group headings are not rows the cursor lands on.
+    pub selected: usize,
+    /// How far the body has been scrolled, in rows.
+    pub scroll: usize,
+}
+
+/// How many commands the cursor can point at (the group headings are not
+/// rows).
+fn cheat_count() -> usize {
+    CHEAT_GROUPS.iter().map(|(_, items)| items.len()).sum()
+}
+
+/// The `selected`th command, or `None` past the end.
+fn cheat_command(selected: usize) -> Option<&'static str> {
+    CHEAT_GROUPS
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .map(|(command, _)| *command)
+        .nth(selected)
+}
+
+/// The command column's width: as wide as the widest command, but never so
+/// wide that the descriptions lose their room in a narrow box — and never so
+/// narrow that a command is cut down to its first character.
+fn cheat_command_col(width: usize) -> usize {
+    let widest = CHEAT_GROUPS
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .map(|(command, _)| text::columns(command))
+        .max()
+        .unwrap_or(0);
+    widest.min(width.saturating_sub(24).max(8))
+}
+
+/// The bridge UART window: the spec in a field, the bridge's answer below.
+///
+/// A window rather than a prompt because the write is a question and the
+/// answer is the confirmation — a bridge that could not change rate keeps the
+/// old one and says so — so the box has to stay up to be read. Enter therefore
+/// sends and Escape closes, the way the cheat sheet's window works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Uart {
+    /// The spec being edited: `baud,data,parity,stop,flow`.
+    pub field: Field,
+    /// The bridge's answer, once it arrives.
+    pub status: Option<String>,
+    /// Why nothing was changed: a spec that does not parse, a link that cannot
+    /// carry the question, a bridge that refused. Under the field, not instead
+    /// of it — the field is what the user is going to fix.
+    pub error: Option<String>,
+}
+
+/// A one-line text field: what has been typed, and where the caret is.
+///
+/// The dialog owns what an answer *means*; this owns the editing, so the
+/// prompt and the UART window move a caret by the same rules — one character
+/// at a time, never mid-character.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Field {
     /// What has been typed.
     pub text: String,
-    /// Where the caret is, as a byte offset into `text`. It only ever sits on a
-    /// character boundary: every move here shifts it by a whole character.
+    /// Where the caret is, as a byte offset into `text`. It only ever sits on
+    /// a character boundary: every move here shifts it by a whole character.
     pub cursor: usize,
-    /// Whether the field shows stars instead of what was typed. Starts on for
-    /// an answer that is a secret — a token that reached a screenshot has to be
-    /// rotated — and Ctrl+R flips it either way, for as long as it takes to
-    /// check one character.
-    pub masked: bool,
-    /// What agreeing to it does.
-    pub action: PromptAction,
 }
 
-/// What agreeing to a prompt does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptAction {
-    /// Name the network to join. Answered by a second prompt for its password,
-    /// because the two are one command on the wire and a half of that command
-    /// is not a thing that can be sent.
-    WifiSsid,
-    /// The password for the network just named. Held nowhere: it goes straight
-    /// from the field into the command and out of the process.
-    WifiPassword,
-    /// Where the device's log is uploaded to.
-    WebdavUrl,
-    /// The address a LAN dial goes to, kept in the sidebar row it edits.
-    LanHost,
-    /// The token that dial carries. Held in the sidebar row and in the dial,
-    /// never in a notice or a log.
-    LanToken,
-}
-
-impl Prompt {
-    /// An empty prompt.
-    pub fn new(title: Entry, action: PromptAction) -> Prompt {
-        Prompt {
-            title,
-            label: Self::label(action),
-            placeholder: Self::placeholder(action),
-            text: String::new(),
-            cursor: 0,
-            masked: action == PromptAction::LanToken,
-            action,
-        }
-    }
-
-    /// A prompt already holding `text`, with the caret after it.
-    ///
-    /// Used when the answer is a change to one already given — renaming a
-    /// network that is half typed — so that correcting one character does not
-    /// mean typing the whole name again.
-    pub fn with_text(title: Entry, action: PromptAction, text: &str) -> Prompt {
-        let mut prompt = Prompt::new(title, action);
-        prompt.text = text.to_string();
-        prompt.cursor = prompt.text.len();
-        prompt
-    }
-
-    /// The question this action's field asks, in the interface language.
-    fn label(action: PromptAction) -> Entry {
-        match action {
-            PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
-            PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
-            PromptAction::WebdavUrl => [
-                "Upload URL (http:// or https://)",
-                "上传地址（http:// 或 https://）",
-            ],
-            PromptAction::LanHost => [
-                "The bridge's LAN address (the board's WiFi IP)",
-                "桥接的局域网地址（板子的 WiFi IP）",
-            ],
-            PromptAction::LanToken => [
-                "32 hex characters, blank when LAN auth is off (Ctrl+R shows it)",
-                "32 位十六进制，未启用鉴权时留空（Ctrl+R 切换显示）",
-            ],
-        }
-    }
-
-    /// What the empty field says, which is how it tells you the shape of
-    /// answer it wants.
-    fn placeholder(action: PromptAction) -> Entry {
-        match action {
-            PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
-            PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
-            PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
-            PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
-            PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
+impl Field {
+    /// A field already holding `text`, with the caret after it.
+    pub fn new(text: &str) -> Field {
+        Field {
+            text: text.to_string(),
+            cursor: text.len(),
         }
     }
 
@@ -371,13 +461,119 @@ impl Prompt {
     }
 }
 
+/// A text field: a question, an answer, and what agreeing to it does.
+///
+/// A prompt rather than a second command line: the interface has no command
+/// line, and a settings value needs exactly one argument. Keeping it a dialog means it
+/// takes the keyboard the same way the others do, and that the answer is a
+/// value the tests can read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    /// The box's title, in both languages.
+    pub title: Entry,
+    /// The question, one line above the field.
+    pub label: Entry,
+    /// What the field shows while it is empty, so an empty box still says what
+    /// shape of answer it wants.
+    pub placeholder: Entry,
+    /// What has been typed, and where the caret is.
+    pub field: Field,
+    /// Whether the field shows stars instead of what was typed. Starts on for
+    /// an answer that is a secret — a token that reached a screenshot has to be
+    /// rotated — and Ctrl+R flips it either way, for as long as it takes to
+    /// check one character.
+    pub masked: bool,
+    /// What agreeing to it does.
+    pub action: PromptAction,
+}
+
+/// What agreeing to a prompt does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAction {
+    /// Name the network to join. Answered by a second prompt for its password,
+    /// because the two are one command on the wire and a half of that command
+    /// is not a thing that can be sent.
+    WifiSsid,
+    /// The password for the network just named. Held nowhere: it goes straight
+    /// from the field into the command and out of the process.
+    WifiPassword,
+    /// Where the device's log is uploaded to.
+    WebdavUrl,
+    /// The address a LAN dial goes to, kept in the sidebar row it edits.
+    LanHost,
+    /// The token that dial carries. Held in the sidebar row and in the dial,
+    /// never in a notice or a log.
+    LanToken,
+}
+
+impl Prompt {
+    /// An empty prompt.
+    pub fn new(title: Entry, action: PromptAction) -> Prompt {
+        Prompt {
+            title,
+            label: Self::label(action),
+            placeholder: Self::placeholder(action),
+            field: Field::default(),
+            masked: action == PromptAction::LanToken,
+            action,
+        }
+    }
+
+    /// A prompt already holding `text`, with the caret after it.
+    ///
+    /// Used when the answer is a change to one already given — renaming a
+    /// network that is half typed — so that correcting one character does not
+    /// mean typing the whole name again.
+    pub fn with_text(title: Entry, action: PromptAction, text: &str) -> Prompt {
+        let mut prompt = Prompt::new(title, action);
+        prompt.field = Field::new(text);
+        prompt
+    }
+
+    /// The question this action's field asks, in the interface language.
+    fn label(action: PromptAction) -> Entry {
+        match action {
+            PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
+            PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
+            PromptAction::WebdavUrl => [
+                "Upload URL (http:// or https://)",
+                "上传地址（http:// 或 https://）",
+            ],
+            PromptAction::LanHost => [
+                "The bridge's LAN address (the board's WiFi IP)",
+                "桥接的局域网地址（板子的 WiFi IP）",
+            ],
+            PromptAction::LanToken => [
+                "32 hex characters, blank when LAN auth is off (Ctrl+R shows it)",
+                "32 位十六进制，未启用鉴权时留空（Ctrl+R 切换显示）",
+            ],
+        }
+    }
+
+    /// What the empty field says, which is how it tells you the shape of
+    /// answer it wants.
+    fn placeholder(action: PromptAction) -> Entry {
+        match action {
+            PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
+            PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
+            PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
+            PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
+            PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
+        }
+    }
+}
+
 impl Dialog {
-    /// The row the dialog is scrolled to. The help, the log and the settings
-    /// scroll; a confirmation and a prompt are the size of their content.
+    /// The row the dialog is scrolled to. The help, the log, the settings and
+    /// the cheat sheet scroll; a confirmation and a prompt are the size of
+    /// their content.
     pub fn scroll(&self) -> usize {
         match self {
-            Dialog::Help(offset) | Dialog::Notices(offset) | Dialog::Settings(offset) => *offset,
-            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::DevicePick(_) => 0,
+            Dialog::Help(offset)
+            | Dialog::Notices(offset)
+            | Dialog::Settings(offset)
+            | Dialog::Cheat(Cheat { scroll: offset, .. }) => *offset,
+            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::DevicePick(_) | Dialog::Uart(_) => 0,
         }
     }
 }
@@ -390,6 +586,8 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Confirm(_) => entry(CONFIRM_TITLE, lang),
         Dialog::Prompt(prompt) => entry(prompt.title, lang),
         Dialog::DevicePick(_) => entry(T_PICK, lang),
+        Dialog::Cheat(_) => entry(CHEAT_TITLE, lang),
+        Dialog::Uart(_) => entry(UART_TITLE, lang),
         Dialog::Settings(_) => entry(SETTINGS_TITLE, lang),
     }
 }
@@ -401,6 +599,8 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         Dialog::Notices(_) => entry(NOTICES_KEYS, lang),
         Dialog::Confirm(_) => entry(CONFIRM_KEYS, lang),
         Dialog::Prompt(_) => entry(PROMPT_KEYS, lang),
+        Dialog::Cheat(_) => entry(CHEAT_KEYS, lang),
+        Dialog::Uart(_) => entry(UART_KEYS, lang),
         Dialog::DevicePick(pick) => {
             if pick.scanning {
                 entry(PICK_SCANNING_KEYS, lang)
@@ -437,6 +637,35 @@ pub fn open_help(app: &mut App) {
 /// Raise the notice log.
 pub fn open_notices(app: &mut App) {
     raise(app, Dialog::Notices(0));
+}
+
+/// Raise the cheat sheet, on its first command.
+pub fn open_cheat(app: &mut App) {
+    raise(
+        app,
+        Dialog::Cheat(Cheat {
+            selected: 0,
+            scroll: 0,
+        }),
+    );
+}
+
+/// Raise the UART window, asking the bridge what it is running as it opens.
+///
+/// The question goes over the management channel, so a session without one —
+/// a LAN dial, a dead link — gets its refusal on the window's own error line
+/// rather than a box that silently never fills in.
+pub fn open_uart(app: &mut App) {
+    let mut uart = Uart {
+        field: Field::new(UART_DEFAULT),
+        status: Some(entry(UART_QUERYING, app.lang).to_string()),
+        error: None,
+    };
+    if let Err(why) = app.ask_device(crate::device::Query::Uart) {
+        uart.status = None;
+        uart.error = Some(why);
+    }
+    raise(app, Dialog::Uart(uart));
 }
 
 /// Raise the assistant's settings.
@@ -576,34 +805,88 @@ fn level_badge(level: NoticeLevel) -> (&'static str, Entry) {
 /// a caret that only existed in the live TUI would make the dialog unreadable in
 /// a `--print-frame` preview — and untestable.
 fn prompt_field(prompt: &Prompt, lang: Lang, theme: &Theme) -> Line<'static> {
-    let (before, under, after) = prompt.split();
+    if prompt.field.text.is_empty() {
+        // Nothing typed: the caret, then what shape of answer the field wants.
+        let mut line = field_line(&prompt.field, theme);
+        line.spans
+            .push(Span::styled(entry(prompt.placeholder, lang), theme.muted()));
+        return line;
+    }
+    if !prompt.masked {
+        return field_line(&prompt.field, theme);
+    }
     // A masked field shows one star per character, so revealing it does not
     // move the caret — and the character under the caret stays exactly one
     // cell (the split hands back a space at the end of the line, which stays
     // a space).
+    let (before, under, after) = prompt.field.split();
     let stars = |text: &str| "*".repeat(text.chars().count());
-    let (before, under, after) = if prompt.masked {
-        (
-            stars(before),
-            if under == " " { " ".to_string() } else { "*".to_string() },
-            stars(after),
-        )
-    } else {
-        (before.to_string(), under.to_string(), after.to_string())
-    };
-    if prompt.text.is_empty() {
-        // Nothing typed: the caret, then what shape of answer the field wants.
-        return Line::from(vec![
-            Span::styled(format!("  {before}"), theme.text()),
-            Span::styled(under, theme.selected()),
-            Span::styled(entry(prompt.placeholder, lang), theme.muted()),
-        ]);
-    }
+    Line::from(vec![
+        Span::styled(format!("  {}", stars(before)), theme.text()),
+        Span::styled(
+            if under == " " {
+                " ".to_string()
+            } else {
+                "*".to_string()
+            },
+            theme.selected(),
+        ),
+        Span::styled(stars(after), theme.text()),
+    ])
+}
+
+/// A field's line: what has been typed, with a caret on the character the
+/// next keystroke will go before.
+///
+/// The caret is drawn *in* the text rather than placed with the terminal's own
+/// cursor. The box is painted by a `Paragraph`, which has no cursor to move, and
+/// a caret that only existed in the live TUI would make the dialog unreadable in
+/// a `--print-frame` preview — and untestable.
+fn field_line(field: &Field, theme: &Theme) -> Line<'static> {
+    let (before, under, after) = field.split();
     Line::from(vec![
         Span::styled(format!("  {before}"), theme.text()),
-        Span::styled(under, theme.selected()),
-        Span::styled(after, theme.text()),
+        Span::styled(under.to_string(), theme.selected()),
+        Span::styled(after.to_string(), theme.text()),
     ])
+}
+
+/// The cheat sheet's body: a heading per group, the commands under it, and a
+/// chip under the cursor.
+///
+/// The two columns are the old sheet's: the command column is as wide as the
+/// widest command but never eats the room the descriptions need, so the second
+/// column starts in the same place in every group. The trailing blank after a
+/// group is a row like any other — the scroll arithmetic counts it.
+fn cheat_body(cheat: &Cheat, lang: Lang, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let command_col = cheat_command_col(width);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut index = 0;
+    for (group, items) in CHEAT_GROUPS {
+        out.push(Line::from(Span::styled(
+            entry(*group, lang),
+            theme.accent_strong().add_modifier(Modifier::BOLD),
+        )));
+        for (command, meaning) in items.iter() {
+            let here = index == cheat.selected;
+            index += 1;
+            // The cursor is one chip, the way the palette's rows are: the
+            // marker, the command and the meaning all take the selection's
+            // ink, so the row reads as one chosen thing.
+            let (marker, ink, hint) = if here {
+                (theme.selected(), theme.selected(), theme.selected())
+            } else {
+                (theme.accent(), theme.text(), theme.muted())
+            };
+            out.push(Line::from(vec![
+                Span::styled(if here { "▸ " } else { "  " }, marker),
+                Span::styled(text::pad_to(command, command_col), ink),
+                Span::styled(format!("  {}", entry(*meaning, lang)), hint),
+            ]));
+        }
+        out.push(Line::default());
+    }
+    out
 }
 
 /// Every row of the dialog's body, before the window is taken.
@@ -653,7 +936,15 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 .map(|(index, device)| {
                     let name = device.name.as_deref().unwrap_or("(no name)");
                     let nus = if device.nus { "nus" } else { "-" };
-                    let row = format!("{nus:>3} {name:<24} {}", device.id);
+                    // The signal the scan heard it at, ranked by bars and
+                    // named by the number: a full column even when the
+                    // adapter had no reading for a device it heard, so the
+                    // names stay in one line down the box.
+                    let signal = match device.rssi {
+                        Some(dbm) => format!("{} {:>4}dBm", text::signal_bars(i32::from(dbm)), dbm),
+                        None => format!("{:>12}", "—"),
+                    };
+                    let row = format!("{nus:>3} {signal} {name:<24} {}", device.id);
                     let style = if index == pick.cursor {
                         theme.selected()
                     } else {
@@ -663,6 +954,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 })
                 .collect()
         }
+        Dialog::Cheat(cheat) => cheat_body(cheat, lang, theme, width),
         Dialog::Notices(_) => {
             if app.log.is_empty() {
                 return vec![Line::from(Span::styled(
@@ -720,6 +1012,31 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             Line::default(),
             prompt_field(prompt, lang, theme),
         ],
+        // The bridge's window: the syntax named under the title, the spec in
+        // a field, and the bridge's own words under it — its answer, or its
+        // refusal — wrapped, because an `ERR` line is a sentence.
+        Dialog::Uart(uart) => {
+            let mut out = vec![
+                Line::from(Span::styled(entry(UART_PROMPT, lang), theme.muted())),
+                Line::default(),
+                field_line(&uart.field, theme),
+                Line::default(),
+            ];
+            match (&uart.error, &uart.status) {
+                (Some(error), _) => out.extend(
+                    wrap_rows(error, width.max(1))
+                        .into_iter()
+                        .map(|row| Line::from(Span::styled(row, theme.danger()))),
+                ),
+                (None, Some(status)) => out.extend(
+                    wrap_rows(status, width.max(1))
+                        .into_iter()
+                        .map(|row| Line::from(Span::styled(row, theme.accent_strong()))),
+                ),
+                (None, None) => {}
+            }
+            out
+        }
         // The assistant's form, painted by the module that owns it: the caret,
         // the hidden key and the note cursor all live in `assistant` state, and
         // a second painter would be a second opinion about what a field holds.
@@ -766,6 +1083,28 @@ pub fn lines(dialog: &Dialog, app: &App, width: u16, height: usize) -> Vec<Line<
 
 // --- keys --------------------------------------------------------------------
 
+/// The movement and editing keys a field answers to, if this is one of them.
+///
+/// A bool rather than a match over everything: the window around the field
+/// keeps the keys that are its own — the prompt's Enter, the UART window's
+/// Escape — and a key with no meaning here leaves the field exactly as it was.
+fn field_key(field: &mut Field, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace => field.backspace(),
+        KeyCode::Delete => field.delete(),
+        KeyCode::Left => field.left(),
+        KeyCode::Right => field.right(),
+        KeyCode::Home => field.home(),
+        KeyCode::End => field.end(),
+        // Tab is a *character* here, not a focus key: a path may want one,
+        // where the dialog has nothing else for it to mean.
+        KeyCode::Char(c) => field.insert(c),
+        KeyCode::Tab => field.insert('\t'),
+        _ => return false,
+    }
+    true
+}
+
 /// Handle a key while a dialog is open. Returns true when the key was consumed.
 ///
 /// A control chord is deliberately *not* consumed: `Ctrl+Q` must still quit and
@@ -806,7 +1145,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // The pick dials the board, and says so: a link the user
                 // asked for by name is news; whether it caught is the log's.
                 Some(device) => {
-                    app.connect_to_board(&device.id, false);
+                    app.connect_to_board(&device.id, device.rssi, false);
                 }
                 None if !pick.scanning => {
                     let _ = app.start_ble_scan();
@@ -830,50 +1169,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             _ => app.dialog = Some(Dialog::Confirm(confirm)),
         },
-        Dialog::Prompt(mut prompt) => match key.code {
-            // Escape gives the keyboard back without starting anything.
-            KeyCode::Esc => {}
-            KeyCode::Enter => start(app, prompt),
-            KeyCode::Backspace => {
-                prompt.backspace();
+        Dialog::Prompt(mut prompt) => {
+            if key.code == KeyCode::Esc {
+                // Escape gives the keyboard back without starting anything.
+            } else if key.code == KeyCode::Enter {
+                start(app, prompt);
+            } else {
+                // Anything else leaves the field exactly as it was. The dialog
+                // stays up, so a key with no meaning here is not a key that
+                // cancels.
+                field_key(&mut prompt.field, key);
                 app.dialog = Some(Dialog::Prompt(prompt));
             }
-            KeyCode::Delete => {
-                prompt.delete();
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            KeyCode::Left => {
-                prompt.left();
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            KeyCode::Right => {
-                prompt.right();
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            KeyCode::Home => {
-                prompt.home();
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            KeyCode::End => {
-                prompt.end();
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            // Tab is a *character* here, not a focus key: a path may want one,
-            // where the dialog has nothing else for it to mean.
-            KeyCode::Char(c) => {
-                prompt.insert(c);
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            KeyCode::Tab => {
-                prompt.insert('\t');
-                app.dialog = Some(Dialog::Prompt(prompt));
-            }
-            // Anything else leaves the field exactly as it was. The dialog stays
-            // up, so a key with no meaning here is not a key that cancels.
-            _ => app.dialog = Some(Dialog::Prompt(prompt)),
-        },
+        }
+        Dialog::Uart(uart) => uart_key(app, uart, key),
         Dialog::Help(offset) => app.dialog = scrolled(app, Dialog::Help(offset), offset, key),
         Dialog::Notices(offset) => app.dialog = scrolled(app, Dialog::Notices(offset), offset, key),
+        Dialog::Cheat(cheat) => cheat_key(app, cheat, key),
         // The assistant's window: Escape shuts it and hands the caret back to
         // the composer, the paging keys scroll the body, and every other key
         // belongs to the form — which re-puts the dialog here whatever it did
@@ -912,7 +1224,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 /// but a send has nothing to offer and says so rather than opening a file called
 /// "".
 fn start(app: &mut App, prompt: Prompt) {
-    let answer = prompt.answer().to_string();
+    let answer = prompt.field.answer().to_string();
     match prompt.action {
         // A network name with no network to name is a refusal rather than a
         // guess: joining "" would send `@w=,` and the firmware would read it as
@@ -972,7 +1284,7 @@ fn start(app: &mut App, prompt: Prompt) {
         // The address is a value the user came to set, so an empty answer is
         // an answer: erase the field and the board's own WiFi address is what
         // a dial falls back to.
-        PromptAction::LanHost => app.lan_host = answer.to_string(),
+        PromptAction::LanHost => app.set_lan_host(answer.to_string()),
         // The token goes into the sidebar row and nowhere else — no notice,
         // no log, no report ever names it.
         PromptAction::LanToken => app.lan_token = answer.to_string(),
@@ -1036,6 +1348,147 @@ fn followed(app: &App, key: KeyCode, offset: usize, rows: usize) -> usize {
     }
 }
 
+/// Body line the `selected` command is painted on.
+///
+/// The key handler moves the scroll from this number, so it has to be the same
+/// arithmetic [`cheat_body`] lays out — a heading, the commands, a blank —
+/// or the cursor walks off the window one line at a time.
+fn cheat_line_of(selected: usize) -> usize {
+    let mut line = 0;
+    let mut index = 0;
+    for (_, items) in CHEAT_GROUPS {
+        if selected < index + items.len() {
+            return line + 1 + (selected - index);
+        }
+        index += items.len();
+        line += 1 + items.len() + 1;
+    }
+    line
+}
+
+/// The scroll the cursor leaves behind: the least the window moves and still
+/// paints the chip — the settings window's arithmetic, with the cursor's line
+/// in place of its field.
+fn cheat_scrolled(app: &App, selected: usize, scroll: usize) -> usize {
+    let rows: usize = CHEAT_GROUPS.iter().map(|(_, items)| items.len() + 2).sum();
+    let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+    if room == 0 {
+        // No paint has said how tall the window is (a headless test, the first
+        // tick), or the frame is too small for a modal at all: the scroll
+        // keeps whatever the key left it.
+        return scroll;
+    }
+    let line = cheat_line_of(selected);
+    if line < scroll {
+        line
+    } else if line >= scroll + room {
+        line + 1 - room
+    } else {
+        scroll
+    }
+}
+
+/// The cheat sheet's keys: a cursor over the commands, Enter sends the row it
+/// is on, Escape closes.
+///
+/// Enter keeps the sheet up — several commands out of one window is the point
+/// of it — and a send with no link is refused out loud by `send_command`,
+/// which is the answer a button press is owed. A key with no meaning here is
+/// not a key that cancels.
+fn cheat_key(app: &mut App, cheat: Cheat, key: KeyEvent) {
+    if key.code == KeyCode::Esc {
+        return;
+    }
+    if key.code == KeyCode::Enter {
+        if let Some(command) = cheat_command(cheat.selected) {
+            app.send_command(command);
+        }
+        app.dialog = Some(Dialog::Cheat(cheat));
+        return;
+    }
+    let last = cheat_count().saturating_sub(1);
+    let selected = match key.code {
+        KeyCode::Up => cheat.selected.saturating_sub(1),
+        KeyCode::Down => (cheat.selected + 1).min(last),
+        KeyCode::PageUp => cheat.selected.saturating_sub(10),
+        KeyCode::PageDown => (cheat.selected + 10).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        _ => {
+            app.dialog = Some(Dialog::Cheat(cheat));
+            return;
+        }
+    };
+    let scroll = cheat_scrolled(app, selected, cheat.scroll);
+    app.dialog = Some(Dialog::Cheat(Cheat { selected, scroll }));
+}
+
+/// The UART window's keys: a spec to edit, Enter to send it, Escape to close.
+fn uart_key(app: &mut App, mut uart: Uart, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => return,
+        KeyCode::Enter => send_uart_spec(app, &mut uart),
+        _ => {
+            // A key that is not a spec character leaves the field exactly as
+            // it was: "no meaning here" is not "cancel", the same way it is
+            // not in every other window.
+            field_key(&mut uart.field, key);
+        }
+    }
+    app.dialog = Some(Dialog::Uart(uart));
+}
+
+/// Send the typed spec.
+///
+/// The local parser has the last word on the *shape* and `set_uart` on the
+/// link and the ranges, so a spec that cannot work is refused before a round
+/// trip rather than after it. The status line then says what is being set,
+/// until the bridge answers with what it now is.
+fn send_uart_spec(app: &mut App, uart: &mut Uart) {
+    uart.status = None;
+    match crate::accessory::parse_uart_spec(uart.field.answer()) {
+        Err(why) => uart.error = Some(why),
+        Ok(settings) => match app.set_uart(&settings) {
+            Err(why) => uart.error = Some(why),
+            Ok(()) => {
+                uart.error = None;
+                uart.status = Some(fill(
+                    entry(UART_SETTING, app.lang),
+                    &[settings.spec()],
+                ));
+            }
+        },
+    }
+}
+
+/// Show a UART answer on the window that asked for it, when one is up.
+///
+/// The bridge's own words, shown as they came: the window's job is to say what
+/// the bridge is running, and a paraphrase would be a second opinion. A
+/// successful answer also sets the field to what the bridge *says* it is —
+/// a bridge that could not take the new rate answers with the old one, and the
+/// field correcting to it is the whole point of asking.
+pub fn uart_answered(app: &mut App, text: &str, ok: bool) {
+    let Some(Dialog::Uart(uart)) = &mut app.dialog else {
+        return;
+    };
+    let answer = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if !ok {
+        uart.status = None;
+        uart.error = Some(answer.to_string());
+        return;
+    }
+    if let Some(settings) = crate::accessory::parse_uart_settings(answer) {
+        uart.field = Field::new(&settings.spec());
+    }
+    uart.error = None;
+    uart.status = Some(answer.to_string());
+}
+
 /// Do what the confirmation agreed to.
 fn run(app: &mut App, action: ConfirmAction) {
     match action {
@@ -1062,6 +1515,7 @@ mod tests {
     use crate::app::Notice;
     use crate::event::ConnectionState;
     use crate::theme::Theme;
+    use crate::transport::testing::{answer, asked_frames, asked_id, asked_includes, MemoryLink};
 
     fn text_of(lines: &[Line<'static>]) -> String {
         lines
@@ -1074,6 +1528,54 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Pump until `ready`, or give up after two seconds and say so.
+    ///
+    /// Pumping is what moves bytes across a test's link, so this is the wait
+    /// every test that puts a real command on a real wire needs.
+    fn pump_until(app: &mut App, ready: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !ready(app) {
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(ready(app), "the pump did not get there in two seconds");
+    }
+
+    /// A connected app on a memory link that says it is Bluetooth: the
+    /// management channel — and so any question a dialog asks — exists on no
+    /// other kind of link.
+    fn connected_over_ble() -> (App, MemoryLink) {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let wire = MemoryLink::ble();
+        app.connect(wire.link()).expect("the memory link opens");
+        pump_until(&mut app, |app| app.state == ConnectionState::Connected);
+        assert_eq!(app.transport, crate::app::Transport::Ble);
+        (app, wire)
+    }
+
+    /// The UART window under test, or a panic naming what is there instead.
+    fn uart_of(app: &App) -> &Uart {
+        match app.dialog.as_ref() {
+            Some(Dialog::Uart(uart)) => uart,
+            other => panic!("the UART window is up: {other:?}"),
+        }
+    }
+
+    /// Type `text` over the UART field, one key at a time, the way a user
+    /// correcting a spec would: from the start, deleting what is there.
+    fn retype(app: &mut App, text: &str) {
+        handle_key(app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        for _ in 0..uart_of(app).field.text.len() {
+            handle_key(app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        }
+        for ch in text.chars() {
+            handle_key(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
     }
 
     /// Every string this module owns is written in both languages — the table
@@ -1100,7 +1602,21 @@ mod tests {
             LEVEL_ERROR,
             HELP_NOTE,
             PROMPT_KEYS,
+            CHEAT_TITLE,
+            CHEAT_KEYS,
+            UART_TITLE,
+            UART_PROMPT,
+            UART_KEYS,
+            UART_QUERYING,
+            UART_SETTING,
         ];
+        entries.extend(CHEAT_GROUPS.iter().map(|(group, _)| *group));
+        entries.extend(
+            CHEAT_GROUPS
+                .iter()
+                .flat_map(|(_, items)| items.iter())
+                .map(|(_, meaning)| *meaning),
+        );
         entries.extend(HELP_ROWS.iter().map(|(_, meaning)| *meaning));
         crate::i18n::assert_bilingual(&entries);
     }
@@ -1113,7 +1629,8 @@ mod tests {
         let app = App::default();
         let shown = text_of(&lines(&Dialog::Help(0), &app, 60, 20));
         for key in [
-            "Ctrl+P", "F1", "F2–F5", "Tab", "Enter", "PgUp", "Ctrl+L", "Ctrl+T", "Ctrl+Q",
+            "Ctrl+P", "F1", "F2–F5", "Ctrl+Up", "Enter", "Ctrl+C", "Ctrl+Shift+C", "Ctrl+Shift+Y",
+            "PgUp", "Ctrl+L", "Ctrl+T", "Ctrl+Q",
         ] {
             assert!(shown.contains(key), "help is missing {key:?}\n{shown}");
         }
@@ -1209,6 +1726,301 @@ mod tests {
         assert_eq!(app.dialog, Some(Dialog::Help(last)));
         let tail = text_of(&lines(&Dialog::Help(last), &app, 60, height));
         assert!(tail.contains("Ctrl+Q"), "{tail}");
+    }
+
+    /// The sheet carries every command in its group, in both languages —
+    /// commands verbatim, because they are what the shell gets — and exactly
+    /// one row is under the cursor.
+    #[test]
+    fn the_cheat_sheet_lists_every_command() {
+        let en = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let sheet = text_of(&lines(
+            &Dialog::Cheat(Cheat {
+                selected: 0,
+                scroll: 0,
+            }),
+            &en,
+            70,
+            40,
+        ));
+        for (group, items) in CHEAT_GROUPS {
+            assert!(sheet.contains(entry(*group, Lang::En)), "{sheet}");
+            for (command, meaning) in items.iter() {
+                assert!(sheet.contains(command), "missing {command:?}\n{sheet}");
+                assert!(
+                    sheet.contains(entry(*meaning, Lang::En)),
+                    "missing the note for {command:?}\n{sheet}"
+                );
+            }
+        }
+        assert_eq!(
+            sheet.matches('▸').count(),
+            1,
+            "one cursor, not two:\n{sheet}"
+        );
+
+        let zh = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        let sheet = text_of(&lines(
+            &Dialog::Cheat(Cheat {
+                selected: 0,
+                scroll: 0,
+            }),
+            &zh,
+            70,
+            40,
+        ));
+        assert!(sheet.contains("文件与目录"), "{sheet}");
+        assert!(sheet.contains("ls -l"), "a command is literal:\n{sheet}");
+    }
+
+    /// The cursor walks the commands and stops at both ends; Escape closes and
+    /// a key with no meaning here does not.
+    #[test]
+    fn the_cheat_cursor_walks_and_stops_at_the_ends() {
+        let mut app = App::default();
+        open_cheat(&mut app);
+        fn selected(app: &App) -> usize {
+            match app.dialog.as_ref() {
+                Some(Dialog::Cheat(cheat)) => cheat.selected,
+                other => panic!("the sheet is up: {other:?}"),
+            }
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(selected(&app), 0, "up from the top");
+        for _ in 0..3 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(selected(&app), 3);
+        handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(selected(&app), cheat_count() - 1);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(selected(&app), cheat_count() - 1, "down from the bottom");
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(selected(&app), cheat_count() - 11);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(selected(&app), 0);
+        // A key with no meaning here is not a key that cancels.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(matches!(app.dialog, Some(Dialog::Cheat(_))));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.dialog, None);
+    }
+
+    /// Enter sends the command under the cursor — verbatim, placeholders and
+    /// all — and the sheet stays up, so a session's commands go out of one
+    /// window.
+    #[test]
+    fn enter_sends_the_command_under_the_cursor_and_keeps_the_sheet() {
+        use crate::session::Dial;
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dial(&Dial::Stdio("-".into()))
+            .expect("the loopback opens");
+        pump_until(&mut app, |app| app.state == ConnectionState::Connected);
+
+        open_cheat(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.tx, "ls -l".len() as u64 + 1, "and a carriage return");
+        let Some(Dialog::Cheat(cheat)) = app.dialog.as_ref() else {
+            panic!("the sheet stayed up: {:?}", app.dialog);
+        };
+        assert_eq!(cheat.selected, 0, "the cursor did not move");
+
+        // `<dir>` goes out as written: the placeholder is edited on the
+        // target, and the sheet must not guess what it stands for.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.tx, ("ls -l".len() + 1 + "cd <dir>".len() + 1) as u64);
+    }
+
+    /// A send with no link is refused out loud, the way a preset is — and the
+    /// sheet stays put so the command is still there to copy from.
+    #[test]
+    fn a_cheat_send_with_no_link_is_refused_out_loud() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        open_cheat(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Cheat(_))));
+        assert!(
+            app.log
+                .iter()
+                .any(|notice| notice.text.contains("Not connected")),
+            "it said so: {:?}",
+            app.log
+        );
+    }
+
+    /// The sheet follows the cursor: walking past the window's bottom row
+    /// scrolls it, and the chip is painted inside the window.
+    #[test]
+    fn the_cheat_sheet_follows_the_cursor() {
+        let mut app = App {
+            screen: ratatui::layout::Rect::new(0, 0, 120, 30),
+            ..App::default()
+        };
+        open_cheat(&mut app);
+        fn scroll(app: &App) -> usize {
+            match app.dialog.as_ref() {
+                Some(Dialog::Cheat(cheat)) => cheat.scroll,
+                other => panic!("the sheet is up: {other:?}"),
+            }
+        }
+        assert_eq!(scroll(&app), 0, "the sheet opens on its first row");
+        handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let rows: usize = CHEAT_GROUPS.iter().map(|(_, items)| items.len() + 2).sum();
+        let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+        assert!(room > 0, "the test frame is big enough for a modal");
+        let line = cheat_line_of(cheat_count() - 1);
+        assert!(
+            line >= scroll(&app) && line < scroll(&app) + room,
+            "the chip is painted: line {line}, scroll {}, room {room}",
+            scroll(&app)
+        );
+    }
+
+    // --- the UART window ------------------------------------------------
+
+    /// Opening the window asks the bridge what its UART is running, and shows
+    /// that the question is out — the field holds the default until the
+    /// answer corrects it.
+    #[test]
+    fn opening_the_uart_window_asks_the_bridge_what_it_runs() {
+        let (mut app, wire) = connected_over_ble();
+        open_uart(&mut app);
+        assert!(asked_includes(&wire, b"@u?"), "the window asked");
+        let uart = uart_of(&app);
+        assert_eq!(uart.field.text, UART_DEFAULT);
+        assert_eq!(
+            uart.field.cursor,
+            UART_DEFAULT.len(),
+            "the caret is at the end"
+        );
+        assert!(uart.error.is_none(), "{:?}", uart.error);
+        let dialog = app.dialog.clone().expect("the window is up");
+        let shown = text_of(&lines(&dialog, &app, 70, 8));
+        assert!(shown.contains("querying uart"), "{shown}");
+    }
+
+    /// Without a Bluetooth link there is no management channel to ask over.
+    /// The window still opens — the field is a hint in itself — and says on
+    /// its own error line why the question cannot go out.
+    #[test]
+    fn without_a_bluetooth_link_the_uart_window_says_why() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        open_uart(&mut app);
+        let uart = uart_of(&app);
+        let error = uart.error.clone().expect("it said why");
+        assert!(error.contains("Not connected"), "{error}");
+        assert!(uart.status.is_none());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.dialog, None);
+    }
+
+    /// The answer is what the field ends up holding — the bridge's rate, not
+    /// the typed one — and the status line carries the bridge's own words.
+    #[test]
+    fn the_bridges_answer_sets_the_field_and_the_status_line() {
+        let (mut app, wire) = connected_over_ble();
+        open_uart(&mut app);
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK uart=9600,7,e,2,rtscts"));
+        pump_until(&mut app, |app| {
+            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.field.text == "9600,7,e,2,rtscts")
+        });
+        let uart = uart_of(&app);
+        assert_eq!(uart.field.text, "9600,7,e,2,rtscts");
+        assert_eq!(uart.field.cursor, uart.field.text.len());
+        assert_eq!(uart.status.as_deref(), Some("OK uart=9600,7,e,2,rtscts"));
+        assert!(uart.error.is_none());
+        assert_eq!(app.baud, Some(9600), "and the top bar's slot fills in");
+    }
+
+    /// Enter sends the spec under the caret, verbatim, and says what is being
+    /// set until the bridge answers with what it now is.
+    #[test]
+    fn enter_sends_the_typed_spec() {
+        let (mut app, wire) = connected_over_ble();
+        open_uart(&mut app);
+        retype(&mut app, "9600,8,n,1,none");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // One drain, because the frame that went out is also the one whose id
+        // the bridge will answer with.
+        let frames = asked_frames(&wire);
+        let last = frames.last().expect("the spec went out");
+        assert_eq!(
+            &last[crate::protocol::MGMT_HEADER_SIZE..],
+            b"@u=9600,8,n,1,none",
+            "the spec went out as typed"
+        );
+        let expected = fill(
+            entry(UART_SETTING, Lang::En),
+            &["9600,8,n,1,none".to_string()],
+        );
+        let uart = uart_of(&app);
+        assert_eq!(uart.status.as_deref(), Some(expected.as_str()));
+        assert!(uart.error.is_none());
+
+        // And the bridge's answer, when it comes, is what stays on the line.
+        let id = u32::from_le_bytes([last[4], last[5], last[6], last[7]]);
+        wire.feed_management(answer(id, "OK uart=9600,8,n,1,none"));
+        pump_until(&mut app, |app| {
+            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.status.as_deref() == Some("OK uart=9600,8,n,1,none"))
+        });
+    }
+
+    /// A spec that does not parse is refused where it was typed, and nothing
+    /// goes out: the round trip is for the bridge's judgement, not the
+    /// parser's.
+    #[test]
+    fn a_spec_that_does_not_parse_is_refused_and_nothing_is_sent() {
+        let (mut app, wire) = connected_over_ble();
+        open_uart(&mut app);
+        retype(&mut app, "fast,8,n,1,none");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let uart = uart_of(&app);
+        let error = uart.error.clone().expect("the field was refused");
+        assert!(error.contains("fast"), "{error}");
+        assert!(uart.status.is_none());
+        assert!(
+            !asked_frames(&wire)
+                .iter()
+                .any(|frame| frame[crate::protocol::MGMT_HEADER_SIZE..].starts_with(b"@u=")),
+            "nothing went out"
+        );
+    }
+
+    /// The bridge's refusal is shown as it came, on the error line, and the
+    /// field is left alone — it is what the user is going to fix.
+    #[test]
+    fn the_bridges_refusal_lands_on_the_error_line() {
+        let (mut app, wire) = connected_over_ble();
+        open_uart(&mut app);
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR format: @u=115200,8,n,1,n"));
+        pump_until(&mut app, |app| {
+            matches!(&app.dialog, Some(Dialog::Uart(uart)) if uart.error.is_some())
+        });
+        let uart = uart_of(&app);
+        assert_eq!(uart.error.as_deref(), Some("ERR format: @u=115200,8,n,1,n"));
+        assert!(uart.status.is_none());
+        assert_eq!(uart.field.text, UART_DEFAULT, "the field is not touched");
     }
 
     /// Esc, `q`, `?` and Enter all close a scrolled dialog, and every one of
@@ -1313,12 +2125,7 @@ mod tests {
         };
         app.dial(&Dial::Stdio("-".into()))
             .expect("the loopback opens");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while std::time::Instant::now() < deadline && app.state != ConnectionState::Connected {
-            app.pump();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert_eq!(app.state, ConnectionState::Connected);
+        pump_until(&mut app, |app| app.state == ConnectionState::Connected);
 
         ask(&mut app, ConfirmAction::Send("version".into()));
         handle_key(
@@ -1484,50 +2291,50 @@ mod tests {
     /// the middle of a value, which is the case an append-only field gets wrong.
     #[test]
     fn the_field_edits_at_the_caret() {
-        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
+        let mut field = Field::default();
         assert_eq!(
-            prompt.split(),
+            field.split(),
             ("", " ", ""),
             "an empty field still has a caret"
         );
 
-        prompt.insert('a');
-        prompt.insert('b');
-        assert_eq!(prompt.text, "ab");
-        prompt.left();
-        prompt.insert('X');
-        assert_eq!(prompt.text, "aXb");
+        field.insert('a');
+        field.insert('b');
+        assert_eq!(field.text, "ab");
+        field.left();
+        field.insert('X');
+        assert_eq!(field.text, "aXb");
         // Inserting moves the caret *past* what was typed, so the highlighted
         // glyph is the one now to the caret's right — not the one just written.
-        assert_eq!(prompt.split(), ("aX", "b", ""));
-        prompt.backspace();
-        assert_eq!(prompt.text, "ab");
-        prompt.delete();
-        assert_eq!(prompt.text, "a");
-        prompt.home();
-        prompt.delete();
-        assert_eq!(prompt.text, "");
-        prompt.backspace();
-        assert_eq!(prompt.text, "", "backspace at the start does nothing");
-        prompt.insert('z');
-        prompt.end();
-        prompt.right();
-        assert_eq!(prompt.cursor, 1, "right stops at the end");
-        assert_eq!(prompt.answer(), "z");
+        assert_eq!(field.split(), ("aX", "b", ""));
+        field.backspace();
+        assert_eq!(field.text, "ab");
+        field.delete();
+        assert_eq!(field.text, "a");
+        field.home();
+        field.delete();
+        assert_eq!(field.text, "");
+        field.backspace();
+        assert_eq!(field.text, "", "backspace at the start does nothing");
+        field.insert('z');
+        field.end();
+        field.right();
+        assert_eq!(field.cursor, 1, "right stops at the end");
+        assert_eq!(field.answer(), "z");
     }
 
     /// The answer is trimmed: a trailing space is easy to type and never meant,
     /// and a leading one hides.
     #[test]
     fn the_answer_is_trimmed() {
-        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
+        let mut field = Field::default();
         for c in "  fw.bin ".chars() {
-            prompt.insert(c);
+            field.insert(c);
         }
-        assert_eq!(prompt.text, "  fw.bin ");
-        assert_eq!(prompt.answer(), "fw.bin");
+        assert_eq!(field.text, "  fw.bin ");
+        assert_eq!(field.answer(), "fw.bin");
 
-        let mut blank = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
+        let mut blank = Field::default();
         for _ in 0..3 {
             blank.insert(' ');
         }
@@ -1539,31 +2346,31 @@ mod tests {
     /// one.
     #[test]
     fn the_caret_never_splits_a_character() {
-        let mut prompt = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
+        let mut field = Field::default();
         for c in "固件.bin".chars() {
-            prompt.insert(c);
+            field.insert(c);
         }
-        assert_eq!(prompt.text, "固件.bin");
+        assert_eq!(field.text, "固件.bin");
 
         for _ in 0..20 {
-            prompt.left();
-            let (before, under, after) = prompt.split();
-            if prompt.cursor < prompt.text.len() {
-                assert_eq!(format!("{before}{under}{after}"), prompt.text);
+            field.left();
+            let (before, under, after) = field.split();
+            if field.cursor < field.text.len() {
+                assert_eq!(format!("{before}{under}{after}"), field.text);
             } else {
                 assert_eq!(under, " ", "the caret is one cell at the end");
             }
         }
-        assert_eq!(prompt.cursor, 0, "left stops at the start");
+        assert_eq!(field.cursor, 0, "left stops at the start");
         for _ in 0..20 {
-            prompt.right();
-            let (before, under, after) = prompt.split();
-            if prompt.cursor < prompt.text.len() {
-                assert_eq!(format!("{before}{under}{after}"), prompt.text);
+            field.right();
+            let (before, under, after) = field.split();
+            if field.cursor < field.text.len() {
+                assert_eq!(format!("{before}{under}{after}"), field.text);
             }
         }
-        assert_eq!(prompt.cursor, prompt.text.len(), "right stops at the end");
-        assert_eq!(prompt.answer(), "固件.bin");
+        assert_eq!(field.cursor, field.text.len(), "right stops at the end");
+        assert_eq!(field.answer(), "固件.bin");
     }
 
     /// The field is painted with a one-cell caret in it, and the placeholder only
@@ -1594,7 +2401,7 @@ mod tests {
         );
 
         let mut typed = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
-        typed.insert('x');
+        typed.field.insert('x');
         let shown: String = row(typed)
             .spans
             .iter()
@@ -1911,6 +2718,7 @@ mod pick_tests {
             name: Some(name.to_string()),
             id: id.to_string(),
             nus,
+            rssi: None,
         }
     }
 
@@ -1960,6 +2768,47 @@ mod pick_tests {
         };
         assert_eq!(pick.rows(), 0);
         assert!(pick.selected().is_none());
+    }
+
+    /// A device row leads with the signal the scan heard it at, bars and
+    /// reading; a device the adapter had no reading for keeps the column and
+    /// shows a dash rather than inventing a number.
+    #[test]
+    fn a_device_row_shows_the_signal_it_was_heard_at() {
+        let app = App::default();
+        let dialog = Dialog::DevicePick(DevicePick {
+            devices: vec![
+                crate::cli::FoundDevice {
+                    rssi: Some(-58),
+                    ..device("Bee", "aa", true)
+                },
+                device("Far", "bb", true),
+            ],
+            cursor: 0,
+            scanning: false,
+            message: String::new(),
+        });
+        let text: String = lines(&dialog, &app, 70, 20)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bee = text
+            .lines()
+            .find(|row| row.contains("Bee"))
+            .expect("the row is drawn");
+        assert!(bee.contains("▂▄▆_  -58dBm"), "{bee}");
+        let far = text
+            .lines()
+            .find(|row| row.contains("Far"))
+            .expect("the row is drawn");
+        assert!(far.contains('—'), "no reading, no invented number: {far}");
+        assert!(!far.contains("dBm"), "no reading, no unit: {far}");
     }
 
     /// The picker's body says what is happening and its legend says which keys
