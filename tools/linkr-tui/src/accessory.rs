@@ -181,8 +181,17 @@ pub struct ReplyStatus {
 
 /// Whether a line begins with `word` followed by a word boundary (`\b`): a
 /// non-word character or the end of the line.
+///
+/// Judged through `get`, not by slicing: wire lines carry whatever SSIDs the
+/// radio heard, and a name that starts with a multi-byte character does not
+/// line up with an ASCII word's length — a slice there takes the whole
+/// interface down over a network's name. A line that cannot even be split at
+/// the word's length cannot begin with the word.
 pub fn starts_with_word(line: &str, word: &str) -> bool {
-    if line.len() < word.len() || !line[..word.len()].eq_ignore_ascii_case(word) {
+    let Some(head) = line.get(..word.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(word) {
         return false;
     }
     match line[word.len()..].chars().next() {
@@ -508,6 +517,22 @@ mod tests {
         assert!(!bad.ok);
         assert_eq!(bad.error, "ERR ssid too long");
         assert!(!reply_status("nothing here").ok);
+    }
+
+    /// The word check is read through `get`, so a line whose first character is
+    /// multi-byte is a line that cannot begin with `ok` or `err` — never a
+    /// slice through the middle of that character. This one, a scan result
+    /// whose SSID began with a three-byte character, took the whole interface
+    /// down when it was read as a status.
+    #[test]
+    fn a_word_boundary_is_read_on_any_text() {
+        assert!(starts_with_word("OK accepted", "ok"));
+        assert!(starts_with_word("ok", "ok"));
+        assert!(starts_with_word("ERR scan=-16", "err"));
+        assert!(!starts_with_word("okay", "ok"));
+        assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "ok"));
+        assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "err"));
+        assert!(!reply_status("非你莫属 wpa2 ch=6 -54dBm").ok);
     }
 
     #[test]

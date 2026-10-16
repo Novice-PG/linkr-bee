@@ -1037,8 +1037,16 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
         },
         // One network per line, in the order the bridge heard them. The scan
         // stream's own lines (`OK accepted`, `@scan done`) are already off the
-        // list — see `App`'s `scan_results`.
-        crate::device::Query::WifiScan => app.network.scan_results.join("\n"),
+        // list — see `App`'s `scan_results`. A scan that failed while it was
+        // running has no list to show, and the words it failed with are the
+        // report a script can act on.
+        crate::device::Query::WifiScan => {
+            if app.network.scan_results.is_empty() {
+                app.network.error.clone().unwrap_or_default()
+            } else {
+                app.network.scan_results.join("\n")
+            }
+        }
         crate::device::Query::Webdav => match &app.network.webdav {
             Some(webdav) => format!("webdav={},url={}", webdav.state, webdav.url),
             None => String::new(),

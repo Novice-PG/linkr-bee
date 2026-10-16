@@ -513,6 +513,31 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
     Ok(())
 }
 
+/// The first of a run of identical management notifications, and nothing of
+/// the rest.
+///
+/// BlueZ re-broadcasts one GATT notification once per outstanding notify
+/// session on the characteristic, so a client sees the same value several
+/// times in a row whenever sessions from earlier clients have not been
+/// cleaned up — and it kept happening, the count climbing from three to four
+/// as more clients came and went. The radio sends each one once (checked on
+/// the air with `btmon`: one indication, one confirmation), so the repeats
+/// are the daemon's alone; passing them on turns one scan result into four
+/// rows and one ending into several orphans.
+///
+/// The comparison is against the *immediately* previous notification rather
+/// than a set of seen ones: what arrives is runs of repeats, and a value that
+/// legitimately comes back later — a state that is published twice — is not
+/// this function's to swallow. Terminal bytes never come through here, so
+/// nothing a user types is ever suppressed.
+fn keep_once(last: &mut Option<Vec<u8>>, value: Vec<u8>) -> Option<Vec<u8>> {
+    if last.as_deref() == Some(value.as_slice()) {
+        return None;
+    }
+    *last = Some(value.clone());
+    Some(value)
+}
+
 /// Move bytes in both directions until one of them stops.
 async fn carry(
     peripheral: &Peripheral,
@@ -529,6 +554,9 @@ async fn carry(
     let Ok(mut notifications) = peripheral.notifications().await else {
         return;
     };
+    // The last management notification, so its repeats can be told apart.
+    // See `keep_once`.
+    let mut last_response: Option<Vec<u8>> = None;
 
     loop {
         tokio::select! {
@@ -545,8 +573,10 @@ async fn carry(
                         // response down the target's stream would type the
                         // bridge's answer into somebody's shell prompt.
                         if notification.uuid == MGMT_RESPONSE {
-                            if management.send(notification.value).is_err() {
-                                return;
+                            if let Some(bytes) = keep_once(&mut last_response, notification.value) {
+                                if management.send(bytes).is_err() {
+                                    return;
+                                }
                             }
                         } else if notification.uuid == NUS_TX
                             && inbound.send(Some(notification.value)).is_err()
@@ -849,5 +879,31 @@ mod tests {
             got.extend_from_slice(&small[..n]);
         }
         assert_eq!(got, sent, "ten bytes through a four-byte buffer, whole");
+    }
+
+    /// A notification the daemon repeated is passed on once, and its repeats
+    /// are dropped — but only while they are *repeats*: the same value coming
+    /// back after a different one is a new event and is not this link's to
+    /// swallow.
+    #[test]
+    fn a_repeated_notification_is_passed_on_once() {
+        let mut last = None;
+        let line = b"@scan result BenchNet wpa2 ch=6 -54dBm".to_vec();
+
+        for copy in 0..4 {
+            let kept = keep_once(&mut last, line.clone());
+            if copy == 0 {
+                assert_eq!(kept.as_ref(), Some(&line), "the first copy is the event");
+            } else {
+                assert!(kept.is_none(), "copy {copy} is the daemon talking twice");
+            }
+        }
+
+        // A different notification in between makes the same value new again.
+        assert!(keep_once(&mut last, b"@scan done".to_vec()).is_some());
+        assert!(
+            keep_once(&mut last, line.clone()).is_some(),
+            "after a different notification the same value is a new one"
+        );
     }
 }

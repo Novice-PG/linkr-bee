@@ -3187,6 +3187,28 @@ mod tests {
         );
     }
 
+    /// A network's name is the radio's data, not ours: it can start with a
+    /// multi-byte character, and reading it must not slice through one. This
+    /// is the line that took the interface down live — a scan result whose
+    /// SSID began with a three-byte character, read as a status.
+    #[test]
+    fn a_scan_result_with_a_multibyte_name_is_a_row() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.scan_wifi().expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK accepted"));
+        wire.feed_management(partial(id, "@scan result 非你莫属 wpa2 ch=6 -54dBm"));
+        wire.feed_management(answer(id, "@scan done"));
+
+        assert!(pump_until(&mut app, |app| !app.network.loading));
+        assert_eq!(
+            app.network.scan_results,
+            vec!["非你莫属 wpa2 ch=6 -54dBm".to_string()],
+            "the name is kept whole"
+        );
+        assert!(app.network.error.is_none());
+    }
+
     /// An approved change is the command, and the read that confirms it follows
     /// from the command rather than from whoever asked for it.
     #[test]
