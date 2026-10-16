@@ -1347,9 +1347,21 @@ fn local_clock() -> String {
 /// is the whole reason the mouse gets captured at all: without it the wheel
 /// belongs to the emulator, and an emulator in an alternate screen has nothing
 /// to scroll, so it either does nothing or jumps.
+///
+/// A modal takes the wheel too: while one is up, the pane and the rail behind
+/// it are not what the user is scrolling.
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
                 cols: u16, rows: u16) {
     use crossterm::event::MouseEventKind;
+
+    // The modal answers the keyboard, and the wheel is a gesture the same way a
+    // key is. The box's own paging keys are how it moves; a notch over it does
+    // nothing rather than move a view the box is covering — moving the rail's
+    // cursor there would be half an action, since the Enter that follows would
+    // go to the modal.
+    if app.overlay_open() {
+        return;
+    }
 
     match mouse.kind {
         // Away from the user: the rail walks up, the pane reads back into its
@@ -2417,5 +2429,56 @@ mod tests {
         assert!(app.terminal.autoscroll, "the tail is where following resumes");
         wheel(&mut app, MouseEventKind::ScrollDown);
         assert_eq!(app.terminal.scroll, 0, "the walk stops at the tail");
+    }
+
+    /// A modal answers the mouse the way it answers the keyboard: the pane and
+    /// the rail underneath it do not move while the user is answering the box.
+    #[test]
+    fn the_wheel_leaves_the_background_alone_under_a_modal() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        fn wheel(app: &mut App, kind: MouseEventKind) {
+            handle_mouse(
+                app,
+                MouseEvent {
+                    kind,
+                    column: 10,
+                    row: 10,
+                    modifiers: KeyModifiers::NONE,
+                },
+                100,
+                30,
+            );
+        }
+
+        // The rail's cursor under a dialog, and under the palette.
+        let mut app = App {
+            focus: Focus::Sidebar,
+            sidebar_cursor: 3,
+            ..App::default()
+        };
+        linkr_tui::dialogs::open_help(&mut app);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.sidebar_cursor, 3, "the rail moved under a dialog");
+        app.dialog = None;
+        linkr_tui::palette::open(&mut app);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.sidebar_cursor, 3, "the rail moved under the palette");
+
+        // The pane, which was following its tail: still following, still on it.
+        let mut app = App::default();
+        app.terminal.push_text("one\ntwo\nthree\n");
+        linkr_tui::dialogs::open_help(&mut app);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.terminal.scroll, 0, "the pane read back under a modal");
+        assert!(
+            app.terminal.autoscroll,
+            "the pane stopped following under a modal"
+        );
+        // The same notch without the box in the way reads back, which is what
+        // makes the two assertions above mean something.
+        app.dialog = None;
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.terminal.scroll, 3);
     }
 }
