@@ -1,6 +1,6 @@
-95eb6eb6b8f76c12b45d15637831cd168106b506ea8def04004d6ce37cfc18da  linux/linkr_1.0.0_amd64.deb
-ef9f1bd7ab4941f42c587ed76db2dabf92ea3b3e711f1d58486e9b698523dc84  linux/linkr_1.0.0_arm64.deb
-f9b9723d51bb3c8b234791b4b3dc778f4aee89603a2eb98ddef816e987b4c652  linux/linkr_1.0.0_armhf.deb
-b0ea86431ad237f20c1708278a1b69812387b95b3f5f38e5229003e4fba71973  linux/linkr_1.0.0_i386.deb
-dc2bb3fdf72e1f92417d6cb93c85b7c3138117547eead31ecef0ee4aa4e3f051  windows/linkr-1.0.0-i686-pc-windows-gnu.tar.gz
-95441cfe6ec8a49dbbe879cf59b2632af7f803c8e63d5a4add87ca07e22165b6  windows/linkr-1.0.0-x86_64-pc-windows-gnu.tar.gz
+df04e90333a825e7ad20302f1440f9b1fdc6066a820bb59f5adfad60cfd4b0b9  linux/linkr_1.0.0_amd64.deb
+f6750373bb131078cc34da8ef3a8880ac53a83a16bc144542c17a77d209a83c5  linux/linkr_1.0.0_arm64.deb
+4f360b91d603ba3100a64ed2ccb1b66dc28724b5e0b84e6dcf95b01d2a93acf8  linux/linkr_1.0.0_armhf.deb
+c3ed892ddf04d7e6af95adb3e8ab1846595afcf6138ea9329225a84e10c11378  linux/linkr_1.0.0_i386.deb
+a3cec1ec9c2e8f9341388a0cae552a407a51d3bf1804569b5db68d0e3af416f4  windows/linkr-1.0.0-i686-pc-windows-gnu.tar.gz
+9e29502851aef560d42d8f693179b494655637ae3413f2dc75c0b84b09bd5588  windows/linkr-1.0.0-x86_64-pc-windows-gnu.tar.gz
