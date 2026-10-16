@@ -1271,10 +1271,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
             // A failure has a sentence, and a sentence is what the user is
             // owed: "no adapter" is not the same news as "no boards".
             if let Some(why) = self.ble_scan.take_failure() {
-                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-                    pick.message = why;
-                }
-                self.ble_scan.reset();
+                self.report_scan_failure(why);
             }
             return;
         }
@@ -1299,11 +1296,17 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 // dialog is for the case where two boards are on the air and
                 // nothing on a command line says which.
                 if boards.len() == 1 && self.dialog.is_none() {
-                    let name = boards[0].name.clone();
+                    // Named when it has a name, addressed when it has none:
+                    // an announcement with a hole in it is one the user has
+                    // to finish themselves.
+                    let name = boards[0]
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| boards[0].id.clone());
                     self.connect_to_board(&boards[0].id);
                     let s = self.strings();
                     self.push_notice(Notice {
-                        text: format!("{} {}", s.link_opened, name.unwrap_or_default()),
+                        text: format!("{}{}", s.link_opened, name),
                         level: crate::event::NoticeLevel::Info,
                     });
                     return;
@@ -1317,13 +1320,24 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                 }
             }
             Ok(false) => {}
-            Err(why) => {
-                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-                    pick.message = why;
-                }
-                self.ble_scan.reset();
-            }
+            Err(why) => self.report_scan_failure(why),
         }
+    }
+
+    /// Say why a scan could not run: in the picker when one is open, and as a
+    /// notice when none is — a startup scan has no dialog to answer in, and
+    /// silence would leave the user waiting for a board that will never be
+    /// found.
+    fn report_scan_failure(&mut self, why: String) {
+        if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+            pick.message = why;
+        } else {
+            self.push_notice(Notice {
+                text: why,
+                level: crate::event::NoticeLevel::Error,
+            });
+        }
+        self.ble_scan.reset();
     }
 
     /// Ask for the LAN access token if it is not already in hand.
@@ -1695,6 +1709,19 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         }
         self.terminal.autoscroll = false;
         self.terminal.scroll = self.terminal.scroll.saturating_add(lines_up);
+    }
+
+    /// Walk the pane back down towards the tail. Landing on the tail resumes
+    /// following, which is what a user who walked all the way down asked for.
+    pub fn scroll_terminal_down(&mut self, lines_down: usize) {
+        if lines_down == 0 {
+            return;
+        }
+        let back = self.terminal.scroll.saturating_sub(lines_down);
+        self.terminal.scroll = back;
+        if back == 0 {
+            self.scroll_terminal_to_bottom();
+        }
     }
 
 }
@@ -2362,6 +2389,31 @@ mod tests {
         // A zero scroll is not a scroll: it must not take the pane off the tail.
         app.scroll_terminal(0);
         assert!(app.terminal.autoscroll);
+    }
+
+    /// Walking back down is a step towards the tail, and reaching the tail
+    /// resumes following — a user who scrolled all the way back asked for the
+    /// bottom, which is the one place the console follows the device again.
+    #[test]
+    fn scrolling_back_down_resumes_following_at_the_tail() {
+        let mut app = App::default();
+        app.terminal.push_text("one\ntwo\nthree\n");
+        app.scroll_terminal(5);
+        assert!(!app.terminal.autoscroll);
+
+        app.scroll_terminal_down(2);
+        assert_eq!(app.terminal.scroll, 3, "a step comes off the offset");
+        assert!(!app.terminal.autoscroll, "still off the tail");
+
+        app.scroll_terminal_down(3);
+        assert_eq!(app.terminal.scroll, 0);
+        assert!(app.terminal.autoscroll, "the tail resumes following");
+
+        // A zero step is not a step: it neither moves nor re-arms anything.
+        app.scroll_terminal(4);
+        app.scroll_terminal_down(0);
+        assert_eq!(app.terminal.scroll, 4);
+        assert!(!app.terminal.autoscroll);
     }
 
     /// Every announcement lands in the log as well as the toast stack, and the

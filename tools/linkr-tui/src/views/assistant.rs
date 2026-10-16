@@ -1133,6 +1133,34 @@ mod interaction {
         let _ = handle_settings_key(app, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    /// The paste lands on a caret the user can see: a settings window field
+    /// while the window is up, and otherwise the composer — with the view
+    /// brought up first rather than text typed into a row nothing is painting.
+    #[test]
+    fn the_paste_lands_on_the_caret_that_is_up() {
+        let mut a = app();
+        a.view = crate::event::View::Network;
+        // A caret left on a setting from an earlier visit: no window is up,
+        // so this row is not painted and must not take the paste.
+        a.assistant.focus = AgentField::Endpoint;
+        paste_text_into_focus(&mut a, "explain\nthe log");
+        assert_eq!(a.view, crate::event::View::Assistant, "the caret came up");
+        assert_eq!(a.assistant.composer, "explain the log", "one line at a time");
+        assert_eq!(a.assistant.endpoint, "", "the unpainted row did not take it");
+
+        settings(&mut a, AgentField::Model);
+        paste_text_into_focus(&mut a, "gpt\n-4");
+        assert_eq!(a.assistant.model, "gpt -4");
+        assert!(
+            matches!(a.dialog, Some(crate::dialogs::Dialog::Settings(_))),
+            "the window stayed up"
+        );
+        assert_eq!(
+            a.assistant.composer, "explain the log",
+            "the composer held still"
+        );
+    }
+
     /// Tab walks the window's five fields forward and BackTab back, wrapping at
     /// both ends — and the composer is not among them: the caret either has a
     /// row in the window or it is not in the window at all.
@@ -1483,10 +1511,7 @@ pub fn write_system_clipboard(text: &str) -> Result<(), String> {
 ///
 /// A chord rather than the terminal's own paste, because the terminal's paste
 /// goes to the *device* while the caret is in a field; this one knows the
-/// difference. A newline in the pasted text is a newline the field does not want
-/// — a goal is one line — so it becomes a space. A note takes newlines: it is
-/// prose, and pasting one long line into a field meant to hold several is a
-/// paste that only half worked.
+/// difference.
 pub fn paste_into_focus(app: &mut App) {
     let Some(text) = read_system_clipboard() else {
         let s = app.strings();
@@ -1496,6 +1521,23 @@ pub fn paste_into_focus(app: &mut App) {
         });
         return;
     };
+    paste_text_into_focus(app, &text);
+}
+
+/// Put `text` on the caret, wherever the caret is painted.
+///
+/// The caret has a row in one of two paints: a settings window field while
+/// that window is up, and the composer otherwise. Anywhere else it is a caret
+/// nobody is showing — a keystroke that lands on a row the user cannot see —
+/// so the paste brings the view up first, the way every other assistant chord
+/// lands where the work is. A newline in the pasted text is a newline the
+/// field does not want — a goal is one line — so it becomes a space. A note
+/// takes newlines: it is prose, and pasting one long line into a field meant
+/// to hold several is a paste that only half worked.
+fn paste_text_into_focus(app: &mut App, text: &str) {
+    if !matches!(app.dialog, Some(crate::dialogs::Dialog::Settings(_))) {
+        focus_composer(app);
+    }
     let focused = app.assistant.focus;
     let field = match focused {
         AgentField::Composer => Some(&mut app.assistant.composer),
@@ -1509,7 +1551,7 @@ pub fn paste_into_focus(app: &mut App) {
         return;
     };
     let pasted = if focused == AgentField::Notes {
-        text.clone()
+        text.to_string()
     } else {
         text.replace("\r\n", " ").replace(['\r', '\n'], " ")
     };

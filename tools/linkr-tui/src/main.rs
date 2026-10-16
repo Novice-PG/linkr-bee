@@ -1082,7 +1082,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 }
                 // The wheel and the drag. Both need the mouse captured by the
                 // guard, and both are one gesture's worth of work: a notch
-                // moves one row because that is what a notch is, and a drag
+                // walks the rail one row and the pane three lines, and a drag
                 // selects text because the terminal's own selection cannot be
                 // read from inside an alternate screen.
                 Event::Mouse(mouse) => {
@@ -1105,11 +1105,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 
 /// Handle one key press. Returns true when the loop should stop.
 ///
-/// The order matters and is the whole policy. A modal takes the keyboard first
-/// — the dialog before the palette, because the dialog is the one the user is
-/// answering — but a *control* chord falls through both, so `Ctrl+Q` still
-/// quits and `Ctrl+T` still repaints with an overlay up. Then the global
-/// chords, then the sidebar, and only what is left is the device's.
+/// The order matters and is the whole policy. The modals are one stack, and
+/// the one opened last is the one that answers: the painter draws the palette
+/// when both are up, so the palette is asked first to agree with it. A dialog
+/// takes the keyboard by closing the palette when it opens — `Ctrl+P` over a
+/// dialog is what raises the palette back on top. A *control* chord falls
+/// through both, so `Ctrl+Q` still quits and `Ctrl+T` still repaints with an
+/// overlay up. Then the global chords, then the sidebar, and only what is left
+/// is the device's.
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // The two modals are a stack: whichever was opened last is on top, takes
     // the keys, and is the one painted. Dispatch has to agree with the
@@ -1172,12 +1175,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         // --- the assistant ---------------------------------------------------
-        // Three chords, each landing where the work is: the composer for a
-        // question, the settings window for a setting, and the mode cycle on the
-        // view that displays the mode. A shortcut that opens the view but leaves
-        // the keyboard somewhere else is one that saves a keystroke and costs
-        // two — and the settings are a window now, so the configure chord raises
-        // it wherever the keyboard happened to be.
+        // Five chords, each landing where the work is: the composer for a
+        // question or a paste, the settings window for a setting, and the mode
+        // cycle and the clear on the view that shows them. A shortcut that
+        // opens the view but leaves the keyboard somewhere else is one that
+        // saves a keystroke and costs two — and the settings are a window now,
+        // so the configure chord raises it wherever the keyboard happened to
+        // be.
         (KeyCode::Char('K'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
             views::assistant::focus_composer(app);
             return false;
@@ -1262,13 +1266,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // PageUp/PageDown walk the pane's own history rather than the device's
         // scroll buffer: without a VT screen there is no device scroll to walk.
         KeyCode::PageUp => app.scroll_terminal(10),
-        KeyCode::PageDown => {
-            let back = app.terminal.scroll.saturating_sub(10);
-            app.terminal.scroll = back;
-            if back == 0 {
-                app.scroll_terminal_to_bottom();
-            }
-        }
+        KeyCode::PageDown => app.scroll_terminal_down(10),
         KeyCode::End => app.scroll_terminal_to_bottom(),
         _ => {
             if let Some(bytes) = key_bytes(key, app.enter) {
@@ -1338,31 +1336,34 @@ fn local_clock() -> String {
 
 /// One mouse gesture, folded into whatever the focused thing wants.
 ///
-/// A wheel notch is one row, never a page and never "whatever the terminal felt
-/// like". That is the whole reason the mouse gets captured at all: without it
-/// the wheel belongs to the emulator, and an emulator in an alternate screen has
-/// nothing to scroll, so it either does nothing or jumps.
+/// A wheel notch is one row over the rail and three lines over the pane, never
+/// a page and never "whatever the terminal felt like". The wheel turns the way
+/// a wheel turns everywhere — away from the user is up, towards the user is
+/// down — and the pane resumes following when the wheel brings it home. That
+/// is the whole reason the mouse gets captured at all: without it the wheel
+/// belongs to the emulator, and an emulator in an alternate screen has nothing
+/// to scroll, so it either does nothing or jumps.
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent,
                 cols: u16, rows: u16) {
     use crossterm::event::MouseEventKind;
 
     match mouse.kind {
-        MouseEventKind::ScrollDown => {
-            if app.focus == linkr_tui::app::Focus::Sidebar {
-                app.cursor_down();
-            } else {
-                app.scroll_terminal(3);
-            }
-        }
+        // Away from the user: the rail walks up, the pane reads back into its
+        // history.
         MouseEventKind::ScrollUp => {
             if app.focus == linkr_tui::app::Focus::Sidebar {
                 app.cursor_up();
             } else {
-                let back = app.terminal.scroll.saturating_sub(3);
-                app.terminal.scroll = back;
-                if back == 0 {
-                    app.scroll_terminal_to_bottom();
-                }
+                app.scroll_terminal(3);
+            }
+        }
+        // Towards the user: the rail walks down, the pane walks back towards
+        // the tail.
+        MouseEventKind::ScrollDown => {
+            if app.focus == linkr_tui::app::Focus::Sidebar {
+                app.cursor_down();
+            } else {
+                app.scroll_terminal_down(3);
             }
         }
         _ => {}
@@ -2362,5 +2363,55 @@ mod tests {
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         );
         assert_eq!(app.tx, 1, "the byte went out");
+    }
+
+    /// The wheel turns the way a wheel turns in both focuses: away from the
+    /// user walks up — a row in the rail, three lines back into the pane — and
+    /// towards the user walks back down, where reaching the tail resumes
+    /// following.
+    #[test]
+    fn the_wheel_walks_the_rail_and_the_pane_the_way_wheels_walk() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        fn wheel(app: &mut App, kind: MouseEventKind) {
+            handle_mouse(
+                app,
+                MouseEvent {
+                    kind,
+                    column: 10,
+                    row: 10,
+                    modifiers: KeyModifiers::NONE,
+                },
+                100,
+                30,
+            );
+        }
+
+        // The rail: one row per notch.
+        let mut app = App {
+            focus: Focus::Sidebar,
+            sidebar_cursor: 1,
+            ..App::default()
+        };
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        assert_eq!(app.sidebar_cursor, 2);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.sidebar_cursor, 1);
+
+        // The pane: away from the user reads back, towards the user walks home.
+        let mut app = App::default();
+        app.terminal.push_text("one\ntwo\nthree\n");
+        assert!(app.terminal.autoscroll);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.terminal.scroll, 6, "two notches, three lines each");
+        assert!(!app.terminal.autoscroll, "reading back stops following");
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        assert_eq!(app.terminal.scroll, 3);
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        assert_eq!(app.terminal.scroll, 0);
+        assert!(app.terminal.autoscroll, "the tail is where following resumes");
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        assert_eq!(app.terminal.scroll, 0, "the walk stops at the tail");
     }
 }
