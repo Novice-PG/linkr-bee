@@ -77,15 +77,45 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// How tall a modal box may be in a region of `height` rows.
+///
+/// The floor is hardened against the region: a window shorter than
+/// `MIN_HEIGHT` would make `clamp`'s own bounds cross, and the guard in
+/// `paint` is a fragile place to keep that from happening.
+fn ceiling_height(height: u16) -> u16 {
+    (height * HEIGHT_PERCENT / 100).clamp(MIN_HEIGHT, height.max(MIN_HEIGHT))
+}
+
+/// The height of a dialog box for a body of `body_rows`: the body plus the two
+/// border rows and the legend row, between the modal minimum and the region's
+/// ceiling. `paint_dialog` and `dialog_body_room` must agree on this, and this
+/// is what keeps them at it.
+fn box_height(body_rows: usize, ceiling: u16) -> u16 {
+    (body_rows as u16 + 3).clamp(MIN_HEIGHT, ceiling)
+}
+
 /// The size a modal asks for, given how much of the width it wants.
 fn wanted(area: Rect, share: u16, max_height: u16) -> (u16, u16) {
     let width = (area.width * share / 100)
         .clamp(MIN_WIDTH, MAX_WIDTH)
         .min(area.width);
-    let height = (area.height * HEIGHT_PERCENT / 100)
-        .clamp(MIN_HEIGHT, max_height)
-        .min(area.height);
+    let height = ceiling_height(area.height).min(max_height);
     (width, height)
+}
+
+/// How many rows of a dialog body a `screen`-sized frame shows.
+///
+/// For the one caller that has to ask *between* two paints: the settings
+/// window follows its caret, and a key is handled outside any frame. The
+/// arithmetic is `paint_dialog`'s own, through the same two helpers. Zero
+/// means the modal is not painted at this size — the region is below the
+/// minimum, or no frame has been drawn yet — and the caller keeps its scroll.
+pub fn dialog_body_room(screen: Rect, sidebar: bool, body_rows: usize) -> usize {
+    let region = super::regions(screen, sidebar).centre;
+    if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
+        return 0;
+    }
+    box_height(body_rows, ceiling_height(region.height)).saturating_sub(3) as usize
 }
 
 fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Rect) {
@@ -95,7 +125,7 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     // that is too short would refuse to show a long notice.
     let (width, ceiling) = wanted(area, DIALOG_WIDTH_PERCENT, area.height);
     let body = dialogs::body_height(app, dialog, width.saturating_sub(2));
-    let height = (body as u16 + 3).clamp(MIN_HEIGHT, ceiling);
+    let height = box_height(body, ceiling);
     let rect = centred(area, width, height);
     frame.render_widget(Clear, rect);
 

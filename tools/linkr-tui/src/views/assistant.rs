@@ -936,6 +936,33 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
     lines
 }
 
+/// The row of the settings body the caret is painted on.
+///
+/// The caret lives in the state, not in the rows, so its row is rebuilt here
+/// with the same arithmetic `settings_lines` walks: a blank row and the
+/// heading above the first field, then one row per field.
+pub fn settings_caret_row(app: &App) -> usize {
+    let at = SETTINGS
+        .iter()
+        .position(|field| *field == app.assistant.focus)
+        // The composer has no row here. While the window is up the caret is on
+        // a field; a caller that asks anyway is sent to the first one rather
+        // than to a row that is not there.
+        .unwrap_or(0);
+    2 + at
+}
+
+/// The row of the settings body the note cursor is painted on.
+///
+/// The note list starts under the five fields, the save's answer when there is
+/// one, and a blank row and the section heading.
+pub fn settings_note_row(app: &App) -> usize {
+    let state = &app.assistant;
+    let list = 2 + SETTINGS.len() + usize::from(state.notice.is_some()) + 2;
+    let last = state.notes.len().saturating_sub(1);
+    list + state.note_cursor.min(last)
+}
+
 /// Thousands-separated token count, matching the agent usage formatter.
 fn format_tokens(value: u64) -> String {
     crate::agent::usage::format_tokens(value)
@@ -1101,6 +1128,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The rows the settings window scrolls by are the rows the body paints:
+    /// the field caret closes its own row, and the note cursor sits on its
+    /// note. A save's answer shifts the list by one row, which is the shift
+    /// easiest to forget.
+    #[test]
+    fn the_caret_rows_are_the_rows_the_body_paints() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::En);
+        a.assistant.notes = vec![
+            ("alpha".to_string(), String::new()),
+            ("bravo".to_string(), String::new()),
+            ("charlie".to_string(), String::new()),
+        ];
+        for field in [
+            AgentField::Endpoint,
+            AgentField::Model,
+            AgentField::ApiKey,
+            AgentField::Headers,
+        ] {
+            open_settings(&mut a, field);
+            let row = settings_caret_row(&a);
+            let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
+            assert!(
+                painted.contains("▌"),
+                "{field:?} paints no caret: {painted:?}"
+            );
+        }
+        // The note field's own row carries the caret while the list has it...
+        open_settings(&mut a, AgentField::Notes);
+        let row = settings_caret_row(&a);
+        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
+        assert!(
+            painted.contains("▌"),
+            "the note field paints no caret: {painted:?}"
+        );
+        // ...and the cursor's row carries the note under it.
+        a.assistant.note_cursor = 2;
+        let row = settings_note_row(&a);
+        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
+        assert!(
+            painted.contains("charlie"),
+            "the cursor row is not charlie: {painted:?}"
+        );
+        // An answer above the list pushes it down a row, and the row moves
+        // with it.
+        a.assistant.notice = Some("saved".to_string());
+        let row = settings_note_row(&a);
+        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
+        assert!(
+            painted.contains("charlie"),
+            "with an answer above the list: {painted:?}"
+        );
     }
 }
 

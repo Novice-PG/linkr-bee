@@ -996,6 +996,10 @@ fn pane_area(cols: u16, rows: u16) -> Rect {
 fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
     let pane = pane_area(cols, rows);
     app.terminal.set_size(pane.width, pane.height);
+    // The frame itself, kept where a key handler can read it: keys are handled
+    // between two paints, and the settings window keeps its caret inside a
+    // body whose height comes from these numbers.
+    app.screen = Rect::new(0, 0, cols, rows);
     pane
 }
 

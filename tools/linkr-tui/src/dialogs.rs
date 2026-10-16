@@ -794,7 +794,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // the composer, the paging keys scroll the body, and every other key
         // belongs to the form — which re-puts the dialog here whatever it did
         // with the caret, because "not the form's key" and "close the window"
-        // are two different answers and only Escape means the second.
+        // are two different answers and only Escape means the second. The
+        // paging keys move the *window*, and a form key moves the caret, so
+        // that key's window has to follow — a caret left on a row nothing
+        // paints is a keystroke that lands where the user cannot see it.
         Dialog::Settings(offset) => {
             if key.code == KeyCode::Esc {
                 crate::views::assistant::close_settings(app);
@@ -805,9 +808,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                     KeyCode::PageDown => offset.saturating_add(10),
                     KeyCode::Home => 0,
                     KeyCode::End => last,
-                    _ => offset,
+                    _ => {
+                        let code = key.code;
+                        let _ = crate::views::assistant::handle_settings_key(app, key);
+                        followed(app, code, offset, last + 1)
+                    }
                 };
-                let _ = crate::views::assistant::handle_settings_key(app, key);
                 app.dialog = Some(Dialog::Settings(moved.min(last)));
             }
         }
@@ -900,6 +906,43 @@ fn scrolled(app: &App, dialog: Dialog, offset: usize, key: KeyEvent) -> Option<D
         Dialog::Notices(_) => Dialog::Notices(moved),
         _ => Dialog::Help(moved),
     })
+}
+
+/// The scroll a form key leaves behind: the least the window can move and
+/// still paint the caret.
+///
+/// The caret is not a scroll position. Tab and the typing keys walk the five
+/// fields, ↑↓ on the note row walks the list cursor, and either walk can leave
+/// the row the next keystroke acts on outside the window's slice of the body.
+/// When that happens the window moves to the caret; when it does not, the
+/// scroll is left where it was. The paging keys are the user moving the window
+/// themselves, so they never come through here.
+fn followed(app: &App, key: KeyCode, offset: usize, rows: usize) -> usize {
+    let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+    if room == 0 {
+        // No paint has said how tall the window is (a headless test, the first
+        // tick), or the frame is too small for a modal at all: the scroll
+        // keeps whatever the key left it.
+        return offset;
+    }
+    let caret = if matches!(key, KeyCode::Up | KeyCode::Down | KeyCode::Delete)
+        && app.assistant.focus == crate::views::assistant::AgentField::Notes
+        && !app.assistant.notes.is_empty()
+    {
+        // The list keys walk the notes: the cursor's own row is what must stay
+        // seen. The field row far above is where a typed character would land,
+        // and it is not the row this key just moved.
+        crate::views::assistant::settings_note_row(app)
+    } else {
+        crate::views::assistant::settings_caret_row(app)
+    };
+    if caret < offset {
+        caret
+    } else if caret >= offset + room {
+        caret + 1 - room
+    } else {
+        offset
+    }
 }
 
 /// Do what the confirmation agreed to.
@@ -1542,6 +1585,87 @@ mod tests {
             crate::views::assistant::AgentField::Composer,
             app.assistant.focus,
             "the caret stayed on a row nothing is painting"
+        );
+    }
+
+    /// The window follows its caret: ↑↓ walks the note list and Tab walks the
+    /// fields, and the row the next keystroke lands on cannot leave the window
+    /// on either trip. Paging is the exception — it is the user moving the
+    /// window itself — and the next form key brings the window back, so typed
+    /// text lands where it can be seen.
+    #[test]
+    fn the_settings_window_follows_its_caret() {
+        let mut app = App {
+            // The size the event loop stores before a key can arrive.
+            screen: ratatui::layout::Rect::new(0, 0, 80, 24),
+            ..App::default()
+        };
+        app.assistant.notes = (0..30)
+            .map(|index| (format!("note-{index:02}"), String::new()))
+            .collect();
+        crate::views::assistant::open_settings(
+            &mut app,
+            crate::views::assistant::AgentField::Notes,
+        );
+
+        // Down the list: the cursor's note has to stay painted.
+        for _ in 0..20 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.assistant.note_cursor, 20);
+        assert!(
+            app.dialog.as_ref().unwrap().scroll() > 0,
+            "the window did not follow the cursor down"
+        );
+        let shown = crate::ui::render_to_text(&app, 80, 24);
+        assert!(
+            shown.contains("note-20"),
+            "the cursor's note left the window:\n{shown}"
+        );
+
+        // Tab walks back to the fields, and the window comes with it.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            crate::views::assistant::AgentField::Endpoint,
+            app.assistant.focus
+        );
+        assert_eq!(
+            app.dialog.as_ref().unwrap().scroll(),
+            2,
+            "the window stayed on the notes"
+        );
+        let shown = crate::ui::render_to_text(&app, 80, 24);
+        assert!(
+            shown.contains("▌"),
+            "the caret's row is not painted:\n{shown}"
+        );
+
+        // Paging moves the window on its own...
+        for _ in 0..3 {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            );
+        }
+        assert!(
+            app.dialog.as_ref().unwrap().scroll() > 2,
+            "PgDn scrolled nothing"
+        );
+        // ...and the first typed key brings it back to the caret.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.endpoint, "x");
+        assert_eq!(
+            app.dialog.as_ref().unwrap().scroll(),
+            2,
+            "the window did not come back to the caret"
+        );
+        let shown = crate::ui::render_to_text(&app, 80, 24);
+        assert!(
+            shown.contains("x▌"),
+            "the typed key is not painted:\n{shown}"
         );
     }
 

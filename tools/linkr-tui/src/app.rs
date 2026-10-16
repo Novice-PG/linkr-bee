@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ratatui::layout::Rect;
+
 use crate::accessory::{self, UartSettings};
 use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
@@ -283,6 +285,11 @@ pub struct App {
     /// Marches while an operation is in flight; drives the busy indicator in
     /// the top bar. The event loop advances it, a frame only reads it.
     pub tick: usize,
+    /// The frame the interface is drawn into: the size the terminal last
+    /// answered with. Kept because a key is handled *between* two paints — the
+    /// settings window sizes its own scroll from the screen it sits on, and
+    /// only the frame knows how tall that is.
+    pub screen: Rect,
     pub quick_send: Vec<QuickSend>,
     /// Findings from the panic/reboot watch.
     pub watch: Vec<String>,
@@ -418,6 +425,9 @@ impl Default for App {
             clock: "00:00:00".to_string(),
             sidebar_cursor: 0,
             tick: 0,
+            // No frame has been drawn yet; the event loop fills this in on its
+            // first tick, before any key can arrive.
+            screen: Rect::default(),
             quick_send: vec![
                 QuickSend::new("help"),
                 QuickSend::new("version"),
