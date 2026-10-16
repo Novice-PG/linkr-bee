@@ -2712,6 +2712,11 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// still go straight out, because holding an arrow key until Enter would
     /// make a target's own line editor unusable.
     pub fn type_bytes(&mut self, ends_line: bool, bytes: &str) -> bool {
+        // Typing is a return to the command line. A terminal pulls the view
+        // back to the tail on the first key (xterm's `scrollKey`, xterm.js's
+        // `scrollOnUserInput`), and the echo of what was typed would otherwise
+        // be written off-screen for the user to miss.
+        self.scroll_terminal_to_bottom();
         if !self.line_mode {
             return self.send_bytes(bytes.as_bytes());
         }
@@ -4883,6 +4888,19 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(sent, b"x");
+    }
+
+    /// Typing is a return to the command line: a pane reading history is
+    /// pulled back to the tail by the first key, so what was just typed and
+    /// what answers it are not written off-screen.
+    #[test]
+    fn typing_resumes_following_the_tail() {
+        let (mut app, _wire) = connected(Lang::Zh);
+        app.scroll_terminal(7);
+        assert!(!app.terminal.autoscroll, "reading history");
+        assert!(app.type_bytes(false, "x"));
+        assert!(app.terminal.autoscroll, "typing brings the tail back");
+        assert_eq!(app.terminal.scroll, 0);
     }
 
     /// The Enter mode is a fact about the wire rather than about one key: a

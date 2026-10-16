@@ -1104,8 +1104,10 @@ fn read_first_line(path: &std::path::Path) -> Result<String, String> {
 }
 
 /// The centre region — the terminal pane's area — for a frame of this size.
+/// The pane the emulator is sized to: [`ui::pane_area`], the paint's own
+/// arithmetic, so the grid ends exactly where the painted cells do.
 fn pane_area(cols: u16, rows: u16) -> Rect {
-    ui::regions(Rect::new(0, 0, cols, rows), true).centre
+    ui::pane_area(cols, rows)
 }
 
 /// The centre region as the *paint* lays it out, rail shown or hidden.

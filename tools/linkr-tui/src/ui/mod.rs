@@ -96,6 +96,21 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
 /// smallest step there is, one column, is what "a little air" gets.
 const LEFT_AIR: u16 = 1;
 
+/// The cell grid the terminal pane's emulator is sized to, for a window of
+/// `cols`×`rows`.
+///
+/// This is the paint's own arithmetic: no column of air, and the rail counted
+/// even when it is closed, so toggling it does not rewrap the device's whole
+/// history. Every column of the rect is one the paint fills, which is what
+/// keeps the device's own wrap between the pane's edges.
+pub fn pane_area(cols: u16, rows: u16) -> Rect {
+    regions(
+        Rect::new(LEFT_AIR, 0, cols.saturating_sub(LEFT_AIR), rows),
+        true,
+    )
+    .centre
+}
+
 /// Paint one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = app.theme();
@@ -517,6 +532,30 @@ mod tests {
         }
     }
 
+    /// The emulator's grid ends exactly where the painted pane ends: no column
+    /// of air is inside it, and the device's own wrap lands on the pane's last
+    /// column rather than one column past the edge.
+    #[test]
+    fn the_pane_grid_ends_where_the_paint_does() {
+        assert_eq!(
+            pane_area(80, 24),
+            Rect {
+                x: 1 + SIDEBAR_WIDTH,
+                y: 1,
+                width: 80 - 1 - SIDEBAR_WIDTH,
+                height: 22,
+            }
+        );
+        // At every size the grid stays inside the frame, keeps both bars, and
+        // never collapses to nothing.
+        for (w, h) in [(40u16, 10u16), (32, 5), (10, 3)] {
+            let pane = pane_area(w, h);
+            assert!(pane.right() <= w && pane.bottom() <= h, "{w}x{h}: {pane:?}");
+            assert_eq!(pane.height, h - 2, "{w}x{h}");
+            assert!(pane.width >= 1, "{w}x{h}: the pane vanished");
+        }
+    }
+
     /// With the rail closed the centre takes the whole middle band: same bottom
     /// bar, same top bar, and the width the sidebar used to hold. Nothing is
     /// reserved for a rail the user asked to be rid of.
@@ -789,7 +828,7 @@ mod tests {
         assert_eq!(buffer[(tx_head, 0)].fg, theme.focus);
         assert!(rx_head < tx_head, "RX heads the left half and TX the right");
         // The halves share the unit evenly rather than one eating the other:
-        // at this width the bar has 18 columns for the unit and both halves
+        // at this width the bar has 22 columns for the unit and both halves
         // must get their arrow and some graph behind it.
         assert!(
             tx_head - rx_head >= 4 && 120 - tx_head >= 4,

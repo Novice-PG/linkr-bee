@@ -61,11 +61,16 @@ pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
 /// thing the bar gained and the first it gives up, because the counters and
 /// the clock read without it — and a hijacked full-width strip would push the
 /// session's own state off a small terminal.
+///
+/// Each size is the label's fixed width, thirteen cells, plus the graph's
+/// room — four, nine and fifteen cells: the graph keeps the columns it was
+/// given as the rate's digits come and go, so nothing in the unit moves but
+/// the number itself.
 pub fn traffic_unit(bar_width: u16) -> u16 {
     match bar_width {
-        120.. => 24,
-        104..=119 => 18,
-        92..=103 => 13,
+        120.. => 28,
+        104..=119 => 22,
+        92..=103 => 17,
         _ => 0,
     }
 }
@@ -74,11 +79,16 @@ pub fn traffic_unit(bar_width: u16) -> u16 {
 /// the two newest columns the graphs draw. The spaces are part of the label so
 /// the rate is held off the clock's tail and the graphs' heads.
 ///
+/// The number stands in a fixed, right-aligned field, so the label is one
+/// width — `1023.9 KB`, the widest a serial line can read, and the widest
+/// `human_bytes` spells — for every rate, and the graphs after it never move
+/// as the digits do.
+///
 /// The graphs alone are shape, not scale: without this number a spike could
 /// just as well be a megabyte as a byte.
 pub fn traffic_label(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
-        format!(" {}/s ", crate::text::human_bytes(app.traffic.rate)),
+        format!(" {:>9}/s ", crate::text::human_bytes(app.traffic.rate)),
         theme.accent(),
     ))
 }
@@ -343,12 +353,12 @@ mod tests {
     fn the_traffic_unit_grows_with_the_bar() {
         assert_eq!(traffic_unit(80), 0);
         assert_eq!(traffic_unit(91), 0);
-        assert_eq!(traffic_unit(92), 13);
-        assert_eq!(traffic_unit(103), 13);
-        assert_eq!(traffic_unit(104), 18);
-        assert_eq!(traffic_unit(119), 18);
-        assert_eq!(traffic_unit(120), 24);
-        assert_eq!(traffic_unit(200), 24);
+        assert_eq!(traffic_unit(92), 17);
+        assert_eq!(traffic_unit(103), 17);
+        assert_eq!(traffic_unit(104), 22);
+        assert_eq!(traffic_unit(119), 22);
+        assert_eq!(traffic_unit(120), 28);
+        assert_eq!(traffic_unit(200), 28);
     }
 
     /// The label is the rate in human bytes, held off its neighbours by a
@@ -361,9 +371,16 @@ mod tests {
             lang: Lang::En,
             ..App::default()
         };
-        assert_eq!(line_text(&traffic_label(&app, &theme)), " 0 B/s ");
+        assert_eq!(line_text(&traffic_label(&app, &theme)), "       0 B/s ");
         app.traffic.rate = 1536;
-        assert_eq!(line_text(&traffic_label(&app, &theme)), " 1.5 KB/s ");
+        assert_eq!(line_text(&traffic_label(&app, &theme)), "    1.5 KB/s ");
+        // The number stands in a fixed field, so what follows the label — the
+        // graphs — never moves as the rate gains or loses a digit, not even at
+        // the widest spelling `human_bytes` has.
+        for rate in [0, 999, 5 * 1024, 640 * 1024, 1_047_552, 8 * 1024 * 1024] {
+            app.traffic.rate = rate;
+            assert_eq!(traffic_label(&app, &theme).width(), 13, "rate {rate}");
+        }
         assert_eq!(
             traffic_label(&app, &theme).spans[0].style.fg,
             Some(theme.accent)

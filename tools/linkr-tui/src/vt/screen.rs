@@ -317,11 +317,31 @@ impl Screen {
     /// leaves every glyph where it was, so a line that was row 3 is still row 3.
     /// Reflowing would make a resize rewrite the screen, and a program that
     /// redraws on `SIGWINCH` would then be redrawing something it never drew.
+    ///
+    /// What shrinking must not do is eat the newest line. When the cursor sits
+    /// below the new bottom the screen scrolls up first, the way a window being
+    /// dragged shorter on a working shell does, and the rows that leave the top
+    /// land in the scrollback instead of vanishing.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = cols.max(1);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
             return;
+        }
+        if rows < self.rows && self.cursor_row >= rows {
+            let gone = self.cursor_row + 1 - rows;
+            let old_cols = self.cols;
+            if self.scrollback_enabled {
+                for row in 0..gone {
+                    let cells = self.cells[row * old_cols..(row + 1) * old_cols].to_vec();
+                    self.push_scrollback(cells);
+                }
+            }
+            self.cells.copy_within(gone * old_cols..self.rows * old_cols, 0);
+            for row in self.rows - gone..self.rows {
+                self.blank_row(row);
+            }
+            self.cursor_row -= gone;
         }
         let mut cells = vec![Cell::default(); cols * rows];
         let copy_rows = rows.min(self.rows);
@@ -1273,6 +1293,33 @@ mod tests {
         screen.resize(3, 2);
         assert_eq!(screen.row_text(0), "hel");
         assert_eq!(screen.cursor().0, 0);
+    }
+
+    /// A shorter screen scrolls rather than bytes the newest line off the
+    /// bottom: the last line a device printed is still on screen, and what no
+    /// longer fits is history.
+    #[test]
+    fn a_shorter_screen_keeps_the_newest_line() {
+        let mut screen = Screen::new(10, 4);
+        for n in 0..6 {
+            for ch in format!("line{n}").chars() {
+                screen.print(ch);
+            }
+            if n < 5 {
+                screen.next_line();
+            }
+        }
+        assert_eq!(screen.row_text(3), "line5");
+        let history = screen.scrollback_len();
+        screen.resize(10, 2);
+        assert_eq!(screen.row_text(0), "line4");
+        assert_eq!(screen.row_text(1), "line5", "the newest line stays visible");
+        assert_eq!(
+            screen.scrollback_len(),
+            history + 2,
+            "the rows that no longer fit are kept as history"
+        );
+        assert_eq!(screen.cursor().0, 1, "the cursor rides down with the text");
     }
 
     /// Origin mode makes cursor addressing relative to the region, which is how
