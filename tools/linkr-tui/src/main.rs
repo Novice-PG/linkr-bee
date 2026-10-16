@@ -598,7 +598,7 @@ impl TerminalGuard {
         // shell that has already run the first half of it. With it, the whole
         // paste is one event carrying the whole payload, which is the only
         // shape in which a paste can be sent as one thing.
-        if let Err(err) = execute!(stdout, EnableBracketedPaste) {
+        if let Err(err) = execute!(stdout, EnableBracketedPaste).or_else(without_capability) {
             let _ = disable_raw_mode();
             let _ = execute!(stdout, LeaveAlternateScreen);
             return Err(err);
@@ -625,12 +625,14 @@ impl TerminalGuard {
          * `Ctrl+letter`, and the shift-latch chords then arrive as the plain
          * ones. The protocol is how a terminal says which modifiers were
          * really pressed. One that does not speak it ignores the request
-         * entirely, which is the reading this interface has always lived
-         * with. */
+         * entirely, and the legacy Windows console cannot even receive it —
+         * both are readings this interface has always lived with. */
         if let Err(err) = execute!(
             stdout,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        ) {
+        )
+        .or_else(without_capability)
+        {
             let _ = disable_raw_mode();
             let _ = execute!(stdout, LeaveAlternateScreen);
             let _ = execute!(stdout, DisableBracketedPaste);
@@ -655,6 +657,20 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         self.restore();
+    }
+}
+
+/// The answer of a console that cannot take a capability request at all: the
+/// legacy Windows console API reports `Unsupported` for every request it has
+/// no console call behind — the keyboard protocol is one — and that is the
+/// console saying "not here", not a failed write. The request was
+/// best-effort: the program continues without the capability. Any other
+/// error is real and stays one.
+#[cfg(feature = "tui")]
+fn without_capability(err: io::Error) -> io::Result<()> {
+    match err.kind() {
+        io::ErrorKind::Unsupported => Ok(()),
+        _ => Err(err),
     }
 }
 
@@ -3265,5 +3281,22 @@ mod tests {
             rows,
         );
         assert_eq!(app.terminal.selected_text(), None, "the click cleared");
+    }
+
+    /// A capability request the console cannot take is answered with
+    /// `Unsupported` — every Windows console answers the keyboard protocol
+    /// that way — and that answer is the console saying "not here", not a
+    /// failed write. Only a real error tears the setup down.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn a_capability_the_console_cannot_take_is_not_a_failure() {
+        let absent = io::Error::new(io::ErrorKind::Unsupported, "not here");
+        assert!(without_capability(absent).is_ok());
+
+        let broken = io::Error::new(io::ErrorKind::BrokenPipe, "gone");
+        assert!(matches!(
+            without_capability(broken),
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe
+        ));
     }
 }
