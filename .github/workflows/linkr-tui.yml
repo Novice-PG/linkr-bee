@@ -1,7 +1,8 @@
 name: Host terminal (linkr-tui)
 
 # The host client is a Rust crate under tools/linkr-tui. It has its own gates —
-# one of which is a seven-target cross check — and its own release artifacts, so
+# one of which cross-checks every target a Linux runner can compile for — and
+# its own release artifacts, so
 # it is a workflow of its own rather than jobs bolted onto the firmware one:
 # a TUI change should not spin up five Zephyr toolchains, and a firmware change
 # should not rebuild seven host binaries.
@@ -37,10 +38,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `cargo check` links nothing, but libdbus-sys still asks pkg-config for the
+  # target's flags — on a cross target that question must be allowed to cross.
+  PKG_CONFIG_ALLOW_CROSS: "1"
 
 defaults:
   run:
-    # Every command below is crate-relative, the way it is run by hand.
+    # Commands default to the crate, the way they are run by hand — the one
+    # firmware step says so when it reaches up to the repository root instead.
     working-directory: tools/linkr-tui
 
 jobs:
@@ -59,6 +64,16 @@ jobs:
           set -euo pipefail
           cargo --version
           rustc --version
+
+      # What the tests need before they run, so the gate measures the suite
+      # rather than the runner: every test binary links the host's libdbus,
+      # and the completion tests are written for fish and zsh — they skip
+      # themselves where a shell is absent, which hides coverage quietly.
+      - name: Install the test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y libdbus-1-dev pkg-config fish zsh
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
@@ -79,18 +94,32 @@ jobs:
       - name: Firmware rate arithmetic
         # No Zephyr, no toolchain: src/uart_autobaud_math.h is plain integers,
         # and this is the only part of the firmware a host compiler can judge.
+        # The test lives with the firmware, not in the crate, so this step —
+        # and only this step — runs from the repository root.
+        working-directory: .
         run: |
           cc -std=c11 -Wall -Wextra -Werror \
             -o /tmp/test_uart_autobaud tests/test_uart_autobaud.c
           /tmp/test_uart_autobaud
 
   targets:
-    name: Seven targets
+    name: Cross targets
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      # The C in the dependency tree (aws-lc-sys) is compiled for the target,
+      # check or no check, so the cross C compilers are what this job needs.
+      # The libdbus is only for the probe — a check links nothing, but
+      # libdbus-sys still asks pkg-config for the Linux targets' flags.
+      - name: Install the cross compilers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 \
+                                  libdbus-1-dev pkg-config
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
@@ -98,17 +127,16 @@ jobs:
           workspaces: tools/linkr-tui -> target
           key: targets
 
-      # The fourth gate: the crate claims Linux, macOS and Windows on x86-64 and
-      # ARM, so every one of them must at least type-check. `check` rather than
-      # `build`: no cross linkers are needed, which keeps this job to one runner
-      # and a few minutes.
-      - name: Check every target
+      # The fourth gate: the targets a Linux runner can genuinely compile
+      # for. Windows MSVC and the Apple targets want SDKs that cannot be
+      # installed here; they are built for real by the package matrix on
+      # their own systems — a stronger claim than a check. This job is the
+      # fast one, not the only one.
+      - name: Check the cross targets
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-                        x86_64-pc-windows-msvc aarch64-pc-windows-msvc \
-                        x86_64-pc-windows-gnu \
-                        x86_64-apple-darwin aarch64-apple-darwin; do
+                        x86_64-pc-windows-gnu; do
             echo "::group::$target"
             cargo check --locked --all-targets --target "$target"
             echo "::endgroup::"
@@ -124,10 +152,12 @@ jobs:
       matrix:
         include:
           # Linux on x86-64: the host this is developed on, so it is also the
-          # one whose archive is *run* before it is uploaded.
+          # one whose archive is *run* before it is uploaded. It links the
+          # host's own libdbus, installed with the cross tools below.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             native: true
+            apt: libdbus-1-dev
           # Linux on ARM: needs a cross linker, installed below.
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
@@ -159,12 +189,39 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install the cross linker
+      - name: Install what the link needs
         if: matrix.apt != ''
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y "${{ matrix.apt }}"
+          # The arm64 leg links the arm64 libdbus, which lives on the ports
+          # archive — the runner's own sources only carry amd64. Extract it the
+          # way a laptop cross build does, then aim the probe at the tree.
+          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then
+            stage=/tmp/arm64-dbus
+            mkdir -p "$stage"
+            fetch() {
+              local dir=$1 pattern=$2 deb
+              deb=$(curl -fsSL "http://ports.ubuntu.com/ubuntu-ports/pool/main/$dir/" |
+                grep -oE "$pattern" | sort -V | tail -1)
+              echo "fetching $deb"
+              curl -fsSL -o "/tmp/$deb" \
+                "http://ports.ubuntu.com/ubuntu-ports/pool/main/$dir/$deb"
+              dpkg-deb -x "/tmp/$deb" "$stage"
+            }
+            fetch d/dbus 'libdbus-1-dev_[^"]*_arm64\.deb'
+            fetch s/systemd 'libsystemd-dev_[^"]*_arm64\.deb'
+            fetch s/systemd 'libsystemd0_[^"]*_arm64\.deb'
+            pc="$stage/usr/lib/aarch64-linux-gnu/pkgconfig"
+            sed -i -E \
+              "s#^(prefix|exec_prefix|libdir|includedir)=/usr#\1=$stage/usr#" \
+              "$pc/dbus-1.pc" "$pc/libsystemd.pc"
+            {
+              echo "PKG_CONFIG_LIBDIR=$pc"
+              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-Wl,-rpath-link,$stage/usr/lib/aarch64-linux-gnu"
+            } >> "$GITHUB_ENV"
+          fi
 
       - name: Point cargo at it
         if: matrix.linker_var != ''
