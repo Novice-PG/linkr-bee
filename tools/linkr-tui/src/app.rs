@@ -1479,6 +1479,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         // A new scan replaces the old list: rows left over from the last one
         // under a running scan read as networks this one has found.
         self.network.scan_results.clear();
+        self.network.settle_focus();
         Ok(())
     }
 
@@ -1589,6 +1590,7 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
                     });
                 } else {
                     self.network.scan_results = scan_results(&reply.lines);
+                    self.network.settle_focus();
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access

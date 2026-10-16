@@ -436,6 +436,19 @@ pub fn prompt_wifi_ssid(app: &mut App) {
     raise(app, Dialog::Prompt(prompt));
 }
 
+/// Ask for the password of the network the form already names.
+///
+/// The name is on the row above the keyboard, so asking for it again would be
+/// asking twice; joining a named network is the password, and this asks for
+/// the half that is not on screen. The answer is held nowhere: it goes from
+/// the field into the command and out of the process.
+pub fn prompt_wifi_password(app: &mut App) {
+    raise(
+        app,
+        Dialog::Prompt(Prompt::new(WIFI_PASSWORD_TITLE, PromptAction::WifiPassword)),
+    );
+}
+
 /// Ask where the device's log should be uploaded to.
 pub fn prompt_webdav_url(app: &mut App) {
     let prompt = Prompt::with_text(

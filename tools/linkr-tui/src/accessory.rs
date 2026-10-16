@@ -231,6 +231,101 @@ pub fn is_scan_error(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case("@scan error")
 }
 
+/// The network's own name, out of the line a scan reported for it.
+///
+/// The firmware writes `@scan result %.*s %s ch=%u %ddBm` (`src/wifi.c`): the
+/// name first and whole — `%.*s` is the one field that may hold spaces — then
+/// the security, the channel and the signal. So the known fields are peeled
+/// off the *right*, one at a time, and all that is left is the name: picking
+/// a network off the list has to bring its name, not the radio's note about
+/// it.
+///
+/// Every peel is refused when it would leave nothing behind — a shorter or
+/// older line puts its one word where this parser expects a field, and that
+/// word is the name as far as the list can tell.
+pub fn wifi_name_of(result: &str) -> String {
+    let body = result.trim();
+    let body = body.strip_prefix("@scan result ").unwrap_or(body).trim();
+    let mut name = body.to_string();
+    peel_signal(&mut name);
+    peel_channel(&mut name);
+    peel_security(&mut name);
+    name.trim().to_string()
+}
+
+/// Peel a trailing ` -54dBm` (or ` -54dB`) off `value`, when there is one.
+fn peel_signal(value: &mut String) {
+    let line = value.trim_end();
+    let Some(head) = line.strip_suffix("dBm").or_else(|| line.strip_suffix("dB")) else {
+        return;
+    };
+    let head = head.trim_end();
+    let digits = head.trim_end_matches(|c: char| c.is_ascii_digit());
+    let rest = digits.trim_end_matches(['+', '-']);
+    let end = rest.trim_end().len();
+    // A number has to be there, its sign at most one character, and the space
+    // the firmware writes before it: `Foo54dBm` alone is a name that ends in a
+    // number, not a signal with nothing to signal.
+    if digits.len() == head.len() || rest.len() + 1 < digits.len() || end == rest.len() || end == 0
+    {
+        return;
+    }
+    value.truncate(end);
+}
+
+/// Peel a trailing ` ch=6` off `value`, when there is one.
+fn peel_channel(value: &mut String) {
+    let line = value.trim_end();
+    let digits = line.trim_end_matches(|c: char| c.is_ascii_digit());
+    if digits.len() == line.len() {
+        return;
+    }
+    let Some(head) = digits.strip_suffix("ch=") else {
+        return;
+    };
+    let end = head.trim_end().len();
+    // The channel has to have a name in front of it, separated by the space
+    // the firmware writes: `Foo2ch=6` is a name, not a channel.
+    if end == 0 || end == head.len() {
+        return;
+    }
+    value.truncate(end);
+}
+
+/// The security words the firmware writes between the name and the channel.
+const SECURITY_WORDS: [&str; 9] = [
+    "open",
+    "wep",
+    "wpa",
+    "wpa2",
+    "wpa2-sha256",
+    "wpa3",
+    "eap",
+    "wapi",
+    "unknown",
+];
+
+/// Peel a trailing ` wpa2` off `value` when the last word is one of the
+/// security words the firmware writes there.
+fn peel_security(value: &mut String) {
+    let line = value.trim_end();
+    // The firmware separates fields with a plain space; the name's own spaces
+    // are the name's, and the word after the last one is where security goes.
+    let Some(at) = line.rfind(' ') else {
+        return; // one word: that word is the name, security word or not
+    };
+    if !SECURITY_WORDS
+        .iter()
+        .any(|word| word.eq_ignore_ascii_case(&line[at + 1..]))
+    {
+        return;
+    }
+    let end = line[..at].trim_end().len();
+    if end > 0 {
+        value.truncate(end);
+    }
+}
+
 /// `OK uart=115200,8,N,1,none` -> settings.
 pub fn parse_uart_settings(text: &str) -> Option<UartSettings> {
     // Find the `uart=` payload and split its five comma fields.
@@ -533,6 +628,33 @@ mod tests {
         assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "ok"));
         assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "err"));
         assert!(!reply_status("非你莫属 wpa2 ch=6 -54dBm").ok);
+    }
+
+    /// A scan result's line is the radio's note about a network; the name is
+    /// what belongs in the form. The fields after it — security, channel,
+    /// signal — are peeled off the right so a name with a space in it stays
+    /// one name, and a name that reads like a field keeps its word when there
+    /// is nothing else on the line.
+    #[test]
+    fn a_scan_result_line_gives_up_its_name() {
+        assert_eq!(
+            wifi_name_of("My Home Network wpa2 ch=6 -48dBm"),
+            "My Home Network"
+        );
+        assert_eq!(wifi_name_of("SecondWifi unknown ch=4 -41dBm"), "SecondWifi");
+        assert_eq!(wifi_name_of("OpenNet open"), "OpenNet");
+        assert_eq!(wifi_name_of("非你莫属 wpa2 ch=6 -54dBm"), "非你莫属");
+        assert_eq!(
+            wifi_name_of("@scan result BenchNet wpa2 ch=6 -54dBm"),
+            "BenchNet",
+            "a whole wire line works too, not only the body"
+        );
+        // The one word there is the name, security word or not.
+        assert_eq!(wifi_name_of("open"), "open");
+        assert_eq!(wifi_name_of("unknown"), "unknown");
+        // A name that ends in a number is a name: there is no signal without
+        // a signal's other fields.
+        assert_eq!(wifi_name_of("Foo54dBm"), "Foo54dBm");
     }
 
     #[test]

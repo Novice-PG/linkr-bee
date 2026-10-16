@@ -35,6 +35,10 @@ pub enum NetworkRow {
     WifiOff,
     /// `@w?` — read the status back.
     WifiStatus,
+    /// The `index`th network in the scan results. Standing here and pressing
+    /// Enter fills the name into the form and hands the keyboard to the
+    /// password — the form's next step, one row up from here.
+    ScanResult(usize),
     /// Where the log goes.
     Url,
     /// `@d=<url>`.
@@ -45,7 +49,7 @@ pub enum NetworkRow {
     WebdavStatus,
 }
 
-/// Every row, in the order the view draws them.
+/// Every row that is always there, in the order the view draws them.
 pub const ROWS: [NetworkRow; 10] = [
     NetworkRow::Ssid,
     NetworkRow::Password,
@@ -59,45 +63,88 @@ pub const ROWS: [NetworkRow; 10] = [
     NetworkRow::WebdavStatus,
 ];
 
+/// How many of [`ROWS`] come before the scan results. The results are drawn
+/// between the WiFi section and the WebDAV one, and they stand there for the
+/// keyboard too: the walk is the drawing's order.
+const WIFI_ROWS: usize = 6;
+
 impl NetworkRow {
-    /// The rows reachable from here, in order.
+    /// Whether the keyboard can stand here right now.
     ///
     /// The password row is left out while a network is joined: there is no
     /// password to set on a network that is already up, and a row that did
-    /// nothing when pressed would be worse than a row that is not there.
-    fn reachable(self, connected: bool) -> bool {
-        !connected || self != NetworkRow::Password
+    /// nothing when pressed would be worse than a row that is not there. A
+    /// scan result is out for the same reason — picking one names the network
+    /// to join and hands the keyboard to the password, and with a network
+    /// joined the password row is not there to hand it to.
+    fn reachable(self, connected: bool, results: usize) -> bool {
+        match self {
+            NetworkRow::Password => !connected,
+            NetworkRow::ScanResult(index) => !connected && index < results,
+            _ => true,
+        }
     }
 
     /// The next row down, wrapping.
-    fn next(self, connected: bool) -> NetworkRow {
-        self.step(1, connected)
+    fn next(self, connected: bool, results: usize) -> NetworkRow {
+        self.step(1, connected, results)
     }
 
     /// The next row up, wrapping.
-    fn previous(self, connected: bool) -> NetworkRow {
-        self.step(-1, connected)
+    fn previous(self, connected: bool, results: usize) -> NetworkRow {
+        self.step(-1, connected, results)
     }
 
     /// Walk `direction` rows, skipping the ones not reachable now.
-    fn step(self, direction: isize, connected: bool) -> NetworkRow {
-        let here = ROWS
-            .iter()
-            .position(|row| *row == self)
-            .expect("every row is in the table");
-        let count = ROWS.len() as isize;
+    fn step(self, direction: isize, connected: bool, results: usize) -> NetworkRow {
+        let count = ROWS.len() + results;
+        let here = self.position(results).min(count - 1);
         let mut offset = 1;
-        // Bounded by the table's own length, so a table with no reachable row
+        // Bounded by the walk's own length, so a walk with no reachable row
         // but this one comes back here rather than spinning.
         while offset <= count {
-            let index = (here as isize + direction * offset).rem_euclid(count) as usize;
-            let candidate = ROWS[index];
-            if candidate.reachable(connected) {
+            let index =
+                (here as isize + direction * offset as isize).rem_euclid(count as isize) as usize;
+            let candidate = Self::at(index, results);
+            if candidate.reachable(connected, results) {
                 return candidate;
             }
             offset += 1;
         }
         self
+    }
+
+    /// Where a row stands in the walk, counting the scan results.
+    ///
+    /// A result that is no longer on the list — the next scan is already
+    /// replacing it — stands where the first would have: the walk goes on
+    /// from there rather than falling off the table.
+    fn position(self, results: usize) -> usize {
+        match self {
+            NetworkRow::ScanResult(index) => WIFI_ROWS + index.min(results.saturating_sub(1)),
+            row => {
+                let base = ROWS
+                    .iter()
+                    .position(|candidate| *candidate == row)
+                    .expect("every row is in the table");
+                if base < WIFI_ROWS {
+                    base
+                } else {
+                    base + results
+                }
+            }
+        }
+    }
+
+    /// The row at a place in the walk.
+    fn at(index: usize, results: usize) -> NetworkRow {
+        if index < WIFI_ROWS {
+            ROWS[index]
+        } else if index < WIFI_ROWS + results {
+            NetworkRow::ScanResult(index - WIFI_ROWS)
+        } else {
+            ROWS[index - results]
+        }
     }
 }
 
@@ -144,13 +191,31 @@ impl NetworkState {
     /// Move the focus down one reachable row.
     pub fn focus_next(&mut self) {
         let connected = self.wifi_connected();
-        self.focus = self.focus.next(connected);
+        self.focus = self.focus.next(connected, self.scan_results.len());
     }
 
     /// Move the focus up one reachable row.
     pub fn focus_previous(&mut self) {
         let connected = self.wifi_connected();
-        self.focus = self.focus.previous(connected);
+        self.focus = self.focus.previous(connected, self.scan_results.len());
+    }
+
+    /// Keep the keyboard on a row that is still there.
+    ///
+    /// A scan result goes away when the list under the keyboard is replaced —
+    /// a new scan clears it before it fills — and a keyboard left standing on
+    /// a row that is no longer drawn takes the next arrow key somewhere the
+    /// user did not come from. The row that asked for the scan is where the
+    /// keyboard lands instead.
+    pub fn settle_focus(&mut self) {
+        let NetworkRow::ScanResult(index) = self.focus else {
+            return;
+        };
+        if self.scan_results.is_empty() {
+            self.focus = NetworkRow::Scan;
+        } else if index >= self.scan_results.len() {
+            self.focus = NetworkRow::ScanResult(self.scan_results.len() - 1);
+        }
     }
 }
 
@@ -259,7 +324,8 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     // A live connection replaces the form with the connected summary; a
     // connected network's name is shown where the input field was.
     let connected = state.wifi_connected();
-    let on = |row: NetworkRow| state.focus == row && row.reachable(connected);
+    let results = state.scan_results.len();
+    let on = |row: NetworkRow| state.focus == row && row.reachable(connected, results);
     let ssid_value = if connected {
         state
             .wifi
@@ -320,8 +386,19 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if state.scan_results.is_empty() {
         lines.push(note(&format!("  {}", s.net_no_results), width, theme));
     } else {
-        for result in &state.scan_results {
-            lines.push(note(&format!("  {result}"), width, theme));
+        for (index, result) in state.scan_results.iter().enumerate() {
+            if on(NetworkRow::ScanResult(index)) {
+                // The chip, as the form's fields wear it: the keyboard is
+                // here, and what pressing Enter takes is the name inside the
+                // line.
+                let chip = format!("▸ {result}");
+                lines.push(Line::from(Span::styled(
+                    text::clip_to(&chip, width as usize),
+                    theme.selected(),
+                )));
+            } else {
+                lines.push(note(&format!("  {result}"), width, theme));
+            }
         }
     }
 
@@ -394,23 +471,47 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
 fn activate(app: &mut App) {
     use crate::device::Query;
     // The password row is not reachable while a network is joined, so a focus
-    // left on it by an earlier state is moved rather than acted on.
+    // left on it by an earlier state is moved rather than acted on — and a scan
+    // result is the same kind of row: picking one names the network to join and
+    // hands the keyboard to the password, and with a network joined there is no
+    // password row to hand it to.
     let row = app.network.focus;
-    if app.network.wifi_connected() && row == NetworkRow::Password {
-        app.network.focus = NetworkRow::Ssid;
-        return;
+    if app.network.wifi_connected() {
+        match row {
+            NetworkRow::Password => {
+                app.network.focus = NetworkRow::Ssid;
+                return;
+            }
+            NetworkRow::ScanResult(_) => {
+                app.network.focus = NetworkRow::Scan;
+                return;
+            }
+            _ => {}
+        }
     }
     match row {
-        NetworkRow::Ssid | NetworkRow::Password => {
-            crate::dialogs::prompt_wifi_ssid(app);
+        NetworkRow::Ssid => crate::dialogs::prompt_wifi_ssid(app),
+        // The name is in the form, so joining it is the password: asking for a
+        // name the user can see on the row above would be asking twice. With no
+        // name there is nothing to password, and the name is the question.
+        NetworkRow::Password | NetworkRow::Connect => {
+            if app.network.ssid_input.trim().is_empty() {
+                dialogs::prompt_wifi_ssid(app);
+            } else {
+                dialogs::prompt_wifi_password(app);
+            }
+        }
+        NetworkRow::ScanResult(index) => {
+            // The line is the radio's note about a network; the name inside it
+            // is what the form wants. The keyboard moves to the password
+            // because that is the next thing joining needs — the name is now
+            // on the row above, where the form shows it.
+            if let Some(result) = app.network.scan_results.get(index) {
+                app.network.ssid_input = crate::accessory::wifi_name_of(result);
+                app.network.focus = NetworkRow::Password;
+            }
         }
         NetworkRow::Url | NetworkRow::WebdavSet => dialogs::prompt_webdav_url(app),
-        NetworkRow::Connect => {
-            // The name is already in the form, so joining goes straight to the
-            // password: asking for a name the user can see on the row above it
-            // would be asking twice.
-            dialogs::prompt_wifi_ssid(app);
-        }
         // A scan is a read, and the note above this match says why that
         // matters: a card asking permission to look at something is a card
         // that teaches people to press yes without reading. The command in
@@ -452,7 +553,7 @@ fn activate(app: &mut App) {
 mod tests {
     use super::*;
     use crate::app::Transport;
-    use crate::dialogs::Dialog;
+    use crate::dialogs::{Dialog, PromptAction};
     use crate::event::ConnectionState;
     use crate::i18n::Lang;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -582,6 +683,146 @@ mod tests {
         assert_eq!(state.focus, NetworkRow::WebdavStatus);
         state.focus_next();
         assert_eq!(state.focus, NetworkRow::Ssid);
+    }
+
+    /// A scan's results are rows the keyboard can stand on: they are drawn
+    /// where they were heard, between the WiFi section and the WebDAV one, and
+    /// the walk goes through them on its way down.
+    #[test]
+    fn the_focus_walks_the_scan_results() {
+        let mut state = NetworkState {
+            scan_results: vec!["One wpa2 ch=6 -48dBm".into(), "Two open".into()],
+            focus: NetworkRow::WifiStatus,
+            ..NetworkState::default()
+        };
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::ScanResult(0));
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::ScanResult(1));
+        state.focus_next();
+        assert_eq!(
+            state.focus,
+            NetworkRow::Url,
+            "and the WebDAV fields follow them"
+        );
+        state.focus_previous();
+        assert_eq!(state.focus, NetworkRow::ScanResult(1));
+    }
+
+    /// With a network joined there is nothing to pick a name for: the results
+    /// are notes, and the walk steps over them as it steps over the password
+    /// row.
+    #[test]
+    fn a_joined_network_steps_over_the_results() {
+        let mut state = NetworkState::default();
+        state.scan_results = vec!["One open".into()];
+        state.wifi = Some(WifiStatus {
+            state: "connected".into(),
+            ssid: "Up".into(),
+            ip: "10.0.0.1".into(),
+        });
+        state.focus = NetworkRow::WifiStatus;
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::Url);
+        state.focus_previous();
+        assert_eq!(state.focus, NetworkRow::WifiStatus);
+    }
+
+    /// A result that is gone is not a row to stand on: a new scan empties the
+    /// list under the keyboard, and the keyboard lands on the row that asked
+    /// for it rather than on nothing.
+    #[test]
+    fn the_focus_leaves_a_vanished_result() {
+        let mut state = NetworkState {
+            scan_results: vec!["One open".into(), "Two open".into()],
+            focus: NetworkRow::ScanResult(0),
+            ..NetworkState::default()
+        };
+        state.scan_results.clear();
+        state.settle_focus();
+        assert_eq!(state.focus, NetworkRow::Scan);
+        // A shorter list keeps the keyboard on the last row that is there.
+        state.scan_results = vec!["One open".into()];
+        state.focus = NetworkRow::ScanResult(1);
+        state.settle_focus();
+        assert_eq!(state.focus, NetworkRow::ScanResult(0));
+    }
+
+    /// Pressing a scan result is the form's first half: the name goes into the
+    /// network-name field and the keyboard moves on to the password — which is
+    /// the half that is not on screen.
+    #[test]
+    fn taking_a_scan_result_fills_the_name_and_moves_to_the_password() {
+        let mut a = app(Lang::En);
+        a.network.scan_results = vec!["My Home Network wpa2 ch=6 -48dBm".into()];
+        a.network.focus = NetworkRow::ScanResult(0);
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert_eq!(a.network.ssid_input, "My Home Network");
+        assert_eq!(a.network.focus, NetworkRow::Password);
+        // The password row asks for the password itself — the name is on the
+        // row above the keyboard, and asking again would be asking twice.
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        let Some(Dialog::Prompt(prompt)) = &a.dialog else {
+            panic!("the password prompt came up: {:?}", a.dialog);
+        };
+        assert_eq!(prompt.action, PromptAction::WifiPassword);
+    }
+
+    /// A named form is not asked for the name again: joining is the password,
+    /// and with no name there is nothing to join, so the name is the question.
+    #[test]
+    fn a_named_form_asks_for_the_password_not_the_name() {
+        let mut a = app(Lang::En);
+        a.network.ssid_input = "BenchNet".into();
+        a.network.focus = NetworkRow::Connect;
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        let Some(Dialog::Prompt(prompt)) = &a.dialog else {
+            panic!("the password prompt came up: {:?}", a.dialog);
+        };
+        assert_eq!(prompt.action, PromptAction::WifiPassword);
+
+        a.dialog = None;
+        a.network.ssid_input.clear();
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        let Some(Dialog::Prompt(prompt)) = &a.dialog else {
+            panic!("the name prompt came up: {:?}", a.dialog);
+        };
+        assert_eq!(prompt.action, PromptAction::WifiSsid);
+    }
+
+    /// The keyboard's result row wears the chip, as the form's fields do: the
+    /// list says which network pressing Enter would take.
+    #[test]
+    fn the_focused_scan_result_is_marked() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::En);
+        a.network.scan_results = vec!["Home wpa2 ch=6 -48dBm".into(), "Office open".into()];
+        a.network.focus = NetworkRow::ScanResult(1);
+        let painted = lines(&a, &theme, 60);
+        let chip = painted
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("Office"))
+            .expect("the row was painted");
+        assert_eq!(chip.style, theme.selected(), "the chip marks the keyboard");
+        let home = painted
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("Home"))
+            .expect("the other row was painted");
+        assert_ne!(home.style, theme.selected(), "and only one row wears it");
     }
 
     /// Enter on a row that changes the bridge asks first, and the card names
