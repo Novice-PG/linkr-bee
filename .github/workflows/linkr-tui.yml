@@ -211,6 +211,12 @@ jobs:
               dpkg-deb -x "/tmp/$deb" "$stage"
             }
             fetch d/dbus 'libdbus-1-dev_[^"]*_arm64\.deb'
+            # The dev package's `libdbus-1.so` points at the runtime library,
+            # which only the runtime package ships. With it missing the symlink
+            # dangles, `-ldbus-1` silently falls back to the static archive in
+            # the dev tree, and that archive wants systemd's `sd_listen_fds` at
+            # link time — a symbol no link line here asks for.
+            fetch d/dbus 'libdbus-1-3_[^"]*_arm64\.deb'
             fetch s/systemd 'libsystemd-dev_[^"]*_arm64\.deb'
             fetch s/systemd 'libsystemd0_[^"]*_arm64\.deb'
             pc="$stage/usr/lib/aarch64-linux-gnu/pkgconfig"
