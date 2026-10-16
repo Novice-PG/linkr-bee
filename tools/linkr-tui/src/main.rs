@@ -903,16 +903,16 @@ fn main() -> io::Result<()> {
     // on the floor.
     // Open listening. A user who runs this on a bench has one board in front of
     // them and did not ask for a chooser; asking them to open a scan is asking
-    // them to do the work the program can do itself. The scan runs, and the
-    // first board it hears that speaks the serial service is dialled — or, if
-    // two are in the air, the list is shown to pick from.
+    // them to do the work the program can do itself. The scan runs, and one
+    // that hears exactly one board that speaks the serial service dials it —
+    // or, if two are in the air, the list is shown to pick from.
     //
     // Not on a link the command line already asked for: `--address` and
     // `--bridge` name a board, and scanning past a named one would replace a
     // deliberate choice with whatever else was advertising.
     #[cfg(feature = "tui")]
     if !app.session.is_live() && app.transport == linkr_tui::app::Transport::Ble {
-        let _ = app.start_ble_scan();
+        let _ = app.start_ble_scan_connecting_one();
     }
 
     #[cfg(feature = "tui")]

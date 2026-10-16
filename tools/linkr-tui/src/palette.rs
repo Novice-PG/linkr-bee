@@ -243,12 +243,18 @@ fn wifi_config(app: &mut App) {
     crate::dialogs::prompt_wifi_ssid(app);
 }
 
+/// A scan is a read, and a read is not guarded — the same rule the network
+/// view's own Scan row follows: a card asking permission to look at something
+/// teaches people to press yes without reading, and this one said `@w scan`,
+/// gadget talk nobody outside this codebase types.
 fn wifi_scan(app: &mut App) {
     app.set_view(View::Network);
-    crate::dialogs::ask(
-        app,
-        crate::dialogs::ConfirmAction::Accessory("@w scan".to_string()),
-    );
+    if let Err(why) = app.scan_wifi() {
+        app.push_notice(crate::app::Notice {
+            text: why,
+            level: crate::event::NoticeLevel::Error,
+        });
+    }
 }
 
 /// A status read is not guarded — it changes nothing, and a card asking
@@ -844,9 +850,10 @@ mod tests {
     }
 
     /// A network action asks before it acts on the *link*, and asks nowhere
-    /// else: joining a network is a command the board will carry out, and a click
-    /// the user cannot take back is worth a card — while a status read changes
-    /// nothing and a card for it would only train people to press yes.
+    /// else: joining a network is a command the board will carry out, and a
+    /// click the user cannot take back is worth a card — while a read, a
+    /// status one or a scan, changes nothing, and a card for it would only
+    /// train people to press yes.
     #[test]
     fn network_actions_guard_the_ones_that_change_things() {
         // A status read goes straight out: no dialog, no notice of its own.
@@ -854,10 +861,13 @@ mod tests {
         wifi_status(&mut app);
         assert!(app.dialog.is_none(), "a status read asked first");
 
-        // A scan is guarded: it is a command the board runs.
+        // And so does a scan: it is a read too, and the card it used to raise
+        // said `@w scan` — gadget talk nobody outside this codebase types. It
+        // is also the one the network view's Scan row opens, and the two must
+        // not disagree about the guard.
         let mut scan = App::default();
         wifi_scan(&mut scan);
-        assert!(scan.dialog.is_some(), "a scan went out unguarded");
+        assert!(scan.dialog.is_none(), "a scan asked first");
 
         // And each network action lands the user on the network view, because a
         // command issued from the palette should leave them looking at the thing
@@ -874,12 +884,11 @@ mod tests {
         }
     }
 
-    /// The assistant's actions land the user on the field that answers the
-    /// question they just asked. A notice saying "set the endpoint" that opened
-    /// on the composer would be a notice that sent them somewhere else.
     /// The assistant's actions land where the work is: configure and "write a
     /// note" raise the settings window on their own row, and asking closes it
-    /// and hands the keyboard to the composer.
+    /// and hands the keyboard to the composer. A notice saying "set the
+    /// endpoint" that opened on the composer would send the user somewhere
+    /// else; the field it names is where the window opens.
     #[test]
     fn an_assistant_action_lands_on_its_field() {
         let mut app = App::default();

@@ -126,9 +126,9 @@ impl BleScan {
     /// What the scan has seen, and whether it has finished.
     ///
     /// `Ok(false)` means "still running, nothing new". The devices are replaced
-    /// rather than appended because the channel posts the whole list each time
-    /// it has one: a device that went out of range then disappears from the
-    /// count rather than sticking on the screen as a ghost.
+    /// rather than appended because the whole list arrives at once when the
+    /// scan comes back: a device that went out of range then disappears from
+    /// the list rather than sticking on the screen as a ghost.
     pub fn poll(&mut self) -> Result<bool, String> {
         if !self.running {
             return Ok(false);
@@ -297,6 +297,12 @@ pub struct App {
     pub lan_captured: LanCapture,
     /// A Bluetooth scan in flight, for the pick-a-board dialog.
     pub ble_scan: BleScan,
+    /// Whether the scan in flight dials the board when one answers alone.
+    ///
+    /// Set by `start_ble_scan_connecting_one` — the startup scan — and taken
+    /// back when its scan answers, because the intent belongs to one scan and
+    /// not to the session: the next scan, however it was started, asks.
+    pub scan_connects_one: bool,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -426,6 +432,7 @@ impl Default for App {
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             ble_scan: BleScan::default(),
+            scan_connects_one: false,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_client: None,
@@ -668,9 +675,9 @@ impl App {
     }
 
     /// Cycle the transport to the next link, and return the notice announcing
-    /// it. A transport the command line pinned cannot be switched: the flag
-    /// decided, and a keypress that quietly overrode it would make the
-    /// sidebar's `locked` suffix a lie.
+    /// it. A locked transport cannot be switched: a command-line flag decided
+    /// it, or a dial did, and a keypress that quietly overrode either would
+    /// make the sidebar's `locked` suffix a lie.
     pub fn toggle_transport(&mut self) -> Notice {
         if self.transport_locked {
             return Notice {
@@ -1186,20 +1193,6 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         self.watch = crate::watch::describe_findings(&self.watch_engine.findings(), language);
     }
 
-    /// Ask the bridge about itself. Returns why the question could not go out.
-    ///
-    /// The answers land in `self.diagnostics` and `self.network` on whichever
-    /// pump they arrive on, so this does not block and does not return them:
-    /// asking is one tick's work and being answered is another's.
-    /// Make sure the LAN access token is in hand, asking for it if it is not.
-    ///
-    /// `@s?` is the only place the bridge reports its LAN access token, and a
-    /// LAN dial without one is a dial that gets refused. So a caller dialling
-    /// over LAN calls this first, and a link that has already been asked does
-    /// not ask twice: the token is remembered for the session.
-    ///
-    /// Asked here rather than on a flag because the alternative is a user who
-    /// has to know the token exists before they can learn it.
     /// Look for boards, and open the list to pick from.
     ///
     /// The question this answers is the one nothing else can: which board is
@@ -1208,6 +1201,9 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// unable to act on the answer, so re-typing the MAC it just showed is the
     /// work it was supposed to save.
     pub fn start_ble_scan(&mut self) -> Result<(), String> {
+        // A scan opened by hand asks; only the startup scan dials a lone
+        // board, and that intent does not leak into this one.
+        self.scan_connects_one = false;
         self.ble_scan.reset();
         self.ble_scan.start(BLE_SCAN_TIMEOUT)?;
         // A dialog is the top of the modal stack, so it takes the keyboard
@@ -1225,12 +1221,26 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         Ok(())
     }
 
+    /// Start the startup scan: the one that dials instead of asking.
+    ///
+    /// Same scan and same list as [`App::start_ble_scan`], with one difference
+    /// at the end: a scan that hears exactly one board that speaks the serial
+    /// service dials it, because a user who runs this on a bench has one board
+    /// in front of them and did not ask for a chooser. Two boards and the list
+    /// is up to pick from.
+    pub fn start_ble_scan_connecting_one(&mut self) -> Result<(), String> {
+        self.start_ble_scan()?;
+        self.scan_connects_one = true;
+        Ok(())
+    }
+
     /// Stop listening and close the list.
     ///
     /// Closing the dialog matters as much as stopping the thread: a dialog left
     /// open over a finished scan would offer Enter on a list nothing is adding
     /// to, and a user who cancels wants the screen back.
     pub fn cancel_ble_scan(&mut self) {
+        self.scan_connects_one = false;
         self.ble_scan.reset();
         self.dialog = None;
     }
@@ -1241,19 +1251,24 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// substring, and two boards on a bench can both be called "Linkr Bee" —
     /// so the dial takes the id and the notice repeats the name the user
     /// picked so the log says what they meant and not just what went out.
-    pub fn connect_to_board(&mut self, address: &str) {
+    ///
+    /// Returns whether the link was dialled: the scan that dials a lone board
+    /// announces it only when it caught, and a dial that failed must not be
+    /// announced as one that worked.
+    pub fn connect_to_board(&mut self, address: &str) -> bool {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
         if let Err(why) = self.dial(&crate::session::Dial::Ble(selection)) {
-            let text = format!("{}: {why}", self.strings().link_failed);
+            let text = format!("{}{why}", self.strings().link_failed);
             self.push_notice(Notice {
                 text,
                 level: crate::event::NoticeLevel::Error,
             });
-            return;
+            return false;
         }
         self.dialog = None;
         self.set_view(crate::event::View::Terminal);
         self.focus = crate::app::Focus::Terminal;
+        true
     }
 
     /// Fold whatever the background scan has seen into the open dialog.
@@ -1263,8 +1278,10 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     /// that had finished and then thought of something.
     fn poll_ble_scan(&mut self) {
         if !self.ble_scan.is_running() {
-            // Finished or never started: clear the dialog's "listening" flag so
-            // the legend stops offering a cancel that would do nothing.
+            // Finished or never started: the one-shot intent goes with it, and
+            // the dialog's "listening" flag clears so the legend stops offering
+            // a cancel that would do nothing.
+            self.scan_connects_one = false;
             if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
                 pick.scanning = false;
             }
@@ -1277,57 +1294,63 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
         }
         match self.ble_scan.poll() {
             Ok(true) => {
-                // Only boards that offer the serial service are listed. A
-                // keyboard on the bench is noise a user does not want to wait
-                // through, and the list this program can act on is the serial
-                // one — everything else is a device this bridge has nothing to
-                // say to.
-                let boards: Vec<crate::cli::FoundDevice> = self
-                    .ble_scan
-                    .devices
-                    .iter()
-                    .filter(|device| device.nus)
-                    .cloned()
-                    .collect();
-
-                // One board and no other answer: dial it. A bench with one
-                // board on it is the common case, and making the user pick
-                // from a list of one is a click that answers nothing. The
-                // dialog is for the case where two boards are on the air and
-                // nothing on a command line says which.
-                if boards.len() == 1 && self.dialog.is_none() {
-                    // Named when it has a name, addressed when it has none:
-                    // an announcement with a hole in it is one the user has
-                    // to finish themselves.
-                    let name = boards[0]
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| boards[0].id.clone());
-                    self.connect_to_board(&boards[0].id);
-                    let s = self.strings();
-                    self.push_notice(Notice {
-                        text: format!("{}{}", s.link_opened, name),
-                        level: crate::event::NoticeLevel::Info,
-                    });
-                    return;
-                }
-
-                if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-                    pick.devices = boards;
-                    pick.cursor = pick
-                        .cursor
-                        .min(pick.devices.len().saturating_sub(1));
-                }
+                let devices = std::mem::take(&mut self.ble_scan.devices);
+                self.settle_scan(devices);
             }
             Ok(false) => {}
             Err(why) => self.report_scan_failure(why),
         }
     }
 
+    /// Fold a finished scan in: list the boards, and dial a lone one when the
+    /// scan was opened to connect.
+    ///
+    /// Only boards that offer the serial service are listed. A keyboard on the
+    /// bench is noise a user does not want to wait through, and the list this
+    /// program can act on is the serial one — everything else is a device this
+    /// bridge has nothing to say to.
+    ///
+    /// The list is filled before the dial, so a dial that failed leaves the
+    /// boards on the screen to pick from rather than closing the list on the
+    /// way out.
+    ///
+    /// One board and the scan was the startup one: dial it. A bench with one
+    /// board on it is the common case, and making the user pick from a list of
+    /// one is a click that answers nothing. The dialog is for the case where
+    /// two boards are on the air and nothing on a command line says which —
+    /// and the empty list offers the rescan a board switched on too late needs.
+    fn settle_scan(&mut self, mut devices: Vec<crate::cli::FoundDevice>) {
+        // Taken rather than read: the intent is the startup scan's alone, and a
+        // scan that has answered cannot still hold it.
+        let connect_single = std::mem::take(&mut self.scan_connects_one);
+        devices.retain(|device| device.nus);
+        if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+            pick.devices = devices.clone();
+            pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
+        }
+        if devices.len() == 1 && connect_single {
+            // Named when it has a name, addressed when it has none: an
+            // announcement with a hole in it is one the user has to finish
+            // themselves.
+            let name = devices[0]
+                .name
+                .clone()
+                .unwrap_or_else(|| devices[0].id.clone());
+            if self.connect_to_board(&devices[0].id) {
+                let s = self.strings();
+                self.push_notice(Notice {
+                    text: format!("{}{}", s.link_opened, name),
+                    level: crate::event::NoticeLevel::Info,
+                });
+            }
+        }
+    }
+
     /// Say why a scan could not run: in the picker when one is open, and as a
-    /// notice when none is — a startup scan has no dialog to answer in, and
-    /// silence would leave the user waiting for a board that will never be
-    /// found.
+    /// notice when none is — every scan in the interface opens the picker, so
+    /// the notice is the fallback rather than the usual side, but a failure is
+    /// owed a sentence wherever it lands, and a dropped one would leave the
+    /// user waiting for a board that will never be found.
     fn report_scan_failure(&mut self, why: String) {
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
             pick.message = why;
@@ -1341,10 +1364,23 @@ fn finish(app: &mut App, found: &crate::agent::tasks::TaskRecord, step: crate::a
     }
 
     /// Ask for the LAN access token if it is not already in hand.
+    ///
+    /// `@s?` is the only place the bridge reports its LAN access token, and a
+    /// LAN dial without one is a dial that gets refused. So a caller dialling
+    /// over LAN calls this first, and a link that has already been asked does
+    /// not ask twice: the token is remembered for the session.
+    ///
+    /// Asked here rather than on a flag because the alternative is a user who
+    /// has to know the token exists before they can learn it.
     pub fn ensure_lan_token(&mut self) -> Result<(), String> {
         self.ask_device(Query::Lan)
     }
 
+    /// Ask the bridge about itself. Returns why the question could not go out.
+    ///
+    /// The answers land in `self.diagnostics` and `self.network` on whichever
+    /// pump they arrive on, so this does not block and does not return them:
+    /// asking is one tick's work and being answered is another's.
     pub fn ask_device(&mut self, query: Query) -> Result<(), String> {
         if !self.connected() {
             return Err(self.strings().not_connected.to_string());
@@ -2470,7 +2506,10 @@ mod tests {
         let notice = app.toggle_transport();
         assert_eq!(app.transport, before, "a pinned transport does not move");
         assert_eq!(notice.level, NoticeLevel::Warn);
-        assert_eq!(notice.text, "The transport is pinned by the command line.");
+        assert_eq!(
+            notice.text,
+            "The transport is pinned and cannot be switched."
+        );
     }
 
     /// Switching the language flips it, says so in the *new* language, and the
@@ -2526,6 +2565,89 @@ mod tests {
             Some("No link configured — nothing to dial.")
         );
         assert!(app.last_dial.is_none());
+    }
+
+    /// A finished scan folds in the way the startup asked it to: only boards
+    /// that speak the serial service are listed, a lone one is dialled, a pair
+    /// is left to pick from, and a dial that failed leaves the list it meant
+    /// to choose from.
+    #[test]
+    fn a_scan_lists_serial_boards_and_dials_a_lone_one() {
+        use crate::cli::FoundDevice;
+
+        fn board(name: &str, id: &str, nus: bool) -> FoundDevice {
+            FoundDevice {
+                name: Some(name.to_string()),
+                id: id.to_string(),
+                nus,
+            }
+        }
+
+        fn picker() -> crate::dialogs::Dialog {
+            crate::dialogs::Dialog::DevicePick(crate::dialogs::DevicePick {
+                devices: Vec::new(),
+                cursor: 0,
+                scanning: true,
+                message: String::new(),
+            })
+        }
+
+        fn pick(app: &App) -> &crate::dialogs::DevicePick {
+            match &app.dialog {
+                Some(crate::dialogs::Dialog::DevicePick(pick)) => pick,
+                other => panic!("the scan left a list: {other:?}"),
+            }
+        }
+
+        // A keyboard on the bench is not a board this program can dial, and it
+        // does not count as "one board": the lone serial board is the one that
+        // gets the dial. The id is not an address, so the attempt fails the
+        // instant it is made — a real board is the same code with a different
+        // outcome — and the sentence it leaves in the log is the proof the
+        // attempt went out. A failed dial leaves the list it meant to choose
+        // from, reason and all.
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.scan_connects_one = true;
+        app.dialog = Some(picker());
+        app.settle_scan(vec![
+            board("Keyboard", "ad:1a:2b:3c:4d:5e", false),
+            board("Linkr Bee", "nonsense", true),
+        ]);
+        assert_eq!(pick(&app).devices.len(), 1, "the keyboard was not listed");
+        let text = app.log.last().expect("a notice").text.clone();
+        assert!(
+            text.starts_with("connect failed: “nonsense” is not a Bluetooth address"),
+            "the dial went out and failed, and said which address: {text}"
+        );
+
+        // Two boards: nothing in the scan can choose, so the list stays up with
+        // both and no link is dialled.
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.scan_connects_one = true;
+        app.dialog = Some(picker());
+        app.settle_scan(vec![
+            board("First", "AA:BB:CC:DD:EE:01", true),
+            board("Second", "AA:BB:CC:DD:EE:02", true),
+        ]);
+        assert_eq!(pick(&app).devices.len(), 2, "both boards are listed");
+        assert!(app.log.is_empty(), "nothing was dialled: {:?}", app.log);
+
+        // A scan opened by hand is a question, not an errand: even one board is
+        // left for the user to pick.
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dialog = Some(picker());
+        app.settle_scan(vec![board("Linkr Bee", "AA:BB:CC:DD:EE:FF", true)]);
+        assert_eq!(pick(&app).devices.len(), 1, "the list is the answer here");
+        assert!(app.log.is_empty(), "nothing was dialled: {:?}", app.log);
     }
 
     /// A dialled link is remembered, and `connect` opens it again rather than

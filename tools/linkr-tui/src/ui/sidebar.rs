@@ -184,10 +184,10 @@ pub fn activate(app: &mut App) {
             let notice = app.toggle_transport();
             app.push_notice(notice);
         }
-        /* The two connection rows are one toggle with the web client's shape:
-         * while a link is up the first says `Disconnect` and hangs up, and the
-         * second is dimmed — switching is what disconnecting is for, so the
-         * row says so rather than looking live and doing nothing. */
+        // The two connection rows are one toggle with the web client's shape:
+        // while a link is up the first says `Disconnect` and hangs up, and the
+        // second is dimmed — switching is what disconnecting is for, so the
+        // row says so rather than looking live and doing nothing.
         index if index == 1 || index == 2 => {
             if index == 1 {
                 // The row is `Disconnect` while a link is up, so pressing it
@@ -208,12 +208,12 @@ pub fn activate(app: &mut App) {
                 });
                 return;
             }
-            /* Switching device IS looking for one. There used to be a
-             * separate palette action for the scan and a warning here,
-             * which left the sidebar row — the one place a user looks to
-             * change who they are talking to — as the only action in the
-             * interface that answered "there is no other device" without
-             * ever having asked the radio. */
+            // Switching device IS looking for one. There used to be a
+            // separate palette action for the scan and a warning here,
+            // which left the sidebar row — the one place a user looks to
+            // change who they are talking to — as the only action in the
+            // interface that answered "there is no other device" without
+            // ever having asked the radio.
             if let Err(why) = app.start_ble_scan() {
                 let text = app.strings().ble_scan_failed.to_string();
                 app.push_notice(crate::app::Notice {

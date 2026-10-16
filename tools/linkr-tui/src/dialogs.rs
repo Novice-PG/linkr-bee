@@ -146,10 +146,10 @@ const PICK_KEYS: Entry = ["↑↓ move · Enter connect · Esc close", "↑↓ �
 /// knows. Keep the list in the dialog so the keyboard answers to it the way it
 /// answers to every other dialog.
 ///
-/// `nus` is shown beside each name rather than filtered on: a board that is
-/// advertising but not offering the serial service is a firmware problem and
-/// not a radio one, and a list that hid it would be a list that answered a
-/// different question.
+/// Whether a device speaks the serial service is marked beside its name, and
+/// the scan hands the list only serial-service boards: everything else is a
+/// device this bridge has nothing to say to, and a `--scan` on a shell is
+/// where the full picture is, advertising-without-the-service included.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevicePick {
     /// What has been heard so far, best first.
@@ -719,7 +719,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // nothing heard it scans again, which is what a bench with the
             // board switched on mid-dialog needs.
             KeyCode::Enter => match pick.selected() {
-                Some(device) => app.connect_to_board(&device.id),
+                // The pick dials the board; whether the dial caught is the
+                // log's news, not the list's, so the answer is dropped here.
+                Some(device) => {
+                    app.connect_to_board(&device.id);
+                }
                 None if !pick.scanning => {
                     let _ = app.start_ble_scan();
                 }
@@ -1633,9 +1637,9 @@ mod pick_tests {
         assert_eq!(pick.cursor, 1, "down from the bottom");
     }
 
-    /// A board that is advertising without the serial service is still listed:
-    /// hiding it would answer "which boards can I use" instead of the question
-    /// that was asked, which is "what is out there".
+    /// The dialog paints a row for every device the list carries and marks
+    /// whether it speaks the serial service; which devices deserve a row is the
+    /// scan's decision, not the dialog's.
     #[test]
     fn a_device_without_nus_is_still_listed() {
         let pick = DevicePick {

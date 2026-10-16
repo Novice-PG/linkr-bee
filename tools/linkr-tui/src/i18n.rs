@@ -429,7 +429,7 @@ const ZH: Strings = Strings {
     language_switched_prefix: "界面语言",
     language_zh: "中文",
     language_en: "English",
-    transport_is_locked: "传输方式已被命令行锁定，无法切换。",
+    transport_is_locked: "传输方式已被锁定，无法切换。",
     no_link: "没有配置链路——无目标可连接。",
     no_other_device: "没有其他设备可切换。",
 };
@@ -565,7 +565,7 @@ const EN: Strings = Strings {
     language_switched_prefix: "Interface language",
     language_zh: "中文",
     language_en: "English",
-    transport_is_locked: "The transport is pinned by the command line.",
+    transport_is_locked: "The transport is pinned and cannot be switched.",
     no_link: "No link configured — nothing to dial.",
     no_other_device: "No other device to switch to yet.",
 };
