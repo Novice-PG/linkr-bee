@@ -1,11 +1,12 @@
 # Linkr CLI —— 给脚本与 Agent 的命令行
 
-本目录是 **CLI 形态** 的 linkr：不带界面，把一件事发到设备、拿回确定的结果、用确定的退出码说话。
+本目录是 **CLI 构建** 的 linkr：同一份源码、关掉界面特性编出来的小程序（压缩包约为界面版的四成），
+专门给脚本与 agent 调用——不带交互界面，把一件事发到设备、拿回确定的结果、用确定的退出码说话。
 
-它与上一级 `linux/`、`macos/`、`windows/` 里的界面版（TUI）**是同一枚程序**：直接运行 `linkr` 打开界面；
-带上动作参数（如 `--query-info`、`--exec "…"`）就是命令行工具。本目录内是与平台文件夹**逐字节相同**的
-压缩包副本，方便只要命令行的人单独取用；完整教程（含界面用法）见上一级《使用教程.md》，校验和见
-`../SHA256SUMS`（同一文件名即同一哈希）。
+程序名是 `linkr-cli`（`--help` 的 Usage 行也这么印）。它和上一级 `linux/`、`macos/`、`windows/`
+里的界面版是**同一份实现**：界面版也包含这里全部的命令行能力（程序名 `linkr`）；本包的差别只是
+没有那个交互界面——裸跑 `linkr-cli` 会打印用法并以 2 退出（先说要做什么），其余动作参数与输出
+格式与界面版完全一致。完整教程（含界面用法）见上一级《使用教程.md》，校验和见 `../SHA256SUMS`。
 
 > 给 Agent 的契约：确定的输入、确定的输出（`--json` 的 JSON Lines）、确定的退出码、失败可分类。
 > 模型调用、审批、任务计划仍在调用方，CLI 只做“发出去、拿回来、说清楚”。
@@ -16,18 +17,18 @@
 
 ```sh
 # Linux / macOS：解压后运行（按机器架构选包）
-tar xzf linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
-./linkr-1.0.0-x86_64-unknown-linux-gnu/linkr --version
-./linkr-1.0.0-x86_64-unknown-linux-gnu/linkr --scan        # 附近有哪些设备
+tar xzf linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --version
+./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
 # Windows：解压后（自带 tar.exe 或 7-Zip）
-.\linkr.exe --version
-.\linkr.exe --scan
+.\linkr-cli.exe --version
+.\linkr-cli.exe --scan
 ```
 
-Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包，装完 CLI 与界面同在一个 `/usr/bin/linkr`。
+Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包：它装的是界面版 `linkr`，命令行能力一样。
 
 ## 二、怎么连
 
@@ -41,7 +42,8 @@ Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包，装完 CLI 与
 | 离线回环（试手） | `--bridge -` |
 | 连接超时 | `--connect-timeout <秒>`（默认 20；蓝牙链路最多再等 30） |
 
-只跑一个动作时：连上 → 动作 → 打印 → 退出。`--cli-then-tui` 会跑完动作再留在界面里。
+只跑一个动作时：连上 → 动作 → 打印 → 退出。`--cli-then-tui` 会在参数阶段被本 CLI 构建拒绝
+（它要打开终端界面，而这枚程序没有），提示改用 `--no-terminal`（见第六节）。
 
 ## 三、常用动作（一次一个）
 
@@ -118,7 +120,8 @@ linkr --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 | 2 | 用法错误；查询类动作连不上链路也是它 |
 | 255 | `--exec` 发不出去或保不住链路（连接失败、断链） |
 
-`--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落。
+`--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落
+（本 CLI 构建的 `operations` 里没有 `tui`——这里没有界面可开）。
 
 ## 七、安全与留档
 
