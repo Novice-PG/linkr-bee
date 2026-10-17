@@ -72,6 +72,33 @@ the pane emulates rather than lays out. `vt/` holds the emulator and
 emulator by the event loop, never by a paint, because a frame is a pure function
 of the state and may not reshape what it is drawing.
 
+### Text, and the bytes that are not
+
+The wire carries bytes and the pane has to say what they are. It says UTF-8,
+and only UTF-8: a device that prints UTF-8 — this bridge does, and so does a
+Zephyr console built to — arrives as the text it sent, split across reads
+however the radio felt like splitting it, and nothing else needs to be
+guessed at. There is no encoding detection, because a heuristic that guesses
+wrong turns one device's Chinese into another device's mojibake and says
+nothing about it.
+
+A byte that is not part of a valid UTF-8 character becomes `U+FFFD` (`�`),
+one per bad byte, and the pane keeps the bytes either side of it: one glitch
+must not swallow the rest of a burst. The count of those bytes is kept, and a
+non-zero count shows up in two places — `乱码 nB` in the bottom bar, beside
+the state, and one warning notice the first time it happens (`Ctrl+L` clears
+the screen, which re-arms it). Both exist because the pane's `�` is the only
+thing that shows the problem and it does not say *whose* problem it is: on a
+serial dial the usual cause is a UART whose framing does not match what the
+device is sending — read it with `--query-uart`, set it with
+`--uart <baud>,<data>,<parity>,<stop>,<flow>` — and the other cause is a
+device that is not speaking UTF-8 at all.
+
+On the old console the `�` is replaced by `?` by the pass above, because
+conhost draws `U+FFFD` two cells wide and one `�` per cell would shove the
+rest of the row sideways. The count is the same either way; only the glyph
+the console can draw differs.
+
 Network is a live form: `@w?`/`@w scan` fill it, `@w=…` and `@d=…` are raised
 as approval cards that name the change, and a scan's answer goes to its own list
 rather than into the status slot.
