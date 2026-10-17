@@ -5,7 +5,7 @@ name: Host terminal (linkr-tui)
 # its own release artifacts, so
 # it is a workflow of its own rather than jobs bolted onto the firmware one:
 # a TUI change should not spin up five Zephyr toolchains, and a firmware change
-# should not rebuild seven host binaries.
+# should not rebuild the host's fourteen archives.
 #
 # Tag a release with `linkr-tui-v<version>`; the archives are attached to it.
 # The tag is namespaced so it cannot collide with the firmware's `v*` releases.
@@ -91,6 +91,16 @@ jobs:
         # it would be testing a dependency set nobody reviewed.
         run: cargo test --locked
 
+      # The second face of the same program. The `cli/` archives are built with
+      # the interface feature off, which is where a bin notices what the
+      # interface was holding up — so this face gets its own lint-and-test pass
+      # rather than being trusted because the other one is green.
+      - name: Lints of the CLI build, warnings are errors
+        run: cargo clippy --all-targets --locked --no-default-features --features cli -- -D warnings
+
+      - name: Tests of the CLI build
+        run: cargo test --locked --no-default-features --features cli
+
       - name: Firmware rate arithmetic
         # No Zephyr, no toolchain: src/uart_autobaud_math.h is plain integers,
         # and this is the only part of the firmware a host compiler can judge.
@@ -139,6 +149,8 @@ jobs:
                         x86_64-pc-windows-gnu; do
             echo "::group::$target"
             cargo check --locked --all-targets --target "$target"
+            cargo check --locked --all-targets --no-default-features --features cli \
+              --target "$target"
             echo "::endgroup::"
           done
 
@@ -242,58 +254,86 @@ jobs:
 
       # The layout of the archive is decided in one place, by the script, and
       # the workflow only calls it — the same call a developer makes by hand.
+      # Both faces of the program are packaged: the interface and the CLI.
       - name: Build and package
         shell: bash
-        run: dev/package.sh "${{ matrix.target }}"
+        run: |
+          dev/package.sh "${{ matrix.target }}"
+          dev/package.sh --cli "${{ matrix.target }}"
 
-      - name: Check the archive
+      - name: Check the archives
         shell: bash
         run: |
           set -euo pipefail
-          archive=$(ls dist/*.tar.gz)
-          echo "archive: $archive"
-          listing=$(tar -tzf "$archive")
-          echo "$listing"
-          name=$(basename "$archive" .tar.gz)
-          # Nothing may be in here that the script did not put there: a stray
-          # file in a release is uploaded before anyone reads the diff.
-          allowed=$(printf '%s\n' "$name/" "$name/linkr" "$name/linkr.exe" \
-                                  "$name/README.md" "$name/LICENSE")
-          for entry in $listing; do
-            echo "$allowed" | grep -qx "$entry" || {
-              echo "unexpected entry in the archive: $entry" >&2
+          for archive in dist/*.tar.gz; do
+            echo "archive: $archive"
+            listing=$(tar -tzf "$archive")
+            echo "$listing"
+            name=$(basename "$archive" .tar.gz)
+            bin=linkr
+            case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
+            # Nothing may be in here that the script did not put there: a stray
+            # file in a release is uploaded before anyone reads the diff.
+            allowed=$(printf '%s\n' "$name/" "$name/$bin" "$name/$bin.exe" \
+                                    "$name/README.md" "$name/LICENSE")
+            for entry in $listing; do
+              echo "$allowed" | grep -qx "$entry" || {
+                echo "unexpected entry in the archive: $entry" >&2
+                exit 1
+              }
+            done
+            # And one of them must be the binary itself.
+            echo "$listing" | grep -qE "^$name/$bin(\.exe)?$" || {
+              echo "the archive holds no binary" >&2
               exit 1
             }
           done
-          # And one of them must be the binary itself.
-          echo "$listing" | grep -qE "^$name/linkr(\.exe)?$" || {
-            echo "the archive holds no binary" >&2
-            exit 1
-          }
 
       # Only the host's own target can be executed here. The rest are checked by
       # the fact that they linked, which is the most this runner can say.
-      - name: Run the packaged binary
+      - name: Run the packaged binaries
         if: matrix.native
         shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/smoke && mkdir -p /tmp/smoke
-          tar -xzf dist/*.tar.gz -C /tmp/smoke
-          bin=$(find /tmp/smoke -type f \( -name linkr -o -name linkr.exe \) | head -1)
-          echo "running $bin"
-          "$bin" --version
-          # The paint path, through the same renderer the TUI uses.
-          "$bin" --print-frame 80x24 --lang en --sample > /dev/null
-          # A dial that cannot open must fail loudly rather than start a broken
-          # session — this is the exit code the interface documents. (`|| status=$?`
-          # rather than `if`: the subject is the *exit code*, and an `if` whose
-          # condition is false has a status of its own.)
-          status=0
-          "$bin" --bridge /no/such/program > /dev/null 2>&1 || status=$?
-          [ "$status" -eq 2 ] || { echo "expected exit 2, got $status" >&2; exit 1; }
+          for archive in dist/*.tar.gz; do
+            stem=$(basename "$archive" .tar.gz)
+            dir=/tmp/smoke/$stem
+            mkdir -p "$dir"
+            tar -xzf "$archive" -C "$dir"
+            bin=linkr
+            case "$stem" in linkr-cli-*) bin=linkr-cli ;; esac
+            found=$(find "$dir" -type f \( -name "$bin" -o -name "$bin.exe" \) | head -1)
+            echo "running $found"
+            "$found" --version
+            if [ "$bin" = linkr-cli ]; then
+              # The CLI build runs a command over the built-in loopback: the
+              # exec path is what an agent harness calls, so it is what the
+              # archive proves before it is uploaded.
+              "$found" --bridge - --no-terminal --exec "echo hi" --quiet > /dev/null
+              # Run bare it has no interface to open, and must say so rather
+              # than exiting with silence.
+              status=0
+              "$found" </dev/null > /dev/null 2>&1 || status=$?
+              [ "$status" -eq 2 ] || {
+                echo "expected exit 2 from a bare CLI run, got $status" >&2
+                exit 1
+              }
+            else
+              # The paint path, through the same renderer the TUI uses.
+              "$found" --print-frame 80x24 --lang en --sample > /dev/null
+            fi
+            # A dial that cannot open must fail loudly rather than start a broken
+            # session — this is the exit code the tool documents. (`|| status=$?`
+            # rather than `if`: the subject is the *exit code*, and an `if` whose
+            # condition is false has a status of its own.)
+            status=0
+            "$found" --bridge /no/such/program > /dev/null 2>&1 || status=$?
+            [ "$status" -eq 2 ] || { echo "expected exit 2, got $status" >&2; exit 1; }
+          done
 
-      - name: Upload the archive
+      - name: Upload the archives
         uses: actions/upload-artifact@v4
         with:
           name: linkr-tui-${{ matrix.target }}

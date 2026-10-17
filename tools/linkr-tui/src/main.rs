@@ -4,7 +4,9 @@
 //! hand over the terminal, and run the event loop. Everything else lives in the
 //! library so it can be tested without a TTY.
 
-use std::io::{self, IsTerminal, Stdout};
+#[cfg(feature = "tui")]
+use std::io::Stdout;
+use std::io::{self, IsTerminal};
 
 // Only the build with a renderer installs a panic hook: a CLI build that fails
 // prints its own error and exits, and a hook that restored a terminal nobody
@@ -14,27 +16,46 @@ use std::panic;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+#[cfg(any(feature = "tui", test))]
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+// The terminal's own half of crossterm — reading events, taking the screen,
+// raw mode, enhancement flags. A CLI-only build never does any of it, so the
+// imports say so rather than sitting unused.
+#[cfg(feature = "tui")]
+use crossterm::event::{self, Event, KeyEventKind};
+#[cfg(feature = "tui")]
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+#[cfg(feature = "tui")]
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+#[cfg(feature = "tui")]
 use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+#[cfg(feature = "tui")]
 use crossterm::execute;
+#[cfg(feature = "tui")]
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+#[cfg(feature = "tui")]
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Position, Rect};
+#[cfg(any(feature = "tui", test))]
+use ratatui::layout::Position;
+use ratatui::layout::Rect;
+#[cfg(feature = "tui")]
 use ratatui::Terminal;
 
-use linkr_tui::app::{App, Focus, Transport};
+#[cfg(any(feature = "tui", test))]
+use linkr_tui::app::Focus;
+use linkr_tui::app::{App, Transport};
 use linkr_tui::cli;
 use linkr_tui::device;
 use linkr_tui::event::{ConnectionState, View};
 use linkr_tui::i18n::Lang;
 use linkr_tui::lan_token_store::{self, TokenStore};
-use linkr_tui::serial::keys::{self, EnterMode, KeyModifiers as TerminalModifiers};
+use linkr_tui::serial::keys::EnterMode;
+#[cfg(any(feature = "tui", test))]
+use linkr_tui::serial::keys::{self, KeyModifiers as TerminalModifiers};
 use linkr_tui::session::Dial;
 use linkr_tui::settings::{Settings, SettingsStore};
 use linkr_tui::theme::ThemeChoice;
@@ -300,12 +321,17 @@ impl Args {
     }
 
     /// How long a scan listens.
+    ///
+    /// Only the CLI asks: an interface launch scans on its own schedule, and
+    /// this is the window a script gives the same scan.
+    #[cfg(feature = "cli")]
     fn scan_window(&self) -> Duration {
         self.timeout.unwrap_or(cli::DEFAULT_SCAN_TIMEOUT)
     }
 
     /// How long a dialled link gets to come up: the window the link itself is
     /// given, and the window a script run waits for it.
+    #[cfg(feature = "cli")]
     fn connect_window(&self) -> Duration {
         self.connect_timeout.unwrap_or(cli::DEFAULT_CONNECT_TIMEOUT)
     }
@@ -334,6 +360,7 @@ impl Args {
 /// two were reachable: a command line that asked for something exited when it
 /// was done, and one that asked for nothing opened the terminal. The middle —
 /// configure the board, then *watch it* — had no spelling.
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Take the terminal over and stay there.
@@ -344,6 +371,7 @@ pub enum Mode {
     CliThenTui,
 }
 
+#[cfg(feature = "cli")]
 impl Mode {
     /// Which mode the command line meant.
     ///
@@ -1251,6 +1279,16 @@ fn main() -> io::Result<()> {
     // the next reader has to explain.
     #[cfg(feature = "cli")]
     let mode = Mode::from(&args, &prog);
+    // A build with no interface has no answer for "just open the terminal",
+    // which is what a bare launch asks for. Say so, in the shape every other
+    // unanswerable command line gets, instead of exiting with silence.
+    #[cfg(all(feature = "cli", not(feature = "tui")))]
+    if mode == Mode::Tui {
+        eprintln!("error: this build has no interface; ask it to do something\n");
+        eprintln!("Usage: {prog} [OPTIONS]\n");
+        eprintln!("For more information, try '--help'.");
+        std::process::exit(2);
+    }
     #[cfg(feature = "cli")]
     if mode != Mode::Tui {
         if !args.quiet && app.session.is_live() {
@@ -1294,6 +1332,9 @@ fn main() -> io::Result<()> {
             }
             return Ok(());
         }
+        // The notes before the terminal opens, and only then: a build without
+        // an interface does not say "opening the terminal" and then not open it.
+        #[cfg(feature = "tui")]
         if exec_code != 0 {
             // A command that ran and answered with a status is not a reason to
             // keep the terminal away; it is a reason to say so before it opens.
@@ -1301,6 +1342,7 @@ fn main() -> io::Result<()> {
                 "note: the command exited with code {exec_code}; opening the terminal anyway"
             );
         }
+        #[cfg(feature = "tui")]
         if failed > 0 {
             // The link stays up either way: a failed request is a report, not
             // a disconnection, and the terminal is still the better way to
@@ -1425,12 +1467,17 @@ fn pane_area(cols: u16, rows: u16) -> Rect {
 /// put when the rail is hidden so a toggle does not rewrap the device's whole
 /// history. A mouse point, though, is measured against what the user sees, so
 /// the drag asks this one and clamps to the emulated screen afterwards.
+// The interactive session's helpers. A CLI-only binary has no loop that calls
+// them, so they leave the build rather than warn as dead code; the tests that
+// drive them keep them under `test`.
+#[cfg(any(feature = "tui", test))]
 fn painted_centre(app: &App, cols: u16, rows: u16) -> Rect {
     ui::regions(Rect::new(0, 0, cols, rows), app.sidebar_visible).centre
 }
 
 /// The pane cell a mouse point is on, when it is on the pane at all: a point
 /// on another view's document or on the rail is not text.
+#[cfg(any(feature = "tui", test))]
 fn pane_cell_at(app: &App, cols: u16, rows: u16, column: u16, row: u16) -> Option<(usize, usize)> {
     let centre = painted_centre(app, cols, rows);
     if column < centre.x
@@ -1472,6 +1519,7 @@ fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
 /// not reshape the screen it is drawing. The loop does it instead, from the same
 /// layout arithmetic the paint uses — and it re-reads the size rather than
 /// caching it, so a resize needs no path of its own.
+#[cfg(feature = "tui")]
 fn fit_pane(terminal: &Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     let size = terminal.size()?;
     fit_pane_to(size.width, size.height, app);
@@ -1592,6 +1640,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 /// through both, so `Ctrl+Q` still quits and `Ctrl+T` still repaints with an
 /// overlay up. Then the global chords, then the sidebar, and only what is left
 /// is the device's.
+#[cfg(any(feature = "tui", test))]
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // The two modals are a stack: whichever was opened last is on top, takes
     // the keys, and is the one painted. Dispatch has to agree with the
@@ -1865,6 +1914,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 /// The stack is the painter's: the palette, then the dialog, then whatever
 /// view is up. `false` means no field was on screen to paste into, and the
 /// caller decides what else a paste can mean there.
+#[cfg(any(feature = "tui", test))]
 fn paste_into_shown_field(app: &mut App, text: &str) -> bool {
     if app.palette.is_some() {
         palette::paste(app, text);
@@ -1894,6 +1944,7 @@ fn paste_into_shown_field(app: &mut App, text: &str) -> bool {
 /// latch spent. Called only for keys that are the device's: a latch is that
 /// key's modifier and nothing more, which is what makes it one-shot by
 /// construction rather than by remembering to clear it.
+#[cfg(any(feature = "tui", test))]
 fn latch_key(app: &mut App, key: KeyEvent) -> KeyEvent {
     let latch = app.latch.take();
     if !latch.is_armed() {
@@ -1915,6 +1966,7 @@ fn latch_key(app: &mut App, key: KeyEvent) -> KeyEvent {
 /// Arm or cancel one modifier of the latch, and say which: a latch is
 /// invisible until the key it was armed for, so the announcement is the only
 /// feedback the first press gets.
+#[cfg(any(feature = "tui", test))]
 fn toggle_latch(
     app: &mut App,
     name: &str,
@@ -1943,6 +1995,7 @@ fn toggle_latch(
 /// has no use for. The named keys go through the ported `terminal_keys.js`
 /// table, so the two clients cannot drift apart on what `F5` or `ArrowUp`
 /// means.
+#[cfg(any(feature = "tui", test))]
 fn key_bytes(key: KeyEvent, enter: EnterMode) -> Option<String> {
     let modifiers = TerminalModifiers {
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
@@ -2000,6 +2053,7 @@ fn local_clock() -> String {
 ///
 /// A modal takes the wheel too: while one is up, the pane and the rail behind
 /// it are not what the user is scrolling.
+#[cfg(any(feature = "tui", test))]
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, rows: u16) {
     use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -2247,6 +2301,7 @@ mod tests {
     /// Nothing else in the tool has had three reachable states: a command line
     /// either exited when it was done or never ran anything, and the configure
     /// a board and then watch it case had no spelling at all.
+    #[cfg(feature = "cli")]
     #[test]
     fn the_three_modes_are_reachable_and_distinguishable() {
         // A plain launch is the terminal.
@@ -2288,6 +2343,7 @@ mod tests {
     /// typed both has two sessions in mind and would get the wrong one. Saying
     /// so beats guessing which — and saying so exits, so what is checked here
     /// is that neither flag on its own is treated as the conflict.
+    #[cfg(feature = "cli")]
     #[test]
     fn the_two_mode_flags_are_not_a_conflict_on_their_own() {
         assert_eq!(Mode::from(&args(&["--no-terminal"]), "linkr"), Mode::Cli);

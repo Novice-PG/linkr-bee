@@ -128,7 +128,9 @@ simply never answers, and the symptom looks exactly like a dead link.
 ```sh
 cargo fmt --check                                   # style
 cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
-cargo test                                          # 679 tests, headless
+cargo test                                          # headless
+cargo clippy --all-targets --no-default-features --features cli -- -D warnings
+cargo test --no-default-features --features cli     # the CLI face gets its own pass
 for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
          x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-pc-windows-msvc \
          x86_64-apple-darwin aarch64-apple-darwin; do
@@ -184,20 +186,25 @@ large, and everything in them is reproducible from the source.
 `dev/package.sh <target>` builds the release binary and lays out the archive — the
 binary, this README and the licence, in `linkr-<version>-<target>.tar.gz`. It is
 the *only* definition of that layout: the CI matrix and a developer's shell call
-the same script, so a release cannot be assembled two ways.
+the same script, so a release cannot be assembled two ways. A `--cli` before the
+target packs the same program built without the interface, as
+`linkr-cli-<version>-<target>.tar.gz` — the archive an agent harness is handed,
+and the smaller of the two.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu     # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh x86_64-unknown-linux-gnu         # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-unknown-linux-gnu   # → dist/linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-`.github/workflows/linkr-tui.yml` runs the four gates, then packages all seven
-targets — Linux on x86-64 and ARM, Windows on both ABIs, macOS on both
+`.github/workflows/linkr-tui.yml` runs the gates, then packages both faces of all
+seven targets — Linux on x86-64 and ARM, Windows on both ABIs, macOS on both
 architectures — and on a `linkr-tui-v<version>` tag it attaches the archives and
 a `SHA256SUMS` to the release. The archives for the host's own targets are
-*executed* before they are uploaded (`--version`, one frame, and a bridge to a
-missing program that must exit `2`), because linking is not the same as running.
-The tag is namespaced so it cannot collide with the firmware's `v*` releases.
+*executed* before they are uploaded (`--version`, one frame or one loopback exec,
+and a bridge to a missing program that must exit `2`), because linking is not the
+same as running. The tag is namespaced so it cannot collide with the firmware's
+`v*` releases.
 
 ## Deliberate differences from the previous TUI
 
