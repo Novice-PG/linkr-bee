@@ -302,6 +302,13 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     // arrive in one TCP segment, and cutting the buffer at the chunk boundary
     // would split `data: {...}` in half and lose the event.
     let mut buffer = String::new();
+    // Bytes of a character that straddles two chunks: a delta is UTF-8 on the
+    // wire, and the unfinished tail waits here for the rest of itself.
+    let mut carry: Vec<u8> = Vec::new();
+    // Whether any text was ever reported. A 200 whose body carried no
+    // completion is not a reply, and the difference between it and an empty one
+    // is worth keeping.
+    let mut saw_text = false;
     let mut usage = Usage::default();
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
@@ -315,41 +322,28 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
                 return;
             }
         };
-        // `from_utf8_lossy` because a delta may split a multi-byte character
-        // across two chunks, and the half that arrives is not the character —
-        // it is replaced, and the next chunk's half is not a character either.
-        // The alternative is dropping the whole chunk.
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-        let mut drained = String::new();
-        while let Some((event, rest)) = next_event(&buffer) {
-            drained.push_str(&event);
-            buffer = rest;
-        }
-        if drained.is_empty() {
+        carry.extend_from_slice(&bytes);
+        let decoded = decode_utf8(&mut carry);
+        if decoded.is_empty() {
             continue;
         }
+        buffer.push_str(&decoded);
         // Every event in the chunk is read, and any text it holds is sent as
-        // one delta: a chunk is a unit of what the model decided to write.
-        let mut text = String::new();
-        for event in drained.split("\n\n") {
-            let Some(payload) = event.strip_prefix("data:") else {
-                continue;
-            };
-            let payload = payload.trim();
-            if payload == "[DONE]" {
-                break;
-            }
-            if let Some(reported) = usage_of(payload) {
-                usage = reported;
-                continue;
-            }
-            if let Some(delta) = text_of(payload) {
-                text.push_str(&delta);
-            }
-        }
+        // one delta: a chunk is a unit of what arrived, and one delta per chunk
+        // is what the interface renders on.
+        let text = drain_events(&mut buffer, &mut usage);
         if !text.is_empty() {
+            saw_text = true;
             send(&reply, &job.task_id, Progress::Delta(text));
         }
+    }
+    if !saw_text {
+        // The provider answered 200 and the body held no completion at all — a
+        // proxy's error page, or a provider answering in a shape this reader
+        // does not know. Calling that a finished turn would file an empty reply
+        // as a success and record it.
+        send(&reply, &job.task_id, Progress::Failed(Failure::Malformed));
+        return;
     }
     send(&reply, &job.task_id, Progress::Done(usage));
 }
@@ -383,6 +377,71 @@ fn client_for(key: &str) -> reqwest::Client {
 /// `\n\n` is the separator, and a lone `\r\n\r\n` is what some gateways send —
 /// so the search is for the longest run of blank-line separators and the event
 /// is everything before it.
+/// Read every complete SSE event in `buffer`, leaving the unfinished tail
+/// behind, and return the text they carried.
+///
+/// A chunk is not an event: one chunk can hold several events, and one event
+/// can span several chunks. Reading the batch one event at a time without
+/// joining them is how two events in one chunk came out as a single line of
+/// mangled JSON — which parsed as nothing, and the reply went with it.
+fn drain_events(buffer: &mut String, usage: &mut Usage) -> String {
+    let mut text = String::new();
+    while let Some((event, rest)) = next_event(buffer) {
+        *buffer = rest;
+        let Some(payload) = event.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            // The stream's own end. Whatever follows in the buffer is not part
+            // of the reply.
+            break;
+        }
+        if let Some(reported) = usage_of(payload) {
+            *usage = reported;
+            continue;
+        }
+        if let Some(delta) = text_of(payload) {
+            text.push_str(&delta);
+        }
+    }
+    text
+}
+
+/// Decode the valid UTF-8 prefix of `bytes`, holding an unfinished character
+/// back for the next call.
+///
+/// A delta may split a multi-byte character across two chunks, and the half
+/// that arrives is not the character. Decoded lossily, one `你` becomes two
+/// replacement characters — visible in the reply, and wrong in whatever the
+/// interface stores from it. Decoded here, it arrives whole one chunk later.
+fn decode_utf8(bytes: &mut Vec<u8>) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let text = text.to_string();
+            bytes.clear();
+            text
+        }
+        Err(error) if error.error_len().is_none() => {
+            // Only the last character is incomplete: decode what is whole and
+            // keep the rest for the next chunk.
+            let whole = std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .expect("valid_up_to is a character boundary")
+                .to_string();
+            bytes.drain(..error.valid_up_to());
+            whole
+        }
+        Err(_) => {
+            // Genuinely invalid bytes: replacement characters are the honest
+            // reading, and the character the provider meant to send never
+            // existed.
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            bytes.clear();
+            text
+        }
+    }
+}
+
 fn next_event(buffer: &str) -> Option<(String, String)> {
     for separator in ["\r\n\r\n", "\n\n"] {
         if let Some(at) = buffer.find(separator) {
@@ -813,6 +872,46 @@ mod tests {
         assert_eq!(unquote("\"\\ud83d\\ude00\"").as_deref(), Some("\u{1f600}"));
         assert_eq!(unquote("\"no escapes\"").as_deref(), Some("no escapes"));
         assert_eq!(unquote("\"unterminated"), None);
+    }
+
+    /// A chunk can hold several events, and every one of them is read in
+    /// order. Joined into a single line without separators, the mangled JSON
+    /// parsed as nothing and the whole reply was lost.
+    #[test]
+    fn every_event_in_a_batch_is_read() {
+        let mut buffer = String::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"one \"}}]}\n\
+             \ndata: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let mut usage = Usage::default();
+        let text = drain_events(&mut buffer, &mut usage);
+        assert_eq!(text, "one two");
+        assert!(buffer.is_empty(), "the whole batch was consumed");
+
+        // And an event split across two chunks waits for its other half.
+        let mut buffer = String::from("data: {\"choices\":[{\"delta\":{\"content\":\"hal");
+        assert_eq!(drain_events(&mut buffer, &mut usage), "");
+        buffer.push_str("f\"}}]}\n\n");
+        assert_eq!(drain_events(&mut buffer, &mut usage), "half");
+    }
+
+    /// A character split across two chunks stays one character: decoded
+    /// lossily it would arrive as two replacement characters, in the reply and
+    /// in whatever the interface stores from it.
+    #[test]
+    fn a_character_split_across_chunks_is_joined() {
+        let text = "温度";
+        let bytes = text.as_bytes();
+        let mut carry = bytes[..4].to_vec();
+        assert_eq!(
+            decode_utf8(&mut carry),
+            "温",
+            "the whole character came out"
+        );
+        carry.extend_from_slice(&bytes[4..]);
+        assert_eq!(decode_utf8(&mut carry), "度");
+        assert!(carry.is_empty(), "nothing was left over");
     }
 
     /// A secret never survives into something the interface would print.
