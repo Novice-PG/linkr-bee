@@ -186,10 +186,6 @@ pub struct Strings {
     pub net_wifi_off: &'static str,
     /// The status action.
     pub net_status: &'static str,
-    /// The WebDAV status action. Its own words, not the WiFi status's: the
-    /// WebDAV row said `[WiFi status]` for a while, which named the wrong
-    /// section of the very view it sits in.
-    pub net_webdav_status: &'static str,
     /// The scan-results section heading.
     pub net_results_section: &'static str,
     /// Shown when a scan failed after the bridge had accepted it.
@@ -199,14 +195,6 @@ pub struct Strings {
     pub net_wifi_failed: &'static str,
     /// Shown when a scan has produced nothing.
     pub net_no_results: &'static str,
-    /// The WebDAV section heading.
-    pub net_webdav_section: &'static str,
-    /// The WebDAV target URL label.
-    pub net_url_label: &'static str,
-    /// The set action.
-    pub net_set: &'static str,
-    /// The disable action.
-    pub net_disable: &'static str,
     /// The WebDAV state prefix (`on`/`off`).
     pub net_state_on: &'static str,
     pub net_state_off: &'static str,
@@ -217,8 +205,11 @@ pub struct Strings {
     pub net_confirm_detail: &'static str,
     /// Refusing to join a network nobody named.
     pub net_no_ssid: &'static str,
-    /// Refusing to point log upload at nowhere.
-    pub net_no_url: &'static str,
+    /// Shown when a join never reached an ending: the state it last reported
+    /// is the argument, and "not yet" is the point of the sentence.
+    pub net_wifi_pending: &'static str,
+    /// The same, for a forget that never reached "off".
+    pub net_wifi_off_pending: &'static str,
     /// A command that is not one the bridge takes, which is a bug in the caller
     /// rather than something the user did.
     pub net_bad_command: &'static str,
@@ -470,21 +461,17 @@ const ZH: Strings = Strings {
     net_connect: "[连接 WiFi]",
     net_wifi_off: "[WiFi 关闭]",
     net_status: "[WiFi 状态]",
-    net_webdav_status: "[状态]",
     net_results_section: "扫描结果",
     net_scan_failed: "扫描失败",
     net_wifi_failed: "WiFi 配网失败（result {}）。请检查密码与 2.4 GHz 信号后重试。",
     net_no_results: "暂无结果",
-    net_webdav_section: "WebDAV 日志上传",
-    net_url_label: "目标 URL",
-    net_set: "[设置]",
-    net_disable: "[关闭]",
     net_state_on: "开启",
     net_state_off: "关闭",
     net_keys_hint: "↑↓ 选择 · Enter 执行 · 结果行=填名",
     net_confirm_detail: "该配置会写入设备，重启后仍然生效",
     net_no_ssid: "先输入网络名称",
-    net_no_url: "先填写上传地址",
+    net_wifi_pending: "板子还没连上（当前 wifi={}）；稍后用 --query-wifi 回读确认",
+    net_wifi_off_pending: "板子还没断开（当前 wifi={}）；稍后用 --query-wifi 回读确认",
     net_bad_command: "不是桥接能识别的命令",
     mgmt_no_answer: "桥接没有应答：它可能正忙，请稍后重试",
     asst_session_section: "会话",
@@ -628,22 +615,18 @@ const EN: Strings = Strings {
     net_connect: "[Connect WiFi]",
     net_wifi_off: "[WiFi off]",
     net_status: "[WiFi status]",
-    net_webdav_status: "[Status]",
     net_results_section: "Scan results",
     net_scan_failed: "the scan failed",
     net_wifi_failed:
         "WiFi provisioning failed (result {}). Check the password and 2.4 GHz coverage, then retry.",
     net_no_results: "no results yet",
-    net_webdav_section: "WebDAV log upload",
-    net_url_label: "Target URL",
-    net_set: "[Set]",
-    net_disable: "[Disable]",
     net_state_on: "on",
     net_state_off: "off",
     net_keys_hint: "up/down choose · Enter run · a result fills the name",
     net_confirm_detail: "This is written to the device and survives a reboot",
     net_no_ssid: "name the network first",
-    net_no_url: "name the upload URL first",
+    net_wifi_pending: "the board has not joined yet (wifi={}); read it back with --query-wifi",
+    net_wifi_off_pending: "the board is not off yet (wifi={}); read it back with --query-wifi",
     net_bad_command: "not a command the bridge understands",
     mgmt_no_answer: "the bridge did not answer — it may be busy, try again",
     asst_session_section: "Session",
@@ -964,16 +947,13 @@ mod tests {
                 s.net_results_section,
                 s.net_wifi_failed,
                 s.net_no_results,
-                s.net_webdav_section,
-                s.net_url_label,
-                s.net_set,
-                s.net_disable,
                 s.net_state_on,
                 s.net_state_off,
                 s.net_keys_hint,
                 s.net_confirm_detail,
                 s.net_no_ssid,
-                s.net_no_url,
+                s.net_wifi_pending,
+                s.net_wifi_off_pending,
                 s.net_bad_command,
                 s.asst_session_section,
                 s.asst_tasks_section,

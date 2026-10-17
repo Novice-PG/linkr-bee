@@ -62,8 +62,6 @@ pub const OPERATIONS: &[&str] = &[
     "wifi",
     "wifi-off",
     "wifi-scan",
-    "webdav",
-    "webdav-off",
     "lan",
     "exec",
     "loopback-test",
@@ -306,8 +304,68 @@ fn report_state(app: &App, format: Format) {
     }
 }
 
+/// The fields one op takes, beside the three every request may carry.
+///
+/// `None` means the op is not one this session knows, and the op's own error
+/// is the answer to it. Written out here — rather than read off the parsing of
+/// each arm — so that the set a caller reads in the manual is the set the
+/// parser enforces; a request is refused by name, never by silence.
+fn accepted_fields(op: &str) -> Option<&'static [&'static str]> {
+    match op {
+        "info" | "lan" | "state" | "quit" | "wifi-off" | "wifi-scan" => Some(&[]),
+        "uart" => Some(&["value"]),
+        "wifi" => Some(&["ssid", "pass"]),
+        "exec" => Some(&["cmd", "timeout_ms", "idle_ms", "retry"]),
+        "loopback-test" => Some(&["data", "timeout_ms"]),
+        _ => None,
+    }
+}
+
+/// Refuse a request that carries a field this session does not read.
+///
+/// Silence here is what let `"timeout": 2` run with the thirty-second default:
+/// the caller's intent was overridden by its own spelling and nothing said so,
+/// while a field of the right name with the wrong type was refused. One
+/// standard, then: everything that is not a field of this op is named. A near
+/// miss is named *twice* — `timeout` is told about `timeout_ms` — because a
+/// caller who spelled it almost right is worth one sentence.
+fn check_fields(request: &Request) -> Result<(), String> {
+    let Some(accepted) = accepted_fields(&request.op) else {
+        return Ok(());
+    };
+    for (field, _) in &request.fields {
+        // `id` and `op` are the frame's own; `format` is read for every
+        // request, before the op is even looked at.
+        if matches!(field.as_str(), "id" | "op" | "format") {
+            continue;
+        }
+        if !accepted.contains(&field.as_str()) {
+            let hint = closest_field(field, accepted)
+                .map(|close| format!("; did you mean \"{close}\"?"))
+                .unwrap_or_default();
+            return Err(format!(
+                "unknown field \"{field}\" for op \"{}\"{hint}",
+                request.op
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The accepted field a spelling was reaching for, when one is obvious: a
+/// prefix either way, the shortest such match (so `timeout` finds
+/// `timeout_ms` and not everything else that starts the same way).
+fn closest_field<'a>(given: &str, accepted: &[&'a str]) -> Option<&'a str> {
+    accepted
+        .iter()
+        .filter(|candidate| candidate.starts_with(given) || given.starts_with(**candidate))
+        .min_by_key(|candidate| candidate.len())
+        .copied()
+}
+
 /// The operation one request names, or the sentence a caller is owed instead.
 fn action_for(request: &Request) -> Result<Action, String> {
+    check_fields(request)?;
     let mut requests = cli::Requests::default();
     match request.op.as_str() {
         "info" => requests.queries.push(Query::Diagnostics),
@@ -318,21 +376,33 @@ fn action_for(request: &Request) -> Result<Action, String> {
             Some(_) => requests.uart = Some(request.string_wanted("value")?.to_string()),
             None => requests.queries.push(Query::Uart),
         },
+        // A join is a name and a password, and each is wanted before the
+        // request goes anywhere: an empty password reaches the firmware as
+        // "open network", and an empty name reaches it as the *forget* it
+        // never asked for. Both are refused here in the same words the command
+        // line uses, because they are one decision.
         "wifi" => match request.value("ssid") {
             Some(_) => {
                 let ssid = request.string_wanted("ssid")?.to_string();
+                if ssid.trim().is_empty() {
+                    return Err(
+                        "wifi wants a network to join; use op \"wifi-off\" to forget the saved one"
+                            .to_string(),
+                    );
+                }
                 let pass = request.text("pass").unwrap_or_default().to_string();
+                if pass.trim().is_empty() {
+                    return Err(
+                        "wifi wants a password: the bridge reads an empty one as an open network"
+                            .to_string(),
+                    );
+                }
                 requests.wifi = Some((ssid, pass));
             }
             None => requests.queries.push(Query::Wifi),
         },
         "wifi-off" => requests.wifi_off = true,
         "wifi-scan" => requests.wifi_scan = true,
-        "webdav" => match request.value("url") {
-            Some(_) => requests.webdav = Some(request.string_wanted("url")?.to_string()),
-            None => requests.queries.push(Query::Webdav),
-        },
-        "webdav-off" => requests.webdav_off = true,
         "exec" => {
             let command = request.string_wanted("cmd")?.to_string();
             if command.trim().is_empty() {
@@ -812,18 +882,12 @@ mod tests {
         }
         match action_for(&request(r#"{"op":"wifi-off"}"#)) {
             Ok(Action::Requests(requests)) => {
-                assert!(requests.wifi_off && !requests.wifi_scan && requests.webdav.is_none())
+                assert!(requests.wifi_off && !requests.wifi_scan && requests.wifi.is_none())
             }
             other => panic!("{other:?}"),
         }
         match action_for(&request(r#"{"op":"wifi-scan"}"#)) {
             Ok(Action::Requests(requests)) => assert!(requests.wifi_scan),
-            other => panic!("{other:?}"),
-        }
-        match action_for(&request(r#"{"op":"webdav","url":"http://host/dav"}"#)) {
-            Ok(Action::Requests(requests)) => {
-                assert_eq!(requests.webdav.as_deref(), Some("http://host/dav"))
-            }
             other => panic!("{other:?}"),
         }
         match action_for(&request(r#"{"op":"exec","cmd":"uname -a"}"#)) {
@@ -872,6 +936,22 @@ mod tests {
             (r#"{"op":"exec","cmd":"ls","retry":-1}"#, "number of times"),
             (r#"{"op":"uart","value":7}"#, "must be a string"),
             (r#"{"op":"loopback-test"}"#, "data is missing"),
+            // A field nobody reads is named, and a near miss is told the
+            // spelling it wanted — the `timeout`/`timeout_ms` pair is the one
+            // that was answered with a silent thirty-second wait.
+            (r#"{"op":"exec","cmd":"ls","timeout":2}"#, "timeout_ms"),
+            (r#"{"op":"exec","cmd":"ls","quiet":true}"#, "unknown field"),
+            (r#"{"op":"uart","baud":115200}"#, "unknown field"),
+            // A join needs a name and a password; neither may be blank.
+            (r#"{"op":"wifi","ssid":"lab"}"#, "wants a password"),
+            (
+                r#"{"op":"wifi","ssid":"lab","pass":"  "}"#,
+                "wants a password",
+            ),
+            (
+                r#"{"op":"wifi","ssid":"  ","pass":"secret"}"#,
+                "wants a network",
+            ),
         ] {
             let error = action_for(&request(line)).expect_err(line);
             assert!(
@@ -879,6 +959,20 @@ mod tests {
                 "{line:?} gave {error:?}, wanted {needle:?}"
             );
         }
+    }
+
+    /// The operations this firmware does not have are not promised anywhere in
+    /// the protocol: WebDAV was cut from the device for RAM, and a session that
+    /// still listed it sent callers into `ERR unknown command`.
+    #[test]
+    fn the_operations_the_device_does_not_have_are_not_promised() {
+        for op in ["webdav", "webdav-off"] {
+            let line = format!(r#"{{"op":"{op}"}}"#);
+            let error = action_for(&request(&line)).expect_err(&line);
+            assert!(error.contains("unknown op"), "{line}: {error}");
+        }
+        assert!(!OPERATIONS.contains(&"webdav"));
+        assert!(!operations_json().contains("webdav"));
     }
 
     /// The two operations that must answer without a link, and the rest.
@@ -907,8 +1001,8 @@ mod tests {
         }
         assert_eq!(
             operations_json(),
-            "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"webdav\",\
-             \"webdav-off\",\"lan\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
+            "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"lan\",\
+             \"exec\",\"loopback-test\",\"state\",\"quit\"]"
         );
     }
 }

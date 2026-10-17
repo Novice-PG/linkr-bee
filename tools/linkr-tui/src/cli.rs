@@ -250,11 +250,6 @@ pub const FLAGS: &[Flag] = &[
         "ask @w? and print the WiFi status",
     ),
     Flag::new(
-        "--query-webdav",
-        Value::None,
-        "ask @d? and print the upload status",
-    ),
-    Flag::new(
         "--uart",
         Value::Free,
         "set UART as baud,data,parity,stop,flow",
@@ -271,12 +266,6 @@ pub const FLAGS: &[Flag] = &[
         Value::None,
         "list the networks the board can see",
     ),
-    Flag::new(
-        "--webdav",
-        Value::Free,
-        "set the HTTP upload URL for the log",
-    ),
-    Flag::new("--webdav-off", Value::None, "turn log upload off"),
     Flag::new(
         "--loopback-test",
         Value::Optional,
@@ -879,10 +868,6 @@ pub struct Requests {
     pub wifi_off: bool,
     /// `@w scan`.
     pub wifi_scan: bool,
-    /// `@d=<url>`.
-    pub webdav: Option<String>,
-    /// `@d off`.
-    pub webdav_off: bool,
 }
 
 impl Requests {
@@ -893,8 +878,6 @@ impl Requests {
             && self.wifi.is_none()
             && !self.wifi_off
             && !self.wifi_scan
-            && self.webdav.is_none()
-            && !self.webdav_off
     }
 }
 
@@ -963,20 +946,14 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         }
     }
     if requests.wifi_off || requests.wifi.is_some() {
+        let asked = requests.wifi.as_ref().map(|pair| pair.0.clone());
         let (ssid, password) = requests
             .wifi
             .as_ref()
             .map_or(("", ""), |pair| (pair.0.as_str(), pair.1.as_str()));
         match app.set_wifi(ssid, password) {
             Err(why) => failed += report(format, "wifi", false, &why),
-            Ok(()) => failed += wait_and_report(app, crate::device::Query::Wifi, format),
-        }
-    }
-    if requests.webdav_off || requests.webdav.is_some() {
-        let url = requests.webdav.as_deref().unwrap_or("");
-        match app.set_webdav(url) {
-            Err(why) => failed += report(format, "webdav", false, &why),
-            Ok(()) => failed += wait_and_report(app, crate::device::Query::Webdav, format),
+            Ok(()) => failed += wait_and_report_wifi(app, format, asked.as_deref()),
         }
     }
     if requests.wifi_scan {
@@ -1150,6 +1127,67 @@ fn wait_and_report(app: &mut App, query: crate::device::Query, format: Format) -
     report_query(app, query, format)
 }
 
+/// Wait for a WiFi write to end, and report what it ended on.
+///
+/// A write is answered twice — an ack, and then the ending — and the ack is
+/// not the outcome. The firmware takes the write and joins on its own clock,
+/// so a wait that stops at the ack prints `ok:true, reply:""` ten seconds
+/// before the read-back says `wifi=off`. This waits for the ending the view
+/// itself waits for — `@event wifi`, or the read-back its own fallback
+/// performs — and only then reads the state that ending left. A board that
+/// is still connecting when the window closes is reported as unfinished
+/// rather than as a success it has not reached: "not yet" and "done" are
+/// different answers, and an empty line cannot tell them apart.
+fn wait_and_report_wifi(app: &mut App, format: Format, ssid: Option<&str>) -> i32 {
+    let window = crate::app::wifi_answer_window() + SETTLE_SLACK;
+    settle(app, format, window);
+    // A refusal or a failed operation already left its sentence in the view;
+    // the report below prints it. What is checked here is the other ending:
+    // one that arrived and said nothing.
+    if app.network.error.is_none() {
+        if let Some(why) = wifi_unfinished(app, ssid) {
+            return report(format, "wifi", false, &why);
+        }
+    }
+    report_query(app, crate::device::Query::Wifi, format)
+}
+
+/// Why the board is not finished with a WiFi write, when it is not; `None`
+/// when it is done.
+///
+/// Done means the state the board reports agrees with what was asked: a join
+/// that ended connected to the network it named, or a forget that ended off.
+/// Everything else is an answer of its own — still connecting, dropped back
+/// to off without a word, or connected to a *different* network, which is the
+/// board saying "already" without the refusal to go with it.
+fn wifi_unfinished(app: &App, ssid: Option<&str>) -> Option<String> {
+    let s = app.strings();
+    let state = app.network.wifi.as_ref().map(|wifi| wifi.state.as_str());
+    match (ssid, state) {
+        (Some(asked), Some("connected")) => {
+            let joined = app
+                .network
+                .wifi
+                .as_ref()
+                .map(|wifi| wifi.ssid.as_str())
+                .unwrap_or("");
+            // A bridge that does not name the network it joined is taken at
+            // its word: `ssid=-` is how "connected, name unknown" is spelled,
+            // and there is nothing to compare the ask against.
+            (!joined.is_empty() && !joined.eq_ignore_ascii_case(asked.trim()))
+                .then(|| app.lang.wifi_failure(crate::accessory::WIFI_ALREADY))
+        }
+        (Some(_), Some(state)) => Some(crate::text::fill(s.net_wifi_pending, &[state.to_string()])),
+        (Some(_), None) => Some(s.mgmt_no_answer.to_string()),
+        (None, Some("off")) => None,
+        (None, Some(state)) => Some(crate::text::fill(
+            s.net_wifi_off_pending,
+            &[state.to_string()],
+        )),
+        (None, None) => Some(s.mgmt_no_answer.to_string()),
+    }
+}
+
 /// Pump until the question asked is no longer outstanding, or until `window`
 /// runs out. Returns whether the wait ended on its own.
 ///
@@ -1202,7 +1240,6 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Uart => "uart",
         crate::device::Query::Wifi => "wifi",
         crate::device::Query::WifiScan => "wifi-scan",
-        crate::device::Query::Webdav => "webdav",
         crate::device::Query::Lan => "lan",
     }
 }
@@ -1264,10 +1301,6 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
         // stream's own lines (`OK accepted`, `@scan done`) are already off the
         // list — see `App`'s `scan_results`.
         crate::device::Query::WifiScan => app.network.scan_results.join("\n"),
-        crate::device::Query::Webdav => match &app.network.webdav {
-            Some(webdav) => format!("webdav={},url={}", webdav.state, webdav.url),
-            None => String::new(),
-        },
         // The state is reported; the token never is. A CLI's output goes to a
         // pipe and a pipe goes to a log, and a token in a log is a token that
         // has to be rotated.
@@ -1454,6 +1487,62 @@ mod tests {
             json_event(&[("reply", Json::Text("a\nb"))]),
             r#"{"reply":"a\nb"}"#
         );
+    }
+
+    /// A join that has not ended is not a join that succeeded. The state the
+    /// board reports decides — connected to the network that was asked for, or
+    /// an answer of its own — and "still connecting" is its own answer, not an
+    /// empty line a caller reads as success.
+    #[test]
+    fn a_join_is_only_done_when_the_board_says_so() {
+        let mut app = App {
+            lang: crate::i18n::Lang::En,
+            ..App::default()
+        };
+        let wifi = |state: &str, ssid: &str| {
+            Some(crate::accessory::WifiStatus {
+                state: state.to_string(),
+                ssid: ssid.to_string(),
+                ip: String::new(),
+            })
+        };
+
+        app.network.wifi = wifi("connected", "BenchNet");
+        assert!(wifi_unfinished(&app, Some("BenchNet")).is_none());
+        assert!(
+            wifi_unfinished(&app, Some("benchnet")).is_none(),
+            "the name is compared the way radios spell them"
+        );
+
+        // Connected to something else is the board saying "already" — the one
+        // ending that arrives looking like a success and is not one.
+        app.network.wifi = wifi("connected", "OtherNet");
+        let why = wifi_unfinished(&app, Some("BenchNet")).expect("not the network asked for");
+        assert_eq!(why, app.lang.wifi_failure(crate::accessory::WIFI_ALREADY));
+        // A bridge that does not name the network it joined is taken at its
+        // word: `ssid=-` is "connected, name unknown", and there is nothing to
+        // compare the ask against.
+        app.network.wifi = wifi("connected", "");
+        assert!(wifi_unfinished(&app, Some("BenchNet")).is_none());
+
+        // Still working, dropped to off without a word, or never read back:
+        // three endings, none of them the one that was asked for.
+        for state in ["connecting", "off", "dhcp"] {
+            app.network.wifi = wifi(state, "");
+            let why = wifi_unfinished(&app, Some("BenchNet"))
+                .unwrap_or_else(|| panic!("{state} is not an ending"));
+            assert!(why.contains(state), "{state} is named: {why}");
+        }
+        app.network.wifi = None;
+        assert!(wifi_unfinished(&app, Some("BenchNet")).is_some());
+
+        // A forget is done when it is off — and not when the board is still
+        // holding a network.
+        app.network.wifi = wifi("off", "");
+        assert!(wifi_unfinished(&app, None).is_none());
+        app.network.wifi = wifi("connected", "OtherNet");
+        let why = wifi_unfinished(&app, None).expect("a forget that did not take");
+        assert!(why.contains("connected"), "{why}");
     }
 
     /// The flag literals a hand-written parser says it accepts. Read from the

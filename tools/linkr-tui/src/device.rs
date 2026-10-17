@@ -61,8 +61,6 @@ pub enum Query {
     /// answered in pieces over several messages and ends with a line of its
     /// own, where a status is one message that ends in `OK`.
     WifiScan,
-    /// `@d?` — whether log upload is on, and where it goes.
-    Webdav,
     /// `@s?` — LAN access state, and the token the bridge expects.
     Lan,
 }
@@ -75,7 +73,6 @@ impl Query {
             Query::Uart => crate::accessory::UART_QUERY_COMMAND,
             Query::Wifi => crate::accessory::WIFI_QUERY_COMMAND,
             Query::WifiScan => crate::accessory::WIFI_SCAN_COMMAND,
-            Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
         }
     }
@@ -107,7 +104,7 @@ impl Query {
                         .error
                         .is_empty()
             }
-            Query::Uart | Query::Wifi | Query::Webdav | Query::Lan => {
+            Query::Uart | Query::Wifi | Query::Lan => {
                 crate::accessory::reply_status(&lines.join("\n")).ok
                     || !crate::accessory::reply_status(&lines.join("\n"))
                         .error
@@ -353,7 +350,6 @@ mod tests {
         assert_eq!(Query::Uart.command(), "@u?");
         assert_eq!(Query::Wifi.command(), "@w?");
         assert_eq!(Query::WifiScan.command(), "@w scan");
-        assert_eq!(Query::Webdav.command(), "@d?");
     }
 
     #[test]
@@ -363,7 +359,6 @@ mod tests {
         assert!(Query::Uart.complete(&["OK uart=115200,8,N,1,none".into()]));
         // An error is an ending too: the answer arrived, it just said no.
         assert!(Query::Wifi.complete(&["ERR ssid too long".into()]));
-        assert!(!Query::Webdav.complete(&["thinking".into()]));
         // A scan's acceptance is not an ending; its own terminator is.
         assert!(!Query::WifiScan.complete(&["OK accepted".into()]));
         assert!(!Query::WifiScan.complete(&[
@@ -385,7 +380,7 @@ mod tests {
         // A scan is the radio walking channels.
         assert_eq!(Query::WifiScan.patience(), SCAN_TIMEOUT);
         // The rest are answered out of the bridge's own state in milliseconds.
-        for query in [Query::Uart, Query::Wifi, Query::Webdav, Query::Lan] {
+        for query in [Query::Uart, Query::Wifi, Query::Lan] {
             assert_eq!(query.patience(), REPLY_TIMEOUT, "{query:?}");
         }
     }

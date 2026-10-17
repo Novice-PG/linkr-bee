@@ -144,13 +144,39 @@ pub fn normalize_url(host: &str) -> String {
 ///
 /// This is the identity a token is remembered against, so `192.168.0.44` and
 /// `ws://192.168.0.44/ws` have to reduce to the same key — otherwise the token
-/// captured in one spelling is not found under the other.
+/// captured in one spelling is not found under the other. A *default* port is
+/// not part of that identity either: `192.168.0.44:80` reaches the same bridge
+/// as `192.168.0.44`, so a token stored under one must be found under the
+/// other. Any other port is kept: `:8080` is a different listener and may be a
+/// different bridge.
 pub fn host_key(host: &str) -> String {
     let url = normalize_url(host);
-    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(&url);
+    let (scheme, rest) = url.split_once("://").unwrap_or(("ws", url.as_str()));
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    authority.to_ascii_lowercase()
+    let authority = authority.to_ascii_lowercase();
+    let default_port = if scheme.eq_ignore_ascii_case("wss") {
+        ":443"
+    } else {
+        ":80"
+    };
+    match authority.strip_suffix(default_port) {
+        // Only the port goes: `:80` alone would leave nothing to address.
+        Some(bare) if !bare.is_empty() => bare.to_string(),
+        _ => authority,
+    }
+}
+
+/// Whether a normalised key can name a bridge at all.
+///
+/// A key is what a dial wrote down: an address with a dot in it, or a name and
+/// a port. A bare word is neither. The firmware reports its address as `down`
+/// or `ready` while there is nothing to dial, and a token remembered under one
+/// of those words is a token nobody can ever use — which is exactly the kind
+/// of entry a hand-edited or once-broken store collects. Kept beside
+/// [`host_key`], because the two together define what the store's keys are.
+pub fn is_bridge_address(key: &str) -> bool {
+    !key.is_empty() && (key.contains('.') || key.contains(':'))
 }
 
 /// Whether `token` is the token the bridge will accept.

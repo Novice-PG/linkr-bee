@@ -386,6 +386,18 @@ pub fn wifi_write_window() -> Duration {
         + Duration::from_secs(10)
 }
 
+/// How long a caller waits for a WiFi write to end: the longer of the two
+/// clocks the view itself runs on.
+///
+/// A join ends either with the ending the board sends (`@event wifi`) or with
+/// the read-back the view performs once [`WIFI_EVENT_FALLBACK`] passes, and a
+/// caller that stops before both has had their chance is a caller reading an
+/// ack as an outcome. So this is the write window and that fallback, whichever
+/// is longer — the answer may be slow, but it never arrives after this.
+pub fn wifi_answer_window() -> Duration {
+    wifi_write_window().max(WIFI_EVENT_FALLBACK)
+}
+
 /// An `@w=` write the interface is not finished with: either its answer has
 /// not arrived, or it was refused for busy and is owed another attempt.
 ///
@@ -539,7 +551,7 @@ pub struct App {
     pub toast_until: Vec<Instant>,
     /// What the device last said when asked `@i?`, and whether a read is out.
     pub diagnostics: DiagnosticsState,
-    /// WiFi/WebDAV management state for the network view.
+    /// WiFi management state for the network view.
     pub network: crate::views::network::NetworkState,
     /// The WiFi action whose `@event wifi` phases the view is still waiting
     /// on, if any. See [`WifiOperation`].
@@ -1496,11 +1508,15 @@ impl App {
         if !typed.is_empty() {
             return typed.to_string();
         }
+        // The status's `ip` is the firmware's word and not always an address:
+        // `down` and `ready` are what it says while there is nothing to dial,
+        // and aiming a dial — or remembering a token — at one of those words
+        // is how a junk key like `down <token>` got into the store.
         self.network
             .wifi
             .as_ref()
             .map(|wifi| wifi.ip.trim().to_string())
-            .filter(|ip| !ip.is_empty())
+            .filter(|ip| crate::transport::lan::is_bridge_address(ip))
             .unwrap_or_default()
     }
 
@@ -2030,6 +2046,13 @@ impl App {
                         }
                     };
                     if let Some((header, payload)) = outcome {
+                        // The answer is evidence too, and it is the half of the
+                        // dialog a person cannot reconstruct from the questions.
+                        // Redacted first, like everything else that leaves this
+                        // app: a reply is where `token=…` shows up.
+                        self.trace.rx_reply(&crate::lan_token_store::redact(
+                            &String::from_utf8_lossy(&payload),
+                        ));
                         if !self.talk.offer(&header, &payload) {
                             // Not an answer to a question in flight: the
                             // bridge talking on its own. WiFi provisioning is
@@ -2196,8 +2219,16 @@ impl App {
     /// owed another attempt on a later beat, and a script that stopped pumping
     /// the moment the refusal arrived would exit in the middle of the retry —
     /// reporting a join that the board had not been asked for a second time.
+    /// Whether a question this view asked is still outstanding.
+    ///
+    /// A WiFi action counts from the moment it is sent until the board
+    /// finishes with the radio, because its ack is not its answer: see
+    /// [`App::apply_reply`] and [`WifiOperation`]. A caller waiting on this —
+    /// the script mode, the resident session — therefore waits out the join
+    /// itself and not the ack that starts it.
     pub fn waiting_on_device(&self) -> bool {
         self.talk.waiting().is_some()
+            || self.wifi_operation.is_some()
             || self
                 .wifi_write
                 .as_ref()
@@ -2546,6 +2577,11 @@ impl App {
             self.talk.reset();
             return Err(self.strings().not_connected.to_string());
         }
+        // The question is evidence as much as its answer is: a record that
+        // held the replies and not what was asked for would leave the reader
+        // guessing which query each line belongs to. `body` is the command
+        // itself, and it goes through the scrubber like every other one.
+        self.trace.tx_command(&accessory::redact_command(body));
         // A read that has gone out owns its own view slot: nothing else will
         // fill it, and leaving it untouched would let a stale answer look like
         // the one just asked for.
@@ -2554,7 +2590,7 @@ impl App {
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
+            Query::Uart | Query::Wifi | Query::WifiScan => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -2598,7 +2634,6 @@ impl App {
         let query = match command.split([' ', '=']).next().unwrap_or("").as_bytes() {
             b"@u" => Query::Uart,
             b"@w" => Query::Wifi,
-            b"@d" => Query::Webdav,
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
         self.send_accessory(command, query)
@@ -2617,13 +2652,6 @@ impl App {
         self.network.scan_results.clear();
         self.network.settle_focus();
         Ok(())
-    }
-
-    /// Point log upload at `url`, or turn it off when there is none.
-    pub fn set_webdav(&mut self, url: &str) -> Result<(), String> {
-        let action = if url.trim().is_empty() { "off" } else { "on" };
-        let command = accessory::webdav_command(action, url)?;
-        self.send_accessory(&command, Query::Webdav)
     }
 
     /// Send an accessory command and wait for the answer to the question that
@@ -2863,11 +2891,6 @@ impl App {
                         // sessions that have no BLE link to ask over.
                         self.remember_lan_token(&status.token);
                     }
-                }
-            }
-            Query::Webdav => {
-                if let Some(status) = accessory::parse_webdav_status(&text) {
-                    self.network.webdav = Some(status);
                 }
             }
         }
@@ -3111,9 +3134,7 @@ impl App {
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
-                self.network.loading = false
-            }
+            Query::Uart | Query::Wifi | Query::WifiScan => self.network.loading = false,
             Query::Lan => self.lan_status.loading = false,
         }
     }
@@ -4813,7 +4834,7 @@ mod tests {
     }
 
     /// A session standing in for a Bluetooth one, because the management
-    /// channel — and therefore diagnostics, UART, WiFi and WebDAV — exists on
+    /// channel — and therefore diagnostics, UART and WiFi — exists on
     /// no other link.
     fn connected_over_ble(lang: Lang) -> (App, crate::transport::testing::MemoryLink) {
         let mut app = App {
@@ -5006,6 +5027,10 @@ mod tests {
             Some(id),
             "the view is still waiting on that operation"
         );
+        assert!(
+            app.waiting_on_device(),
+            "and a caller waiting on the join waits for the ending, not the ack"
+        );
 
         // The radio working is the view saying loading, not the old state
         // getting a new name.
@@ -5031,6 +5056,10 @@ mod tests {
             "the ending closes the operation"
         );
         assert!(!app.network.loading, "and stops the spinner");
+        assert!(
+            app.wifi_write.is_none(),
+            "nothing about the join is outstanding any more"
+        );
     }
 
     /// A failed join says which code the firmware gave and leaves no network
@@ -5208,6 +5237,75 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef"),
             "remembered under the address the dial would go to"
         );
+    }
+
+    /// The address the status reports is the firmware's word, and `ip=down` is
+    /// its word for "none": a token filed under it — or a dial aimed at it —
+    /// would be aimed at nothing at all. The user's store had exactly such a
+    /// key (`down <token>`), which is why the shape is checked here.
+    #[test]
+    fn a_board_with_no_address_files_its_token_nowhere() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.lan_store = Some(crate::lan_token_store::TokenStore::default());
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK ws=on token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| matches!(
+            app.lan_captured,
+            LanCapture::Captured
+        )));
+
+        app.ask_device(Query::Wifi).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK wifi=connecting,ssid=BenchNet,ip=down"));
+        assert!(pump_until(&mut app, |app| {
+            app.network
+                .wifi
+                .as_ref()
+                .is_some_and(|wifi| wifi.state == "connecting")
+        }));
+        assert!(
+            app.lan_store.as_ref().is_some_and(|store| store.is_empty()),
+            "\"down\" is not an address to remember a token under"
+        );
+        assert!(app.lan_host_effective().is_empty(), "nor one to dial");
+    }
+
+    /// The management channel is recorded in both directions. A log holding
+    /// the questions and not the answers is the half of the dialog nobody can
+    /// reconstruct — and the answers are the half that carries a token, so
+    /// they are scrubbed before they are written.
+    #[test]
+    fn the_management_dialog_reaches_the_log() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        let dir = std::env::temp_dir().join(format!("linkr-app-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("session.log");
+        let _ = std::fs::remove_file(&path);
+        app.trace = crate::trace::ByteTrace::to_file(&path).expect("the log opens");
+
+        app.ask_device(Query::Diagnostics).expect("asked");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(
+            id,
+            "OK fw=1.0.0 token=0123456789abcdef0123456789abcdef",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.diagnostics.error.is_none() && !app.diagnostics.loading
+        }));
+
+        let text = std::fs::read_to_string(&path).expect("the log reads back");
+        assert!(text.contains("tx command: @i?"), "{text}");
+        assert!(text.contains("rx reply: OK fw=1.0.0"), "{text}");
+        assert!(
+            !text.contains("0123456789abcdef0123456789abcdef"),
+            "a token in a reply is redacted on its way into the log: {text}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The other moment the address becomes known: somebody types it into the

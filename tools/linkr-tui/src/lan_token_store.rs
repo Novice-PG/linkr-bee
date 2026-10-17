@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::transport::lan::{host_key, validate_token, TOKEN_ERROR, TOKEN_LEN};
+use crate::transport::lan::{host_key, is_bridge_address, validate_token, TOKEN_ERROR, TOKEN_LEN};
 
 /// The variable a token may be read from.
 pub const TOKEN_ENV: &str = "LINKR_LAN_TOKEN";
@@ -74,16 +74,23 @@ impl TokenStore {
     ///
     /// An unreadable or malformed file is treated as empty rather than as an
     /// error: a corrupt cache must not be the reason a user cannot connect to
-    /// a bridge they have the token for.
+    /// a bridge they have the token for. A file that *had* lines the format
+    /// does not allow is written back clean on the spot — a dropped line stays
+    /// dropped only if it is gone from the file, and the next session should
+    /// not have to drop the same mistake again.
     pub fn at(path: impl Into<PathBuf>) -> TokenStore {
         let path = path.into();
-        let entries = std::fs::read_to_string(&path)
+        let (entries, dropped) = std::fs::read_to_string(&path)
             .map(|text| parse(&text))
             .unwrap_or_default();
-        TokenStore {
+        let store = TokenStore {
             path: Some(path),
             entries,
+        };
+        if dropped {
+            let _ = store.save();
         }
+        store
     }
 
     /// The store the environment points at, or one that remembers nothing when
@@ -122,7 +129,7 @@ impl TokenStore {
     /// Remember `token` for `host`, refusing anything the bridge would refuse.
     pub fn remember(&mut self, host: &str, token: &str) -> Result<(), String> {
         let key = host_key(host);
-        if key.is_empty() {
+        if key.is_empty() || !is_bridge_address(&key) {
             return Err("a token can only be saved for a bridge with an address".to_string());
         }
         validate_token(token)?;
@@ -276,27 +283,35 @@ fn default_path() -> Option<PathBuf> {
 
 /// Read the store's format: one `host token` per line, `#` for a comment.
 ///
-/// A line that is not exactly that is dropped. Dropping is what keeps a
-/// half-written file from becoming a token: the alternative, taking the
-/// longest hex-shaped run on the line, would invent one.
-fn parse(text: &str) -> BTreeMap<String, String> {
+/// A line that is not exactly that is dropped, and the second value says
+/// whether anything was: the caller writes a store that dropped something back
+/// out, so the file heals instead of being re-dropped every session. Dropping
+/// is what keeps a half-written file from becoming a token: the alternative,
+/// taking the longest hex-shaped run on the line, would invent one.
+fn parse(text: &str) -> (BTreeMap<String, String>, bool) {
     let mut entries = BTreeMap::new();
+    let mut dropped = false;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let Some((host, token)) = line.split_once(char::is_whitespace) else {
+            dropped = true;
             continue;
         };
         let host = host_key(host);
         let token = token.trim();
-        if host.is_empty() || validate_token(token).is_err() {
+        // A key that cannot name a bridge is dropped like any other bad line:
+        // `down` and `ready` are the firmware's words for "no address", and a
+        // token under one of them is a token that can never be used.
+        if !is_bridge_address(&host) || validate_token(token).is_err() {
+            dropped = true;
             continue;
         }
         entries.insert(host, token.to_string());
     }
-    entries
+    (entries, dropped)
 }
 
 /// The store's format, written the way [`parse`] reads it.
@@ -340,9 +355,14 @@ mod tests {
         assert_eq!(store.token_for("192.168.0.44"), Some(TOKEN));
         assert_eq!(store.token_for("ws://192.168.0.44/ws"), Some(TOKEN));
         assert_eq!(
-            store.token_for("ws://192.168.0.44:80/ws"),
+            store.token_for("192.168.0.44:80"),
+            Some(TOKEN),
+            "the default port is the same bridge"
+        );
+        assert_eq!(
+            store.token_for("ws://192.168.0.44:8080/ws"),
             None,
-            "a port is another bridge"
+            "another port is another bridge"
         );
         assert_eq!(store.token_for("192.168.0.45"), None);
     }
@@ -359,6 +379,10 @@ mod tests {
         assert!(
             store.remember("", TOKEN).is_err(),
             "and a token needs a host"
+        );
+        assert!(
+            store.remember("down", TOKEN).is_err(),
+            "and a host needs to be an address, not the firmware's word for none"
         );
         assert!(store.is_empty());
     }
@@ -381,7 +405,9 @@ mod tests {
     }
 
     /// A file that is not the store's format loses the lines it cannot read and
-    /// keeps the ones it can, rather than failing whole or inventing a token.
+    /// keeps the ones it can, rather than failing whole or inventing a token —
+    /// and the lines it lost are gone from the file too, so the next session
+    /// reads a clean one.
     #[test]
     fn a_damaged_line_is_dropped_not_guessed_at() {
         let dir = scratch("damaged");
@@ -395,6 +421,7 @@ mod tests {
                  this line has no token\n\
                  192.168.0.45 uppercase\n\
                  192.168.0.46 {}\n\
+                 down {OTHER}\n\
                  \n",
                 TOKEN.to_uppercase()
             ),
@@ -409,6 +436,19 @@ mod tests {
             None,
             "case is part of the token"
         );
+        assert_eq!(
+            store.token_for("down"),
+            None,
+            "a word the firmware uses for \"no address\" is not a bridge"
+        );
+
+        let healed = std::fs::read_to_string(&path).expect("still there");
+        assert!(
+            healed.contains(TOKEN) && !healed.contains("no token") && !healed.contains(OTHER),
+            "the file was written back clean: {healed:?}"
+        );
+        let reloaded = TokenStore::at(&path);
+        assert_eq!(reloaded.len(), 1, "and reads the same afterwards");
     }
 
     /// A store with nowhere to write says so instead of pretending to save.

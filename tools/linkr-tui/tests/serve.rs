@@ -167,7 +167,19 @@ fn a_session_answers_many_requests_on_one_link() {
     );
     assert!(session.until("\"event\":\"end\"").contains("\"code\":2"));
 
-    session.send(r#"{"id":6,"op":"quit"}"#);
+    // A field the operation does not have is named and refused, rather than
+    // silently dropped and left to a default the caller never asked for.
+    session.send(r#"{"id":6,"op":"exec","cmd":"uname -a","timeout":2}"#);
+    let error = session.until("\"event\":\"error\"");
+    assert!(
+        error.contains("\"id\":6")
+            && error.contains("unknown field \\\"timeout\\\"")
+            && error.contains("timeout_ms"),
+        "{error}"
+    );
+    assert!(session.until("\"event\":\"end\"").contains("\"code\":2"));
+
+    session.send(r#"{"id":7,"op":"quit"}"#);
     let end = session.until("\"event\":\"end\"");
     assert!(end.contains("\"code\":0"), "{end}");
     assert_eq!(session.finish(), 0);

@@ -138,6 +138,13 @@ fn is_a_shell_name(prefix: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct GeometrySync {
     geometry: Geometry,
+    /// Whether a pane has ever said what size it is.
+    ///
+    /// Nothing is typed before one has: the one-shot and resident modes have no
+    /// pane, and a size command of theirs would be a line on the target's
+    /// console nobody asked for — the `--exec` command's own wrapper is the
+    /// thing that should be going out at that first prompt, not an `stty`.
+    armed: bool,
     /// The size the target confirmed it was sent, as [`Geometry::key`].
     synced: String,
     /// The size whose command is on the wire but not yet confirmed gone.
@@ -150,15 +157,23 @@ pub struct GeometrySync {
 }
 
 impl Default for GeometrySync {
+    /// The size-less state: a placeholder size and nothing owed to the target,
+    /// which is what a mode without a pane runs in. [`Self::set_size`] arms it.
     fn default() -> GeometrySync {
-        GeometrySync::new(80, 24)
+        GeometrySync {
+            armed: false,
+            ..GeometrySync::new(80, 24)
+        }
     }
 }
 
 impl GeometrySync {
+    /// A sync for a caller that already has a size in hand — the pane's first
+    /// frame, and the tests that stand in for one.
     pub fn new(cols: u16, rows: u16) -> GeometrySync {
         GeometrySync {
             geometry: Geometry::new(cols, rows),
+            armed: true,
             synced: String::new(),
             in_flight: String::new(),
             prompt_visible: false,
@@ -166,9 +181,11 @@ impl GeometrySync {
         }
     }
 
-    /// The pane was resized. A size that changed is a size the target is owed.
+    /// The pane was resized. A size that changed is a size the target is owed,
+    /// and a pane that has said a size once has said it is there to be synced.
     pub fn set_size(&mut self, cols: u16, rows: u16) {
         self.geometry = Geometry::new(cols, rows);
+        self.armed = true;
     }
 
     /// The size the target has been told, for a caller that wants to show it.
@@ -203,13 +220,13 @@ impl GeometrySync {
 
     /// The line to type now, or `None` when nothing is due.
     ///
-    /// Due means: an idle prompt is on the line, and this size is neither one
-    /// the target already confirmed nor one already on the wire. Taking the
-    /// command clears the prompt, because typing it is exactly what makes the
-    /// line busy again.
+    /// Due means: a pane has said what size it is, an idle prompt is on the
+    /// line, and this size is neither one the target already confirmed nor one
+    /// already on the wire. Taking the command clears the prompt, because
+    /// typing it is exactly what makes the line busy again.
     pub fn take_pending_command(&mut self) -> Option<String> {
         let key = self.geometry.key();
-        if !self.prompt_visible || key == self.synced || key == self.in_flight {
+        if !self.armed || !self.prompt_visible || key == self.synced || key == self.in_flight {
             return None;
         }
         self.in_flight = key;
@@ -295,6 +312,26 @@ mod tests {
         );
         // Taken once, not once per frame.
         assert_eq!(sync.take_pending_command(), None);
+    }
+
+    #[test]
+    fn nothing_is_typed_at_a_target_no_pane_is_watching() {
+        // The one-shot and resident modes have no pane, so no size was ever
+        // given: an `stty` line of theirs would be a write the caller never
+        // asked for, landing right where its own command is about to go.
+        let mut sync = GeometrySync::default();
+        sync.observe("root@linkr:~# ");
+        assert_eq!(
+            sync.take_pending_command(),
+            None,
+            "no pane, no size, no write"
+        );
+        // A pane that gives one arms the sync — the interface's own path.
+        sync.set_size(120, 30);
+        assert_eq!(
+            sync.take_pending_command().as_deref(),
+            Some("stty rows 30 cols 120 >/dev/null 2>&1\r")
+        );
     }
 
     #[test]

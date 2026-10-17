@@ -53,15 +53,12 @@ Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包：它装的是�
 | 读板子诊断 `@i?` | `linkr --query-info` |
 | 读串口参数 `@u?` | `linkr --query-uart` |
 | 读 WiFi 状态 `@w?` | `linkr --query-wifi` |
-| 读上传状态 `@d?` | `linkr --query-webdav` |
 | 设置串口 | `linkr --uart 115200,8,n,1,none`　`baud,data,parity,stop,flow` |
 | 连 WiFi | `linkr --wifi "MySSID,MyPassword"` |
 | 连 WiFi（密码不进参数） | `linkr --wifi "MySSID" --wifi-key-file pw.txt`（读文件第一行） |
 | 扫描 WiFi | `linkr --wifi-scan` |
 | 忘记 WiFi | `linkr --wifi-off` |
-| 设置上传地址 | `linkr --webdav http://host:port/upload` |
-| 关掉上传 | `linkr --webdav-off` |
-| 回环自测（发什么收什么） | `linkr --loopback-test 414243`（十六进制） |
+| 回环自测（发什么收什么） | `linkr --loopback-test 414243`（发的是字面字节 `4 1 4 2 4 3`） |
 | 在板子的目标上跑 shell 命令 | `linkr --exec "uname -a"`，见下节 |
 
 > 读诊断（`@i?` 等管理命令）仅限 BLE：LAN / stdio 下会返回一行说明并以 1 退出，这不是故障。
@@ -116,9 +113,9 @@ linkr --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 |---|---|
 | 0–125 | `--exec` 目标命令自身的状态，原样透传 |
 | 126 · 127 | 保留 shell 含义（127 = 命令没找到） |
-| 1 | 做了但结果不对：需要人工输入、超时、被拒绝 |
-| 2 | 用法错误；查询类动作连不上链路也是它 |
-| 255 | `--exec` 发不出去或保不住链路（连接失败、断链） |
+| 1 | 做了但结果不对：需要人工输入、超时、被拒绝；管理命令在 LAN / stdio 上也走它（那里没有管理通道） |
+| 2 | 用法错误：参数拼错、缺失、互斥冲突（普通启动且链路打不开也是它） |
+| 255 | 发不出去或保不住链路：连接失败、断链（带动作的调用在连接失败时走它，不是 2） |
 
 `--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落
 （本 CLI 构建的 `operations` 里没有 `tui`——这里没有界面可开）。
@@ -147,9 +144,9 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 
 | 行 | 字段 | 说明 |
 |---|---|---|
-| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是本构建支持的请求 |
-| `begin` | `id` `op` | 每个请求的开口，`id` 原样回显（可不给） |
-| `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第七节） |
+| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是本构建支持的请求（随传输变化：LAN 下不含仅限 BLE 的项） |
+| `begin` | `id` `op` | 每个请求的开口；`id` 是可选数字，原样回显（不给就是 `null`） |
+| `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第六节） |
 
 请求就是「动作的参数换成 JSON」，`op` 名与 `--` 参数一一对应：
 
@@ -160,11 +157,9 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 | `wifi` | 给 `ssid`（+可选 `pass`）：连；不给：读 | `--wifi` / `--query-wifi` |
 | `wifi-off` | —— | `--wifi-off` |
 | `wifi-scan` | —— | `--wifi-scan` |
-| `webdav` | 给 `url`：设；不给：读 | `--webdav` / `--query-webdav` |
-| `webdav-off` | —— | `--webdav-off` |
 | `lan` | —— | 读桥的局域网状态（`@s?`）：`ws=` 与 token 是否已捕获；界面里是连接区的一行 |
 | `exec` | `cmd`（必填）、`timeout_ms`、`idle_ms`、`retry` | `--exec` 全部参数 |
-| `loopback-test` | `data`（十六进制）、`timeout_ms`（默认 3000） | `--loopback-test` |
+| `loopback-test` | `data`（字面字节，非十六进制）、`timeout_ms`（默认 3000） | `--loopback-test` |
 | `state` | —— | 本地状态：链路是否活着、已连、计数 |
 | `quit` | —— | 结束会话（会话也随 stdin 关闭而结束） |
 
@@ -174,7 +169,9 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
   拨号失败回 `{"event":"error","code":"not_connected","message":…}`（`code` 255，会话不死），
   等板子就绪再发一次即可。
 - **坏请求不致命**：不是合法 JSON、或 `op` 不认识 → `{"event":"error","code":"bad_request"}`（`code` 2）；
-  参数缺失（如 `exec` 没给 `cmd`）同理。会话继续读下一行。
+  参数缺失（如 `exec` 没给 `cmd`）同理；**未知字段也拒绝**，文案会点名并给出近似字段的建议
+  （`unknown field "timeout" for op "exec"; did you mean "timeout_ms"?`）——不会静默回落默认值。
+  会话继续读下一行。
 - **请求内格式**：请求里加 `"format":"text"`，该请求内部的事件按文本输出（框架两行仍是 JSON）。
 - **结束**：`quit` 或 stdin 关闭 → 退出码 0。启动时若已给 `--ble-address` 等连接参数，
   会话只记住它、不提前拨号。
@@ -182,8 +179,12 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 ## 八、安全与留档
 
 - **token 永不回显**：桥自述里带 token 的字段上屏前一律打码；记住的 token 存在
-  `~/.config/linkr/lan-tokens`（0600），不进日志、不进通知。
+  `~/.config/linkr/lan-tokens`（0600），不进日志、不进通知（日志里的管理回复同样打码）。
+  键按**归一化后的桥地址**存放：`ws://host:80/ws`、`host:80`、`host` 是同一条；格式不合的行
+  读取时丢弃并把文件重写干净。
 - **密码尽量不进命令行**：`--wifi "SSID" --wifi-key-file pw.txt` 只读文件第一行。
-- **留档**：`--log-file <文件>` 追加记录设备发出的每个字节；`--debug-io` 跟踪双向字节
-  （终端里运行时写在 `$TMPDIR/linkr-trace-<进程号>.log`，0600，启动时有通知告知路径）。
+- **留档**：`--log-file <文件>` 追加记录设备发出的每个字节；管理通道的问答也进同一份档，
+  带标签以示区分——`tx command: @i?` / `rx reply: @info …`（token/密码打码后）。
+  `--debug-io` 在标准错误上跟踪双向字节（管理问答同样是 `tx command:` / `rx reply:` 两行）；
+  终端里运行时 trace 写在 `$TMPDIR/linkr-trace-<进程号>.log`（0600，启动时有通知告知路径）。
 - 一次性试完所有查询又不想碰真机：`--bridge -` 是本程序内置的回环设备（离线跑通全流程）。

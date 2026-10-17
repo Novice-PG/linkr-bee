@@ -161,9 +161,44 @@ impl ByteTrace {
     /// terminal recording, or a CI log, none of which is a place a password
     /// belongs. See [`crate::accessory::redact_command`].
     pub fn tx_command(&mut self, command: &str) {
-        if self.tracing() && !command.is_empty() {
-            self.trace_line(format!("tx command: {command}"));
+        if !command.is_empty() {
+            self.management_line(format!("tx command: {command}"));
         }
+    }
+
+    /// A management reply that came back from the bridge.
+    ///
+    /// Taken already redacted for the reason the command direction is: a reply
+    /// is where the bridge reports `token=…`, and the sinks here are
+    /// scrollback, a file and a CI log. See
+    /// [`crate::lan_token_store::redact`].
+    ///
+    /// A reply body is several lines as often as not — diagnostics are — and
+    /// each keeps its own label so that none of them reads as target output in
+    /// the log, which is the same device speaking in a different voice.
+    pub fn rx_reply(&mut self, reply: &str) {
+        for line in reply.lines() {
+            if !line.is_empty() {
+                self.management_line(format!("rx reply: {line}"));
+            }
+        }
+    }
+
+    /// One management-channel line: the log records both directions too.
+    ///
+    /// They are labelled because the log file is raw device bytes everywhere
+    /// else, and the bridge talking about itself is the same device speaking
+    /// in a different voice. A log holding the questions and not the answers
+    /// is half a dialog, and the half that is missing is the one a reader
+    /// cannot reconstruct.
+    fn management_line(&mut self, line: String) {
+        if let Some(file) = self.file.as_mut() {
+            // A full disk or a closed pipe must not end the session: the log
+            // is a record of the session, not a condition of it.
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+        self.trace_line(line);
     }
 }
 
@@ -245,7 +280,38 @@ mod tests {
         trace.rx(b"ignored");
         trace.tx(b"ignored");
         trace.tx_command("@w=ssid,secret");
+        trace.rx_reply("OK token=ignored");
         assert!(ByteTrace::none().with_stderr().is_active());
+    }
+
+    /// The management dialog goes into the log file too, labelled: the file is
+    /// raw device bytes everywhere else, and a log holding the questions and
+    /// not the answers is half a dialog — the answers being the half a reader
+    /// cannot reconstruct.
+    #[test]
+    fn a_log_file_holds_the_management_dialog_too() {
+        let dir = std::env::temp_dir().join(format!("linkr-trace-mgmt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("mgmt.log");
+        let _ = std::fs::remove_file(&path);
+
+        let mut trace = ByteTrace::to_file(&path).expect("the file opens");
+        trace.rx(b"shell output\r\n");
+        trace.tx_command("@i?");
+        trace.rx_reply("OK fw=1.0.0\r\nOK wifi state=connected");
+        drop(trace);
+
+        let text = std::fs::read_to_string(&path).expect("the file reads back");
+        assert!(text.contains("shell output\r\n"), "{text:?}");
+        assert!(text.contains("tx command: @i?"), "{text}");
+        assert!(text.contains("rx reply: OK fw=1.0.0"), "{text}");
+        assert!(
+            text.contains("rx reply: OK wifi state=connected"),
+            "every line of a multi-line reply keeps its label: {text}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The standard-error trace can be switched on and off while the session

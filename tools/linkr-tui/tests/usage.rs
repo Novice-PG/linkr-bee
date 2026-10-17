@@ -1,0 +1,109 @@
+//! The command line's refusals, locked against the built binary.
+//!
+//! Each of these is a request that used to come back looking like success: an
+//! empty `--exec` (a run marker and a status for a line that ran nothing), a
+//! join with no password (the firmware reads an empty key as an *open*
+//! network), and a `--transport` beside `--bridge` (overridden without a
+//! word). A refusal is met from a shell the same way an answer is — `rc=2`,
+//! the sentence on stderr, nothing sent — which is what these check.
+#![cfg(feature = "cli")]
+
+use std::process::{Command, Output};
+
+fn linkr(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_linkr"))
+        .args(args)
+        .output()
+        .expect("the binary runs")
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// `--exec ""` is not a run: the wrapper would still send its marker and the
+/// shell would still print a status, so a line that ran nothing would come
+/// back verified.
+#[test]
+fn an_empty_command_is_refused() {
+    for empty in ["", "   ", "\t"] {
+        let output = linkr(&["--exec", empty]);
+        assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("exec wants a command to run"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+/// A join is a name *and* a password; with an empty one the firmware would be
+/// told to join an open network, and the change that did not happen would be
+/// reported as one that did.
+#[test]
+fn a_join_without_a_password_is_refused() {
+    let output = linkr(&["--wifi", "BenchNet"]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("a join needs a password"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A join with no network named is a forget spelled sideways — `@w=,` is not
+/// what anyone means, and `--wifi-off` is what they mean.
+#[test]
+fn a_join_without_a_network_is_refused() {
+    let output = linkr(&["--wifi", ""]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("a join needs a network"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// The bridge *is* a stdio link whatever else the command line says, so
+/// naming another transport beside it would be a statement the run quietly
+/// discards.
+#[test]
+fn a_bridge_with_another_transport_is_refused() {
+    let output = linkr(&["--bridge", "-", "--transport", "ble", "--exec", "true"]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("--transport"), "{said}");
+    assert!(said.contains("pick one"), "{said}");
+}
+
+/// The same two flags in the order that makes sense: a stdio transport *is*
+/// what a bridge is, and the run goes through.
+#[test]
+fn a_bridge_with_the_stdio_transport_runs() {
+    let output = linkr(&[
+        "--bridge",
+        "-",
+        "--transport",
+        "stdio",
+        "--exec",
+        "true",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+}
+
+/// WebDAV was cut from the device for RAM, so it is promised nowhere: not in
+/// the capability list an agent reads first, and not as a flag that would
+/// dial, send `@d` and collect `ERR unknown command`.
+#[test]
+fn webdav_is_not_promised() {
+    let output = linkr(&["--capabilities", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let caps = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(!caps.to_lowercase().contains("webdav"), "{caps}");
+
+    for flag in ["--webdav", "--webdav-off", "--query-webdav"] {
+        let output = linkr(&[flag]);
+        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
+    }
+}

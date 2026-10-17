@@ -162,7 +162,6 @@ const PROMPT_KEYS: Entry = [
 
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
-const WEBDAV_TITLE: Entry = [" Log upload target ", " 日志上传目标 "];
 const LAN_HOST_TITLE: Entry = [" LAN host ", " 局域网主机 "];
 const LAN_TOKEN_TITLE: Entry = [" LAN token ", " 局域网令牌 "];
 
@@ -559,8 +558,6 @@ pub enum PromptAction {
     /// The password for the network just named. Held nowhere: it goes straight
     /// from the field into the command and out of the process.
     WifiPassword,
-    /// Where the device's log is uploaded to.
-    WebdavUrl,
     /// The address a LAN dial goes to, kept in the sidebar row it edits.
     LanHost,
     /// The token that dial carries. Held in the sidebar row and in the dial,
@@ -597,10 +594,6 @@ impl Prompt {
         match action {
             PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
             PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
-            PromptAction::WebdavUrl => [
-                "Upload URL (http:// or https://)",
-                "上传地址（http:// 或 https://）",
-            ],
             PromptAction::LanHost => [
                 "The bridge's LAN address (the board's WiFi IP)",
                 "桥接的局域网地址（板子的 WiFi IP）",
@@ -618,7 +611,6 @@ impl Prompt {
         match action {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
-            PromptAction::WebdavUrl => ["for example https://host/dav/", "例如 https://host/dav/"],
             PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
             PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
         }
@@ -800,20 +792,6 @@ pub fn prompt_wifi_password(app: &mut App) {
         app,
         Dialog::Prompt(Prompt::new(WIFI_PASSWORD_TITLE, PromptAction::WifiPassword)),
     );
-}
-
-/// Ask where the device's log should be uploaded to.
-pub fn prompt_webdav_url(app: &mut App) {
-    let prompt = Prompt::with_text(
-        WEBDAV_TITLE,
-        PromptAction::WebdavUrl,
-        &app.network
-            .webdav
-            .as_ref()
-            .map(|d| d.url.clone())
-            .unwrap_or_default(),
-    );
-    raise(app, Dialog::Prompt(prompt));
 }
 
 /// Ask for the address a LAN dial goes to. The sidebar row shows what the
@@ -1460,27 +1438,6 @@ fn start(app: &mut App, prompt: Prompt) {
                         return;
                     }
                 };
-            ask(app, ConfirmAction::Accessory(command));
-        }
-        PromptAction::WebdavUrl => {
-            if answer.trim().is_empty() {
-                let text = app.strings().net_no_url.to_string();
-                app.push_notice(crate::app::Notice {
-                    text,
-                    level: NoticeLevel::Warn,
-                });
-                return;
-            }
-            let command = match crate::accessory::webdav_command("on", answer.trim()) {
-                Ok(command) => command,
-                Err(why) => {
-                    app.push_notice(crate::app::Notice {
-                        text: why,
-                        level: NoticeLevel::Error,
-                    });
-                    return;
-                }
-            };
             ask(app, ConfirmAction::Accessory(command));
         }
         // The address is a value the user came to set, so an empty answer is
@@ -2648,9 +2605,9 @@ mod tests {
     #[test]
     fn a_prompt_carries_its_own_words() {
         let send = Dialog::Prompt(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
-        let receive = Dialog::Prompt(Prompt::new(WEBDAV_TITLE, PromptAction::WebdavUrl));
+        let receive = Dialog::Prompt(Prompt::new(LAN_HOST_TITLE, PromptAction::LanHost));
         assert_eq!(title(&send, Lang::En), " Join a WiFi network ");
-        assert_eq!(title(&receive, Lang::Zh), " 日志上传目标 ");
+        assert_eq!(title(&receive, Lang::Zh), " 局域网主机 ");
         assert_ne!(title(&send, Lang::Zh), title(&send, Lang::En));
 
         let theme = Theme::DARK;

@@ -108,8 +108,6 @@ enum OverlayPreview {
     /// caret can be looked at without a device — which is the only way to look
     /// at a dialog that is normally raised to *do* something.
     WifiSsid,
-    /// The prompt the WebDAV row opens.
-    WebdavUrl,
     /// The assistant's settings: five fields, a note list and a caret that has
     /// nowhere else to be looked at.
     Settings,
@@ -125,7 +123,6 @@ impl OverlayPreview {
             "notices" => Some(OverlayPreview::Notices),
             "confirm" => Some(OverlayPreview::Confirm),
             "wifi" => Some(OverlayPreview::WifiSsid),
-            "webdav" => Some(OverlayPreview::WebdavUrl),
             "settings" => Some(OverlayPreview::Settings),
             _ => None,
         }
@@ -151,7 +148,6 @@ impl OverlayPreview {
                 dialogs::ask(app, dialogs::ConfirmAction::Send(command));
             }
             OverlayPreview::WifiSsid => dialogs::prompt_wifi_ssid(app),
-            OverlayPreview::WebdavUrl => dialogs::prompt_webdav_url(app),
             // On the endpoint, which is the row a first-time user lands on.
             OverlayPreview::Settings => {
                 views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
@@ -606,7 +602,6 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
             "--query-uart" => args.requests.queries.push(device::Query::Uart),
             "--query-wifi" => args.requests.queries.push(device::Query::Wifi),
-            "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
                 let raw = value("--wifi");
@@ -621,8 +616,6 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--wifi-key-file" => args.wifi_key_file = Some(PathBuf::from(value("--wifi-key-file"))),
             "--wifi-off" => args.requests.wifi_off = true,
             "--wifi-scan" => args.requests.wifi_scan = true,
-            "--webdav" => args.requests.webdav = Some(value("--webdav")),
-            "--webdav-off" => args.requests.webdav_off = true,
             "--loopback-test" => {
                 // `nargs="?"` in the reference client: `--loopback-test` alone
                 // sends `A`, which is the shortest thing that can fail in an
@@ -771,6 +764,52 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             );
         }
     }
+    // An empty command is not a command. The run would still carry its marker,
+    // the marker would still come back, and the caller would read `rc: 0` and
+    // `verified: true` off a line that ran nothing. The resident session
+    // refuses the same request in these same words, because the two are one
+    // decision.
+    if let Some(command) = &args.exec {
+        if command.trim().is_empty() {
+            fail(prog, "exec wants a command to run");
+        }
+    }
+    // A bridge *is* a stdio link; a different `--transport` beside it would be
+    // overridden by it without a word, and the caller would believe the radio
+    // it named was the one being talked to.
+    if args.bridge.is_some() {
+        if let Some(kind) = args.transport {
+            if kind != linkr_tui::app::Transport::Stdio {
+                fail(
+                    prog,
+                    &format!(
+                        "the bridge is a stdio link, and --transport {} would be \
+                         overridden by it; pick one",
+                        kind.as_str()
+                    ),
+                );
+            }
+        }
+    }
+    // A join is a name and a password. Sent with an empty one, the firmware
+    // reads it as an *open network* rather than as a password somebody forgot —
+    // and the send that changed nothing comes back looking like success. The
+    // password may arrive later through `--wifi-key-file`; the file's own
+    // emptiness is checked when it is read.
+    if let Some((ssid, password)) = &args.requests.wifi {
+        if ssid.trim().is_empty() {
+            fail(
+                prog,
+                "a join needs a network to name; --wifi-off forgets the saved one",
+            );
+        }
+        if password.is_empty() && args.wifi_key_file.is_none() {
+            fail(
+                prog,
+                "a join needs a password: pass it as SSID,PASSWORD or through --wifi-key-file",
+            );
+        }
+    }
     args
 }
 
@@ -845,8 +884,8 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"query-webdav\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",\"webdav\",",
-                "\"webdav-off\",\"exec\",\"loopback-test\"{}],",
+                "\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"exec\",\"loopback-test\"{}],",
                 "\"defaults\":{{\"scan_timeout_ms\":{},\"connect_timeout_ms\":{},",
                 "\"exec_timeout_ms\":{}}},",
                 "\"exec\":{{\"endings\":[\"rc-marker\",\"idle\"],",
@@ -877,9 +916,8 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\n",
                 "scan        --scan                     list what is on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
-                "            --query-wifi --query-webdav --wifi-scan\n",
+                "            --query-wifi --wifi-scan\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
-                "            --webdav --webdav-off\n",
                 "execute     --exec COMMAND             run a shell command on the target\n",
                 "            --idle WINDOW              end it when the output goes quiet\n",
                 "            --retry N                  resend it after a timeout\n",
@@ -1138,6 +1176,12 @@ fn main() -> io::Result<()> {
             .map_or("", |pair| pair.0.as_str());
         if ssid.trim().is_empty() {
             eprintln!("error: --wifi-key-file needs --wifi to name the network too");
+            std::process::exit(2);
+        }
+        // The first line answered with nothing: the same refusal as never
+        // having named a password at all, for the same reason.
+        if password.trim().is_empty() {
+            eprintln!("error: --wifi-key-file is empty; a join needs a password to send");
             std::process::exit(2);
         }
         args.requests.wifi = Some((ssid.to_string(), password));
@@ -3502,7 +3546,6 @@ mod tests {
             ("notices", OverlayPreview::Notices),
             ("confirm", OverlayPreview::Confirm),
             ("wifi", OverlayPreview::WifiSsid),
-            ("webdav", OverlayPreview::WebdavUrl),
             ("settings", OverlayPreview::Settings),
         ] {
             assert_eq!(args(&["--overlay", name]).overlay, Some(expected), "{name}");
@@ -3569,7 +3612,6 @@ mod tests {
             (OverlayPreview::Notices, "通知记录"),
             (OverlayPreview::Confirm, "请确认"),
             (OverlayPreview::WifiSsid, "加入 WiFi 网络"),
-            (OverlayPreview::WebdavUrl, "日志上传目标"),
             (OverlayPreview::Settings, "助手设置"),
         ] {
             let mut app = App::default();
