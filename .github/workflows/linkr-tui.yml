@@ -434,9 +434,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            echo "creating release $GITHUB_REF_NAME"
             gh release create "$GITHUB_REF_NAME" \
               --title "linkr-tui $GITHUB_REF_NAME" --generate-notes
+          fi
+
+      # A draft is invisible to everyone without the token, so from outside it
+      # reads as "the release never happened"; taking the flag off is
+      # idempotent on a published release. This run exists so the release
+      # matches this build — including being seen.
+      - name: Make sure it is published
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false
 
       # A tag can be re-pointed — this one has been — and the assets a previous
       # run uploaded under it keep their names and stay there until something
@@ -475,3 +491,29 @@ jobs:
           shopt -s nullglob
           files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.deb dist/SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+      # The run is not done when the upload returns: it is done when the
+      # release, read back from GitHub, is public and carries exactly the
+      # files this build made. A silent divergence upstream — the state that
+      # left this tag without a visible release once — fails here instead of
+      # shipping.
+      - name: The release carries this build
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          expected=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          count=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')
+          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
+          echo "release $GITHUB_REF_NAME: assets=$count expected=${#expected[@]} draft=$draft"
+          [ "$draft" = "false" ] || {
+            echo "the release is a draft — nobody without the token can see it"
+            exit 1
+          }
+          [ "$count" = "${#expected[@]}" ] || {
+            echo "the release carries $count assets, this build made ${#expected[@]}"
+            exit 1
+          }
