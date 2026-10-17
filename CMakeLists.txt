@@ -20,6 +20,7 @@ target_sources(app PRIVATE
   src/ble_uart_reliable.c
   src/main.c
   src/uart_autobaud.c
+  src/uart_bulk_tx.c
   src/wifi.c
   src/ws_bridge.c
 )

@@ -38,6 +38,7 @@
 #include "ble_uart_reliable.h"
 #include "wifi.h"
 #include "uart_autobaud.h"
+#include "uart_bulk_tx.h"
 #include "ws_bridge.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
@@ -1551,9 +1552,29 @@ static void ble_to_uart_thread(void)
 	for (;;) {
 		k_msgq_get(&ble_to_uart_queue, &packet, K_FOREVER);
 
+#if LINKR_UART_BULK_TX
+		/*
+		 * Same bytes, same order, same completion guarantee as the
+		 * uart_poll_out loop below — the difference is one write to
+		 * the FIFO instead of 244 single-byte trips through the
+		 * driver. The rate is read under the same lock every other
+		 * reader uses, because autobaud can move the port underneath
+		 * us. Boards with the option off compile the loop below
+		 * unchanged.
+		 */
+		uint32_t baudrate;
+
+		k_mutex_lock(&uart_config_lock, K_FOREVER);
+		baudrate = active_uart_config.baudrate;
+		k_mutex_unlock(&uart_config_lock);
+
+		linkr_uart_bulk_write(DT_REG_ADDR(LINKR_UART_NODE), baudrate,
+				      packet.data, packet.len);
+#else
 		for (uint16_t i = 0; i < packet.len; i++) {
 			uart_poll_out(bridge_uart, packet.data[i]);
 		}
+#endif
 
 		signal_uart_activity();
 	}

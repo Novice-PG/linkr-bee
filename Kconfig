@@ -154,6 +154,51 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 	  wired up and validated on esp32_devkitc. Widening it to C3/C5/S3
 	  needs a build and a real link test on those parts first.
 
+config LINKR_BLE_BRIDGE_UART_BULK_TX
+	bool "Fill the UART FIFO in one write instead of one byte at a time"
+	depends on SOC_SERIES_ESP32
+	default n
+	help
+	  Send each packet to the UART by filling its hardware FIFO in a
+	  single write, instead of looping uart_poll_out() once per byte.
+
+	  uart_poll_out() waits for one byte of FIFO space and then writes
+	  that one byte; on the classic ESP32 its body is 50 bytes of code
+	  and the spin is inside it. The FIFO is 128 bytes
+	  (SOC_UART_FIFO_LEN) and a packet is up to 244, so a full packet is
+	  244 trips through that function plus the caller's loop — 244 calls
+	  through the device api, 244 status reads, 244 single-byte writes,
+	  and 116 of them spinning because the FIFO is full. This option does
+	  the same bytes in the same order but offers the FIFO everything it
+	  can take in one call, so the per-packet driver overhead falls from
+	  244 round trips to a handful.
+
+	  Be clear about what that buys: CPU time, not line speed. A 244-byte
+	  packet is 21.2 ms of serialisation at 115200 baud and no firmware
+	  change shortens it — that 11520 B/s is the ceiling on this link.
+	  The saving is the redundant bookkeeping around the wire, which is
+	  worth having but is not a faster port.
+
+	  Turned off, the byte-at-a-time loop is compiled instead and every
+	  board builds exactly as it did before. It is off by default because
+	  the change is on a live TX path and the only board it has been
+	  built and measured on is esp32_devkitc.
+
+	  Only the classic ESP32 is validated. It reaches <hal/uart_hal.h>
+	  for the free-slot count and the FIFO write, neither of which is
+	  used anywhere else in this tree. C3/C5 have their own uart_ll.h with
+	  the same two entry points and would very likely work, but "very
+	  likely" is not what shipping firmware runs on: widening this needs a
+	  build and a sustained transfer on those parts first, the same bar
+	  the autobaud option above is held to.
+
+	  There is no reason to enable it together with
+	  LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY: the loopback config
+	  reads its own bytes back on the other side of the wire, and the
+	  header collapses to a no-op stub under that config regardless of
+	  this setting.
+
+
 choice LINKR_BLE_BRIDGE_UART_DATA_BITS
 	prompt "UART data bits"
 	default LINKR_BLE_BRIDGE_UART_DATA_BITS_8
