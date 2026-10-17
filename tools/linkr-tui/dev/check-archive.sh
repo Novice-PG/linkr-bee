@@ -43,13 +43,32 @@ case "$stem" in
     ;;
   *.tar.gz) listing=$(tar -tzf "$archive") ;;
   *.zip)
-    # GNU tar cannot read a zip and bsdtar can, which is the whole of the
-    # platform difference here: ask `unzip` first and fall back to `tar`.
-    if unzip -Z1 "$archive" >/dev/null 2>&1; then
-      listing=$(unzip -Z1 "$archive")
-    else
-      listing=$(tar -tf "$archive")
-    fi
+    # A zip is checked by extracting it rather than by listing it: on Windows
+    # the listing needs a tool Git Bash does not have — its `tar` is GNU tar
+    # and cannot read a zip, and there is no `unzip` — while PowerShell is
+    # always there and reads one. The tree that comes out is what the user
+    # will have, which is what the rest of this script is about.
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        # `cygpath` is what turns the shell's `/tmp/...` into the path
+        # PowerShell will actually open.
+        powershell -NoProfile -Command \
+          "Expand-Archive -LiteralPath '$(cygpath -w "$archive")' \
+             -DestinationPath '$(cygpath -w "$work")' -Force" >/dev/null
+        ;;
+      *)
+        unzip -q "$archive" -d "$work" 2>/dev/null ||
+          tar -xf "$archive" -C "$work" 2>/dev/null || {
+            echo "no tool here can read a zip" >&2
+            exit 1
+          }
+        ;;
+    esac
+    # The paths are taken relative to the extraction root, which is the shape
+    # the rule below is written in.
+    listing=$(cd "$work" && find . -mindepth 1 | sed 's|^\./||')
     ;;
   *.dmg)
     if [ "$(uname -s)" = Darwin ]; then
@@ -71,8 +90,10 @@ name=${name%.zip}
 bin=linkr
 case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
 # Nothing may be in here that the script did not put there: a stray file in a
-# release is uploaded before anyone reads the diff.
-allowed=$(printf '%s\n' "$name/" "$name/$bin" "$name/$bin.exe" \
+# release is uploaded before anyone reads the diff. The folder is spelled both
+# ways because `tar` lists a directory with its trailing slash and a `find`
+# over an extracted zip does not.
+allowed=$(printf '%s\n' "$name" "$name/" "$name/$bin" "$name/$bin.exe" \
                         "$name/README.md" "$name/LICENSE")
 for entry in $listing; do
   printf '%s\n' "$allowed" | grep -qx "$entry" || {

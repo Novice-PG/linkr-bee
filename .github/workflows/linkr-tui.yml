@@ -323,10 +323,17 @@ jobs:
               *.zip)
                 case "$(uname -s)" in
                   Linux) unzip -q "$archive" -d "$dir" ;;
-                  # macOS and Windows both reach a bsdtar as `tar`, and it
-                  # reads a zip as happily as a tarball. PowerShell would
-                  # expand it too, but it has its own idea of what `/tmp/...`
-                  # means and the extraction would land somewhere else.
+                  MINGW*|MSYS*|CYGWIN*)
+                    # Git Bash has no `unzip`, and its `tar` is GNU tar, which
+                    # cannot read a zip. PowerShell can, and `cygpath` is what
+                    # keeps the extraction pointed at the same directory the
+                    # shell will look in.
+                    powershell -NoProfile -Command \
+                      "Expand-Archive -LiteralPath '$(cygpath -w "$archive")' \
+                         -DestinationPath '$(cygpath -w "$dir")' -Force" >/dev/null
+                    ;;
+                  # macOS reaches a bsdtar as `tar`, and it reads a zip as
+                  # happily as a tarball.
                   *) tar -xf "$archive" -C "$dir" ;;
                 esac
                 ;;
