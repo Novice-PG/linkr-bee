@@ -137,12 +137,14 @@ jobs:
       # check or no check, so the cross C compilers are what this job needs.
       # The libdbus is only for the probe — a check links nothing, but
       # libdbus-sys still asks pkg-config for the Linux targets' flags.
+      # `nasm` is for the 32-bit x86 targets: aws-lc's i386 assembly is NASM
+      # source, and its absence is a build failure, not a fallback to C.
       - name: Install the cross compilers
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 \
-                                  gcc-mingw-w64-i686 libdbus-1-dev pkg-config
+                                  gcc-mingw-w64-i686 libdbus-1-dev pkg-config nasm
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
@@ -204,7 +206,7 @@ jobs:
             deb: true
           - os: ubuntu-latest
             target: i686-unknown-linux-gnu
-            apt: gcc-i686-linux-gnu
+            apt: gcc-i686-linux-gnu nasm
             linker_var: CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
             linker: i686-linux-gnu-gcc
             stage: true
@@ -219,7 +221,7 @@ jobs:
             linker: x86_64-w64-mingw32-gcc
           - os: ubuntu-latest
             target: i686-pc-windows-gnu
-            apt: gcc-mingw-w64-i686 zip unzip
+            apt: gcc-mingw-w64-i686 zip unzip nasm
             linker_var: CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER
             linker: i686-w64-mingw32-gcc
           # Windows, MSVC ABI, on Windows: the ARM64 tools ship with the
@@ -284,58 +286,17 @@ jobs:
           fi
 
       # What a release carries is read back before it is uploaded: the entries
-      # of every archive, the package's own name and the binary inside it.
+      # of every archive, the package's own name and the binary inside it. The
+      # script knows every format and the tool each platform reads it with, so
+      # every leg is checked exactly as much as its neighbours are — a
+      # Windows-produced `.zip` used to be read by nobody.
       - name: Check the archives
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
           for archive in dist/*; do
-            echo "archive: $archive"
-            case "$archive" in
-              *.deb)
-                # `dpkg-deb -c` prints a long listing, and a `grep -q` on the
-                # far end of a pipe exits the moment it matches — which kills
-                # the writer with SIGPIPE and, under `pipefail`, fails a check
-                # that just succeeded. Capture first, match on the string.
-                fields=$(dpkg-deb -f "$archive" Package Architecture)
-                echo "$fields"
-                grep -qx 'Package: linkr' <<<"$fields" || {
-                  echo "unexpected package name" >&2
-                  exit 1
-                }
-                contents=$(dpkg-deb -c "$archive")
-                grep -E ' \./usr/bin/linkr$' <<<"$contents" >/dev/null || {
-                  echo "the package holds no binary" >&2
-                  exit 1
-                }
-                continue
-                ;;
-              *.tar.gz) listing=$(tar -tzf "$archive") ;;
-              *.zip)    listing=$(unzip -Z1 "$archive") ;;
-              *) continue ;;
-            esac
-            echo "$listing"
-            stem=$(basename "$archive")
-            name=${stem%.tar.gz}
-            name=${name%.zip}
-            bin=linkr
-            case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
-            # Nothing may be in here that the script did not put there: a stray
-            # file in a release is uploaded before anyone reads the diff.
-            allowed=$(printf '%s\n' "$name/" "$name/$bin" "$name/$bin.exe" \
-                                    "$name/README.md" "$name/LICENSE")
-            for entry in $listing; do
-              grep -qx "$entry" <<<"$allowed" || {
-                echo "unexpected entry in the archive: $entry" >&2
-                exit 1
-              }
-            done
-            # And one of them must be the binary itself.
-            grep -E "^$name/$bin(\.exe)?$" <<<"$listing" >/dev/null || {
-              echo "the archive holds no binary" >&2
-              exit 1
-            }
+            dev/check-archive.sh "$archive"
           done
 
       # Only the host's own target can be executed here. The rest are checked by
@@ -361,11 +322,12 @@ jobs:
               *.tar.gz) tar -xzf "$archive" -C "$dir" ;;
               *.zip)
                 case "$(uname -s)" in
-                  MINGW*|MSYS*)
-                    powershell -NoProfile -Command \
-                      "Expand-Archive -LiteralPath '$archive' -DestinationPath '$dir' -Force"
-                    ;;
-                  *) unzip -q "$archive" -d "$dir" ;;
+                  Linux) unzip -q "$archive" -d "$dir" ;;
+                  # macOS and Windows both reach a bsdtar as `tar`, and it
+                  # reads a zip as happily as a tarball. PowerShell would
+                  # expand it too, but it has its own idea of what `/tmp/...`
+                  # means and the extraction would land somewhere else.
+                  *) tar -xf "$archive" -C "$dir" ;;
                 esac
                 ;;
               *.dmg)
@@ -468,6 +430,31 @@ jobs:
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
             gh release create "$GITHUB_REF_NAME" \
               --title "linkr-tui $GITHUB_REF_NAME" --generate-notes
+
+      # A tag can be re-pointed — this one has been — and the assets a previous
+      # run uploaded under it keep their names and stay there until something
+      # removes them. Without this, the Windows `.tar.gz` of an older format
+      # would sit beside the new `.zip` and read as a choice somebody should
+      # make, and the release would carry files its own checksums do not name.
+      # After this step the release is exactly the files just built.
+      - name: Drop the assets this build does not carry
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          keep=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[].name' > /tmp/assets
+          while IFS= read -r name; do
+            for wanted in "${keep[@]}"; do
+              [ "$name" = "$wanted" ] && continue 2
+            done
+            echo "dropping $name: this build does not carry it"
+            gh release delete-asset "$GITHUB_REF_NAME" "$name" -y
+          done < /tmp/assets
 
       # `--clobber` so re-running a workflow over an existing tag replaces the
       # archives rather than failing halfway. The globs are expanded from a
