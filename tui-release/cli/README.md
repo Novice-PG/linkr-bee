@@ -16,7 +16,7 @@
 ## 一、快速开始
 
 ```sh
-# Linux / macOS：解压后运行（按机器架构选包；macOS 也可用上一级 macos/ 里的 .dmg）
+# Linux / macOS：解压后运行（按机器架构选包；macOS 另有 .dmg：本目录的是这份 CLI，上一级 macos/ 的是界面版）
 tar xzf linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
 ./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --version
 ./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --scan        # 附近有哪些设备
