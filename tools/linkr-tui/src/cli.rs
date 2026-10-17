@@ -233,6 +233,16 @@ pub const FLAGS: &[Flag] = &[
         Value::None,
         "print what this tool is and can do, and exit",
     ),
+    Flag::new(
+        "--doctor",
+        Value::None,
+        "check the link, the bridge, the loopback and the target once",
+    ),
+    Flag::with_choices(
+        "--send",
+        &["line", "raw"],
+        "send stdin without waiting for an ending; line adds newlines",
+    ),
     // The bridge itself
     Flag::new(
         "--query-info",
@@ -248,6 +258,11 @@ pub const FLAGS: &[Flag] = &[
         "--query-wifi",
         Value::None,
         "ask @w? and print the WiFi status",
+    ),
+    Flag::new(
+        "--query-lan",
+        Value::None,
+        "ask @s? and print the bridge's LAN address and token state",
     ),
     Flag::new(
         "--uart",
@@ -275,6 +290,11 @@ pub const FLAGS: &[Flag] = &[
         "--loopback-timeout",
         Value::Free,
         "seconds to wait for that echo",
+    ),
+    Flag::new(
+        "--link-state",
+        Value::None,
+        "print this link's state and counters, then exit",
     ),
     // The terminal
     Flag::with_choices(
@@ -316,6 +336,274 @@ impl Flag {
     }
 }
 
+/// The subcommands, and what each one is an alias of.
+///
+/// A subcommand is not a second command line: `linkr scan` is the *same* line
+/// as `linkr --scan`, written as words. [`expand_subcommand`] rewrites it
+/// before the one parser sees anything, so a subcommand can never mean
+/// something the flag of the same name does not — there is one grammar to
+/// teach, one table for the help and the completion, and one place a bug can
+/// live.
+///
+/// The order is the order the help lists them.
+pub const SUBCOMMANDS: &[(&str, &str)] = &[
+    ("scan", "list nearby Bluetooth devices, and never connect"),
+    (
+        "doctor",
+        "one checkup: the link, the bridge, the loopback, the target",
+    ),
+    ("query", "read one thing: info, uart, wifi or lan"),
+    ("set", "change one thing and read it back: uart or wifi"),
+    (
+        "exec",
+        "run a command on the target and bring its status back: exec -- <cmd>",
+    ),
+    (
+        "send",
+        "send without waiting for an ending: send --line, or send --raw",
+    ),
+    (
+        "loopback",
+        "send a payload and require it back: loopback <payload>",
+    ),
+    ("tui", "open the terminal after whatever else was asked for"),
+    ("capabilities", "print what this tool is and can do"),
+];
+
+/// The subcommand `word` names, if it names one.
+pub fn subcommand_named(word: &str) -> Option<&'static str> {
+    SUBCOMMANDS
+        .iter()
+        .find(|(name, _)| *name == word)
+        .map(|(name, _)| *name)
+}
+
+/// The subcommand names as a JSON array, for the capability document.
+pub fn subcommands_json() -> String {
+    let names: Vec<String> = SUBCOMMANDS
+        .iter()
+        .map(|(name, _)| json_string(name))
+        .collect();
+    format!("[{}]", names.join(","))
+}
+
+/// The subcommand names as a line of prose, for the capability document's text.
+pub fn subcommands_words() -> String {
+    SUBCOMMANDS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether the flag at `flag` takes the word after it as its value.
+///
+/// `None` for a word this table does not know: an unknown flag is the parser's
+/// to refuse, and the expansion only has to avoid mistaking a *value* for a
+/// subcommand.
+fn takes_a_value(flag: &str) -> Option<bool> {
+    let known = FLAGS.iter().find(|known| known.name == flag)?;
+    Some(!matches!(known.value, Value::None))
+}
+
+/// Rewrite a subcommand form of the command line into the flag form.
+///
+/// `linkr scan --json` becomes `linkr --scan --json`, `linkr exec -- df -h`
+/// becomes `linkr --exec "df -h"`, and a line with no subcommand in it is
+/// handed back untouched — which is what keeps every existing script, every
+/// existing flag and every existing test working. The subcommand's own words
+/// are consumed, the flags around them (before *and* after, because a global
+/// flag written after the subcommand means what it says) are left where they
+/// are, and the one parser reads the result.
+///
+/// `--` says where the flags stop and the words begin: after it everything is
+/// data, even a word that looks like a flag. Written without one, the words are
+/// the bare words leading, and a command that starts with a dash then needs the
+/// `--` — which is exactly what it is for.
+///
+/// The error is a sentence for the caller: a subcommand whose words do not add
+/// up is a usage error, and naming the word it wanted is the answer.
+pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
+    // Where the subcommand is, if there is one: the first bare word that is not
+    // the value of a flag before it. `--ble-name doctor` names a board called
+    // doctor, and reading that value as a subcommand would be a lie about the
+    // command line the caller wrote.
+    let mut at = 0;
+    while at < argv.len() {
+        let word = argv[at].as_str();
+        if takes_a_value(word) == Some(true) {
+            at += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            at += 1;
+            continue;
+        }
+        break;
+    }
+    let Some(name) = argv.get(at).and_then(|word| subcommand_named(word)) else {
+        return Ok(argv);
+    };
+    let after = &argv[at + 1..];
+    // The three parts a subcommand's tail can have: flags written before a
+    // `--`, the words that are the data, and the flags written after them.
+    let (mut before, words, mut after_flags): (Vec<String>, Vec<String>, Vec<String>) =
+        match after.iter().position(|word| word == "--") {
+            Some(sep) => (after[..sep].to_vec(), after[sep + 1..].to_vec(), Vec::new()),
+            None => {
+                let bare = after
+                    .iter()
+                    .take_while(|word| !word.starts_with('-'))
+                    .count();
+                (Vec::new(), after[..bare].to_vec(), after[bare..].to_vec())
+            }
+        };
+
+    let mut translated: Vec<String> = Vec::new();
+    match name {
+        "scan" | "capabilities" | "doctor" | "tui" => {
+            reject_words(name, &words)?;
+            translated.push(
+                match name {
+                    "scan" => "--scan",
+                    "capabilities" => "--capabilities",
+                    "doctor" => "--doctor",
+                    // Opening the terminal is what `--cli-then-tui` names: run
+                    // what else was asked for, then take the screen. A `tui`
+                    // with nothing else asked for is the plain launch.
+                    _ => "--cli-then-tui",
+                }
+                .to_string(),
+            );
+        }
+        "query" => {
+            let [what] = one_word(name, &words)?;
+            translated.push(
+                match what.as_str() {
+                    "info" => "--query-info",
+                    "uart" => "--query-uart",
+                    "wifi" => "--query-wifi",
+                    "lan" => "--query-lan",
+                    other => {
+                        return Err(format!(
+                            "query reads one of info, uart, wifi or lan; '{other}' is not one"
+                        ))
+                    }
+                }
+                .to_string(),
+            );
+        }
+        "set" => {
+            let [what, value] = two_words(name, &words)?;
+            translated.push(
+                match what.as_str() {
+                    "uart" => "--uart",
+                    "wifi" => "--wifi",
+                    other => {
+                        return Err(format!(
+                            "set changes one of uart or wifi; '{other}' is not one"
+                        ))
+                    }
+                }
+                .to_string(),
+            );
+            translated.push(value);
+        }
+        "loopback" => {
+            let [payload] = one_word(name, &words)?;
+            translated.push("--loopback-test".to_string());
+            translated.push(payload);
+        }
+        "exec" => {
+            // The words are the command. Joining them with spaces is what the
+            // flag form would have received had the caller quoted them, and it
+            // is the shell's own reading of an unquoted command line.
+            let command = words.join(" ");
+            if command.is_empty() {
+                return Err("exec wants a command to run: exec -- <command>".to_string());
+            }
+            translated.push("--exec".to_string());
+            translated.push(command);
+        }
+        "send" => {
+            if let Some(word) = words.first() {
+                return Err(format!("send takes no words; '{word}' is not one"));
+            }
+            // `--line` and `--raw` say how, so they are the subcommand's own
+            // words in flag clothing: taken out here, where the flag form has
+            // the one `--send line|raw` to keep.
+            let mut chosen: Option<&'static str> = None;
+            take_send_marker(&mut before, &mut chosen)?;
+            take_send_marker(&mut after_flags, &mut chosen)?;
+            let Some(how) = chosen else {
+                return Err("send wants --line or --raw to say how".to_string());
+            };
+            translated.push("--send".to_string());
+            translated.push(how.to_string());
+        }
+        _ => unreachable!("every subcommand is in the match"),
+    }
+    let mut out: Vec<String> = argv[..at].to_vec();
+    out.extend(before);
+    out.extend(translated);
+    out.extend(after_flags);
+    Ok(out)
+}
+
+/// Take `--line` or `--raw` out of the words it was written among, and say
+/// which one was asked for. Both at once is a contradiction, and neither is a
+/// `send` that never said how.
+fn take_send_marker(
+    words: &mut Vec<String>,
+    chosen: &mut Option<&'static str>,
+) -> Result<(), String> {
+    let mut kept = Vec::with_capacity(words.len());
+    for word in words.drain(..) {
+        match word.as_str() {
+            "--line" | "--raw" => {
+                if chosen.is_some() {
+                    return Err("send takes --line or --raw, not both".to_string());
+                }
+                *chosen = Some(if word == "--line" { "line" } else { "raw" });
+            }
+            _ => kept.push(word),
+        }
+    }
+    *words = kept;
+    Ok(())
+}
+
+fn reject_words(name: &str, words: &[String]) -> Result<(), String> {
+    match words.first() {
+        Some(word) => Err(format!("{name} takes no words; '{word}' is not one")),
+        None => Ok(()),
+    }
+}
+
+fn one_word(name: &str, words: &[String]) -> Result<[String; 1], String> {
+    match words {
+        [word] => Ok([word.clone()]),
+        [] => Err(format!("{name} wants one word after it")),
+        _ => Err(format!(
+            "{name} takes one word; {} is too many",
+            words.len()
+        )),
+    }
+}
+
+fn two_words(name: &str, words: &[String]) -> Result<[String; 2], String> {
+    match words {
+        [first, second] => Ok([first.clone(), second.clone()]),
+        [] | [_] => Err(format!(
+            "{name} wants two words: what to change, and to what"
+        )),
+        _ => Err(format!(
+            "{name} takes two words; {} is too many",
+            words.len()
+        )),
+    }
+}
+
 /// The usage text, generated from the table rather than written beside it.
 ///
 /// Two columns like the reference clients': a flag and what it does. Generated
@@ -327,6 +615,24 @@ pub fn usage(prog: &str, about: &str) -> String {
     let _ = writeln!(out, "{about}");
     let _ = writeln!(out);
     let _ = writeln!(out, "Usage: {prog} [OPTIONS]");
+    let _ = writeln!(out, "       {prog} <SUBCOMMAND> [OPTIONS]");
+    let _ = writeln!(out);
+    // The subcommands are the same flags in words. One table, printed from —
+    // see `SUBCOMMANDS` — and the whole list is in the help because the whole
+    // list is the model: a caller who reads a subcommand here can write it as
+    // the flag underneath and get the same run.
+    let _ = writeln!(
+        out,
+        "Subcommands (the same runs, written as words; one per command line):"
+    );
+    let subcommand_width = SUBCOMMANDS
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    for (name, about) in SUBCOMMANDS {
+        let _ = writeln!(out, "  {name:subcommand_width$}  {about}");
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
     let width = FLAGS
@@ -357,6 +663,16 @@ pub fn usage(prog: &str, about: &str) -> String {
 that bridge. It is never echoed: anything the bridge says about itself has the
 token scrubbed before it reaches the screen, the notices or the log."
     );
+    if !cfg!(feature = "tui") {
+        // The flags above are one table for both builds — the help and the
+        // completion scripts read it — so the one thing that differs between
+        // them is said here, in the build where it is true.
+        let _ = writeln!(
+            out,
+            "\nThis build has no interface: --enter, --local-echo, --line-mode,
+--escape and --cli-then-tui are refused, not ignored."
+        );
+    }
     out
 }
 
@@ -973,6 +1289,136 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
     failed
 }
 
+/// Print what the device has said since the last look, and forget it.
+///
+/// The checkup is the caller: it wants the device's own greeting — the banner
+/// every other command prints — on screen before its first check, and the
+/// round trip below deliberately discards whatever is already in flight, which
+/// is right for an echo test and wrong for a greeting.
+pub fn flush_output(app: &mut App, format: Format) {
+    app.pump();
+    drain(app, format);
+}
+
+/// How `--send` frames what arrives on standard input.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Framing {
+    /// One line at a time, each ending with a newline: what a person would have
+    /// typed into a terminal.
+    Line,
+    /// The bytes exactly as they arrive, framing and all.
+    Raw,
+}
+
+impl Framing {
+    /// The framing `name` asks for, if it is one this build knows.
+    pub fn from_name(name: &str) -> Option<Framing> {
+        match name {
+            "line" => Some(Framing::Line),
+            "raw" => Some(Framing::Raw),
+            _ => None,
+        }
+    }
+}
+
+/// Send standard input to the target, printing what comes back as it comes.
+///
+/// This is the human-in-the-loop half of `--exec`: the caller types (or pipes)
+/// what they would have typed into a terminal, and this forwards it without
+/// deciding when anything has ended. There is no ending rule here and no
+/// marker, because the bytes *are* the point — a `--send` that invented an
+/// ending would be an `--exec` that does not bring a status back with it.
+///
+/// The bytes go out as the caller produces them, and the answers are printed
+/// while the next line is still being typed, which is what makes it usable with
+/// a person at the keyboard. The run's answer is whether all of them went out;
+/// an empty standard input is a failure and not a quiet success, for the same
+/// reason an empty `--exec` is (issue 01): a run that did nothing must not look
+/// like one that worked.
+pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
+    use std::io::{BufRead, Read};
+
+    app.collect_output = true;
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut sent = 0usize;
+    let mut missing = 0usize;
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        let read = if how == Framing::Line {
+            match input.read_until(b'\n', &mut buffer) {
+                Ok(read) => read,
+                Err(_) => break,
+            }
+        } else {
+            // A read at a time: `raw` has no framing of its own, so the only
+            // sensible size is the one that keeps a pipe moving.
+            buffer.resize(4096, 0);
+            match input.read(&mut buffer) {
+                Ok(read) => {
+                    buffer.truncate(read);
+                    read
+                }
+                Err(_) => break,
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        let outgoing = match how {
+            Framing::Raw => buffer.clone(),
+            Framing::Line => {
+                // The newline is the framing and is put back below; a carriage
+                // return before it is the file's line ending, not the caller's
+                // keystroke, and sending both would frame twice.
+                let mut line = buffer.clone();
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                line.push(b'\n');
+                line
+            }
+        };
+        if app.send_bytes(&outgoing) {
+            sent += outgoing.len();
+        } else {
+            missing += outgoing.len();
+        }
+        app.pump();
+        drain(app, format);
+    }
+    // One last look: the answer to the last line may still be on its way, and a
+    // human who just typed something expects to see the answer to *that* one
+    // and not only to the ones before it.
+    let deadline = Instant::now() + SETTLE_SLACK;
+    while Instant::now() < deadline {
+        app.pump();
+        drain(app, format);
+        thread::sleep(Duration::from_millis(5));
+    }
+    if sent == 0 && missing == 0 {
+        return report(
+            format,
+            "send",
+            false,
+            "standard input was empty: nothing was sent",
+        );
+    }
+    if missing > 0 {
+        return report(
+            format,
+            "send",
+            false,
+            &format!("{sent} bytes sent, {missing} could not be sent — the link went away"),
+        );
+    }
+    report(format, "send", true, &format!("{sent} bytes sent"))
+}
+
 /// Send `payload` and require the same bytes back.
 ///
 /// This is the wiring test, and it is the only check that proves the round trip
@@ -986,6 +1432,26 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
 /// target may well have echoed it between other output — a console that is
 /// printing a prompt is still a working wire.
 pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: Format) -> bool {
+    match loopback_round_trip(app, payload, timeout) {
+        Ok(detail) => {
+            let _ = report(format, "loopback", true, &detail);
+            true
+        }
+        Err(why) => {
+            let _ = report(format, "loopback", false, &why);
+            false
+        }
+    }
+}
+
+/// Send `payload` and require the same bytes back, handing back what was heard
+/// — or the reason the round trip did not happen. `loopback_test` is this,
+/// printed; the checkup is the caller that wants the answer as a value.
+pub fn loopback_round_trip(
+    app: &mut App,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<String, String> {
     app.collect_output = true;
     // Anything already in flight belongs to whatever happened before the test,
     // and counting it as the echo would let a board pass without answering.
@@ -994,12 +1460,10 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
     // at every position, including before anything arrived — and a test that
     // passes on silence is worse than no test.
     if payload.is_empty() {
-        let _ = report(format, "loopback", false, "the payload is empty");
-        return false;
+        return Err("the payload is empty".to_string());
     }
     if !app.send_bytes(payload) {
-        let _ = report(format, "loopback", false, app.strings().not_connected);
-        return false;
+        return Err(app.strings().not_connected.to_string());
     }
 
     let mut seen: Vec<u8> = Vec::new();
@@ -1010,25 +1474,18 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
             seen.extend_from_slice(&chunk);
         }
         if seen.windows(payload.len()).any(|window| window == payload) {
-            let _ = report(format, "loopback", true, &crate::trace::debugged(payload));
-            return true;
+            return Ok(crate::trace::debugged(payload));
         }
         if Instant::now() >= deadline {
             break;
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let _ = report(
-        format,
-        "loopback",
-        false,
-        &format!(
-            "timed out after {} s; heard {}",
-            timeout.as_secs_f64(),
-            crate::trace::debugged(&seen)
-        ),
-    );
-    false
+    Err(format!(
+        "timed out after {} s; heard {}",
+        timeout.as_secs_f64(),
+        crate::trace::debugged(&seen)
+    ))
 }
 
 /// Pump until a dialled link is connected enough to be asked things.
@@ -1112,25 +1569,56 @@ fn with_wifi_state(app: &App, why: &str) -> String {
 /// — and the report afterwards reads whichever of those happened off the
 /// state it left.
 fn wait_and_report(app: &mut App, query: crate::device::Query, format: Format) -> i32 {
-    // A join is answered twice — an ack, then the phases of an asynchronous
-    // operation — and it can be refused for busy and asked again on a later
-    // beat. The wait covers the whole of that, because a write still owed an
-    // attempt is a question still outstanding. Every other query ends with its
-    // own patience, so the wider window costs them nothing.
+    if !wait_for_query(app, query, format) {
+        return report(format, query_name(query), false, &why_no_answer(app));
+    }
+    report_query(app, query, format)
+}
+
+/// Ask one management question and wait for the answer, handing it back as a
+/// value instead of printing it.
+///
+/// The waiting is the same waiting — the same patience, the same busy retries
+/// through `App::ask_device` — because a checkup that waited differently would
+/// describe a different bridge. Only the printing is the caller's, and the
+/// checkup is that caller: it compares the answer with what it expects.
+pub fn ask_and_wait(
+    app: &mut App,
+    query: crate::device::Query,
+    format: Format,
+) -> Result<String, String> {
+    app.collect_output = true;
+    app.ask_device(query)?;
+    if !wait_for_query(app, query, format) {
+        return Err(why_no_answer(app));
+    }
+    answer_of(app, query)
+}
+
+/// Wait for the answer to the question that was just asked, and say whether it
+/// arrived.
+///
+/// A join is answered twice — an ack, then the phases of an asynchronous
+/// operation — and it can be refused for busy and asked again on a later
+/// beat. The wait covers the whole of that, because a write still owed an
+/// attempt is a question still outstanding. Every other query ends with its
+/// own patience, so the wider window costs them nothing.
+fn wait_for_query(app: &mut App, query: crate::device::Query, format: Format) -> bool {
     let window = match query {
         crate::device::Query::Wifi => crate::app::wifi_write_window(),
         _ => query.patience(),
     } + SETTLE_SLACK;
-    if !settle(app, format, window) {
-        let why = app
-            .diagnostics
-            .error
-            .clone()
-            .or_else(|| app.network.error.clone())
-            .unwrap_or_else(|| "the bridge did not answer".to_string());
-        return report(format, query_name(query), false, &why);
-    }
-    report_query(app, query, format)
+    settle(app, format, window)
+}
+
+/// Why a question that was asked has no answer: whatever the wait left behind
+/// as the reason, or the plainest possible one.
+fn why_no_answer(app: &App) -> String {
+    app.diagnostics
+        .error
+        .clone()
+        .or_else(|| app.network.error.clone())
+        .unwrap_or_else(|| "the bridge did not answer".to_string())
 }
 
 /// Wait for a WiFi write to end, and report what it ended on.
@@ -1281,19 +1769,25 @@ fn report(format: Format, what: &str, ok: bool, detail: &str) -> i32 {
 }
 
 /// Print what a read came back with.
-fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
-    // A read that did not arrive — nothing answered, or what answered could
-    // not be read — is reported with its reason. An empty reply next to
-    // `ok=false` reads as a read that came back empty rather than one that
-    // never happened, which sends the reader to the wrong half of the link.
+/// What one query's answer is, as text, or the reason there is none.
+///
+/// A read that did not arrive — nothing answered, or what answered could not be
+/// read — is an error rather than an empty answer: an empty reply next to
+/// `ok=false` reads as a read that came back empty rather than one that never
+/// happened, which sends the reader to the wrong half of the link.
+///
+/// A value and not a print because the checkup (`--doctor`) is a caller: it
+/// compares the answer with what it expects, and a line on standard output
+/// cannot be compared.
+fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
     let error = match query {
         crate::device::Query::Diagnostics => &app.diagnostics.error,
         _ => &app.network.error,
     };
     if let Some(why) = error {
-        return report(format, query_name(query), false, why);
+        return Err(why.clone());
     }
-    let detail = match query {
+    Ok(match query {
         crate::device::Query::Diagnostics => app.diagnostics.raw.join("\n"),
         crate::device::Query::Uart => app
             .baud
@@ -1325,6 +1819,13 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
                 )
             }
         }
+    })
+}
+
+fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
+    let detail = match answer_of(app, query) {
+        Ok(detail) => detail,
+        Err(why) => return report(format, query_name(query), false, &why),
     };
     match format {
         Format::Text => {
@@ -1368,6 +1869,16 @@ pub enum Json<'a> {
     /// alternative is a second writer or a string that has to be decoded
     /// again. What goes in must be JSON: nothing here escapes it.
     Raw(&'a str),
+}
+
+/// One string as a JSON string literal, quotes and escaping included.
+///
+/// For the shapes this writer is not big enough to build by nesting:
+/// [`Json::Raw`] values are written by hand, and a hand-written value that
+/// carries text needs the same escaping as every other — a detail read off a
+/// device is exactly the text that breaks a hand-written one.
+pub fn json_string(text: &str) -> String {
+    format!("\"{}\"", escape(text))
 }
 
 /// One JSON object on one line, escaped by hand.
@@ -1783,5 +2294,131 @@ mod tests {
     fn a_value_with_an_apostrophe_survives_being_quoted() {
         assert_eq!(shell_quote("don't"), "'don'\\''t'");
         assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    /// A subcommand is the flag it stands for, word for word. Written as a
+    /// table because that is what it is: the expansion is the whole
+    /// implementation, and each row is one promise `--help` makes.
+    #[test]
+    fn a_subcommand_expands_into_the_flag_it_stands_for() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["scan"], &["--scan"]),
+            (&["scan", "--json"], &["--scan", "--json"]),
+            (&["capabilities"], &["--capabilities"]),
+            (&["doctor"], &["--doctor"]),
+            (&["tui"], &["--cli-then-tui"]),
+            (&["query", "info"], &["--query-info"]),
+            (&["query", "uart"], &["--query-uart"]),
+            (&["query", "wifi"], &["--query-wifi"]),
+            (&["query", "lan"], &["--query-lan"]),
+            (&["query", "info", "--json"], &["--query-info", "--json"]),
+            (
+                &["set", "uart", "115200,8,n,1,none"],
+                &["--uart", "115200,8,n,1,none"],
+            ),
+            (
+                &["set", "wifi", "Bench,secret"],
+                &["--wifi", "Bench,secret"],
+            ),
+            (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
+            (&["exec", "--", "echo", "hi"], &["--exec", "echo hi"]),
+            (
+                &["exec", "--timeout", "15", "--", "df -h"],
+                &["--timeout", "15", "--exec", "df -h"],
+            ),
+            (&["loopback", "AB"], &["--loopback-test", "AB"]),
+            (&["send", "--line"], &["--send", "line"]),
+            (&["send", "--raw"], &["--send", "raw"]),
+            (
+                &["--ble-name", "UART-1", "exec", "--", "uname -a"],
+                &["--ble-name", "UART-1", "--exec", "uname -a"],
+            ),
+            // A word that names a subcommand is translated wherever it is a
+            // *word*: `--scan doctor` is a batch, and the caller wrote the same
+            // thing as `--scan --doctor`.
+            (&["--scan", "doctor"], &["--scan", "--doctor"]),
+        ];
+        for (written, expected) in cases {
+            let argv: Vec<String> = written.iter().map(|word| word.to_string()).collect();
+            let expanded = expand_subcommand(argv).expect("the words add up");
+            let wanted: Vec<String> = expected.iter().map(|word| word.to_string()).collect();
+            assert_eq!(expanded, wanted, "{written:?}");
+        }
+    }
+
+    /// The flag form is the one every existing script uses, and it is handed
+    /// back untouched — including a flag whose *value* is a subcommand's name:
+    /// a board called `doctor` is a board called doctor.
+    #[test]
+    fn the_flag_form_is_left_alone() {
+        for written in [
+            &["--query-info"][..],
+            &["--ble-name", "doctor", "--query-info"],
+            &["--exec", "scan"],
+            &["--send", "line"],
+        ] {
+            let argv: Vec<String> = written.iter().map(|word| word.to_string()).collect();
+            assert_eq!(
+                expand_subcommand(argv.clone()).expect("nothing to translate"),
+                argv,
+                "{written:?}"
+            );
+        }
+    }
+
+    /// A subcommand whose words do not add up is a usage error that names what
+    /// was wanted, and never a run with half a meaning.
+    #[test]
+    fn a_subcommand_that_does_not_add_up_is_refused() {
+        for (written, wanted) in [
+            (&["query"][..], "wants one word"),
+            (&["query", "webdav"], "not one"),
+            (&["query", "info", "uart"], "takes one word"),
+            (&["set", "webdav", "x"], "not one"),
+            (&["set", "uart"], "two words"),
+            (&["set", "uart", "a", "b"], "two words"),
+            (&["exec"], "wants a command"),
+            (&["loopback"], "wants one word"),
+            (&["scan", "everything"], "takes no words"),
+            (&["send"], "wants --line or --raw"),
+            (&["send", "--line", "--raw"], "not both"),
+        ] {
+            let argv: Vec<String> = written.iter().map(|word| word.to_string()).collect();
+            let why = expand_subcommand(argv).expect_err("the words do not add up");
+            assert!(why.contains(wanted), "{written:?}: {why}");
+        }
+    }
+
+    /// Every expansion is written in flags the table knows, and every
+    /// subcommand is in the help: the two things a reader of `--help` and a
+    /// caller of `linkr <word>` both depend on.
+    #[test]
+    fn every_subcommand_is_in_the_help_and_expands_into_real_flags() {
+        let text = usage("linkr", "about line");
+        for (name, about) in SUBCOMMANDS {
+            assert!(text.contains(name), "help omits {name}");
+            assert!(text.contains(about), "help omits {name}'s line");
+        }
+        // Each subcommand, expanded with no words of its own, uses only flags
+        // the table lists: the arithmetic is the point, because a subcommand is
+        // an alias and an alias of nothing is a bug the help cannot show.
+        for (name, _) in SUBCOMMANDS {
+            let argv = vec![name.to_string()];
+            let Ok(expanded) = expand_subcommand(argv) else {
+                // The words-taking subcommands are checked through their own
+                // forms in the table above; here only the flags matter.
+                continue;
+            };
+            for word in expanded.iter().filter(|word| word.starts_with("--")) {
+                assert!(
+                    FLAGS.iter().any(|flag| flag.name == word),
+                    "{name} expands into {word}, which is not a flag"
+                );
+            }
+        }
+        assert_eq!(
+            subcommands_json(),
+            r#"["scan","doctor","query","set","exec","send","loopback","tui","capabilities"]"#
+        );
     }
 }

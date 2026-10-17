@@ -181,6 +181,11 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
 pub fn run(app: &mut App, run: &Run, format: Format) -> i32 {
     let execution_id = uuid::Uuid::new_v4().to_string();
     let link = app.session.describe();
+    // The clock the report's `elapsed_ms` reads: the whole run as the caller
+    // waited for it, retries and the state reads between them included. An
+    // attempt's own time is a different number, and it is reported per attempt
+    // (see the retry events below) rather than as the run's.
+    let started = Instant::now();
     if format == Format::Json {
         println!(
             "{}",
@@ -195,16 +200,20 @@ pub fn run(app: &mut App, run: &Run, format: Format) -> i32 {
     }
 
     let mut sent: u32 = 0;
+    let mut previous: Option<Duration> = None;
     let last = loop {
         if sent > 0 && format == Format::Json {
-            println!(
-                "{}",
-                cli::json_event(&[
-                    ("event", cli::Json::Text("retry")),
-                    ("execution_id", cli::Json::Text(&execution_id)),
-                    ("attempt", cli::Json::Number(i64::from(sent))),
-                ])
-            );
+            let mut fields = vec![
+                ("event", cli::Json::Text("retry")),
+                ("execution_id", cli::Json::Text(&execution_id)),
+                ("attempt", cli::Json::Number(i64::from(sent))),
+            ];
+            if let Some(spent) = previous {
+                // What the attempt that timed out cost, which is the detail
+                // the run's own total cannot give back.
+                fields.push(("attempt_ms", cli::Json::Number(spent.as_millis() as i64)));
+            }
+            println!("{}", cli::json_event(&fields));
         }
         let last = attempt_once(app, run, format, false);
         // Only a timeout is worth another try, and only the caller's count
@@ -222,10 +231,11 @@ pub fn run(app: &mut App, run: &Run, format: Format) -> i32 {
                 bytes: last.bytes,
             };
         }
+        previous = Some(last.elapsed);
         sent += 1;
     };
 
-    report(app, run, format, &execution_id, &last);
+    report(app, run, format, &execution_id, &last, started.elapsed());
     exit_code(&last.outcome)
 }
 
@@ -359,7 +369,12 @@ fn prompt_waiting(tail: &[u8]) -> Option<String> {
         .unwrap_or(tail);
     let text = String::from_utf8_lossy(pending);
     let lower = text.to_ascii_lowercase();
-    const PROMPTS: [&str; 13] = [
+    // English and Chinese, because the console on the other end is not
+    // necessarily in the CLI's language and the promise is about the prompt,
+    // not about its alphabet: a `密码：` that is not recognised costs the
+    // caller the whole timeout and an answer of "it timed out" instead of the
+    // one thing the run actually knows — the console is waiting for a person.
+    const PROMPTS: [&str; 17] = [
         "[sudo] password",
         "password:",
         "password for",
@@ -373,6 +388,10 @@ fn prompt_waiting(tail: &[u8]) -> Option<String> {
         "press any key",
         "press enter",
         "--more--",
+        "密码",
+        "口令",
+        "登录",
+        "确认",
     ];
     if !PROMPTS.iter().any(|pattern| lower.contains(pattern)) {
         return None;
@@ -405,9 +424,21 @@ fn emit_output(format: Format, at_ms: u128, chunk: &[u8]) {
 
 /// Say how the run ended: a sentence a person reads, or the event a caller
 /// consumes.
-fn report(app: &App, run: &Run, format: Format, execution_id: &str, last: &Attempt) {
+///
+/// `elapsed` is the whole run's wall clock, not the last attempt's: a caller
+/// budgeting for a retried command — the reason `--retry` exists — reads a
+/// number that deliberately includes every attempt and every state read
+/// between them, because that is the time the caller spent waiting.
+fn report(
+    app: &App,
+    run: &Run,
+    format: Format,
+    execution_id: &str,
+    last: &Attempt,
+    elapsed: Duration,
+) {
     let still_running = matches!(last.outcome, Outcome::Timeout | Outcome::NeedsInput(_));
-    let seconds = last.elapsed.as_secs_f64();
+    let seconds = elapsed.as_secs_f64();
     match format {
         Format::Text => {
             let line = match &last.outcome {
@@ -467,10 +498,7 @@ fn report(app: &App, run: &Run, format: Format, execution_id: &str, last: &Attem
                     fields.push(("still_running", cli::Json::Bool(still_running)));
                 }
             }
-            fields.push((
-                "elapsed_ms",
-                cli::Json::Number(last.elapsed.as_millis() as i64),
-            ));
+            fields.push(("elapsed_ms", cli::Json::Number(elapsed.as_millis() as i64)));
             fields.push(("bytes", cli::Json::Number(last.bytes as i64)));
             fields.push(("bytes_rx", cli::Json::Number(app.rx as i64)));
             fields.push(("bytes_tx", cli::Json::Number(app.tx as i64)));
@@ -575,6 +603,23 @@ mod tests {
         // waiting for an answer.
         assert_eq!(prompt_waiting(b"the file says (yes/no)\r\n"), None);
         assert_eq!(prompt_waiting(b"Linux bee 6.6.0\r\n"), None);
+        // And a prompt is a prompt in the console's own language: the board on
+        // the bench prints `密码：`, and a run that does not recognise it waits
+        // out its whole timeout to say "it timed out" — which is the one thing
+        // the console was not doing.
+        assert_eq!(
+            prompt_waiting("密码： ".as_bytes()).as_deref(),
+            Some("密码：")
+        );
+        assert_eq!(
+            prompt_waiting("登录: ".as_bytes()).as_deref(),
+            Some("登录:")
+        );
+        assert_eq!(
+            prompt_waiting("确认？(y/n) ".as_bytes()).as_deref(),
+            Some("确认？(y/n)")
+        );
+        assert_eq!(prompt_waiting("密码错误\r\n".as_bytes()), None);
     }
 
     #[test]

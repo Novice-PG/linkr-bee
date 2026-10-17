@@ -109,6 +109,19 @@ impl Session {
     }
 }
 
+/// The whole number written for `key` in one event line — the shape is this
+/// module's, and the contract is the key.
+fn number(line: &str, key: &str) -> u64 {
+    let at = line
+        .find(&format!("\"{key}\":"))
+        .unwrap_or_else(|| panic!("no {key} in {line}"));
+    let rest = &line[at + key.len() + 3..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("{key} is not a number in {line}"))
+}
+
 #[test]
 fn a_session_answers_many_requests_on_one_link() {
     let mut session = Session::start();
@@ -150,6 +163,14 @@ fn a_session_answers_many_requests_on_one_link() {
         state.contains("\"live\":true") && state.contains("\"connected\":true"),
         "{state}"
     );
+    // And its counters are the link's, counted off the bytes that just moved.
+    // This is the assertion that catches a report reading the terminal's frame
+    // copy of the counters: a session has no frame, and would answer zero.
+    assert!(
+        number(&state, "rx") > 0,
+        "the reply came over the link: {state}"
+    );
+    assert!(number(&state, "tx") > 0, "the command went out: {state}");
     session.until("\"event\":\"end\"");
 
     // The status a one-shot `--exec` would have exited with arrives as the

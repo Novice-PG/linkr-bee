@@ -272,6 +272,13 @@ impl LoopbackDevice {
     /// the way a real one would be. The banner's own commands keep their
     /// exact answers, and anything else stays "not found".
     ///
+    /// The boundary is a wall and not a fence: the shell grammar this device
+    /// does not implement — pipes, redirections, substitutions, globs — is
+    /// refused with a non-zero status rather than echoed back as literal
+    /// words, because a rehearsal that passes offline what the board would
+    /// fail is worse than one that says what it cannot do. See
+    /// [`unsupported`].
+    ///
     /// One deliberate difference from a real shell: `exit N` ends *the
     /// command* with status N and the rest of the line still runs. The CLI
     /// wraps a command as `cmd; echo "LINKR_RC:$?"`, so an `exit` that took
@@ -302,6 +309,18 @@ impl LoopbackDevice {
     /// waiting rather than returning a status; the status returned is what
     /// `$?` sees in the segment that follows.
     fn run_segment(&self, segment: &str, status: i32) -> Option<i32> {
+        // The grammar this device does not implement is refused before any of
+        // it is read as words. `echo x | tr a-z A-Z` reaching the `echo` arm
+        // would print the pipe and answer 0 — a rehearsal that passes offline
+        // and fails on the board, which is worse than no rehearsal at all.
+        if let Some(operator) = unsupported(segment) {
+            self.push(&format!(
+                "sh: {operator}: the loopback device runs simple commands only — \
+                 pipes, redirections, substitutions and globs are the target \
+                 shell's, not this one's\r\n"
+            ));
+            return Some(2);
+        }
         let words: Vec<String> = words(segment)
             .into_iter()
             .map(|word| word.replace("$?", &status.to_string()))
@@ -437,6 +456,59 @@ impl LoopbackDevice {
 
 /// Split a command line on its `;` separators, ignoring the ones inside
 /// quotes: `echo "a;b"` is one segment and prints `a;b`.
+/// The first piece of shell grammar in this segment that the loopback device
+/// does not run, if there is one.
+///
+/// The device is a stand-in for the target's shell, and a stand-in that
+/// answers a pipeline, a redirection or a glob with the text it was given and
+/// a status of 0 has lied about the board — the one kind of failure an offline
+/// rehearsal must not have. So the operators are refused out loud, with a
+/// status a shell would use for a line it could not parse, and only simple
+/// commands are run.
+///
+/// Quoting is honoured, because a quoted argument is data and not grammar:
+/// `echo 'a|b'` prints what it says. `$?` is the one substitution this device
+/// does implement, so `$` followed by `?` is left for [`words`] to expand;
+/// every other `$` is an expansion with no answer here. `#` is a comment only
+/// where a word starts, which is the only place a shell reads one.
+fn unsupported(segment: &str) -> Option<&'static str> {
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    let mut chars = segment.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                word_start = false;
+            }
+            '\\' => {
+                chars.next();
+                word_start = false;
+            }
+            '|' => return Some("|"),
+            '&' => return Some("&"),
+            '>' => return Some(">"),
+            '<' => return Some("<"),
+            '`' => return Some("`"),
+            '*' => return Some("*"),
+            '~' => return Some("~"),
+            '(' => return Some("("),
+            ')' => return Some(")"),
+            '#' if word_start => return Some("#"),
+            '$' if chars.peek() != Some(&'?') => return Some("$"),
+            other if other.is_whitespace() => word_start = true,
+            _ => word_start = false,
+        }
+    }
+    None
+}
+
 fn segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut segment = String::new();
@@ -999,5 +1071,61 @@ mod tests {
         device.reply("exit; echo \"LINKR_RC:$?\"");
         let text = outbox(&device);
         assert!(text.contains("LINKR_RC:0"), "{text:?}");
+    }
+
+    /// The shell grammar this device does not implement is refused, not
+    /// faked: a pipeline that reached `echo` as literal words would come back
+    /// with status 0, and an offline rehearsal that passes what the board
+    /// would fail is the one kind of lie a rehearsal must not tell.
+    #[test]
+    fn the_loopback_refuses_the_grammar_it_does_not_run() {
+        for command in [
+            "echo x | tr a-z A-Z",
+            "true && echo hi",
+            "echo x > /tmp/f",
+            "echo `id`",
+            "echo $(id)",
+            "echo *",
+            "echo ~",
+            "ls /tmp; echo x # a comment",
+        ] {
+            let device = LoopbackDevice::default();
+            device.reply(command);
+            let text = outbox(&device);
+            assert!(
+                text.contains("simple commands only"),
+                "{command:?} was not refused: {text:?}"
+            );
+        }
+        // The refusal is a status a shell would use for a line it could not
+        // parse, and the rest of the line — the wrapper's own status echo —
+        // still runs, which is what makes the answer readable.
+        let device = LoopbackDevice::default();
+        device.reply("echo x | cat; echo \"LINKR_RC:$?\"");
+        let text = outbox(&device);
+        assert!(text.contains("LINKR_RC:2"), "{text:?}");
+    }
+
+    /// Quoting is the boundary of the boundary: a metacharacter inside quotes
+    /// is an argument, and `$?` is the one substitution this shell has.
+    #[test]
+    fn the_refusal_stops_at_quotes_and_at_dollar_question() {
+        let device = LoopbackDevice::default();
+        device.reply("echo 'a|b' \"c>d\"");
+        let text = outbox(&device);
+        assert!(
+            text.contains("a|b c>d"),
+            "a quoted argument was refused: {text:?}"
+        );
+        // `$?` expands in every word, unquoted included.
+        let device = LoopbackDevice::default();
+        device.reply("false; echo $?");
+        let text = outbox(&device);
+        assert!(text.contains("1\r\n"), "`$?` did not expand: {text:?}");
+        // A `#` inside a word is a word, as it is in a shell.
+        let device = LoopbackDevice::default();
+        device.reply("echo a#b");
+        let text = outbox(&device);
+        assert!(text.contains("a#b"), "{text:?}");
     }
 }

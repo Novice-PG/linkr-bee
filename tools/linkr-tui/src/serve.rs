@@ -323,17 +323,25 @@ fn handle(app: &mut App, action: Action, format: Format, connect: Duration) -> i
 
 /// What the session and its link are doing, for the one request that is
 /// answered without a link.
-fn report_state(app: &App, format: Format) {
+///
+/// Public because the one-shot `--link-state` is the same report: a session's
+/// `state` request and a caller's flag must not describe the same link in two
+/// different shapes.
+pub fn report_state(app: &App, format: Format) {
     let live = app.session.is_live();
     let connected = app.connected();
     let dialing = app.dialing.is_some();
+    // The session's counters, not the app's: `app.rx`/`app.tx` are the frame's
+    // copies of them, refreshed on the terminal's beat, and a run with no
+    // terminal has no beat — reading those would describe a link that just
+    // carried a question and its answer as one that moved nothing.
+    let rx = app.session.rx();
+    let tx = app.session.tx();
     match format {
         Format::Text => println!(
             "state: live={live}, connected={connected}, dialing={dialing}, \
-             link={}, rx={}, tx={}{}",
+             link={}, rx={rx}, tx={tx}{}",
             app.session.describe(),
-            app.rx,
-            app.tx,
             app.baud
                 .map(|baud| format!(", uart={baud}"))
                 .unwrap_or_default()
@@ -348,8 +356,8 @@ fn report_state(app: &App, format: Format) {
                 ("connected", Json::Bool(connected)),
                 ("dialing", Json::Bool(dialing)),
                 ("link", Json::Text(app.session.describe())),
-                ("rx", Json::Number(app.rx as i64)),
-                ("tx", Json::Number(app.tx as i64)),
+                ("rx", Json::Number(rx as i64)),
+                ("tx", Json::Number(tx as i64)),
                 (
                     "uart",
                     app.baud

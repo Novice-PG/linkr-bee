@@ -92,6 +92,30 @@ fn a_bridge_with_the_stdio_transport_runs() {
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
 }
 
+/// The flags that configure an interface in a build that has none: `--enter`,
+/// `--local-echo`, `--line-mode`, `--escape` and `--cli-then-tui` choose how
+/// the terminal behaves while it is held, and a build compiled without it
+/// answers every command line from the script side. Parsing them there would
+/// accept a command line and quietly drop it, which is the one outcome a
+/// caller cannot see — the run would look configured and behave unconfigured.
+#[cfg(not(feature = "tui"))]
+#[test]
+fn an_interface_flag_with_no_interface_is_refused() {
+    for (argv, flag) in [
+        (&["--line-mode"][..], "--line-mode"),
+        (&["--local-echo"][..], "--local-echo"),
+        (&["--enter", "cr"][..], "--enter"),
+        (&["--escape", "^]"][..], "--escape"),
+        (&["--cli-then-tui"][..], "--cli-then-tui"),
+    ] {
+        let output = linkr(argv);
+        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
+        let said = stderr(&output);
+        assert!(said.contains("no interface"), "{flag}: {said}");
+        assert!(said.contains(flag), "{flag}: {said}");
+    }
+}
+
 /// WebDAV was cut from the device for RAM, so it is promised nowhere: not in
 /// the capability list an agent reads first, and not as a flag that would
 /// dial, send `@d` and collect `ERR unknown command`.

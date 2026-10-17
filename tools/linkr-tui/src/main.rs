@@ -261,6 +261,18 @@ struct Args {
     loopback: Option<String>,
     /// How long that echo is waited for.
     loopback_timeout: Duration,
+    /// `--link-state`: print what this link and its counters are doing, as the
+    /// session's `state` request reports it — the one reading answered without
+    /// asking the bridge anything, so it still says something when the bridge
+    /// is what has gone quiet.
+    link_state: bool,
+    /// `--doctor`: one checkup of the whole run — the link, the bridge
+    /// describing itself, the UART round trip, and the target's shell — with a
+    /// word for each finding. See `linkr_tui::doctor`.
+    doctor: bool,
+    /// `--send`: forward standard input to the target without waiting for an
+    /// ending. The framing is the value: `line` adds newlines, `raw` does not.
+    send: Option<cli::Framing>,
 }
 
 impl Args {
@@ -409,6 +421,9 @@ fn serve_refusal(args: &Args) -> Option<String> {
         (args.print_frame.is_some(), "--print-frame"),
         (args.exec.is_some(), "--exec"),
         (args.loopback.is_some(), "--loopback-test"),
+        (args.link_state, "--link-state"),
+        (args.doctor, "--doctor"),
+        (args.send.is_some(), "--send"),
         (args.sample, "--sample"),
     ] {
         if named {
@@ -474,7 +489,13 @@ impl Mode {
             };
         }
         // Nothing asked for, or a plain launch: the terminal is the answer.
-        if args.requests.is_empty() && args.loopback.is_none() && args.exec.is_none() {
+        if args.requests.is_empty()
+            && args.loopback.is_none()
+            && args.exec.is_none()
+            && args.send.is_none()
+            && !args.doctor
+            && !args.link_state
+        {
             return Mode::Tui;
         }
         // Something was asked for, so the answer is the thing being asked
@@ -482,6 +503,35 @@ impl Mode {
         Mode::Cli
     }
 }
+
+/// Refuse an interface-only flag in a build that has no interface.
+///
+/// `--enter`, `--local-echo`, `--line-mode` and `--escape` choose how the
+/// terminal behaves while it is held — how Enter is sent, whether typed bytes
+/// are echoed into the pane, whether a line waits for Enter, which byte ends
+/// the session — and a build compiled without the interface answers every
+/// command line from the script side instead. Parsing one there would accept a
+/// command line and quietly do nothing about it, which is the one outcome a
+/// caller cannot see: the flag is either true or it is refused, with the same
+/// exit code as any other usage error.
+///
+/// In a build that has an interface this is a no-op and the parse carries on;
+/// in one that has none the call does not come back. Written without a `!`
+/// return type on purpose: the arms below still have to type-check in both
+/// builds, and a diverging signature would make their bodies unreachable code
+/// in the one that refuses.
+#[cfg(not(feature = "tui"))]
+fn refuse_without_interface(prog: &str, flag: &str) {
+    fail(
+        prog,
+        &format!(
+            "this build has no interface: {flag} configures one, and there is none to configure"
+        ),
+    )
+}
+
+#[cfg(feature = "tui")]
+fn refuse_without_interface(_prog: &str, _flag: &str) {}
 
 /// A command-line error, printed in the shape the rest of the toolchain uses.
 fn fail(prog: &str, message: &str) -> ! {
@@ -533,6 +583,9 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         debug_io: false,
         loopback: None,
         loopback_timeout: Duration::from_secs(3),
+        link_state: false,
+        doctor: false,
+        send: None,
     };
     let mut i = 0;
     while i < argv.len() {
@@ -602,6 +655,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
             "--query-uart" => args.requests.queries.push(device::Query::Uart),
             "--query-wifi" => args.requests.queries.push(device::Query::Wifi),
+            "--query-lan" => args.requests.queries.push(device::Query::Lan),
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
                 let raw = value("--wifi");
@@ -644,15 +698,31 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                     });
                 args.loopback_timeout = Duration::from_secs_f64(seconds);
             }
+            "--link-state" => args.link_state = true,
+            "--doctor" => args.doctor = true,
+            "--send" => {
+                let raw = value("--send");
+                args.send = Some(cli::Framing::from_name(&raw).unwrap_or_else(|| {
+                    fail(prog, &format!("invalid value '{raw}' for '--send <HOW>'"))
+                }));
+            }
             "--enter" => {
+                refuse_without_interface(prog, "--enter");
                 let raw = value("--enter");
                 args.enter = Some(EnterMode::from_name(&raw).unwrap_or_else(|| {
                     fail(prog, &format!("invalid value '{raw}' for '--enter <MODE>'"))
                 }));
             }
-            "--local-echo" => args.local_echo = true,
-            "--line-mode" => args.line_mode = true,
+            "--local-echo" => {
+                refuse_without_interface(prog, "--local-echo");
+                args.local_echo = true;
+            }
+            "--line-mode" => {
+                refuse_without_interface(prog, "--line-mode");
+                args.line_mode = true;
+            }
             "--escape" => {
+                refuse_without_interface(prog, "--escape");
                 let raw = value("--escape");
                 args.escape = cli::parse_escape(&raw).unwrap_or_else(|why| {
                     fail(
@@ -884,8 +954,12 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
-                "\"exec\",\"loopback-test\"{}],",
+                "\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"exec\",\"send\",\"doctor\",\"loopback-test\",\"link-state\"{}],",
+                // The subcommands are the same runs written as words, and a
+                // caller that reads them here can write either form: the list
+                // is the model as much as it is a list of names.
+                "\"subcommands\":[{}],",
                 "\"defaults\":{{\"scan_timeout_ms\":{},\"connect_timeout_ms\":{},",
                 "\"exec_timeout_ms\":{}}},",
                 "\"exec\":{{\"endings\":[\"rc-marker\",\"idle\"],",
@@ -895,7 +969,8 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\"session\":{{\"flag\":\"--serve\",\"ops\":{},\"codes\":[\"bad_request\",",
                 "\"not_connected\"],\"frame\":\"begin then the one-shot events then ",
                 "end, per request, ids as sent\"}},",
-                "\"exit_codes\":{{\"0-125\":\"the command's own status\",",
+                "\"exit_codes\":{{\"0-125\":\"a lone command's own status; in a batch 1 \
+                 means something in it failed\",",
                 "\"126-127\":\"reserved for the shell\",",
                 "\"1\":\"executed but not as expected, needs input, or timed out\",",
                 "\"2\":\"usage error\",",
@@ -904,6 +979,7 @@ fn capabilities(prog: &str, json: bool) -> String {
             version,
             linkr_tui::protocol::MGMT_API_MAJOR,
             TUI_OPERATION,
+            linkr_tui::cli::subcommands_json(),
             cli::DEFAULT_SCAN_TIMEOUT.as_millis(),
             cli::DEFAULT_CONNECT_TIMEOUT.as_millis(),
             linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis(),
@@ -916,22 +992,33 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\n",
                 "scan        --scan                     list what is on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
-                "            --query-wifi --wifi-scan\n",
+                "            --query-wifi --wifi-scan --query-lan\n",
+                "state       --link-state               this link: live, counters, transport\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
                 "execute     --exec COMMAND             run a shell command on the target\n",
                 "            --idle WINDOW              end it when the output goes quiet\n",
                 "            --retry N                  resend it after a timeout\n",
                 "            --dry-run                  show the bytes instead\n",
+                "            --send line|raw            forward stdin without waiting\n",
                 "wire test   --loopback-test [BYTES]    prove the target's UART round trip\n",
+                "checkup     --doctor                   one report: link, bridge, UART,\n",
+                "                                       loopback and the target's shell,\n",
+                "                                       each with match/mismatch/observed/\n",
+                "                                       indeterminate\n",
                 "session     --serve                    hold the link, answer JSON requests on\n",
                 "                                       stdin (one per line) until it ends\n",
                 "{}",
                 "\n",
-                "Exit codes: 0-125 the command's own status, 1 executed but not as\n",
-                "expected (or needs input, or timed out), 2 usage, 255 the link or\n",
-                "the send failed.\n",
+                "The same runs can be written as subcommands: {}\n",
+                "Exit codes: 0-125 a lone command's own status, then 1 executed\n",
+                "but not as expected (or needs input, or timed out, or something\n",
+                "else in the same batch failed), 2 usage, 255 the link or the send\n",
+                "failed.\n",
             ),
-            prog, version, INTERFACE_CAPABILITY
+            prog,
+            version,
+            INTERFACE_CAPABILITY,
+            cli::subcommands_words(),
         )
     }
 }
@@ -1132,6 +1219,15 @@ fn main() -> io::Result<()> {
         })
         .unwrap_or_else(|| "linkr".to_string());
     let argv: Vec<String> = raw.map(|arg| arg.to_string_lossy().into_owned()).collect();
+    // The subcommand form is a *writing* of the same command line and not a
+    // second one: `linkr exec -- df -h` becomes `linkr --exec "df -h"` before
+    // anything is parsed, so there is one grammar to read, one table behind the
+    // help and the completion, and one place a bug can live. See
+    // `cli::expand_subcommand`.
+    let argv = match cli::expand_subcommand(argv) {
+        Ok(argv) => argv,
+        Err(why) => fail(&prog, &why),
+    };
 
     let mut args = parse_args(&prog, &argv);
     // A session is refused here, *before* the flags that answer and exit: a
@@ -1449,7 +1545,10 @@ fn main() -> io::Result<()> {
                 || args.cli_then_tui
                 || !args.requests.is_empty()
                 || args.exec.is_some()
-                || args.loopback.is_some();
+                || args.loopback.is_some()
+                || args.send.is_some()
+                || args.doctor
+                || args.link_state;
             if args.json && scripted {
                 println!(
                     "{}",
@@ -1598,6 +1697,14 @@ fn main() -> io::Result<()> {
         if let Some(run) = args.exec_run() {
             exec_code = linkr_tui::exec::cli::run(&mut app, &run, format);
         }
+        // Standard input goes to the target with no ending rule: this is the
+        // human-in-the-loop half, and it stands where `--exec` does — right
+        // after the questions, before the wire test.
+        if let Some(how) = args.send {
+            if linkr_tui::cli::send_stdin(&mut app, how, format) != 0 {
+                failed += 1;
+            }
+        }
         // The loopback goes last and stands alone: it is answered by the
         // target's UART rather than by the bridge, so running it before the
         // management requests would put its echo in what they read back.
@@ -1605,6 +1712,30 @@ fn main() -> io::Result<()> {
             if !cli::loopback_test(&mut app, payload.as_bytes(), args.loopback_timeout, format) {
                 failed += 1;
             }
+        }
+        // The checkup, when it was asked for: it runs after whatever else was
+        // asked so that it describes the board those requests left behind —
+        // and it is the same commands underneath (`@i?`, `@u?`, the round
+        // trip, one `--exec`), so a checkup can never pass a bridge that a
+        // plain query would have failed.
+        if args.doctor {
+            let expect_baud = args.requests.uart.as_deref().and_then(|spec| {
+                linkr_tui::accessory::parse_uart_spec(spec)
+                    .ok()
+                    .map(|settings| settings.baud)
+            });
+            if linkr_tui::doctor::run(&mut app, format, expect_baud) != 0 {
+                failed += 1;
+            }
+        }
+        // The link's own state, last: it is a reading of the run that just
+        // happened — the counters are the ones those requests moved — and it
+        // is answered without asking the bridge anything, so it still answers
+        // when the bridge is what has gone quiet. The session's `state`
+        // request is the same report (`serve::report_state`), which is why it
+        // is one function and not two.
+        if args.link_state {
+            linkr_tui::serve::report_state(&app, format);
         }
         // Only the pure script mode hangs up. The middle mode keeps the link
         // it just configured and takes the terminal over on it: a board whose
@@ -1614,13 +1745,27 @@ fn main() -> io::Result<()> {
             // Hung up out loud rather than merely dropped: the process is
             // about to go, and the board has to hear about it before it does.
             app.hang_up(linkr_tui::hangup::EXIT_GRACE);
-            // The order the codes are decided in: the command's own status
-            // first, then whether anything else that was asked for failed,
-            // then success.
-            if exec_code != 0 {
+            // The order the codes are decided in, and where a batch's own
+            // status goes. A command that was the *only* thing asked for
+            // answers with its own status: a script wrapping one `--exec`
+            // needs the target's answer, not a summary of it. In a batch of
+            // several actions the command's status is one event among others
+            // — 5 and 1 are the same "not zero" to a shell — and letting it
+            // win would hide whether the rest of the batch worked, which is
+            // the one thing a batch is for. So the batch's code says whether
+            // the batch worked, and the rc stays in the event the caller
+            // reads it from.
+            let exec_alone = exec_code != 0
+                && args.exec.is_some()
+                && args.requests.is_empty()
+                && args.loopback.is_none()
+                && args.send.is_none()
+                && !args.doctor
+                && !args.link_state;
+            if exec_alone {
                 std::process::exit(exec_code);
             }
-            if failed > 0 {
+            if failed > 0 || exec_code != 0 {
                 std::process::exit(1);
             }
             return Ok(());
@@ -2565,6 +2710,22 @@ mod tests {
         assert!(json.contains("\"exec\""), "{json}");
         assert!(json.contains("rc-marker"), "{json}");
         assert!(json.contains("\"exit_codes\""), "{json}");
+        // The exit-code line is what a script reads before deciding to branch
+        // on a status, so the one thing that is not obvious about it — whose
+        // status a batch answers with — has to be in the text and not only in
+        // the README.
+        assert!(json.contains("batch"), "{json}");
+        // And the two local readings a one-shot caller can now ask for.
+        assert!(json.contains("\"query-lan\""), "{json}");
+        assert!(json.contains("\"link-state\""), "{json}");
+        // The checkup and the send-only mode are operations too, and the
+        // subcommand names are the same runs written as words: a caller that
+        // reads either form here can write both.
+        assert!(json.contains("\"doctor\""), "{json}");
+        assert!(json.contains("\"send\""), "{json}");
+        assert!(json.contains("\"subcommands\""), "{json}");
+        assert!(json.contains("\"loopback\""), "{json}");
+        assert!(json.contains("\"capabilities\""), "{json}");
         // The interface is an operation of the build that has one, and not of
         // the build that does not: the list says what *this* binary can be
         // asked for, because it is the contract a script reads.
@@ -2610,6 +2771,42 @@ mod tests {
         // And the endings conflict rather than rank: `--rc-marker` with
         // `--idle` is a command line that has not decided.
         assert_eq!(args(&["--exec", "x", "--rc-marker"]).exec_idle, None);
+    }
+
+    /// The checkup and the send-only mode are actions like any other: named in
+    /// the table a caller reads, parsed into the fields the one-shot run reads,
+    /// and refused by the resident session — which answers what arrives on its
+    /// own input, and cannot have a second reader of it.
+    #[test]
+    fn the_checkup_and_send_flags_are_parsed_and_documented() {
+        for flag in ["--doctor", "--send"] {
+            assert!(
+                cli::FLAGS.iter().any(|entry| entry.name == flag),
+                "{flag} is missing from the flag table"
+            );
+        }
+        assert!(!args(&[]).doctor);
+        assert!(args(&["--doctor"]).doctor);
+        assert!(args(&["--doctor"]).send.is_none());
+        assert_eq!(
+            args(&["--send", "line"]).send,
+            Some(linkr_tui::cli::Framing::Line)
+        );
+        assert_eq!(
+            args(&["--send", "raw"]).send,
+            Some(linkr_tui::cli::Framing::Raw)
+        );
+        // Both are things to do, so a command line that names one is a run and
+        // not a request to open the terminal.
+        assert_eq!(Mode::from(&args(&["--doctor"]), "linkr"), Mode::Cli);
+        assert_eq!(Mode::from(&args(&["--send", "line"]), "linkr"), Mode::Cli);
+        for refused in [
+            &["--serve", "--bridge", "-", "--doctor"][..],
+            &["--serve", "--bridge", "-", "--send", "line"],
+        ] {
+            let why = serve_refusal(&args(refused)).expect("the session refuses it");
+            assert!(why.contains("resident session"), "{refused:?}: {why}");
+        }
     }
 
     /// The wire settings are read off the command line in the forms the

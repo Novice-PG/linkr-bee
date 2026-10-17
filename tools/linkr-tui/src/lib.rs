@@ -12,6 +12,7 @@ pub mod cli;
 pub mod clipboard;
 pub mod device;
 pub mod dialogs;
+pub mod doctor;
 pub mod event;
 pub mod exec;
 pub mod geometry;
