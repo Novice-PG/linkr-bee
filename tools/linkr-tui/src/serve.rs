@@ -41,6 +41,7 @@ use crate::cli::{self, Format, Json};
 use crate::device::Query;
 use crate::exec::cli::{Ending, Run};
 use crate::session::Dial;
+use crate::transport::LinkKind;
 
 /// How long a `loopback-test` request waits when it did not say.
 ///
@@ -69,11 +70,67 @@ pub const OPERATIONS: &[&str] = &[
     "quit",
 ];
 
-/// The operations as a JSON array, for the ready line and for
-/// `--capabilities`.
+/// The operations as a JSON array, for `--capabilities`.
+///
+/// Every operation this build has, in the build's own right: `--capabilities`
+/// answers "what is in this program", which does not depend on what the caller
+/// is about to dial. A *session* promises what its link can serve instead —
+/// see [`operations_for`].
 pub fn operations_json() -> String {
-    let list: Vec<String> = OPERATIONS.iter().map(|op| format!("\"{op}\"")).collect();
+    json_ops(OPERATIONS)
+}
+
+/// The operations a session on this link can answer, as a JSON array.
+pub fn operations_json_for(kind: Option<LinkKind>) -> String {
+    json_ops(&operations_for(kind))
+}
+
+/// A list of operation names as the JSON array the ready line and
+/// `--capabilities` both print.
+fn json_ops(ops: &[&str]) -> String {
+    let list: Vec<String> = ops.iter().map(|op| format!("\"{op}\"")).collect();
     format!("[{}]", list.join(","))
+}
+
+/// The operations a session on this kind of link can actually answer.
+///
+/// The management reads and writes are BLE-only by construction: `@i?` and its
+/// neighbours are frames on the bridge's own characteristic, and a LAN socket
+/// or a serial line has no such channel — the bridge there is a byte pipe.
+/// A ready line that listed them anyway would promise ten operations and hold
+/// four, and the caller pays for the difference with a request it cannot use
+/// (the answer to which is "management is BLE-only", exit 1).
+///
+/// A session with nothing to dial — which the command line refuses before a
+/// session ever starts — falls back to the operations that need no link at
+/// all: the same two its `not_connected` refusals would leave reachable.
+pub fn operations_for(kind: Option<LinkKind>) -> Vec<&'static str> {
+    OPERATIONS
+        .iter()
+        .copied()
+        .filter(|op| match kind {
+            Some(LinkKind::Ble) => true,
+            Some(_) => !is_ble_only(op),
+            None => !needs_a_link(op),
+        })
+        .collect()
+}
+
+/// Whether this operation is answered by the bridge's management channel.
+///
+/// Kept beside the list it explains rather than derived from `action_for`:
+/// the reader this exists for is checking one against the other.
+fn is_ble_only(op: &str) -> bool {
+    matches!(
+        op,
+        "info" | "uart" | "wifi" | "wifi-off" | "wifi-scan" | "lan"
+    )
+}
+
+/// Whether this operation needs a link at all — the name-shaped twin of
+/// [`needs_link`], kept beside the list it filters.
+fn needs_a_link(op: &str) -> bool {
+    !matches!(op, "state" | "quit")
 }
 
 /// Run the resident session until its input ends or it is told to stop.
@@ -89,7 +146,7 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
         .as_ref()
         .map(Dial::describe)
         .unwrap_or_else(|| "none".to_string());
-    let ops = operations_json();
+    let ops = operations_json_for(dial.as_ref().map(Dial::kind));
     println!(
         "{}",
         cli::json_event(&[
@@ -973,6 +1030,38 @@ mod tests {
         }
         assert!(!OPERATIONS.contains(&"webdav"));
         assert!(!operations_json().contains("webdav"));
+    }
+
+    /// A session promises what its link can actually serve. The management
+    /// reads and writes are frames on the bridge's own characteristic, so a
+    /// LAN or serial session that listed them would answer its caller's first
+    /// request with "management is BLE-only" — a request spent on a promise
+    /// this program could see was empty (issue 21).
+    #[test]
+    fn a_session_promises_only_what_its_link_can_serve() {
+        assert_eq!(
+            operations_for(Some(LinkKind::Ble)),
+            OPERATIONS.to_vec(),
+            "the management channel serves every operation there is"
+        );
+
+        for kind in [LinkKind::Lan, LinkKind::Stdio] {
+            let ops = operations_for(Some(kind));
+            for gone in ["info", "uart", "wifi", "wifi-off", "wifi-scan", "lan"] {
+                assert!(!ops.contains(&gone), "{kind:?} cannot serve {gone}");
+            }
+            for kept in ["exec", "loopback-test", "state", "quit"] {
+                assert!(ops.contains(&kept), "{kind:?} still serves {kept}");
+            }
+        }
+
+        // A session with nothing to dial can only ever answer these two.
+        assert_eq!(operations_for(None), vec!["state", "quit"]);
+
+        // While the build's own list — what `--capabilities` answers — is
+        // untouched by any of it: it is a claim about the program, not about
+        // one session's link.
+        assert!(operations_json().contains("\"info\""));
     }
 
     /// The two operations that must answer without a link, and the rest.

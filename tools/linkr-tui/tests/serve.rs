@@ -37,8 +37,15 @@ struct Session {
 
 impl Session {
     fn start() -> Session {
+        Session::start_with(&["--bridge", "-"])
+    }
+
+    /// A session dialling whatever the arguments say. Everything else — the
+    /// pipes, the reader thread, the patience — is the same session.
+    fn start_with(dial: &[&str]) -> Session {
         let mut child = Command::new(env!("CARGO_BIN_EXE_linkr"))
-            .args(["--bridge", "-", "--serve"])
+            .args(dial)
+            .args(["--serve"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Nothing here writes enough to a pipe to block on it, and a
@@ -183,6 +190,42 @@ fn a_session_answers_many_requests_on_one_link() {
     let end = session.until("\"event\":\"end\"");
     assert!(end.contains("\"code\":0"), "{end}");
     assert_eq!(session.finish(), 0);
+}
+
+/// The ready line is a promise about the link in hand. A session on a LAN
+/// socket has no management channel to answer `info` on, and listing it would
+/// spend the caller's first request on an answer this program could have
+/// given before the request was sent (issue 21). Nothing is dialled until a
+/// request needs the link, so the ready line is read here without touching a
+/// network — the host is a documentation address on purpose.
+#[test]
+fn a_session_offers_only_the_operations_its_link_can_serve() {
+    let lan = Session::start_with(&["--lan-host", "192.0.2.9"]);
+    let ready = lan.until("\"event\":\"ready\"");
+    for gone in ["\"info\"", "\"uart\"", "\"wifi\"", "\"lan\""] {
+        assert!(
+            !ready.contains(gone),
+            "a LAN session cannot answer {gone}: {ready}"
+        );
+    }
+    for kept in ["\"exec\"", "\"loopback-test\"", "\"state\"", "\"quit\""] {
+        assert!(
+            ready.contains(kept),
+            "a LAN session still serves {kept}: {ready}"
+        );
+    }
+
+    // A board named but never dialled: the management channel is what a BLE
+    // session is for, so its list is the whole build.
+    let ble = Session::start_with(&["--ble-name", "Linkr BLE UART-1"]);
+    let ready = ble.until("\"event\":\"ready\"");
+    for op in ["\"info\"", "\"uart\"", "\"wifi\"", "\"lan\""] {
+        assert!(ready.contains(op), "a BLE session answers {op}: {ready}");
+    }
+
+    // Neither session ever dialled; end of input closes both.
+    assert_eq!(ble.finish(), 0);
+    assert_eq!(lan.finish(), 0);
 }
 
 /// End of input is the session's hang-up: the caller closed the pipe because

@@ -151,10 +151,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long one dial attempt may take before it counts as failed.
 ///
-/// btleplug's own ceiling is half a minute; that is a bound on the D-Bus call,
-/// not on a person's patience, and a screen that says "connecting" for it is
-/// worse than an attempt that starts over from nothing. Fifteen seconds and
-/// not less, because a Windows connect builds a fresh GATT session every time
+/// A floor, not a ceiling: a caller that named `--connect-timeout` raises it to
+/// what it asked for, because a dial that gave up before its own window ran
+/// out would answer "15 s" to a question about 40. Fifteen seconds and not
+/// less, because a Windows connect builds a fresh GATT session every time
 /// — WinRT keeps no service cache between sessions — and a first dial to a
 /// board this machine has not seen this boot takes several of them; cutting at
 /// eight read as a refusal on a board that was merely slow, while the host
@@ -399,8 +399,20 @@ impl Link for BleLink {
         let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Frame>(WRITE_BACKLOG);
 
         let selection = self.selection.clone();
+        // Read before the thread starts, because the reactor needs it too: one
+        // dial attempt is allowed to run for the whole window the caller named
+        // (see `DIAL_ATTEMPT`), and a window that is only known to the half
+        // that waits is a window the half that dials cannot honour.
+        let window = self.within.unwrap_or(CONNECT_TIMEOUT);
         thread::spawn(move || {
-            radio(&selection, ready_tx, inbound_tx, to_radio_rx, management_tx);
+            radio(
+                &selection,
+                window,
+                ready_tx,
+                inbound_tx,
+                to_radio_rx,
+                management_tx,
+            );
         });
         // The bytes this interface writes out are handed across to the reactor
         // by their own thread, because the writer here is a synchronous one
@@ -418,7 +430,6 @@ impl Link for BleLink {
         // else in the product, and a link that reported itself open while the
         // stack was still turning over would have the interface painting
         // before there was anything to paint.
-        let window = self.within.unwrap_or(CONNECT_TIMEOUT);
         match ready_rx.recv_timeout(window) {
             Err(why) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -454,16 +465,27 @@ impl Link for BleLink {
 /// The reactor thread: find, connect, subscribe, and then shuttle bytes until
 /// something ends.
 ///
+/// `window` is the caller's patience — the same one `open` waits on — and it
+/// bounds one dial attempt as well as the whole reaction: an attempt that gave
+/// up at fifteen seconds while its caller was still due forty has answered a
+/// question nobody asked.
+///
 /// A format string rather than an error value, because the interesting
 /// failures here are all of the "nothing like that on the air" shape and the
 /// caller needs to say which nothing.
 fn radio(
     selection: &Selection,
+    window: Duration,
     ready: Sender<io::Result<()>>,
     inbound: Sender<Option<Vec<u8>>>,
     outbound: tokio::sync::mpsc::Receiver<Frame>,
     management: Sender<Vec<u8>>,
 ) {
+    // Whichever is longer: the floor every dial needs on a cold adapter, or the
+    // window the caller named. Shorter windows stay shorter — `open` gives up
+    // on its own timer, and this one is only what the attempt inside it may
+    // take.
+    let attempt = dial_attempt(window);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         // Every timer and every BlueZ socket the link uses wants one of these,
         // and there is nothing else on this runtime to fight with.
@@ -487,7 +509,7 @@ fn radio(
         let refuse = |why: String| {
             let _ = ready.send(Err(io::Error::other(why)));
         };
-        let (peripheral, dialled_here) = match find(selection).await {
+        let (peripheral, dialled_here) = match find(selection, attempt).await {
             Ok(found) => found,
             Err(why) => {
                 refuse(why);
@@ -521,7 +543,7 @@ fn radio(
         if wired.is_err() && !dialled_here {
             let _ = peripheral.disconnect().await;
             wait_until_down(&peripheral).await;
-            match dial(&peripheral).await {
+            match dial(&peripheral, attempt).await {
                 Ok(made) => {
                     dialled_here = made;
                     wired = wire(&peripheral).await;
@@ -582,26 +604,28 @@ fn radio(
 ///   the budget;
 /// * everything else is the answer, kept whole and worded by [`dial_error`].
 ///
+/// An attempt that did not come up asks for a disconnect before it is given
+/// up on. A `Connect` BlueZ is still running towards a board that is not there
+/// keeps the adapter busy on its own account — the call outlives the caller's
+/// patience by minutes, and the *next* session's connect then fails with
+/// `In Progress` for two minutes over a board that is perfectly healthy. The
+/// busy answer is the one case that must not: there the pending operation is
+/// another client's dial, and cancelling it is exactly what this call just
+/// learned not to do.
+///
 /// `Ok(true)` when this call dialled the link, `Ok(false)` when it joined one
 /// that was already up: the difference is who may hang it up again.
-async fn dial(peripheral: &Peripheral) -> Result<bool, String> {
+async fn dial(peripheral: &Peripheral, attempt: Duration) -> Result<bool, String> {
     let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
     loop {
         if is_up(peripheral).await {
             return Ok(false);
         }
-        let error = match peripheral.connect_with_timeout(DIAL_ATTEMPT).await {
+        let error = match peripheral.connect_with_timeout(attempt).await {
             Ok(()) => return Ok(true),
             Err(error) => error,
         };
         let text = error.to_string();
-        if is_transient(&text) && tokio::time::Instant::now() < deadline {
-            // Best effort: nothing was up, but BlueZ may still be holding the
-            // remains of the attempt, and a fresh `Connect` wants them gone.
-            let _ = peripheral.disconnect().await;
-            tokio::time::sleep(RETRY_BACKOFF).await;
-            continue;
-        }
         if is_busy(&text) {
             while tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(RETRY_POLL).await;
@@ -609,6 +633,14 @@ async fn dial(peripheral: &Peripheral) -> Result<bool, String> {
                     return Ok(false);
                 }
             }
+            return Err(dial_error(&text));
+        }
+        // Best effort, and deliberately after the busy case: nothing was up,
+        // so what is still pending here is our own attempt's remains.
+        let _ = peripheral.disconnect().await;
+        if is_transient(&text) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(RETRY_BACKOFF).await;
+            continue;
         }
         return Err(dial_error(&text));
     }
@@ -648,9 +680,41 @@ fn dial_error(text: &str) -> String {
             "the BLE link dropped mid-dial: {text} — the board or another client let \
              go of the connection; retry in a second"
         )
+    } else if is_timeout(text) {
+        // The adapter itself is the thing to warn about here: BlueZ keeps a
+        // connect that nobody is waiting for any more, and the next dial made
+        // against it is refused with `In Progress` until it comes back. The
+        // disconnect this module asks for on the way out is what shortens
+        // that, but it is a request rather than a guarantee — a phone that
+        // walked away mid-connect can leave the adapter holding the attempt.
+        format!(
+            "the board did not answer in time: {text} — if the next attempt says the \
+             adapter is busy, give it a minute before trying again"
+        )
     } else {
         format!("the connection was refused: {text}")
     }
+}
+
+/// How long one dial attempt gets, given the window its caller named.
+///
+/// The longer of the two, so that `--connect-timeout 40` really is forty
+/// seconds of dialling rather than fifteen and a lying sentence, and a caller
+/// that asked for five still gets an attempt that a cold adapter can finish —
+/// the short case is `open`'s own timer, which fires while this one is still
+/// going.
+fn dial_attempt(window: Duration) -> Duration {
+    window.max(DIAL_ATTEMPT)
+}
+
+/// Whether the dial gave up waiting rather than being refused.
+///
+/// btleplug reports this in its own words (`Timed out after 15s`), and BlueZ in
+/// its (`br-connection-timeout`); the second is caught by [`is_transient`]
+/// first, which is why this is asked only after that.
+fn is_timeout(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("timed out") || text.contains("timeout")
 }
 
 /// `true` when BlueZ is saying somebody else owns the adapter: another scan or
@@ -715,7 +779,7 @@ where
 
 /// Scan for `selection` and connect to it, reporting whether the dial was
 /// this session's own — see [`dial`].
-async fn find(selection: &Selection) -> Result<(Peripheral, bool), String> {
+async fn find(selection: &Selection, attempt: Duration) -> Result<(Peripheral, bool), String> {
     let manager = Manager::new()
         .await
         .map_err(|why| format!("no Bluetooth manager could be opened: {why}"))?;
@@ -761,7 +825,7 @@ async fn find(selection: &Selection) -> Result<(Peripheral, bool), String> {
         }
     })?;
 
-    let dialled_here = dial(&chosen).await?;
+    let dialled_here = dial(&chosen, attempt).await?;
     Ok((chosen, dialled_here))
 }
 
@@ -1373,5 +1437,46 @@ mod tests {
             refused, "the connection was refused: br-connection-rej-security",
             "a permanent refusal is not dressed up"
         );
+    }
+
+    /// A caller that named a long window gets a long attempt: the flag is the
+    /// promise, and a dial that gave up at fifteen seconds while its caller was
+    /// still due forty would answer a question nobody asked.
+    #[test]
+    fn a_dial_attempt_follows_the_window_the_caller_named() {
+        assert_eq!(
+            dial_attempt(Duration::from_secs(40)),
+            Duration::from_secs(40),
+            "`--connect-timeout 40` governs the segment it was asked about"
+        );
+        assert_eq!(
+            dial_attempt(Duration::from_secs(5)),
+            DIAL_ATTEMPT,
+            "a window shorter than a cold dial is `open`'s timer, not this one"
+        );
+        assert_eq!(
+            dial_attempt(DIAL_ATTEMPT),
+            DIAL_ATTEMPT,
+            "the floor is the floor"
+        );
+    }
+
+    /// A dial that ran out of time is told apart from a refusal, and its
+    /// message names the next attempt's hazard: the adapter can still be
+    /// finishing with a board that never answered.
+    #[test]
+    fn a_timed_out_dial_warns_about_the_adapter() {
+        let timed_out = dial_error("Timed out after 40s");
+        assert!(timed_out.contains("did not answer in time"), "{timed_out}");
+        assert!(timed_out.contains("give it a minute"), "{timed_out}");
+        assert!(timed_out.contains("Timed out after 40s"), "{timed_out}");
+        assert!(is_timeout("Timed out after 40s"));
+        assert!(is_timeout("operation timeout"));
+        assert!(!is_timeout("device not found"));
+        // BlueZ's own timeout spelling is transient first: it is retried
+        // in-budget, and only its expiry is reported — as a dropped link.
+        let expired = dial_error("br-connection-timeout");
+        assert!(expired.contains("dropped mid-dial"), "{expired}");
+        assert!(!expired.contains("did not answer in time"), "{expired}");
     }
 }

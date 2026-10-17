@@ -62,6 +62,10 @@ Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包：它装的是�
 | 在板子的目标上跑 shell 命令 | `linkr --exec "uname -a"`，见下节 |
 
 > 读诊断（`@i?` 等管理命令）仅限 BLE：LAN / stdio 下会返回一行说明并以 1 退出，这不是故障。
+>
+> 扫描遇到板子忙（另一个 WiFi 操作还没结束，板子此时对 `@w scan` 要么不应答、要么回
+> `ERR scan=-16`）会自动重试 4 次，停顿 2/4/6/8 秒；板子报"操作结束"时还会提前重试。
+> 4 次都没成才报错，报的话会说重试次数。TUI 里每次等待都有一条"最多 N 秒后自动重试…"提示。
 
 ## 四、`--exec`：把命令送到板子的目标 shell
 
@@ -144,7 +148,7 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 
 | 行 | 字段 | 说明 |
 |---|---|---|
-| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是本构建支持的请求（随传输变化：LAN 下不含仅限 BLE 的项） |
+| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是这个会话当下能服务的请求（随传输变化：LAN / stdio 下不含 `info`/`uart`/`wifi`/`wifi-off`/`wifi-scan`/`lan` 这些仅限 BLE 的项；`--capabilities` 才是本构建的全表） |
 | `begin` | `id` `op` | 每个请求的开口；`id` 是可选数字，原样回显（不给就是 `null`） |
 | `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第六节） |
 

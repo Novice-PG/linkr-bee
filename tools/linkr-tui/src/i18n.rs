@@ -845,6 +845,21 @@ impl Lang {
             ),
         }
     }
+
+    /// A question the board never answered, after the retries that were meant
+    /// to outlast its being busy.
+    ///
+    /// The plain [`Self::mgmt_no_answer`] says "try again", which is the one
+    /// thing the caller has just spent the retries doing; this says what was
+    /// already tried, so the next step is not a repeat of this one.
+    pub fn mgmt_no_answer_after_retries(self, tries: u32) -> String {
+        match self {
+            Lang::Zh => format!("桥接重试 {tries} 次仍没有应答：它一直很忙，请稍后再试"),
+            Lang::En => format!(
+                "the bridge did not answer through {tries} retries — it stayed busy, try again later"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1027,6 +1042,13 @@ mod tests {
             assert!(
                 lang.wifi_busy_wait(4).contains('4'),
                 "the wait says how long it is"
+            );
+            let retried = lang.mgmt_no_answer_after_retries(4);
+            assert!(retried.contains('4'), "the retries are counted: {retried}");
+            assert_ne!(
+                lang.strings().mgmt_no_answer,
+                retried,
+                "the retried ending is said differently from the plain one"
             );
         }
         assert_ne!(

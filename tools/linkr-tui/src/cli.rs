@@ -1055,8 +1055,14 @@ pub(crate) fn wait_for_connected(app: &mut App, window: Duration) {
 /// once, best effort, and carried into the report. The read cannot turn the
 /// failure into a success: the sentence to report was captured first, and a
 /// bridge that will not answer the state question either keeps its own words.
+///
+/// The wait is [`crate::app::scan_answer_window`] rather than one patience,
+/// because a board busy with another WiFi operation refuses a scan by saying
+/// nothing at all and the app asks again on its own — see [`crate::app::ScanRetry`].
+/// A window sized for the first attempt alone would end the process in the
+/// middle of those retries and report a busy board as a silent one.
 fn wait_and_report_scan(app: &mut App, format: Format) -> i32 {
-    let window = crate::device::Query::WifiScan.patience() + SETTLE_SLACK;
+    let window = crate::app::scan_answer_window();
     let answered = settle(app, format, window);
     if !answered {
         let why = app

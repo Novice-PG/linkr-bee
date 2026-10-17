@@ -358,6 +358,11 @@ const WIFI_EVENT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(
 /// mistake and not worth an error. It is worth waiting out. Bounded, because
 /// a board that stays busy through every attempt is a board to hear about
 /// rather than to keep asking.
+///
+/// A scan is turned away by the same gate, and spends the same allowance on
+/// the same pauses: see [`ScanRetry`]. What differs is the shape of the
+/// refusal — `ERR scan=-16` when the gate is another scan, and silence when
+/// it is a join.
 const WIFI_BUSY_RETRIES: u32 = 4;
 
 /// The pause before the attempt that follows `spent` refused ones.
@@ -398,6 +403,21 @@ pub fn wifi_answer_window() -> Duration {
     wifi_write_window().max(WIFI_EVENT_FALLBACK)
 }
 
+/// How long a caller waits for a scan that keeps going unanswered.
+///
+/// Every attempt gets its patience and every pause between them is counted,
+/// because that is what the app will spend: a scan nobody answers is asked
+/// again (see [`ScanRetry`]), and a window sized for one attempt would have
+/// the caller give up in the middle of the retries — reporting a busy board as
+/// a silent one.
+pub fn scan_answer_window() -> Duration {
+    crate::device::Query::WifiScan.patience() * (WIFI_BUSY_RETRIES + 1)
+        + (0..WIFI_BUSY_RETRIES)
+            .map(wifi_busy_pause)
+            .sum::<Duration>()
+        + Duration::from_secs(10)
+}
+
 /// An `@w=` write the interface is not finished with: either its answer has
 /// not arrived, or it was refused for busy and is owed another attempt.
 ///
@@ -425,6 +445,40 @@ impl WifiWrite {
             command: command.to_string(),
             left: WIFI_BUSY_RETRIES,
             next: None,
+        }
+    }
+}
+
+/// A scan whose answer never came, and which is owed another attempt.
+///
+/// A scan is the one question a busy board refuses with nothing at all. The
+/// firmware turns a scan away while another scan owns the scan lock — with
+/// `ERR scan=-16`, which is handled where replies are folded — and while a
+/// join owns the radio it very often answers nothing: the request reaches a
+/// management task that is busy with the operation, and no reply, no `ERR` and
+/// no partial list comes back. Silence is therefore the shape this record
+/// exists for, and the reason it is worth asking again rather than reporting:
+/// the gate is the board finishing what it was doing, and it clears on its
+/// own.
+///
+/// The attempts and the pauses are a busy write's, because it is the same gate
+/// in the same firmware. Unlike [`WifiWrite`] the record holds no command and
+/// no secret — the scan is the same `@w scan` every time — so the only thing a
+/// retry costs is the wait itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanRetry {
+    /// Attempts still owed after the unanswered one.
+    pub left: u32,
+    /// When the next attempt is due, once one is owed.
+    pub due: Option<Instant>,
+}
+
+impl ScanRetry {
+    /// The record a fresh scan opens, with every attempt still owed.
+    fn new() -> ScanRetry {
+        ScanRetry {
+            left: WIFI_BUSY_RETRIES,
+            due: None,
         }
     }
 }
@@ -559,6 +613,9 @@ pub struct App {
     /// The `@w=` write whose answer has not arrived, or that is owed another
     /// attempt after a busy refusal. See [`WifiWrite`].
     pub wifi_write: Option<WifiWrite>,
+    /// The scan whose answer has not arrived, or that is owed another attempt
+    /// after being refused. See [`ScanRetry`].
+    pub scan_retry: Option<ScanRetry>,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -757,6 +814,7 @@ impl Default for App {
             network: crate::views::network::NetworkState::default(),
             wifi_operation: None,
             wifi_write: None,
+            scan_retry: None,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -1762,6 +1820,7 @@ impl App {
         self.session.hang_up(Duration::from_millis(250));
         self.state = ConnectionState::Disconnected;
         self.wifi_write = None;
+        self.scan_retry = None;
         // The lock a dial took out went with the dial: with the link down
         // there is nothing left for it to protect, and switching the transport
         // is exactly what hanging up is for. A transport the command line
@@ -1785,6 +1844,7 @@ impl App {
         self.state = ConnectionState::Disconnected;
         self.transport_locked = self.transport_pinned;
         self.wifi_write = None;
+        self.scan_retry = None;
         ended
     }
 
@@ -2086,10 +2146,12 @@ impl App {
                 // the target is owed the current one at its first prompt.
                 // A write still waiting on the board is dropped with the link
                 // it belonged to — the record holds a password, and a board
-                // that is gone is not owed the retry.
+                // that is gone is not owed the retry. A scan owed one goes the
+                // same way: the next link is not the one that was busy.
                 LinkEvent::Opened | LinkEvent::Closed(_) => {
                     self.geometry.reset();
                     self.wifi_write = None;
+                    self.scan_retry = None;
                 }
             }
         }
@@ -2102,7 +2164,7 @@ impl App {
             self.apply_reply(reply, &stamp);
         }
         if let Some(query) = self.talk.abandon(now) {
-            self.report_unanswered(query);
+            self.report_unanswered(query, now);
         }
         // An `@event wifi` ending that never came is given up on the same
         // beat as an answer's own timeout, and the status is read back
@@ -2111,6 +2173,9 @@ impl App {
         // A `@w=` write the board refused for busy is asked again on the beat
         // its pause is over.
         self.send_due_wifi_write(now);
+        // And so is a scan nobody answered, for the same reason: the gate it
+        // was refused by clears on its own.
+        self.send_due_scan_retry(now);
         // A program that asks a question — where is the cursor, how wide is the
         // screen — blocks until it hears back, so the emulator's answers go out
         // on the tick that produced them. Always *after* the feed: an answer is
@@ -2210,22 +2275,23 @@ impl App {
         self.output.drain(..).collect()
     }
 
-    /// Whether a question is still waiting for its answer.
+    /// Whether a question this view asked is still outstanding.
     ///
     /// Asked by the script mode, which has to know when to stop pumping; the
     /// frame never needs to, because a tick is always followed by another.
-    ///
-    /// A write the board refused for busy counts as outstanding too: it is
-    /// owed another attempt on a later beat, and a script that stopped pumping
-    /// the moment the refusal arrived would exit in the middle of the retry —
-    /// reporting a join that the board had not been asked for a second time.
-    /// Whether a question this view asked is still outstanding.
     ///
     /// A WiFi action counts from the moment it is sent until the board
     /// finishes with the radio, because its ack is not its answer: see
     /// [`App::apply_reply`] and [`WifiOperation`]. A caller waiting on this —
     /// the script mode, the resident session — therefore waits out the join
     /// itself and not the ack that starts it.
+    ///
+    /// A retry counts too, in both the shapes one takes: a write the board
+    /// refused for busy is owed another attempt on a later beat, and a scan
+    /// nobody answered is owed one for the same reason. A script that stopped
+    /// pumping when the refusal arrived would exit in the middle of the retry —
+    /// reporting a join, or a scan, that the board had not been asked for a
+    /// second time.
     pub fn waiting_on_device(&self) -> bool {
         self.talk.waiting().is_some()
             || self.wifi_operation.is_some()
@@ -2233,6 +2299,10 @@ impl App {
                 .wifi_write
                 .as_ref()
                 .is_some_and(|write| write.next.is_some())
+            || self
+                .scan_retry
+                .as_ref()
+                .is_some_and(|retry| retry.due.is_some())
     }
 
     /// The wall clock, `HH:MM:SS`, local time.
@@ -2599,6 +2669,17 @@ impl App {
             // next to a wifi name is a token in a screenshot.
             Query::Lan => self.lan_status.loading = true,
         }
+        // A scan is the one question the app may ask again by itself, so it
+        // carries the record of what it is owed. A fresh scan gets the whole
+        // allowance; an attempt that is already owed keeps the attempts it has
+        // left, because the count is what bounds the waiting — restarting it
+        // per attempt would bound nothing.
+        if query == Query::WifiScan {
+            match self.scan_retry.as_mut() {
+                Some(retry) => retry.due = None,
+                None => self.scan_retry = Some(ScanRetry::new()),
+            }
+        }
         Ok(())
     }
 
@@ -2728,17 +2809,32 @@ impl App {
         // "loading…" underneath an error.
         self.stop_waiting(reply.query);
         if !reply.status.ok {
-            let code = if reply.query == Query::Wifi {
+            // A busy refusal is not a failure to report: the board's gate is
+            // held by whatever WiFi work is in flight, and it clears on its
+            // own. The question is owed another attempt instead. A write says
+            // busy with `ERR wifi=-16` and a scan with `ERR scan=-16`; a scan
+            // can also be refused by silence, which is handled where timeouts
+            // are (see [`ScanRetry`]). Only when the attempts run out does it
+            // arrive here as a failure.
+            let code = if matches!(reply.query, Query::Wifi | Query::WifiScan) {
                 accessory::wifi_error_code(&reply.status.error)
             } else {
                 None
             };
-            // A busy board is not a refusal to report: the write is owed
-            // another attempt, and the wait for it is said instead of the
-            // gate's number. Only when the attempts run out does it arrive
-            // here as a failure.
-            if code == Some(accessory::WIFI_BUSY) && self.retry_wifi_write() {
-                return;
+            if code == Some(accessory::WIFI_BUSY) {
+                let owed = match reply.query {
+                    Query::Wifi => self.retry_wifi_write(),
+                    _ => self.retry_scan(Instant::now()),
+                };
+                if owed {
+                    return;
+                }
+            }
+            // Whatever the refusal was, a scan it named is not owed anything
+            // by it: the record goes, so that a scan asked later starts with
+            // its whole allowance.
+            if reply.query == Query::WifiScan {
+                self.scan_retry = None;
             }
             // A `@w=` write that was answered is not owed anything any more,
             // whichever way the answer went. This is where the password the
@@ -2793,9 +2889,12 @@ impl App {
         // The answer arrived, so the write is finished with as far as the
         // interface is concerned — including the copy of the command it was
         // holding for a retry. The operation, if the write started one, is
-        // waited on separately; see [`WifiOperation`].
-        if reply.query == Query::Wifi {
-            self.wifi_write = None;
+        // waited on separately; see [`WifiOperation`]. The same for a scan:
+        // what was owed another attempt is not owed one any more.
+        match reply.query {
+            Query::Wifi => self.wifi_write = None,
+            Query::WifiScan => self.scan_retry = None,
+            _ => {}
         }
         let text = reply.lines.join("\n");
         match reply.query {
@@ -2931,10 +3030,11 @@ impl App {
         // An ending is the bridge finishing with the radio, and an ending of
         // *anybody's* operation frees the gate a busy refusal was waiting on —
         // so a write owed another attempt goes out now rather than sitting out
-        // the rest of its pause. The pauses remain as the path for a host that
-        // never sees the ending.
+        // the rest of its pause, and a scan owed one goes with it. The pauses
+        // remain as the path for a host that never sees the ending.
         if event.is_final {
             self.ask_busy_write_again();
+            self.ask_busy_scan_again();
         }
         let ours = match &self.wifi_operation {
             Some(operation) => event.operation == operation.id,
@@ -3057,6 +3157,44 @@ impl App {
         }
     }
 
+    /// The same for a scan owed another attempt: the ending that frees the
+    /// gate frees its pause too.
+    fn ask_busy_scan_again(&mut self) {
+        if let Some(retry) = self.scan_retry.as_mut() {
+            if retry.due.is_some() {
+                retry.due = Some(Instant::now());
+            }
+        }
+    }
+
+    /// The last attempt went unanswered: put the scan back in the queue for
+    /// its next one, and say what the wait is for. Returns whether an attempt
+    /// was owed at all.
+    ///
+    /// The row is put back into "loading" on purpose, exactly as a retried
+    /// write's is: from the user's side a scan that is being asked again is
+    /// still a scan in progress, and a row that said "nothing is happening"
+    /// for those seconds would be lying about it.
+    fn retry_scan(&mut self, now: Instant) -> bool {
+        let Some(retry) = self.scan_retry.as_mut() else {
+            return false;
+        };
+        if retry.left == 0 {
+            return false;
+        }
+        let pause = wifi_busy_pause(WIFI_BUSY_RETRIES - retry.left);
+        retry.left -= 1;
+        retry.due = Some(now + pause);
+        self.network.loading = true;
+        self.network.error = None;
+        let text = self.lang.wifi_busy_wait(pause.as_secs());
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Info,
+        });
+        true
+    }
+
     /// Send the `@w=` write that is owed another attempt, when `now` is the
     /// moment for it.
     ///
@@ -3089,6 +3227,33 @@ impl App {
         }
     }
 
+    /// Send the scan that is owed another attempt, when `now` is the moment
+    /// for it.
+    ///
+    /// `ask_device` is what clears `due` — one attempt is on the wire again —
+    /// and what keeps the attempts that are left: it is the same record,
+    /// because the count is what bounds the waiting. See [`App::ask_device`].
+    fn send_due_scan_retry(&mut self, now: Instant) {
+        let Some(retry) = &self.scan_retry else {
+            return;
+        };
+        if !matches!(retry.due, Some(at) if now >= at) {
+            return;
+        }
+        if let Err(why) = self.ask_device(Query::WifiScan) {
+            // The link went away under the retry. The record goes with it
+            // rather than waiting for a board that is no longer there, and the
+            // reason is left where the scan's own failure would have gone —
+            // the one-shot scan reports the row's words.
+            self.scan_retry = None;
+            self.network.error = Some(why.clone());
+            self.push_notice(Notice {
+                text: why,
+                level: NoticeLevel::Error,
+            });
+        }
+    }
+
     /// Give up on an `@event wifi` ending that never came, at `now`.
     ///
     /// Uncertain bridges are read, not waited out: when the window passes,
@@ -3111,10 +3276,27 @@ impl App {
     }
 
     /// Say that a question went unanswered, and stop the view waiting on it.
-    fn report_unanswered(&mut self, query: Query) {
+    fn report_unanswered(&mut self, query: Query, now: Instant) {
         self.stop_waiting(query);
+        // A scan is the one question a busy board refuses with nothing at all:
+        // the request reaches a management task that is in the middle of
+        // another WiFi operation, and no reply, no `ERR` and no partial list
+        // comes back. Silence is therefore worth asking again about — the gate
+        // is the board finishing what it was doing, and it clears on its own.
+        if query == Query::WifiScan && self.retry_scan(now) {
+            return;
+        }
         let s = self.strings();
-        let text = s.mgmt_no_answer.to_string();
+        // Every attempt was spent and the board stayed silent for all of them:
+        // the plain sentence would tell the caller to try again, which is the
+        // one thing that has just been done. (The `take` is what ends the
+        // record — nothing is owed any more by the time this is said.)
+        let retried = query == Query::WifiScan && self.scan_retry.take().is_some();
+        let text = if retried {
+            self.lang.mgmt_no_answer_after_retries(WIFI_BUSY_RETRIES)
+        } else {
+            s.mgmt_no_answer.to_string()
+        };
         match query {
             Query::Diagnostics => self.diagnostics.error = Some(text.clone()),
             // A `@s?` nobody answered is not a failure the user did anything
@@ -5827,6 +6009,164 @@ mod tests {
             asked_times(&wire, b"@w=BenchNet,secret"),
             0,
             "nothing went out again (the drain above took the first write)"
+        );
+    }
+
+    /// A scan is the question a busy board refuses with nothing at all: the
+    /// request reaches a management task that is in the middle of another WiFi
+    /// operation, and no reply, no `ERR` and no partial list comes back. The
+    /// silence is therefore "busy" rather than "no", and the scan is asked
+    /// again rather than handed back as unanswered — while the row keeps saying
+    /// the scan is in flight, and the wait is said.
+    #[test]
+    fn a_silent_scan_is_asked_again() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::WifiScan).expect("the link is up");
+        assert_eq!(asked_times(&wire, b"@w scan"), 1, "the scan went out");
+
+        // Its patience passes with nothing at all on the wire.
+        app.report_unanswered(Query::WifiScan, Instant::now());
+
+        assert!(app.network.error.is_none(), "silence is not yet a failure");
+        assert!(app.network.loading, "a scan being asked again is in flight");
+        assert!(app.waiting_on_device(), "and a script waits with it");
+        let retry = app.scan_retry.as_ref().expect("the scan is owed a retry");
+        assert_eq!(retry.left, WIFI_BUSY_RETRIES - 1, "an attempt is spent");
+        assert!(
+            retry.due.is_some(),
+            "the retry starts out waiting its pause"
+        );
+        let notice = app.notices.last().expect("a notice about the wait");
+        assert!(notice.text.contains("自动重试"), "{}", notice.text);
+
+        // The bridge finishing with the radio frees the gate, and the pause
+        // with it: the same question goes out again without sitting it out.
+        let started = Instant::now();
+        wire.feed_management(answer(
+            0,
+            "@event wifi operation=0 phase=failed result=-116",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.scan_retry
+                .as_ref()
+                .is_some_and(|retry| retry.due.is_none())
+        }));
+        assert!(
+            started.elapsed() < wifi_busy_pause(0),
+            "the ending brought the retry forward rather than waiting the pause out"
+        );
+        let (id, body) = newest_question(&wire);
+        assert_eq!(body, b"@w scan", "the scan went out again");
+        let retry = app.scan_retry.as_ref().expect("still owed the rest");
+        assert_eq!(retry.left, WIFI_BUSY_RETRIES - 1, "nothing else was spent");
+
+        // And when the answer does come, nothing is owed any more.
+        wire.feed_management(answer(
+            id,
+            "OK accepted\r\n@scan result BenchNet wpa2 ch=6 -54dBm\r\n@scan done\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.scan_retry.is_none()));
+        assert_eq!(
+            app.network.scan_results,
+            vec!["BenchNet wpa2 ch=6 -54dBm".to_string()],
+            "the retried scan's answer is the answer"
+        );
+        assert_ne!(
+            app.network.error.as_deref(),
+            Some(Lang::Zh.strings().net_scan_failed),
+            "and it is not reported as a failed scan"
+        );
+    }
+
+    /// The gate has a second spelling for a scan: `ERR scan=-16` is the
+    /// firmware's own "a scan is already in flight" from `linkr_wifi_scan_start`,
+    /// and it is waited out exactly as silence is.
+    #[test]
+    fn a_scan_refused_for_busy_waits_its_turn() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::WifiScan).expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR scan=-16\r\n"));
+
+        assert!(pump_until(&mut app, |app| {
+            app.scan_retry
+                .as_ref()
+                .is_some_and(|retry| retry.due.is_some())
+        }));
+        assert!(app.network.loading, "a scan being retried is in flight");
+        assert!(
+            app.network.error.is_none(),
+            "the gate's number is not an error to show"
+        );
+        assert_eq!(
+            app.scan_retry.as_ref().map(|retry| retry.left),
+            Some(WIFI_BUSY_RETRIES - 1),
+            "the refusal spends an attempt"
+        );
+        let notice = app.notices.last().expect("a notice about the wait");
+        assert!(notice.text.contains("自动重试"), "{}", notice.text);
+    }
+
+    /// A board that never answers is heard about at last: the attempts are
+    /// bounded, the record is not left claiming anything, and the sentence says
+    /// the retries were spent rather than telling the caller to try again —
+    /// which is the one thing that has just been done.
+    #[test]
+    fn a_scan_that_stays_silent_is_reported_at_last() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.ask_device(Query::WifiScan).expect("the link is up");
+
+        for spent in 0..WIFI_BUSY_RETRIES {
+            app.report_unanswered(Query::WifiScan, Instant::now());
+            assert_eq!(
+                app.scan_retry.as_ref().map(|retry| retry.left),
+                Some(WIFI_BUSY_RETRIES - 1 - spent),
+                "the attempts are counted down"
+            );
+            assert!(
+                app.scan_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.due.is_some()),
+                "each silence owes another attempt"
+            );
+            // The pause is over: the attempt goes out.
+            app.send_due_scan_retry(Instant::now() + Duration::from_secs(60));
+            assert!(
+                app.scan_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.due.is_none()),
+                "one attempt is on the wire again"
+            );
+        }
+        let (_, body) = newest_question(&wire);
+        assert_eq!(body, b"@w scan", "the last attempt is the same question");
+
+        // Silent through every attempt — including the last.
+        app.report_unanswered(Query::WifiScan, Instant::now());
+
+        assert!(app.scan_retry.is_none(), "nothing is owed any more");
+        assert!(!app.network.loading, "and nothing is left spinning");
+        assert_eq!(
+            app.network.error.as_deref(),
+            Some(
+                Lang::Zh
+                    .mgmt_no_answer_after_retries(WIFI_BUSY_RETRIES)
+                    .as_str()
+            ),
+            "the row says the retries were spent, not that nothing happened"
+        );
+    }
+
+    /// The script mode's wait for a scan covers every attempt its retries can
+    /// make: a window sized for the first silence alone would end the process
+    /// in the middle of them.
+    #[test]
+    fn the_scan_window_outlasts_the_retries() {
+        let pauses: Duration = (0..WIFI_BUSY_RETRIES).map(wifi_busy_pause).sum();
+        let patiences = crate::device::Query::WifiScan.patience() * (WIFI_BUSY_RETRIES + 1);
+        assert!(
+            scan_answer_window() > pauses + patiences,
+            "the window has to outlast every attempt and every pause between"
         );
     }
 
