@@ -10,12 +10,12 @@ e3e49a8e59b94e9ce5d03e902e9055bfccbfacb9f136c0c427b35a7bbac566e6  cli/linkr-cli-
 adbf1b48991d08a9a45c2bda067b30011c05d12bd690319e79d5812a2e9d61c7  cli/linkr-cli-1.0.0-x86_64-pc-windows-msvc.zip
 733675e85c6fd9d8b19e7f0e1c87ae10da3b710e6b2b11ce06deb3fa63f95acf  cli/linkr-cli-1.0.0-aarch64-apple-darwin.dmg
 29769451f1cf1aad9941c2479fd1b05d07827a99450bf883a0b50d26bc35c138  cli/linkr-cli-1.0.0-x86_64-apple-darwin.dmg
-8bfb78877e0f22c2ddd4c74b97545be2773409ab25f6fb1b6b9a73f3e49cfbbf  linux/linkr-1.0.0-aarch64-unknown-linux-gnu.tar.gz
+ff23edf4f21760c10701c2d3990fd937cae10d2dc0ff2846168bdab4b321ee68  linux/linkr-1.0.0-aarch64-unknown-linux-gnu.tar.gz
 cf8ca6aa9a817f22ae83e6935ac9b2b53f4906c55dc185adaff934ff0f71b3df  linux/linkr-1.0.0-armv7-unknown-linux-gnueabihf.tar.gz
 6c3d783c16213b532d635ea17df05175c686a4209706a1184069b8f20aed9371  linux/linkr-1.0.0-i686-unknown-linux-gnu.tar.gz
 cf8581d525e3e00b4ef31be8cfb4ec5a23619eee47d19acc4280c06f73c9a604  linux/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
 55e56bfa7fd8255fb0bad39af7ae46dff71b7cbe03cf7d67aaddd36479d4d5ef  linux/linkr_1.0.0_amd64.deb
-b083ff3e7cc9958ac8977b8757288f168a024b392468d98e3c6895d7be5568e7  linux/linkr_1.0.0_arm64.deb
+109bce3c9cac9c214125d0c86acf6b52385ddadb2221df44ead0a607170acb27  linux/linkr_1.0.0_arm64.deb
 20ede37021834acebf03bb191f0b74b8f7ce5f9011ad4b3220ecfef39d5a8c10  linux/linkr_1.0.0_armhf.deb
 6e33e25bc4780543c10c4cdf8232ea5bd204b14b741ccd01c06ac03fdb6f2636  linux/linkr_1.0.0_i386.deb
 fc6312ef7e63d0b262213fdcb5aca5e6e03a9f8e3b8916aec4698cefea7f03f3  macos/linkr-1.0.0-aarch64-apple-darwin.tar.gz
@@ -24,5 +24,5 @@ cec172cfd06e855bd5ac1a586bfc2a864e9ee93ec26d53ab15f837a6dbe1f633  macos/linkr-1.
 cc0ea1bb8d3b072d563c39a19a5248c6414a18731fe675163a792d3959e8da17  macos/linkr-1.0.0-x86_64-apple-darwin.dmg
 f5578a5f8ffa4a12cd952b4024c39027b4a8f9e34c72d8df725b1ff9ebbc092f  windows/linkr-1.0.0-aarch64-pc-windows-msvc.zip
 3757df442b83df01f50c0dcc87520a93f8d98d06ec701ac09564ffed837d10cf  windows/linkr-1.0.0-i686-pc-windows-gnu.zip
-fb07f883b6bdefe1417f736720f93f40c9190f83fd218df168d6369059190ff5  windows/linkr-1.0.0-x86_64-pc-windows-gnu.zip
+799d9e798452447138b11830338c591b0ecbed39df62d4b5c4755224c1313343  windows/linkr-1.0.0-x86_64-pc-windows-gnu.zip
 006cb2d99b930af23508b1b6e24e760a560334895a54516d0e5a6a36c6b0ed66  windows/linkr-1.0.0-x86_64-pc-windows-msvc.zip
