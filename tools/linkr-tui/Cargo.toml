@@ -36,6 +36,13 @@ uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset", "http2", "stream"] }
 
+# A CLI whose reader quits first should quit quietly with it; Rust disables
+# SIGPIPE for the whole process, so restoring the default takes one libc call.
+# Unix-only because only unix has the signal. See `restore_default_sigpipe`
+# in `src/main.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The Windows executable wears the project's mark, which lives in a Windows
 # resource section and nowhere else: `build.rs` embeds `assets/icon.ico`. The
 # dependency is unconditional because a build script is compiled for the

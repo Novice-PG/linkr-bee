@@ -1049,7 +1049,29 @@ fn restore_best_effort() {
     let _ = execute!(stdout, LeaveAlternateScreen);
 }
 
+/// Rust starts every process with SIGPIPE ignored, which turns a reader that
+/// quits first into an I/O error — and, for a `println!`, into a panic printed
+/// to nobody. The Unix convention for a CLI is the other one: stop talking the
+/// moment there is nobody left listening. The default handler *is* that quiet
+/// stop, so it goes back before any output can fail.
+#[cfg(unix)]
+fn restore_default_sigpipe() {
+    // SAFETY: changing a signal disposition cannot violate any memory rule,
+    // and this runs at the top of `main`, while the process is single-threaded.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// Nothing to restore where there is no SIGPIPE.
+#[cfg(not(unix))]
+fn restore_default_sigpipe() {}
+
 fn main() -> io::Result<()> {
+    // A reader that quits first must end this process quietly, not with a
+    // panic — before any output exists to fail.
+    restore_default_sigpipe();
+
     // Read as `OsString` and soften what cannot be text: `env::args()` panics
     // on an argument that is not UTF-8 — a byte-sequence path on Linux is the
     // ordinary case — and a crash is a worse answer than a file name that will

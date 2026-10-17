@@ -1354,6 +1354,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "futures",
+ "libc",
  "ratatui",
  "reqwest",
  "tokio",
