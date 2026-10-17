@@ -28,7 +28,17 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
         ),
         Span::styled(app.state_name().to_string(), theme.text()),
         Span::styled(DOT.to_string(), theme.muted()),
-        Span::styled(app.signal_text(), theme.muted()),
+        // The reading wears the strength ladder rather than the strip's dim
+        // grey — the same reason the meters do: in three of the six themes
+        // that grey is all but the panel behind it, and a reading nobody can
+        // see reads as a reading that is not there at all.
+        Span::styled(
+            app.signal_text(),
+            match app.signal_dbm {
+                Some(dbm) => theme.signal_style(dbm),
+                None => theme.muted(),
+            },
+        ),
     ])
 }
 

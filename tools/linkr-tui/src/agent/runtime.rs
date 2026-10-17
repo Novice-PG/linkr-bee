@@ -105,13 +105,21 @@ impl Failure {
     /// One sentence for the interface, with the provider's own wording kept when
     /// it has any. Not `Display`: this is classified text and a `Display` impl
     /// would let a caller print one as though it were a log line.
-    pub fn describe(&self) -> String {
+    ///
+    /// The sentence is the interface's own language rather than this module's
+    /// English: an assistant that answers nothing is the hardest thing in the
+    /// program to diagnose, and the reason has to arrive in words its reader
+    /// uses.
+    pub fn describe(&self, lang: crate::i18n::Lang) -> String {
+        let s = lang.strings();
         match self {
-            Failure::Unreachable(why) => format!("the model did not answer: {why}"),
-            Failure::Rejected(status, body) => {
-                format!("the provider refused ({status}): {body}")
+            Failure::Unreachable(why) => {
+                crate::text::fill(s.asst_unreachable, std::slice::from_ref(why))
             }
-            Failure::Malformed => "the provider answered but sent no completion".to_string(),
+            Failure::Rejected(status, body) => {
+                crate::text::fill(s.asst_rejected, &[status.to_string(), body.clone()])
+            }
+            Failure::Malformed => s.asst_malformed.to_string(),
         }
     }
 }
@@ -259,7 +267,7 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     let key = job.config.api_key.clone();
     let url = chat_url(&job.config.endpoint);
 
-    let mut request = client_for(&key)
+    let mut request = client_for()
         .post(&url)
         .header("content-type", "application/json")
         // Accept SSE, because a provider that supports both will otherwise
@@ -359,17 +367,64 @@ fn send(reply: &Option<Sender<(String, Progress)>>, task_id: &str, step: Progres
     }
 }
 
-/// The client, with the timeout the whole request has to fit in.
-fn client_for(key: &str) -> reqwest::Client {
-    let _ = key;
+/// The client, with the timeout the whole request has to fit in, and any proxy
+/// the environment names.
+///
+/// A machine that can only reach the model through a proxy has no other way
+/// out, and reqwest's own system-proxy support is not built into this binary —
+/// so `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` (either case) are read here,
+/// with `NO_PROXY` handed to reqwest as the bypass list. A proxy reqwest
+/// cannot parse is skipped rather than made fatal: a typo in a variable is not
+/// a reason for the assistant to stop working, and the request will say what
+/// happened if it was the only way out.
+fn client_for() -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
+    if let Some(proxy) = proxy_from_env() {
+        builder = builder.proxy(proxy);
+    }
     // A client per answer, because the timeout is part of the request and a
     // shared one would have to be built before the first caller knew its
     // budget. The connection pool is the cost, and an interactive assistant
     // asks one question at a time in practice.
-    reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The proxy the environment names, if any.
+///
+/// `HTTPS_PROXY` is looked at first because that is the variable every provider
+/// in the list is reached through, then `ALL_PROXY`, then `HTTP_PROXY` — the
+/// order curl documents. The `NO_PROXY` list is parsed by reqwest rather than
+/// here, because bypassing is its own rules about domains, ports and CIDRs.
+fn proxy_from_env() -> Option<reqwest::Proxy> {
+    proxy_from(|name| std::env::var(name).ok())
+}
+
+/// The variables that name a proxy, in the order they are read.
+const PROXY_VARS: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
+
+/// The same choice, taken from a lookup rather than the process environment, so
+/// the order and the skipping are testable without touching globals.
+///
+/// A variable set to nothing, or to something reqwest cannot parse, is passed
+/// over rather than made fatal: a typo in one of six names is not a reason for
+/// the assistant to stop working, and the request will say what happened if
+/// that was the only way out.
+fn proxy_from(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<reqwest::Proxy> {
+    let mut proxy = PROXY_VARS
+        .iter()
+        .filter_map(|name| lookup(name))
+        .find_map(|url| reqwest::Proxy::all(url.trim()).ok())?;
+    if let Some(no_proxy) = reqwest::NoProxy::from_env() {
+        proxy = proxy.no_proxy(Some(no_proxy));
+    }
+    Some(proxy)
 }
 
 /// The next complete SSE event in `buffer`, and what is left after it.
@@ -397,12 +452,16 @@ fn drain_events(buffer: &mut String, usage: &mut Usage) -> String {
             // of the reply.
             break;
         }
-        if let Some(reported) = usage_of(payload) {
-            *usage = reported;
-            continue;
-        }
+        // Text and usage are read from the same event, not one *or* the
+        // other: several providers — every gateway that reports the bill in
+        // its last delta rather than in an event of its own — put the usage
+        // object beside the final slice of the reply, and an event that was
+        // read for its tokens alone would drop the words it came with.
         if let Some(delta) = text_of(payload) {
             text.push_str(&delta);
+        }
+        if let Some(reported) = usage_of(payload) {
+            *usage = reported;
         }
     }
     text
@@ -476,6 +535,13 @@ fn text_of(event: &str) -> Option<String> {
 /// The token accounting a stream event carries, if it carries one.
 fn usage_of(event: &str) -> Option<Usage> {
     let usage = field(event, "usage")?;
+    // A provider that was not asked for its accounting still spells the key —
+    // OpenAI sends `"usage":null` on every chunk — and reading that as a
+    // report would overwrite the real one with zeros.
+    let usage = usage.trim();
+    if usage.is_empty() || usage == "null" {
+        return None;
+    }
     Some(parse_usage(usage))
 }
 
@@ -782,6 +848,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
 
     fn config(endpoint: &str) -> AgentConfig {
         AgentConfig {
@@ -914,6 +981,84 @@ mod tests {
         assert!(carry.is_empty(), "nothing was left over");
     }
 
+    /// The environment is the only way out on a machine that can only reach the
+    /// model through a proxy: the first variable naming a usable one is taken,
+    /// a blank or unparsable one is passed over rather than made fatal, and no
+    /// variable at all is no proxy rather than an error.
+    #[test]
+    fn the_proxy_comes_from_the_environment_in_order() {
+        assert!(
+            proxy_from(|_| None).is_none(),
+            "no variable, no proxy — and no complaint"
+        );
+
+        let lowercase =
+            |name: &str| (name == "all_proxy").then(|| "http://127.0.0.1:7890".to_string());
+        assert!(proxy_from(lowercase).is_some(), "a lowercase name counts");
+
+        let blank_then_good = |name: &str| match name {
+            "HTTPS_PROXY" => Some("   ".to_string()),
+            "http_proxy" => Some("http://127.0.0.1:7890".to_string()),
+            _ => None,
+        };
+        assert!(
+            proxy_from(blank_then_good).is_some(),
+            "a variable set to nothing is not a proxy, and the next one is"
+        );
+
+        let garbage_then_good = |name: &str| match name {
+            "HTTPS_PROXY" => Some("not a url".to_string()),
+            "HTTP_PROXY" => Some("http://127.0.0.1:7890".to_string()),
+            _ => None,
+        };
+        assert!(
+            proxy_from(garbage_then_good).is_some(),
+            "an unparsable variable is skipped rather than made fatal"
+        );
+
+        assert!(
+            proxy_from(|_| Some("not a url".to_string())).is_none(),
+            "nothing usable anywhere is no proxy"
+        );
+    }
+
+    /// A failed turn is said in the interface's own words: the reason an
+    /// assistant answered nothing is the hardest thing in the program to
+    /// diagnose, and an English sentence under a Chinese interface is half of
+    /// the reason.
+    #[test]
+    fn a_failure_is_said_in_the_interfaces_language() {
+        let unreachable = Failure::Unreachable("connection refused".to_string());
+        assert_eq!(
+            unreachable.describe(Lang::En),
+            "the model did not answer: connection refused"
+        );
+        assert_eq!(
+            unreachable.describe(Lang::Zh),
+            "模型没有应答：connection refused",
+            "the provider's own wording is kept as it came"
+        );
+
+        let rejected = Failure::Rejected(503, "upstream is down".to_string());
+        assert_eq!(
+            rejected.describe(Lang::Zh),
+            "服务商拒绝（HTTP 503）：upstream is down"
+        );
+        assert!(rejected
+            .describe(Lang::En)
+            .starts_with("the provider refused"));
+
+        let malformed = Failure::Malformed;
+        assert_eq!(
+            malformed.describe(Lang::Zh),
+            "服务商返回了正文，但里面没有回答"
+        );
+        assert_eq!(
+            malformed.describe(Lang::En),
+            "the provider answered, but its body held no reply"
+        );
+    }
+
     /// A secret never survives into something the interface would print.
     #[test]
     fn a_key_is_redacted_from_provider_text() {
@@ -972,6 +1117,36 @@ mod tests {
     fn a_delta_is_what_arrives_mid_stream() {
         let event = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hel"}}]}"#;
         assert_eq!(text_of(event).as_deref(), Some("hel"));
+    }
+
+    /// The event that carries the bill carries words too, on every gateway that
+    /// reports usage beside its last delta rather than in an event of its own:
+    /// read for its tokens alone, the reply loses its ending — live, this was
+    /// `hi there` arriving as `hi`.
+    #[test]
+    fn a_delta_and_its_usage_are_read_from_one_event() {
+        let mut buffer = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let mut usage = Usage::default();
+        let text = drain_events(&mut buffer, &mut usage);
+        assert_eq!(text, "hi there", "the last delta went with the usage");
+        assert_eq!(usage.input, 3);
+        assert_eq!(usage.output, 2);
+    }
+
+    /// `"usage":null` is a key with no report in it — OpenAI spells it that way
+    /// when the accounting was not asked for — and reading it as a report would
+    /// overwrite a real one with zeros.
+    #[test]
+    fn a_null_usage_is_not_a_report() {
+        assert!(usage_of(r#"{"choices":[],"usage":null}"#).is_none());
+        assert!(usage_of(r#"{"choices":[]}"#).is_none());
+        let reported = usage_of(r#"{"usage":{"prompt_tokens":5}}"#).expect("a report");
+        assert_eq!(reported.input, 5);
     }
 
     /// A provider that answers in one message puts it in `message`, not `delta`.

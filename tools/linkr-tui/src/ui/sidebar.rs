@@ -342,7 +342,7 @@ pub fn rows(app: &App) -> Vec<Row> {
         // The device names the link once one is up; it is read, not chosen,
         // which is why it takes no cursor index.
         rows.push(Row::at(
-            labelled(s.device_label, &app.device_name, s.label_separator),
+            labelled(s.device_label, &app.device_text(), s.label_separator),
             RowStyle::Label,
             ITEM_INDENT,
         ));

@@ -115,7 +115,10 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
             Ok(_) => {}
             Err(why) => {
                 eprintln!("error: the session could not read its input: {why}");
-                app.session.close();
+                // Ended out loud rather than merely dropped: the caller's pipe
+                // broke, and the board must not be left holding a link to a
+                // session that can no longer hear it.
+                app.hang_up(crate::hangup::EXIT_GRACE);
                 return 2;
             }
         }
@@ -151,7 +154,10 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
                     ])
                 );
                 frame_end(id, 0);
-                app.session.close();
+                // The caller asked for the session to be over; the board is
+                // told so before the answer is even read back, because a link
+                // left standing is a board the next client cannot find.
+                app.hang_up(crate::hangup::EXIT_GRACE);
                 return 0;
             }
             Ok(action) => {

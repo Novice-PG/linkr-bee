@@ -36,6 +36,7 @@ pub mod stdio;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Which link the session is carried over. The sidebar names it, the command
 /// line pins it, and `--transport` accepts the spelling [`LinkKind::as_str`]
@@ -127,6 +128,16 @@ pub trait LinkWriter: Send {
             "this link has no management channel",
         ))
     }
+
+    /// End the link itself, not just this end of it.
+    ///
+    /// A bearer that holds a session of its own — Bluetooth's LE link — can
+    /// close it out loud, and that is what frees the device for the next
+    /// client. A bearer that is a pipe has nothing to close: the process
+    /// leaving is the hang-up, so the default does nothing.
+    fn hangup(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A link that has not been opened yet.
@@ -190,6 +201,10 @@ enum Outgoing {
     Bytes(Vec<u8>),
     /// A whole management frame, split into writes by the link itself.
     Management(Vec<u8>),
+    /// Stop writing, and — on a link that holds a session of its own — end
+    /// that session out loud rather than letting it time out. See
+    /// [`LinkWriter::hangup`].
+    Hangup,
     Close,
 }
 
@@ -319,6 +334,57 @@ impl LinkHandle {
             }
         }
     }
+
+    /// Ask the transport to end the link — out loud when the bearer can.
+    ///
+    /// `false` means the writer thread is already gone, which is a link that
+    /// ended by itself and needs no goodbye.
+    pub fn hangup(&self) -> bool {
+        self.outgoing.send(Outgoing::Hangup).is_ok()
+    }
+
+    /// The way to end this link from *anywhere* — a panic hook, a console
+    /// close handler — where no handle is in reach: see [`crate::hangup`].
+    ///
+    /// The closure has no events channel to hear the answer on, so its wait
+    /// is a flat delay; every caller of it is already leaving.
+    pub fn ender(&self) -> crate::hangup::Ender {
+        let outgoing = self.outgoing.clone();
+        std::sync::Arc::new(move |grace: Duration| {
+            if outgoing.send(Outgoing::Hangup).is_ok() {
+                thread::sleep(grace);
+            }
+        })
+    }
+
+    /// Hang up, and wait up to `grace` for the link to say it is down.
+    ///
+    /// The wait is the whole point of the method: a process that asks for the
+    /// hang-up and exits in the same millisecond leaves the board connected to
+    /// a client that no longer exists. `true` means the end was *heard* —
+    /// a `Closed` event or a reader that is gone — and `false` means the
+    /// grace ran out, which is the honest answer for a bearer whose reader is
+    /// parked in a blocking read and reports nothing until it unblocks.
+    pub fn hangup_and_wait(&self, grace: Duration) -> bool {
+        if !self.hangup() {
+            return true;
+        }
+        let deadline = Instant::now() + grace;
+        loop {
+            match self.events.try_recv() {
+                Ok(LinkEvent::Closed(_)) => return true,
+                // Anything the link still had to say on its way out is read
+                // and dropped: this is only ever called on the way to an exit.
+                Ok(_) => continue,
+                Err(TryRecvError::Disconnected) => return true,
+                Err(TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl Drop for LinkHandle {
@@ -368,6 +434,13 @@ fn spawn_writer(
     thread::spawn(move || {
         while let Ok(command) = commands.recv() {
             match command {
+                // The hang-up first, then the same stop a close asks for: a
+                // board left connected to a client that has gone stops
+                // advertising, and the next client cannot find it.
+                Outgoing::Hangup => {
+                    let _ = writer.hangup();
+                    break;
+                }
                 Outgoing::Close => break,
                 Outgoing::Bytes(bytes) => {
                     if bytes.is_empty() {
@@ -418,9 +491,18 @@ pub mod testing {
         /// `Stdio`; the management channel is Bluetooth-only, so anything
         /// asking the bridge about itself needs a link that says it is.
         kind: LinkKind,
+        /// How the pair names itself. "memory" unless a test needs a link
+        /// that describes itself the way a real one does — the sidebar's
+        /// device row reads the description, so a test of that row asks for a
+        /// link that has one.
+        description: String,
         /// Set when the host's writer is dropped, so a test can tell the
         /// difference between "nothing yet" and "the host hung up".
         closed: Arc<Mutex<bool>>,
+        /// Set when the host asked for the link itself to end, which is a
+        /// different request from dropping the writer: see
+        /// [`LinkWriter::hangup`].
+        hung_up: Arc<Mutex<bool>>,
     }
 
     /// A memory pair announces itself as `Stdio` rather than taking
@@ -436,7 +518,9 @@ pub mod testing {
                 management_to_device: Arc::new(Mutex::new(VecDeque::new())),
                 management_from_device: Arc::new(Mutex::new(VecDeque::new())),
                 kind: LinkKind::Stdio,
+                description: "memory".to_string(),
                 closed: Arc::new(Mutex::new(false)),
+                hung_up: Arc::new(Mutex::new(false)),
             }
         }
     }
@@ -451,6 +535,18 @@ pub mod testing {
         pub fn ble() -> MemoryLink {
             MemoryLink {
                 kind: LinkKind::Ble,
+                ..MemoryLink::default()
+            }
+        }
+
+        /// A memory pair that names itself the way a Bluetooth link does —
+        /// `ble:EE:C7:42:34:48:CF`. The sidebar's device row reads the
+        /// description of the link that is up, so this is what a test of that
+        /// row dials.
+        pub fn ble_addressed(address: &str) -> MemoryLink {
+            MemoryLink {
+                kind: LinkKind::Ble,
+                description: format!("ble:{}", address.to_ascii_uppercase()),
                 ..MemoryLink::default()
             }
         }
@@ -500,6 +596,12 @@ pub mod testing {
 
         fn closed_flag(&self) -> bool {
             *self.closed.lock().expect("link lock")
+        }
+
+        /// Whether the host asked for the *link* to end rather than merely
+        /// putting its own end down.
+        pub fn hung_up(&self) -> bool {
+            *self.hung_up.lock().expect("link lock")
         }
     }
 
@@ -685,6 +787,16 @@ pub mod testing {
             queue.push_back(frame.to_vec());
             Ok(())
         }
+
+        /// Ending the link out loud, the way a bearer with a session of its own
+        /// does: the reader is let go too, because an ended link has no more
+        /// bytes to deliver — which is what makes a hang-up observable to a
+        /// test rather than merely sent.
+        fn hangup(&mut self) -> io::Result<()> {
+            *self.link.hung_up.lock().expect("link lock") = true;
+            self.link.close();
+            Ok(())
+        }
     }
 
     impl Link for MemoryLink {
@@ -704,7 +816,7 @@ pub mod testing {
         }
 
         fn describe(&self) -> String {
-            "memory".to_string()
+            self.description.clone()
         }
     }
 }
@@ -802,6 +914,23 @@ mod tests {
         let handle = LinkHandle::start(link.link()).expect("opens");
         assert!(handle.send(b"reboot\n".to_vec()));
         assert!(wait_for(|| link.take_sent() == b"reboot\n".to_vec()));
+    }
+
+    /// An asked-for hang-up reaches the transport and is *heard*: the reader is
+    /// let go, and the wait ends when it is. This is what makes "the board is
+    /// free when the process is" a fact rather than a hope.
+    #[test]
+    fn a_hang_up_reaches_the_transport_and_waits_for_the_end() {
+        let link = MemoryLink::new();
+        let handle = LinkHandle::start(link.link()).expect("opens");
+        assert!(wait_for(|| !handle.drain().is_empty()), "opened");
+        assert!(
+            handle.hangup_and_wait(Duration::from_millis(500)),
+            "the end was heard"
+        );
+        assert!(link.hung_up(), "the link itself was asked to end");
+        // And it stays ended: a second hang-up is a link that is already down.
+        assert!(!handle.send(b"x".to_vec()), "nothing is writable after it");
     }
 
     /// A device that hangs up ends the session with a reason, exactly once:

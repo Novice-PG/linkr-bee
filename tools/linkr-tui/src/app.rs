@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::Rect;
 
@@ -350,6 +350,73 @@ pub const MAX_LOG: usize = 200;
 /// by the read rather than by waiting forever.
 const WIFI_EVENT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// How many more times an `@w=` write refused with `-EBUSY` is sent.
+///
+/// The gate the firmware refuses on is held by whatever WiFi operation is in
+/// flight — often the bridge's own background retry, which comes back every
+/// few seconds — so a write that lands in the middle of one is not a user
+/// mistake and not worth an error. It is worth waiting out. Bounded, because
+/// a board that stays busy through every attempt is a board to hear about
+/// rather than to keep asking.
+const WIFI_BUSY_RETRIES: u32 = 4;
+
+/// The pause before the attempt that follows `spent` refused ones.
+///
+/// It lengthens: the first attempt is for the second or two a join takes to
+/// clear the gate, and the last is for a bridge that is working through a
+/// connect cycle of its own.
+fn wifi_busy_pause(spent: u32) -> Duration {
+    Duration::from_secs(2 * (u64::from(spent) + 1))
+}
+
+/// The longest a `@w=` write can be waited out end to end: every pause in
+/// [`wifi_busy_pause`] one after another, with room for the round trips
+/// between them.
+///
+/// The script mode waits this long for a join or a forget, because a write
+/// still owed an attempt is a question still outstanding — see
+/// [`App::waiting_on_device`] — and a wait sized for the first answer alone
+/// would cut the process off in the middle of the retries. Nothing else
+/// waits this long: an ordinary question ends with its own patience, and a
+/// retry that goes early cuts the wait short like any other answer.
+pub fn wifi_write_window() -> Duration {
+    (0..=WIFI_BUSY_RETRIES)
+        .map(wifi_busy_pause)
+        .sum::<Duration>()
+        + Duration::from_secs(10)
+}
+
+/// An `@w=` write the interface is not finished with: either its answer has
+/// not arrived, or it was refused for busy and is owed another attempt.
+///
+/// It is the one place a WiFi password — the command carries it — outlives
+/// the dialog that asked for it, and it outlives it by seconds: the buffer is
+/// dropped when the answer arrives, when the attempts run out, or when the
+/// link goes down, whichever comes first. Nothing writes it anywhere; the
+/// latency is the whole of the concession, and it is what makes "the board
+/// was busy" a wait rather than a failure the user has to retype a password
+/// for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiWrite {
+    /// The command as it went out.
+    pub command: String,
+    /// Attempts still owed after a busy refusal.
+    pub left: u32,
+    /// When the next attempt is due, once one is owed.
+    pub next: Option<Instant>,
+}
+
+impl WifiWrite {
+    /// The record a fresh write opens, with every attempt still owed.
+    fn new(command: &str) -> WifiWrite {
+        WifiWrite {
+            command: command.to_string(),
+            left: WIFI_BUSY_RETRIES,
+            next: None,
+        }
+    }
+}
+
 /// A WiFi action whose `@event wifi` ending the network view is waiting on.
 ///
 /// `@w=` and `@w off` are answered twice: first with an `OK` that only means
@@ -424,7 +491,19 @@ pub struct App {
     /// released with the link; this one is the operator's and outlives it.
     pub transport_pinned: bool,
     /// The device the session targets (or, once connected, the one it found).
+    ///
+    /// Empty until there is something true to put here: the row then falls
+    /// back to the board the next dial is aimed at, and to the placeholder
+    /// when even that is unknown — see [`Self::device_text`]. It is never a
+    /// default name, because a name that never changes is a name that tells
+    /// the user nothing about which board they are on.
     pub device_name: String,
+    /// The name a scan heard for the board being dialled, when it heard one.
+    ///
+    /// Kept beside the address rather than inside it because the two answer
+    /// different questions: the name is what a person recognizes, the address
+    /// is what tells two boards flashed from one configuration apart.
+    pub advertised_name: Option<String>,
     pub rx: u64,
     pub tx: u64,
     /// Traffic rates sampled off those counters: the top bar's graph and the
@@ -465,6 +544,9 @@ pub struct App {
     /// The WiFi action whose `@event wifi` phases the view is still waiting
     /// on, if any. See [`WifiOperation`].
     pub wifi_operation: Option<WifiOperation>,
+    /// The `@w=` write whose answer has not arrived, or that is owed another
+    /// attempt after a busy refusal. See [`WifiWrite`].
+    pub wifi_write: Option<WifiWrite>,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -533,6 +615,10 @@ pub struct App {
     pub agent_replies: Vec<std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
+    /// The size the target has been told its console is, and the gate that
+    /// decides when it may be told: `stty` is typed into a live shell, so it
+    /// goes out only at an idle prompt. See [`crate::geometry`].
+    pub geometry: crate::geometry::GeometrySync,
     /// Whether the pane's first undecodable byte has already been announced.
     ///
     /// Said once, not once per read: a device that speaks something that is
@@ -631,7 +717,8 @@ impl Default for App {
             transport: Transport::default(),
             transport_locked: false,
             transport_pinned: false,
-            device_name: "Linkr BLE UART".to_string(),
+            device_name: String::new(),
+            advertised_name: None,
             rx: 0,
             tx: 0,
             traffic: crate::traffic::Traffic::default(),
@@ -657,6 +744,7 @@ impl Default for App {
             diagnostics: DiagnosticsState::default(),
             network: crate::views::network::NetworkState::default(),
             wifi_operation: None,
+            wifi_write: None,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -673,6 +761,7 @@ impl Default for App {
             agent_client: None,
             agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
+            geometry: crate::geometry::GeometrySync::default(),
             decode_loss_noticed: false,
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -1207,6 +1296,99 @@ impl App {
         self.session.adopt(opened);
         self.transport = kind;
         self.state = ConnectionState::Connecting;
+        // The row names the board *this* link is on, from the moment there is
+        // a link to name: a board whose name never changed would leave two
+        // boards on one bench indistinguishable.
+        self.device_name = self.device_name_for_link();
+    }
+
+    /// What the Device row calls the link that is up.
+    ///
+    /// The board's own name when the air carried one — a bench with several
+    /// units suffixes it, which is what tells them apart — and then the tail
+    /// of the address the link is actually on. Both, not either: two boards
+    /// flashed from one configuration carry one name between them, and this
+    /// row is the only place the user can see which of the two was dialled.
+    /// A board heard only as an address is named by its address, because a
+    /// name invented here would belong to a different board.
+    fn device_name_for_link(&self) -> String {
+        let described = self.session.describe().to_string();
+        match self.transport {
+            Transport::Ble => {
+                let address = described.strip_prefix("ble:").unwrap_or(&described);
+                // Hex groups, so an address is recognized as one and a
+                // searched-for name is not mistaken for it. A platform that
+                // identifies devices by UUID lands in the `None` arm and keeps
+                // its own spelling.
+                let tail = Self::address_tail_of(address);
+                match (&self.advertised_name, tail) {
+                    (Some(name), Some(tail)) => format!("{name} {tail}"),
+                    (Some(name), None) => name.clone(),
+                    (None, None) => address.to_string(),
+                    (None, Some(_)) => address.to_string(),
+                }
+            }
+            // A bridge names itself by what it runs — "loopback", the command
+            // — which is the whole of what it is.
+            Transport::Stdio => described
+                .strip_prefix("stdio: ")
+                .unwrap_or(&described)
+                .to_string(),
+            // The LAN rows carry the host themselves, so this row is not shown
+            // for a LAN link; the host is still the honest answer if it is.
+            Transport::Lan => self.session.lan_host().to_string(),
+        }
+    }
+
+    /// The tail of a Bluetooth address — its last two groups, `48:CF`.
+    ///
+    /// Short enough to sit beside a name in the sidebar, and long enough that
+    /// two boards on one bench do not share it. `None` for anything that is
+    /// not a colon-separated hex address: a UUID is not one, and neither is
+    /// the word a name search dialled with.
+    fn address_tail_of(address: &str) -> Option<&str> {
+        let groups: Vec<&str> = address.split(':').collect();
+        let looks_like_an_address = groups.len() >= 2
+            && groups
+                .iter()
+                .all(|group| !group.is_empty() && group.chars().all(|c| c.is_ascii_hexdigit()));
+        if !looks_like_an_address {
+            return None;
+        }
+        let last_two = groups.len() - 2;
+        let offset = groups[..last_two]
+            .iter()
+            .map(|g| g.len() + 1)
+            .sum::<usize>();
+        Some(&address[offset..])
+    }
+
+    /// What the Device row says: the board that is up, or the one the next
+    /// dial is aimed at, or the placeholder when neither is known.
+    pub fn device_text(&self) -> String {
+        if !self.device_name.is_empty() {
+            return self.device_name.clone();
+        }
+        match self.last_dial.as_ref().and_then(Self::dialed_device_name) {
+            Some(name) if !name.is_empty() => name,
+            _ => self.unknown().to_string(),
+        }
+    }
+
+    /// A dial's target as a device name, or `None` when the dial does not
+    /// name one — `find the nearest device` is a direction, not a board.
+    fn dialed_device_name(dial: &Dial) -> Option<String> {
+        match dial {
+            Dial::Ble(crate::transport::ble::Selection::Address(address), _) => {
+                Some(address.to_ascii_uppercase())
+            }
+            Dial::Ble(crate::transport::ble::Selection::Name(name), _) => Some(name.clone()),
+            Dial::Ble(crate::transport::ble::Selection::Any, _) => None,
+            Dial::Stdio(command) => Some(
+                crate::transport::stdio::StdioBridge::command_description(command),
+            ),
+            Dial::Lan { host, .. } => Some(crate::transport::lan::host_key(host)),
+        }
     }
 
     /// Dial what the command line asked for.
@@ -1231,6 +1413,12 @@ impl App {
         // switching the transport and dialling again a sequence the user can
         // actually perform.
         self.transport_locked = true;
+        // Whatever the last scan heard belonged to the last dial: this one
+        // names its own target.
+        self.advertised_name = None;
+        if let Some(name) = Self::dialed_device_name(dial) {
+            self.device_name = name;
+        }
         self.adopt(opened);
         Ok(())
     }
@@ -1484,6 +1672,14 @@ impl App {
         // is the choice the dial was built from, and a transport switched
         // under a dial in flight would leave the sidebar naming a link that is
         // not the one coming.
+        //
+        // The row names the target while it comes up, so the wait shows what
+        // is being waited for. Any name the last scan heard belonged to the
+        // *last* dial and goes with it.
+        self.advertised_name = None;
+        if let Some(name) = Self::dialed_device_name(dial) {
+            self.device_name = name;
+        }
         self.transport_locked = true;
         self.state = ConnectionState::Connecting;
         self.dialing = Some(DialJob {
@@ -1542,8 +1738,14 @@ impl App {
             return;
         }
         let name = self.session.describe().to_string();
-        self.session.close();
+        // Ended *out loud* where the bearer can end it: a board left connected
+        // to a client that has hung up stops advertising, and the next client
+        // — a phone, a second bench — cannot find it. The wait is short,
+        // because this is an interactive key and the link is being asked to
+        // end, not audited.
+        self.session.hang_up(Duration::from_millis(250));
         self.state = ConnectionState::Disconnected;
+        self.wifi_write = None;
         // The lock a dial took out went with the dial: with the link down
         // there is nothing left for it to protect, and switching the transport
         // is exactly what hanging up is for. A transport the command line
@@ -1554,6 +1756,20 @@ impl App {
             text,
             level: NoticeLevel::Info,
         });
+    }
+
+    /// Hang up on the way out, and wait for the goodbye to land.
+    ///
+    /// Every exit from the interface calls this — the quit key, Ctrl+C, a
+    /// terminal that went away, a paint that failed — because "the board is
+    /// free the moment this process is" is a promise the next client depends
+    /// on. No notice and no state: nobody is left to read one.
+    pub fn hang_up(&mut self, grace: Duration) -> bool {
+        let ended = self.session.hang_up(grace);
+        self.state = ConnectionState::Disconnected;
+        self.transport_locked = self.transport_pinned;
+        self.wifi_write = None;
+        ended
     }
 
     /// One pump: fold whatever the link produced into the frame, and announce
@@ -1674,7 +1890,7 @@ impl App {
                     _ => crate::agent::runtime::Failure::Malformed,
                 };
                 (
-                    failure.describe(),
+                    failure.describe(app.lang),
                     "failed",
                     crate::agent::usage::Usage::default(),
                 )
@@ -1763,6 +1979,11 @@ impl App {
             match event {
                 LinkEvent::Data(bytes) => {
                     self.terminal.push(&bytes);
+                    // The same bytes are the only evidence about whether an
+                    // idle shell prompt is on the line, which is what decides
+                    // when the target can be told its console size. See
+                    // [`crate::geometry`].
+                    self.geometry.observe(&String::from_utf8_lossy(&bytes));
                     self.note_decode_loss();
                     self.trace.rx(&bytes);
                     if self.collect_output {
@@ -1837,7 +2058,16 @@ impl App {
                         }
                     }
                 }
-                LinkEvent::Opened | LinkEvent::Closed(_) => {}
+                // A link coming up or going down is a new console: whatever
+                // the last one had been told about its size died with it, and
+                // the target is owed the current one at its first prompt.
+                // A write still waiting on the board is dropped with the link
+                // it belonged to — the record holds a password, and a board
+                // that is gone is not owed the retry.
+                LinkEvent::Opened | LinkEvent::Closed(_) => {
+                    self.geometry.reset();
+                    self.wifi_write = None;
+                }
             }
         }
         // Answers are collected between ticks and read here, because the tick
@@ -1855,6 +2085,9 @@ impl App {
         // beat as an answer's own timeout, and the status is read back
         // instead.
         self.expire_wifi_operation(now);
+        // A `@w=` write the board refused for busy is asked again on the beat
+        // its pause is over.
+        self.send_due_wifi_write(now);
         // A program that asks a question — where is the cursor, how wide is the
         // screen — blocks until it hears back, so the emulator's answers go out
         // on the tick that produced them. Always *after* the feed: an answer is
@@ -1864,6 +2097,17 @@ impl App {
         // already given up and moved on.
         for reply in self.terminal.take_replies() {
             self.session.send(&reply);
+        }
+        // The target's console size, typed in at the one moment typing is
+        // safe: an idle shell prompt. A `stty` line sent while a command owned
+        // the console would be read by that command, which is why the gate
+        // exists — see [`crate::geometry`].
+        if let Some(command) = self.geometry.take_pending_command() {
+            if self.send_bytes(command.as_bytes()) {
+                self.geometry.confirm_sent();
+            } else {
+                self.geometry.abort_sent();
+            }
         }
         let now_live = self.session.is_live();
         if self.dialing.is_some() {
@@ -1947,8 +2191,17 @@ impl App {
     ///
     /// Asked by the script mode, which has to know when to stop pumping; the
     /// frame never needs to, because a tick is always followed by another.
+    ///
+    /// A write the board refused for busy counts as outstanding too: it is
+    /// owed another attempt on a later beat, and a script that stopped pumping
+    /// the moment the refusal arrived would exit in the middle of the retry —
+    /// reporting a join that the board had not been asked for a second time.
     pub fn waiting_on_device(&self) -> bool {
         self.talk.waiting().is_some()
+            || self
+                .wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
     }
 
     /// The wall clock, `HH:MM:SS`, local time.
@@ -2053,11 +2306,31 @@ impl App {
     /// answer to "which one". `rssi` is the signal the scan heard it at, and
     /// `quiet` marks the startup scan's own dial: the hall is caught off the
     /// board coming up, and nothing announces it.
-    pub fn connect_to_board(&mut self, address: &str, rssi: Option<i16>, quiet: bool) {
+    pub fn connect_to_board(
+        &mut self,
+        address: &str,
+        advertised_name: Option<&str>,
+        rssi: Option<i16>,
+        quiet: bool,
+    ) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
         if !self.dial_async(&crate::session::Dial::Ble(selection, None), quiet) {
             return;
         }
+        // Set *after* the dial, so the dial's own naming of its target cannot
+        // undo it: the name the scan heard is a better answer than the address
+        // the dial was aimed with, and it is not known to the dial.
+        if let Some(name) = advertised_name {
+            self.advertised_name = Some(name.to_string());
+        }
+        self.device_name = match (
+            advertised_name,
+            Self::address_tail_of(&address.to_ascii_uppercase()),
+        ) {
+            (Some(name), Some(tail)) => format!("{name} {tail}"),
+            (Some(name), None) => name.to_string(),
+            (None, _) => address.to_ascii_uppercase(),
+        };
         // The signal the scan heard the board at. A connected board stops
         // advertising, so the reading taken while listening is the last one
         // there will be — and one taken from the air is worth more than the
@@ -2164,7 +2437,8 @@ impl App {
                     // every dial's Connected edge — except a quiet one, which
                     // is what this is: nobody asked for this dial aloud.
                     let id = board.id.clone();
-                    self.connect_to_board(&id, board.rssi, true);
+                    let name = board.name.clone();
+                    self.connect_to_board(&id, name.as_deref(), board.rssi, true);
                 }
                 [] => {}
                 _ => {
@@ -2395,6 +2669,13 @@ impl App {
         // them. See [`WifiOperation`].
         if query == Query::Wifi {
             self.wifi_operation = Some(WifiOperation::new(id, command, now + WIFI_EVENT_FALLBACK));
+            // The command is kept for as long as its answer may take, because
+            // a busy refusal is retried with it rather than re-asked of the
+            // user. Anything else sent replaces the question this answer
+            // belonged to, so the record — a password and all — goes with it.
+            self.wifi_write = Some(WifiWrite::new(command));
+        } else {
+            self.wifi_write = None;
         }
         self.trace.tx_command(&shown);
         self.network.loading = true;
@@ -2419,11 +2700,47 @@ impl App {
         // "loading…" underneath an error.
         self.stop_waiting(reply.query);
         if !reply.status.ok {
+            let code = if reply.query == Query::Wifi {
+                accessory::wifi_error_code(&reply.status.error)
+            } else {
+                None
+            };
+            // A busy board is not a refusal to report: the write is owed
+            // another attempt, and the wait for it is said instead of the
+            // gate's number. Only when the attempts run out does it arrive
+            // here as a failure.
+            if code == Some(accessory::WIFI_BUSY) && self.retry_wifi_write() {
+                return;
+            }
+            // A `@w=` write that was answered is not owed anything any more,
+            // whichever way the answer went. This is where the password the
+            // record held stops being kept, and where a refused write stops
+            // claiming to be an operation: the board never started one, so no
+            // phase of it is coming.
+            if reply.query == Query::Wifi {
+                self.wifi_write = None;
+                self.finish_wifi_operation();
+            }
+            // The board already holds the radio: that is a refusal like any
+            // other — the write did not happen — but not a mysterious one. The
+            // gate is the radio's state and not the name it was handed, so the
+            // same code comes back whether the network asked for is the one
+            // already up or another one entirely, and the sentence says both
+            // what that means and what switching takes. Nothing to read back:
+            // the row already says which network the board is on.
             // A scan that failed says so in its own words rather than an `ERR`
             // line, and those words are not a sentence to put in front of a
             // user: the failure gets one notice whichever shape it arrived in.
             let error = match reply.query {
                 Query::WifiScan => self.strings().net_scan_failed.to_string(),
+                // The bridge's refusals are `errno` values. A code this crate
+                // knows becomes a sentence; one it does not keeps its line,
+                // because the line and not the number is what has the words
+                // in it.
+                Query::Wifi => match code {
+                    Some(code) => self.lang.wifi_failure(code),
+                    None => reply.status.error.clone(),
+                },
                 _ => reply.status.error.clone(),
             };
             if matches!(reply.query, Query::Uart) {
@@ -2444,6 +2761,13 @@ impl App {
                 level: NoticeLevel::Error,
             });
             return;
+        }
+        // The answer arrived, so the write is finished with as far as the
+        // interface is concerned — including the copy of the command it was
+        // holding for a retry. The operation, if the write started one, is
+        // waited on separately; see [`WifiOperation`].
+        if reply.query == Query::Wifi {
+            self.wifi_write = None;
         }
         let text = reply.lines.join("\n");
         match reply.query {
@@ -2581,6 +2905,14 @@ impl App {
     /// somebody else's operation must not claim the join a user is waiting
     /// on.
     fn apply_wifi_event(&mut self, event: &crate::protocol::WifiEvent) {
+        // An ending is the bridge finishing with the radio, and an ending of
+        // *anybody's* operation frees the gate a busy refusal was waiting on —
+        // so a write owed another attempt goes out now rather than sitting out
+        // the rest of its pause. The pauses remain as the path for a host that
+        // never sees the ending.
+        if event.is_final {
+            self.ask_busy_write_again();
+        }
         let ours = match &self.wifi_operation {
             Some(operation) => event.operation == operation.id,
             None => event.operation == 0,
@@ -2624,7 +2956,8 @@ impl App {
                 }
             }
             // A failed operation leaves no network behind, and the code the
-            // firmware gave is the one useful thing to say about it.
+            // firmware gave is the one useful thing to say about it — as
+            // words, because the number on its own is not one.
             "failed" => {
                 self.finish_wifi_operation();
                 self.network.wifi = Some(accessory::WifiStatus {
@@ -2632,10 +2965,7 @@ impl App {
                     ssid: String::new(),
                     ip: String::new(),
                 });
-                self.network.error = Some(crate::text::fill(
-                    self.strings().net_wifi_failed,
-                    &[event.result.to_string()],
-                ));
+                self.network.error = Some(self.lang.wifi_failure(event.result));
             }
             "off" => {
                 self.finish_wifi_operation();
@@ -2658,6 +2988,82 @@ impl App {
             .take()
             .map(|operation| operation.ssid)
             .unwrap_or_default()
+    }
+
+    /// The last answer was a busy refusal: put the write back in the queue for
+    /// its next attempt, and say what the wait is for. Returns whether an
+    /// attempt was owed at all.
+    ///
+    /// The row is put back into "loading" on purpose: from the user's side a
+    /// join that is being retried is still a join in progress, and a row that
+    /// said "nothing is happening" for those seconds would be lying about it.
+    fn retry_wifi_write(&mut self) -> bool {
+        let Some(write) = self.wifi_write.take() else {
+            return false;
+        };
+        if write.left == 0 {
+            return false;
+        }
+        let pause = wifi_busy_pause(WIFI_BUSY_RETRIES - write.left);
+        let text = self.lang.wifi_busy_wait(pause.as_secs());
+        let next = Instant::now() + pause;
+        self.wifi_write = Some(WifiWrite {
+            left: write.left - 1,
+            next: Some(next),
+            ..write
+        });
+        self.network.loading = true;
+        self.network.error = None;
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Info,
+        });
+        true
+    }
+
+    /// Pull a waiting retry forward: the bridge has just finished with the
+    /// radio, so the one-operation gate is free again.
+    ///
+    /// Only ever brings a moment closer — a write that is mid-question, or one
+    /// with every attempt spent, is left exactly as it is.
+    fn ask_busy_write_again(&mut self) {
+        if let Some(write) = self.wifi_write.as_mut() {
+            if write.next.is_some() {
+                write.next = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Send the `@w=` write that is owed another attempt, when `now` is the
+    /// moment for it.
+    ///
+    /// The send builds a fresh record with every attempt counted, so the ones
+    /// already spent are carried back onto it by hand — the alternative is a
+    /// second sending path whose command never passed through the first one's
+    /// checks.
+    fn send_due_wifi_write(&mut self, now: Instant) {
+        let Some(write) = &self.wifi_write else {
+            return;
+        };
+        if !matches!(write.next, Some(at) if now >= at) {
+            return;
+        }
+        let mut write = self.wifi_write.take().expect("just looked");
+        let left = write.left;
+        write.next = None;
+        match self.send_accessory(&write.command, Query::Wifi) {
+            Ok(()) => {
+                if let Some(fresh) = self.wifi_write.as_mut() {
+                    fresh.left = left;
+                }
+            }
+            // The link went away under the retry. The record goes with it,
+            // rather than waiting for a board that is no longer there.
+            Err(why) => self.push_notice(Notice {
+                text: why,
+                level: NoticeLevel::Error,
+            }),
+        }
     }
 
     /// Give up on an `@event wifi` ending that never came, at `now`.
@@ -2788,6 +3194,9 @@ impl App {
             return false;
         }
         self.trace.tx(bytes);
+        // A keystroke took the line: whatever prompt the target had printed is
+        // no longer idle ground for a size command to land on.
+        self.geometry.mark_busy();
         // The counter is part of the *frame*, so it moves here rather than at
         // the next pump: a keystroke's byte should show in the top bar on the
         // same repaint as the character it produced.
@@ -3513,6 +3922,68 @@ mod tests {
         assert!(!app.ble_connected());
     }
 
+    /// The Device row names the board that is up — the name the air carried,
+    /// and the address that tells two boards flashed from one configuration
+    /// apart — so a bench with two boards shows two different rows.
+    #[test]
+    fn the_device_row_names_the_board_that_is_up() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // Nothing dialled and nothing remembered: the row says so rather than
+        // naming a board that is not there.
+        assert_eq!(app.device_text(), app.unknown().to_string());
+
+        // A remembered board names where the next dial is aimed.
+        app.last_dial = Some(Dial::Ble(
+            crate::transport::ble::Selection::Address("ee:c7:42:34:48:cf".into()),
+            None,
+        ));
+        assert_eq!(app.device_text(), "EE:C7:42:34:48:CF");
+
+        // The link comes up with the name the scan heard: the row carries the
+        // name and the tail of the address, which is the pair that says *which*
+        // board this is.
+        app.advertised_name = Some("Linkr BLE UART-3".to_string());
+        let wire = crate::transport::testing::MemoryLink::ble_addressed("EE:C7:42:34:48:CF");
+        app.adopt(crate::transport::OpenedLink::open(wire.link()).expect("opens"));
+        assert_eq!(app.device_name, "Linkr BLE UART-3 48:CF");
+        assert_eq!(app.device_text(), app.device_name);
+
+        // A second board that never named itself is named by its address, and
+        // the two rows are not the same row.
+        let first = app.device_text();
+        app.advertised_name = None;
+        let second = crate::transport::testing::MemoryLink::ble_addressed("FB:F6:91:14:33:3A");
+        app.adopt(crate::transport::OpenedLink::open(second.link()).expect("opens"));
+        assert_eq!(app.device_name, "FB:F6:91:14:33:3A");
+        assert_ne!(app.device_text(), first);
+
+        // A bridge names itself by what it runs, not by an address it has not
+        // got.
+        app.dial(&Dial::Stdio("-".to_string()))
+            .expect("the loopback opens");
+        assert_eq!(app.device_name, "loopback");
+    }
+
+    /// The tail of an address is its last two groups, and only an address has
+    /// one: a name a dial searched for is not mistaken for a device.
+    #[test]
+    fn an_address_tail_is_the_last_two_groups() {
+        assert_eq!(App::address_tail_of("EE:C7:42:34:48:CF"), Some("48:CF"));
+        assert_eq!(App::address_tail_of("FB:F6:91:14:33:3A"), Some("33:3A"));
+        assert_eq!(App::address_tail_of("48:CF"), Some("48:CF"));
+        assert_eq!(App::address_tail_of("memory"), None);
+        assert_eq!(App::address_tail_of(""), None);
+        assert_eq!(App::address_tail_of("find the nearest device"), None);
+        assert_eq!(
+            App::address_tail_of("9C7B4E3A-2D1F-4E6B-8A3C-5F0E1D2C3B4A"),
+            None,
+            "a CoreBluetooth identifier is not an address"
+        );
+    }
+
     /// Theme and language shortcuts read the state, so a view never has to know
     /// which of the two enums is in force.
     #[test]
@@ -3588,9 +4059,17 @@ mod tests {
             app.notices
         );
 
-        // A keystroke goes out and the device's answer comes back.
+        // A keystroke goes out and the device's answer comes back. The count is
+        // taken as a delta: a shell that has gone idle is a shell the geometry
+        // sync may have typed a size into, and that is not this assertion's
+        // business — what it is here for is the carriage return.
+        let before = app.tx;
         assert!(app.send_command("uname -a"));
-        assert_eq!(app.tx, 9, "the carriage return is part of what was sent");
+        assert_eq!(
+            app.tx - before,
+            9,
+            "the carriage return is part of what was sent"
+        );
         assert!(pump_until(&mut app, |app| app
             .terminal
             .visible_text()
@@ -3649,7 +4128,7 @@ mod tests {
         // A dial that never lands: the reading goes with the dial — the scan
         // heard the board, and that is a fact worth showing while it is being
         // reached — and the failure takes it back.
-        app.connect_to_board("nonsense", Some(-52), true);
+        app.connect_to_board("nonsense", None, Some(-52), true);
         assert_eq!(app.signal_dbm, Some(-52), "the reading went with the dial");
         assert!(pump_until(&mut app, |app| app.dialing.is_none()));
         assert_eq!(app.signal_dbm, None, "a failed dial leaves nothing showing");
@@ -3701,6 +4180,76 @@ mod tests {
         );
         assert_eq!(app.tx, 16, "and the byte counter counted them");
         assert!(app.terminal.vt().is_blank(), "a question is not text");
+    }
+
+    /// The console size is typed into the target once an idle shell prompt is
+    /// on the line — and never while a command owns it, because the line would
+    /// be read by that command.
+    #[test]
+    fn the_target_is_told_its_console_size_at_an_idle_prompt() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::new();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        app.geometry.set_size(255, 30);
+
+        // A command is running: the line is not a place to type.
+        wire.feed(b"apt update\r\nReading package lists...\r\n");
+        app.pump();
+        assert!(wire.take_sent().is_empty(), "the line is busy");
+
+        // The prompt comes back, and the size goes out with it — once.
+        wire.feed(b"root@linkr:~# ");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(
+            wire.take_sent(),
+            b"stty rows 30 cols 255 >/dev/null 2>&1\r".to_vec()
+        );
+        app.pump();
+        assert!(wire.take_sent().is_empty(), "once, not once per frame");
+
+        // A keystroke takes the line, so the reprinted prompt is not an idle
+        // one to land on.
+        app.type_bytes(false, "x");
+        app.pump();
+        assert!(pump_until(&mut app, |_| wire.sent_len() >= 1));
+        assert_eq!(wire.take_sent(), b"x".to_vec());
+
+        // A resize is owed again, but waits for the next idle prompt.
+        app.geometry.set_size(120, 40);
+        wire.feed(b"\r\n");
+        app.pump();
+        assert!(wire.take_sent().is_empty(), "half a line is not a prompt");
+        wire.feed(b"$ ");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(
+            wire.take_sent(),
+            b"stty rows 40 cols 120 >/dev/null 2>&1\r".to_vec()
+        );
+    }
+
+    /// The interface leaving takes the link with it — whichever exit it was —
+    /// and the goodbye is waited for, because the board being free for the
+    /// next client is the whole point of hanging up.
+    #[test]
+    fn the_interface_hangs_the_link_up_when_it_leaves() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::new();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+
+        assert!(app.hang_up(Duration::from_millis(500)), "the end was heard");
+        assert!(wire.hung_up(), "the link itself was ended");
+        assert!(!app.connected());
+        // Nothing is left to send on, and the try says so rather than counting
+        // bytes into a link that is gone.
+        assert!(!app.send_bytes(b"x"));
     }
 
     /// A command with no link is refused *out loud*: a preset that vanished
@@ -5021,6 +5570,320 @@ mod tests {
         assert!(
             app.waiting_on_device(),
             "and the read that confirms it is out"
+        );
+    }
+
+    /// The command among the frames that went out, counted rather than merely
+    /// found — a retry is the same bytes a second time.
+    fn asked_times(wire: &crate::transport::testing::MemoryLink, command: &[u8]) -> usize {
+        crate::transport::testing::asked_frames(wire)
+            .iter()
+            .filter(|frame| frame[crate::protocol::MGMT_HEADER_SIZE..] == *command)
+            .count()
+    }
+
+    /// The id and body of the newest question to go out, read in one drain.
+    ///
+    /// `asked_id` and `asked_includes` each drain the wire, so a test that
+    /// wants to know *which* command the id belongs to has to read both at
+    /// once rather than ask twice and compare answers from different moments.
+    fn newest_question(wire: &crate::transport::testing::MemoryLink) -> (u32, Vec<u8>) {
+        let frames = crate::transport::testing::asked_frames(wire);
+        let bytes = frames.last().expect("a question went out").clone();
+        let id = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        (id, bytes[crate::protocol::MGMT_HEADER_SIZE..].to_vec())
+    }
+
+    /// A board that is busy is waited out. `-EBUSY` is the firmware's
+    /// one-operation gate — often its own background retry mid-attempt — so the
+    /// write is asked again rather than handed back to the user as `ERR
+    /// wifi=-16`, and the wait is said without the password that is being held
+    /// for it.
+    #[test]
+    fn a_busy_wifi_write_waits_its_turn_and_goes_again() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
+        }));
+        assert!(
+            app.network.loading,
+            "a write being retried is still a write in flight"
+        );
+        assert!(
+            app.network.error.is_none(),
+            "the gate's number is not an error to show"
+        );
+        assert!(app
+            .wifi_write
+            .as_ref()
+            .is_some_and(|w| w.left < WIFI_BUSY_RETRIES));
+        let notice = app.notices.last().expect("a notice about the wait");
+        assert!(notice.text.contains("自动重试"), "{}", notice.text);
+        assert!(
+            app.notices
+                .iter()
+                .all(|notice| !notice.text.contains("secret")),
+            "the wait is announced without the password"
+        );
+        // Nothing goes out before the pause is over: the gate is held by
+        // somebody else, and asking again into it is the same refusal.
+        assert!(
+            wire.take_management().is_empty(),
+            "the retry went out before its pause"
+        );
+        app.send_due_wifi_write(Instant::now() + Duration::from_secs(60));
+        assert_eq!(
+            asked_times(&wire, b"@w=BenchNet,secret"),
+            1,
+            "the write went out again, once"
+        );
+    }
+
+    /// The pause is a fallback, not the clock a retry runs on: an ending the
+    /// bridge publishes means it has finished with the radio, and the gate it
+    /// held is free — so the write owed an attempt goes back out at once,
+    /// inside the window before the bridge's own loop claims it again.
+    #[test]
+    fn the_boards_own_ending_lets_a_busy_write_go_early() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
+        }));
+        assert!(
+            app.waiting_on_device(),
+            "a write owed another attempt is a question still outstanding — \
+             the script mode waits on this"
+        );
+        let owed = app
+            .wifi_write
+            .as_ref()
+            .and_then(|write| write.next)
+            .expect("a moment");
+        assert!(
+            owed > Instant::now() + Duration::from_secs(1),
+            "the retry starts out waiting its pause"
+        );
+
+        wire.feed_management(answer(
+            0,
+            "@event wifi operation=0 phase=failed result=-116",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_none())
+        }));
+        // The drain above took the first write with it, so one frame here is
+        // the retry: the write went out again, without sitting out the pause.
+        assert_eq!(asked_times(&wire, b"@w=BenchNet,secret"), 1);
+    }
+
+    /// Only an ending frees the gate: a phase in flight is the bridge *holding*
+    /// it, and a write asked again there is the same refusal.
+    #[test]
+    fn a_phase_in_flight_leaves_a_waiting_retry_where_it_was() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
+        }));
+        let owed = app
+            .wifi_write
+            .as_ref()
+            .and_then(|write| write.next)
+            .expect("a moment");
+
+        wire.feed_management(answer(
+            0,
+            "@event wifi operation=0 phase=connecting result=0",
+        ));
+        let deadline = Instant::now() + Duration::from_millis(150);
+        while Instant::now() < deadline {
+            app.pump();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            app.wifi_write.as_ref().and_then(|write| write.next),
+            Some(owed),
+            "a phase in flight is not an ending"
+        );
+        assert_eq!(
+            asked_times(&wire, b"@w=BenchNet,secret"),
+            0,
+            "nothing went out again (the drain above took the first write)"
+        );
+    }
+
+    /// A stranger's ending frees the gate as surely as the bridge's own: the
+    /// gate is the radio's, not the operation's, so the waiting write may go
+    /// the moment *anything* the board was doing is done.
+    #[test]
+    fn a_strangers_ending_frees_the_gate_too() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
+        }));
+
+        wire.feed_management(answer(
+            id + 1,
+            &format!(
+                "@event wifi operation={} phase=ready result=0 state=connected ip=10.9.9.9",
+                id + 1
+            ),
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_none())
+        }));
+        assert_eq!(
+            asked_times(&wire, b"@w=BenchNet,secret"),
+            1,
+            "the retry went out; the drain above took the first write"
+        );
+        assert!(
+            !app.network.wifi_connected(),
+            "somebody else's address is still not this view's network"
+        );
+    }
+
+    /// The script mode's wait for a join covers every attempt the retry chain
+    /// can make: a window sized for the first answer alone would end the
+    /// process in the middle of the retries.
+    #[test]
+    fn the_wifi_write_window_outlasts_the_retries() {
+        let pauses: Duration = (0..WIFI_BUSY_RETRIES).map(wifi_busy_pause).sum();
+        assert!(
+            wifi_write_window() > pauses,
+            "the window has to outlast the pauses it covers"
+        );
+    }
+
+    /// A board that stays busy is heard about rather than asked forever: the
+    /// attempts are bounded, and the last word is the sentence that says what
+    /// was wrong instead of the number it came as.
+    #[test]
+    fn a_board_that_stays_busy_is_reported_at_last() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let (id, body) = newest_question(&wire);
+        assert_eq!(body, b"@w=BenchNet,secret", "the write is the question");
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+        assert!(pump_until(&mut app, |app| {
+            app.wifi_write
+                .as_ref()
+                .is_some_and(|write| write.next.is_some())
+        }));
+
+        for owed in (1..WIFI_BUSY_RETRIES).rev() {
+            app.send_due_wifi_write(Instant::now() + Duration::from_secs(60));
+            assert_eq!(
+                app.wifi_write.as_ref().map(|write| write.left),
+                Some(owed),
+                "the attempts are counted down"
+            );
+            let (id, body) = newest_question(&wire);
+            assert_eq!(body, b"@w=BenchNet,secret", "the same write, again");
+            wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+            assert!(pump_until(&mut app, |app| {
+                app.wifi_write
+                    .as_ref()
+                    .is_some_and(|write| write.next.is_some())
+            }));
+        }
+        // The last attempt is owed, so it goes out — and is refused in turn.
+        app.send_due_wifi_write(Instant::now() + Duration::from_secs(60));
+        let (id, body) = newest_question(&wire);
+        assert_eq!(body, b"@w=BenchNet,secret", "the last attempt is the same");
+        wire.feed_management(answer(id, "ERR wifi=-16\r\n"));
+        assert!(pump_until(&mut app, |app| app.network.error.is_some()));
+
+        assert!(app.wifi_write.is_none(), "nothing is owed any more");
+        assert!(
+            app.wifi_operation.is_none(),
+            "a refused write never started an operation"
+        );
+        assert!(!app.network.loading, "and nothing is left spinning");
+        assert_eq!(
+            app.network.error.as_deref(),
+            Some(Lang::Zh.wifi_failure(-16).as_str()),
+            "the row says what busy means, not the errno"
+        );
+    }
+
+    /// A board whose radio is already up refuses a second join, and the code
+    /// it refuses with is the firmware's own `-EALREADY` — 120 in the C library
+    /// it is built with, where 114 would be "network unreachable". The refusal
+    /// is real (the write did not happen, and a script that reads `ok` has to
+    /// know), so it is said as a failure: what the words carry is the step a
+    /// switch takes, which is the thing the number cannot.
+    #[test]
+    fn a_network_already_joined_is_said_rather_than_numbered() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let (id, _) = newest_question(&wire);
+        wire.feed_management(answer(
+            id,
+            &format!("ERR wifi={}\r\n", accessory::WIFI_ALREADY),
+        ));
+
+        assert!(pump_until(&mut app, |app| !app.waiting_on_device()));
+        assert_eq!(
+            app.network.error.as_deref(),
+            Some(Lang::Zh.wifi_failure(accessory::WIFI_ALREADY).as_str()),
+            "the row says what the state means, not the errno"
+        );
+        assert!(app.wifi_write.is_none(), "nothing is owed any more");
+        assert!(
+            app.wifi_operation.is_none(),
+            "a refused write never started an operation"
+        );
+        let notice = app.notices.last().expect("a notice");
+        assert_eq!(notice.text, Lang::Zh.wifi_failure(accessory::WIFI_ALREADY));
+        assert_eq!(notice.level, NoticeLevel::Error);
+    }
+
+    /// The code a refusal came as is only kept when nothing here has words for
+    /// it: a line this does not know is shown as it arrived, because inventing
+    /// a meaning for it would be inventing an error.
+    #[test]
+    fn an_unknown_refusal_keeps_the_bridges_own_line() {
+        let (mut app, wire) = connected_over_ble(Lang::Zh);
+        app.run_accessory("@w=BenchNet,secret")
+            .expect("the link is up");
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR wifi not configured\r\n"));
+
+        assert!(pump_until(&mut app, |app| app.network.error.is_some()));
+        assert_eq!(
+            app.network.error.as_deref(),
+            Some("ERR wifi not configured")
         );
     }
 

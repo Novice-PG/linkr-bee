@@ -608,7 +608,15 @@ mod tests {
     #[test]
     fn a_prompt_stops_the_run_without_answering_it() {
         let mut app = loopback_app();
-        let attempt = attempt_once(&mut app, &shell("sudo reboot"), Format::Text, false);
+        // The deadline is not what this test is about: a machine under load can
+        // take longer than the two seconds the other runs are priced at, and a
+        // starved prompt arriving late must not read as a console that never
+        // asked. What is being tested is the shape of the ending.
+        let run = Run {
+            timeout: Duration::from_secs(10),
+            ..shell("sudo reboot")
+        };
+        let attempt = attempt_once(&mut app, &run, Format::Text, false);
         match attempt.outcome {
             Outcome::NeedsInput(prompt) => {
                 assert!(

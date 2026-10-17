@@ -255,6 +255,17 @@ pub struct Strings {
     pub asst_usage_label: &'static str,
     /// The pending-approval row.
     pub asst_awaiting: &'static str,
+    /// A request that never reached the model, with the transport's own why.
+    ///
+    /// An assistant that does nothing is the hardest thing to diagnose, so
+    /// the reason a request failed is a sentence in the interface's own
+    /// language rather than an English line from a library the user did not
+    /// choose.
+    pub asst_unreachable: &'static str,
+    /// A provider that answered and refused, with its status and its words.
+    pub asst_rejected: &'static str,
+    /// A 200 whose body carried no completion at all.
+    pub asst_malformed: &'static str,
 
     // --- notices ---------------------------------------------------------
     /// "Theme: light" and friends — the toast shown by the toggle.
@@ -306,8 +317,6 @@ pub struct Strings {
     pub agent_who_user: &'static str,
     /// Who the model's turns are labelled.
     pub agent_who_model: &'static str,
-    /// The value of a key field as painted: never the key.
-    pub agent_key_hidden: &'static str,
     /// The notice when a model is not configured and a prompt cannot be sent.
     pub agent_needs_endpoint: &'static str,
     /// The notice when a settings save was refused, naming the field after it.
@@ -442,7 +451,6 @@ const ZH: Strings = Strings {
     clipboard_pasted: "已粘贴",
     agent_who_user: "你",
     agent_who_model: "模型",
-    agent_key_hidden: "（不显示）",
     agent_needs_endpoint: "先填接口地址和模型",
     agent_setting_invalid: "这一项没填对",
     agent_composer_section: "提问",
@@ -492,6 +500,9 @@ const ZH: Strings = Strings {
     asst_full_auto_expired: "Full Auto 已到时并回退到 Auto，后续命令需要确认。",
     asst_usage_label: "Token 用量",
     asst_awaiting: "等待确认",
+    asst_unreachable: "模型没有应答：{}",
+    asst_rejected: "服务商拒绝（HTTP {}）：{}",
+    asst_malformed: "服务商返回了正文，但里面没有回答",
     link_opened: "链路已建立：",
     link_closed: "链路已断开：",
     link_failed: "连接失败：",
@@ -593,7 +604,6 @@ const EN: Strings = Strings {
     clipboard_pasted: "Pasted",
     agent_who_user: "you",
     agent_who_model: "model",
-    agent_key_hidden: "(not shown)",
     agent_needs_endpoint: "set the endpoint and model first",
     agent_setting_invalid: "that setting is not acceptable",
     agent_composer_section: "ask",
@@ -650,6 +660,9 @@ const EN: Strings = Strings {
         "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
     asst_usage_label: "Token usage",
     asst_awaiting: "awaiting approval",
+    asst_unreachable: "the model did not answer: {}",
+    asst_rejected: "the provider refused (HTTP {}): {}",
+    asst_malformed: "the provider answered, but its body held no reply",
     link_opened: "link open: ",
     link_closed: "link closed: ",
     link_failed: "connect failed: ",
@@ -762,6 +775,93 @@ impl Lang {
             (Lang::En, ConnectionState::Failed) => "connection failed",
         }
     }
+
+    /// What a WiFi failure actually means, by the number the firmware gave it.
+    ///
+    /// The firmware answers in its C vocabulary, and it has two of them: a
+    /// refusal of the command itself carries an `errno` — `-16` its
+    /// one-operation gate being held, `-120` a radio that is already up, `-22`
+    /// a name or key it will not take — while a join that was accepted and then
+    /// failed reports the radio's own status, a small positive number where `2`
+    /// is a bad password and `4` an access point nobody heard. A bare number in
+    /// front of a user is not a thing anybody can act on, so both halves are
+    /// worded here; a code with no words keeps the table's own sentence with
+    /// the number in it, because a code nobody has words for is still the only
+    /// clue there is.
+    pub fn wifi_failure(self, code: i64) -> String {
+        use crate::accessory::{
+            WIFI_ALREADY, WIFI_BAD_ARGUMENT, WIFI_BUSY, WIFI_CONN_AP_NOT_FOUND, WIFI_CONN_FAIL,
+            WIFI_CONN_TIMEOUT, WIFI_CONN_WRONG_PASSWORD, WIFI_NO_MEMORY, WIFI_NO_RADIO,
+            WIFI_TIMEOUT, WIFI_UNREACHABLE,
+        };
+        let words = match (self, code) {
+            (Lang::Zh, WIFI_BUSY) => {
+                "板子正忙：另一个 WiFi 操作还没结束，等它结束再试一次。"
+            }
+            (Lang::En, WIFI_BUSY) => {
+                "The board is busy: another WiFi operation has not finished. Try again once it does."
+            }
+            (Lang::Zh, WIFI_ALREADY) => {
+                "板子已经有网络了，不用重复配网；要换网络，先在网络页做一次“关闭 WiFi”（@w off）再连。"
+            }
+            (Lang::En, WIFI_ALREADY) => {
+                "The board already has a network — no need to configure it again; to switch, turn WiFi off first (network pane) and join again."
+            }
+            (Lang::Zh, WIFI_BAD_ARGUMENT) => {
+                "网络名或密码不被接受：名称最多 32 字节，密码最多 64 字节。"
+            }
+            (Lang::En, WIFI_BAD_ARGUMENT) => {
+                "The board would not take that name or key: an SSID is at most 32 bytes, a key at most 64."
+            }
+            (Lang::Zh, WIFI_CONN_WRONG_PASSWORD) => "密码不对：四步握手没过，注意大小写。",
+            (Lang::En, WIFI_CONN_WRONG_PASSWORD) => {
+                "Wrong password: the handshake did not go through. Mind the letter case."
+            }
+            (Lang::Zh, WIFI_CONN_AP_NOT_FOUND) => {
+                "没找到这个网络：它得是 2.4 GHz 的、且在板子附近。"
+            }
+            (Lang::En, WIFI_CONN_AP_NOT_FOUND) => {
+                "No network by that name: it has to be a 2.4 GHz one, and near the board."
+            }
+            (Lang::Zh, WIFI_TIMEOUT | WIFI_CONN_TIMEOUT) => {
+                "连接超时：密码不对，或者这是 5 GHz、或信号太弱的 2.4 GHz 网络。"
+            }
+            (Lang::En, WIFI_TIMEOUT | WIFI_CONN_TIMEOUT) => {
+                "The join timed out: the key is wrong, or this is a 5 GHz — or a too-weak 2.4 GHz — network."
+            }
+            (Lang::Zh, WIFI_UNREACHABLE) => {
+                "网络不可达：板子连上了路由器，但网络没有把地址给出来（看看路由器的 DHCP）。"
+            }
+            (Lang::En, WIFI_UNREACHABLE) => {
+                "The network is unreachable: the board joined the router but no address came back (check the router's DHCP)."
+            }
+            (Lang::Zh, WIFI_CONN_FAIL) => "连接失败：密码不对、信号太弱，或路由器拒绝了板子。",
+            (Lang::En, WIFI_CONN_FAIL) => {
+                "The join failed: a wrong key, a weak signal, or a router turning the board away."
+            }
+            (Lang::Zh, WIFI_NO_RADIO) => "板子的 WiFi 无线还没就绪，稍后重试。",
+            (Lang::En, WIFI_NO_RADIO) => "The board's WiFi radio is not up yet; try again shortly.",
+            (Lang::Zh, WIFI_NO_MEMORY) => "板子内存不足，稍后重试。",
+            (Lang::En, WIFI_NO_MEMORY) => "The board is out of memory; try again shortly.",
+            _ => return crate::text::fill(self.strings().net_wifi_failed, &[code.to_string()]),
+        };
+        words.to_string()
+    }
+
+    /// A `@w=` write the board refused because it was busy, and the pause
+    /// before the interface asks again.
+    pub fn wifi_busy_wait(self, seconds: u64) -> String {
+        match self {
+            // The number is a bound, not a promise: the retry also goes early
+            // when the bridge says it has finished with the radio.
+            Lang::Zh => {
+                format!("板子正忙（另一个 WiFi 操作还没结束），最多 {seconds} 秒后自动重试…")
+            }
+            Lang::En => format!(
+                "The board is busy with another WiFi operation; retrying within {seconds} s…"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -842,7 +942,6 @@ mod tests {
                 s.agent_field_key,
                 s.agent_field_headers,
                 s.agent_field_note,
-                s.agent_key_hidden,
                 s.agent_needs_endpoint,
                 s.agent_setting_invalid,
                 s.agent_composer_section,
@@ -888,6 +987,9 @@ mod tests {
                 s.asst_mode_full_auto,
                 s.asst_usage_label,
                 s.asst_awaiting,
+                s.asst_unreachable,
+                s.asst_rejected,
+                s.asst_malformed,
                 s.link_opened,
                 s.link_closed,
                 s.link_failed,
@@ -902,6 +1004,75 @@ mod tests {
             for field in all {
                 assert!(!field.trim().is_empty(), "empty string in {lang:?}");
             }
+        }
+    }
+
+    /// A failure's number becomes a sentence, and a code nobody has words for
+    /// keeps the table's sentence with the number in it rather than a blank.
+    #[test]
+    fn a_wifi_failure_has_words_in_both_languages() {
+        use crate::accessory::{
+            WIFI_ALREADY, WIFI_BAD_ARGUMENT, WIFI_BUSY, WIFI_CONN_AP_NOT_FOUND, WIFI_CONN_FAIL,
+            WIFI_CONN_TIMEOUT, WIFI_CONN_WRONG_PASSWORD, WIFI_NO_MEMORY, WIFI_NO_RADIO,
+            WIFI_TIMEOUT, WIFI_UNREACHABLE,
+        };
+        for lang in [Lang::Zh, Lang::En] {
+            for code in [
+                WIFI_BUSY,
+                WIFI_ALREADY,
+                WIFI_BAD_ARGUMENT,
+                WIFI_TIMEOUT,
+                WIFI_UNREACHABLE,
+                WIFI_NO_RADIO,
+                WIFI_NO_MEMORY,
+                WIFI_CONN_FAIL,
+                WIFI_CONN_WRONG_PASSWORD,
+                WIFI_CONN_TIMEOUT,
+                WIFI_CONN_AP_NOT_FOUND,
+            ] {
+                let words = lang.wifi_failure(code);
+                assert!(!words.trim().is_empty(), "{lang:?} has no words for {code}");
+                // An errno is a C number and never a thing to show. The radio's
+                // own statuses are small enough that "2.4 GHz" holds one of
+                // them, so only the negative half is checked for it.
+                if code < 0 {
+                    assert!(
+                        !words.contains(&format!("{code}")),
+                        "{lang:?} shows the number for {code}: {words}"
+                    );
+                }
+            }
+            let unknown = lang.wifi_failure(-4242);
+            assert!(unknown.contains("-4242"), "{unknown}");
+            assert!(
+                lang.wifi_busy_wait(4).contains('4'),
+                "the wait says how long it is"
+            );
+        }
+        assert_ne!(
+            Lang::Zh.wifi_failure(WIFI_BUSY),
+            Lang::En.wifi_failure(WIFI_BUSY),
+            "the sentence was never translated"
+        );
+    }
+
+    /// The live traffic that caught this: a board that was already connected
+    /// answered `-120`, while the table held `-114` to mean "already connected".
+    /// In the firmware's own C library those are `EALREADY` and `ENETUNREACH` —
+    /// one is the board saying "I am fine", the other a router to look at — so
+    /// the two sentences must never be each other's.
+    #[test]
+    fn an_already_connected_board_is_not_an_unreachable_network() {
+        use crate::accessory::{WIFI_ALREADY, WIFI_UNREACHABLE};
+        for lang in [Lang::Zh, Lang::En] {
+            let already = lang.wifi_failure(WIFI_ALREADY);
+            let unreachable = lang.wifi_failure(WIFI_UNREACHABLE);
+            assert_ne!(already, unreachable, "{lang:?} words both as one thing");
+            assert!(!already.contains(&format!("{WIFI_ALREADY}")), "{already}");
+            assert!(
+                !unreachable.contains(&format!("{WIFI_UNREACHABLE}")),
+                "{unreachable}"
+            );
         }
     }
 

@@ -171,6 +171,15 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 /// answer says one is being dialled right now.
 const RETRY_POLL: Duration = Duration::from_millis(250);
 
+/// How long to give BlueZ to finish a disconnect before dialling again.
+///
+/// Asking for the disconnect is instant and being free of it is not: BlueZ
+/// tears the link down on its own time, and a dial that starts inside that
+/// window finds a device that is reported connected and cannot be wired. Two
+/// and a half seconds is several times the teardown measured on a desktop
+/// adapter, and it is only ever spent when a dial actually meets one.
+const HANGUP_SETTLE: Duration = Duration::from_millis(2500);
+
 /// How long a single BlueZ call may take before the adapter is called wedged.
 ///
 /// Generous on purpose: a real GATT call completes in milliseconds, and only
@@ -309,6 +318,11 @@ enum Frame {
     Stream(Vec<u8>),
     /// A whole management request, already framed by `protocol`.
     Management(Vec<u8>),
+    /// End the LE link itself. Nothing is written: the radio is asked to
+    /// disconnect, which is what makes the board advertise again — a board
+    /// left connected to a client that is gone is a board the next client
+    /// cannot find.
+    Hangup,
 }
 
 /// A BLE connection that has not been opened yet.
@@ -494,7 +508,31 @@ fn radio(
             }
         };
 
-        if let Err(why) = wire(&peripheral).await {
+        // Joining a link that is already up is an optimization, and it has one
+        // failure shape: BlueZ reports a device as connected for a second or
+        // two after the client that dialled it asked to hang up, and a session
+        // built on that remaining link cannot subscribe — the CCCD write lands
+        // on a connection BlueZ is in the middle of taking down. So a *joined*
+        // link that will not wire is cleared, waited out, and dialled for real
+        // once. A link this dial made keeps its own refusal, which is about the
+        // device rather than about what the last session left behind.
+        let mut dialled_here = dialled_here;
+        let mut wired = wire(&peripheral).await;
+        if wired.is_err() && !dialled_here {
+            let _ = peripheral.disconnect().await;
+            wait_until_down(&peripheral).await;
+            match dial(&peripheral).await {
+                Ok(made) => {
+                    dialled_here = made;
+                    wired = wire(&peripheral).await;
+                }
+                Err(why) => {
+                    refuse(why);
+                    return;
+                }
+            }
+        }
+        if let Err(why) = wired {
             // A refused link is still an up link as far as BlueZ is concerned,
             // and hanging it up is only ours to do when the dial was: a link
             // another client brought up has that client's session running
@@ -580,6 +618,19 @@ async fn dial(peripheral: &Peripheral) -> Result<bool, String> {
 /// or another client did.
 async fn is_up(peripheral: &Peripheral) -> bool {
     peripheral.is_connected().await.unwrap_or(false)
+}
+
+/// Wait for BlueZ to agree that the link is down, or for [`HANGUP_SETTLE`] to
+/// run out.
+///
+/// Asking for a disconnect is not the same as the device being free again: the
+/// property turns at the end of a teardown BlueZ runs on its own time, and a
+/// dial that starts inside that window finds a link that is up and unusable.
+async fn wait_until_down(peripheral: &Peripheral) {
+    let deadline = tokio::time::Instant::now() + HANGUP_SETTLE;
+    while is_up(peripheral).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(RETRY_POLL).await;
+    }
 }
 
 /// A failed dial as a sentence: the two answers that have an action in them
@@ -917,6 +968,14 @@ async fn carry(
                     }
                     // The sender dropping is the interface closing the link.
                     None => return,
+                    // Asked to end it: the disconnect is the answer, so it is
+                    // made before the loop leaves. Best effort — a link the
+                    // device has already dropped is a link that is already
+                    // hung up, which is the state we wanted.
+                    Some(Frame::Hangup) => {
+                        let _ = peripheral.disconnect().await;
+                        return;
+                    }
                 }
             }
         }
@@ -993,6 +1052,15 @@ impl LinkWriter for BleWriter {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.outbound
             .send(Frame::Stream(buf.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the BLE link is no longer up"))
+    }
+
+    /// End the LE link out loud: the radio disconnects, the board advertises
+    /// again, and the next client — phone, tablet or another bench — can find
+    /// it without waiting for a supervision timeout to guess we are gone.
+    fn hangup(&mut self) -> io::Result<()> {
+        self.outbound
+            .send(Frame::Hangup)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the BLE link is no longer up"))
     }
 

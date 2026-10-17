@@ -146,7 +146,7 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     let body_height = inner.height.saturating_sub(1) as usize;
     let mut lines = dialogs::lines(dialog, app, inner.width, body_height);
     lines.push(dialogs::legend(dialog, app.lang, &theme));
-    frame.render_widget(Paragraph::new(lines).style(theme.panel()), inner);
+    frame.render_widget(Paragraph::new(lines).style(theme.card()), inner);
 
     // The bar spans the body rows and stops above the legend: the legend is
     // chrome, and a thumb beside it would claim the key hints scroll.
@@ -176,7 +176,7 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
     let mut lines = palette::lines_in(state, app.lang, visible, &theme);
     lines.push(Line::default());
     lines.push(palette::legend(app.lang, &theme));
-    frame.render_widget(Paragraph::new(lines).style(theme.panel()), inner);
+    frame.render_widget(Paragraph::new(lines).style(theme.card()), inner);
 
     // The list's own scrollbar, on the rows the list actually occupies: the
     // query line and the separator above it are chrome, and the legend below

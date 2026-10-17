@@ -1072,6 +1072,14 @@ fn main() -> io::Result<()> {
     // panic — before any output exists to fail.
     restore_default_sigpipe();
 
+    // The board goes free when this process does. Every ordinary exit hangs
+    // the link up on its own way out; these two cover the exits that have no
+    // "way out" — a panic, and a console window being closed — because a board
+    // still connected to a client that is gone stops advertising, and the next
+    // client cannot find it.
+    linkr_tui::hangup::catch_panics();
+    linkr_tui::hangup::catch_console_close();
+
     // Read as `OsString` and soften what cannot be text: `env::args()` panics
     // on an argument that is not UTF-8 — a byte-sequence path on Linux is the
     // ordinary case — and a crash is a worse answer than a file name that will
@@ -1525,6 +1533,9 @@ fn main() -> io::Result<()> {
         // asks it to quit, and that answer is the exit code.
         if mode == Mode::Serve {
             let code = linkr_tui::serve::run(&mut app, dial, args.connect_window());
+            // The session held the link for as long as its input asked it to;
+            // the board is told it is over before the process is gone.
+            app.hang_up(linkr_tui::hangup::EXIT_GRACE);
             std::process::exit(code);
         }
         if !args.quiet && app.session.is_live() {
@@ -1556,7 +1567,9 @@ fn main() -> io::Result<()> {
         // serial settings were just changed is exactly the board the user now
         // wants to watch.
         if mode == Mode::Cli {
-            app.session.close();
+            // Hung up out loud rather than merely dropped: the process is
+            // about to go, and the board has to hear about it before it does.
+            app.hang_up(linkr_tui::hangup::EXIT_GRACE);
             // The order the codes are decided in: the command's own status
             // first, then whether anything else that was asked for failed,
             // then success.
@@ -1631,6 +1644,12 @@ fn main() -> io::Result<()> {
         app.legacy_console = ui::legacy::legacy_console();
         run(&mut app)
     };
+    // The interface is over whichever way it ended — the quit key, Ctrl+C,
+    // the terminal going away, a write that failed — and the board hears
+    // about it here, before the process leaves: a link left standing is a
+    // board the next client cannot find.
+    #[cfg(feature = "tui")]
+    app.hang_up(linkr_tui::hangup::EXIT_GRACE);
     #[cfg(not(feature = "tui"))]
     let outcome: io::Result<()> = Ok(());
     outcome
@@ -1665,6 +1684,13 @@ fn load_agent_state(app: &mut App) {
     input.endpoint = saved.endpoint.clone();
     input.model = saved.model.clone();
     input.api_key = saved.api_key.clone();
+    // The headers are parsed back the same way the Enter key parses them.
+    // Dropping them here was a bug with a long tail: a gateway that needs a
+    // header would validate, save, load, and then send every request without
+    // it — a configured assistant that answers nothing, with nothing on
+    // screen to say why.
+    input.headers =
+        linkr_tui::agent::config::parse_agent_headers(&saved.headers).unwrap_or_default();
     // A stored config that no longer validates must not leave the view claiming
     // a model it cannot use: the answer here is the same one the Enter key
     // gives, so a bad endpoint is caught the same way wherever it came from.
@@ -1752,6 +1778,9 @@ fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
     let painted = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console).width;
     let pane = pane_area(painted, rows);
     app.terminal.set_size(pane.width, pane.height);
+    // The console the target sees is this pane, so this pane is the size it is
+    // told — on the next idle prompt, and again whenever the window changes.
+    app.geometry.set_size(pane.width, pane.height);
     // The frame itself, kept where a key handler can read it: keys are handled
     // between two paints, and the settings window keeps its caret inside a
     // body whose height comes from these numbers.
@@ -2423,6 +2452,49 @@ mod tests {
             linkr_tui::exec::cli::Ending::Idle(Duration::from_millis(1500))
         );
         assert_eq!(args(&["--no-terminal"]).exec_run(), None);
+    }
+
+    /// A configuration that needs a header is still configured after a
+    /// restart. Leaving the headers out of the load was a bug with a long
+    /// tail: the assistant validated, saved, reloaded, and then sent every
+    /// request without its header — a model the view said was configured,
+    /// answering nothing, with nothing on screen to say why.
+    #[test]
+    fn the_headers_of_a_saved_model_come_back_with_it() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-headers-load-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = App {
+            agent_store: Some(linkr_tui::agent::store::JsonFile::at(&path)),
+            ..App::default()
+        };
+        if let Some(store) = app.agent_store.as_mut() {
+            linkr_tui::agent::config::save_agent_config(
+                store,
+                &linkr_tui::agent::config::StoredAgentConfig {
+                    endpoint: "https://api.example.com/v1".to_string(),
+                    model: "gpt".to_string(),
+                    api_key: "sk-x".to_string(),
+                    headers: "X-Tenant: acme".to_string(),
+                },
+            );
+        }
+
+        load_agent_state(&mut app);
+
+        let config = app.assistant.config.clone().expect("still configured");
+        assert_eq!(
+            config.headers,
+            vec![("X-Tenant".to_string(), "acme".to_string())],
+            "the request will carry the header it was configured with"
+        );
+        assert_eq!(
+            app.assistant.headers, "X-Tenant: acme",
+            "and the form shows it again, editable as it was typed"
+        );
+        assert!(app.assistant.configured);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The dry run is the byte-level half of the contract: what a caller

@@ -1129,7 +1129,16 @@ fn with_wifi_state(app: &App, why: &str) -> String {
 /// — and the report afterwards reads whichever of those happened off the
 /// state it left.
 fn wait_and_report(app: &mut App, query: crate::device::Query, format: Format) -> i32 {
-    if !settle(app, format, query.patience() + SETTLE_SLACK) {
+    // A join is answered twice — an ack, then the phases of an asynchronous
+    // operation — and it can be refused for busy and asked again on a later
+    // beat. The wait covers the whole of that, because a write still owed an
+    // attempt is a question still outstanding. Every other query ends with its
+    // own patience, so the wider window costs them nothing.
+    let window = match query {
+        crate::device::Query::Wifi => crate::app::wifi_write_window(),
+        _ => query.patience(),
+    } + SETTLE_SLACK;
+    if !settle(app, format, window) {
         let why = app
             .diagnostics
             .error

@@ -14,6 +14,8 @@ pub mod device;
 pub mod dialogs;
 pub mod event;
 pub mod exec;
+pub mod geometry;
+pub mod hangup;
 pub mod i18n;
 pub mod lan_token_store;
 pub mod palette;

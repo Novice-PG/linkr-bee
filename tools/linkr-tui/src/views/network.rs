@@ -291,15 +291,32 @@ fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
     ))
 }
 
-/// One scan row: the bars and the reading in front, then the name, then the
+/// One scan row, split where the colour changes.
+struct ScanRow {
+    /// The reading, when the firmware gave one. `None` means no bars are
+    /// invented and the name simply starts where the others' names do.
+    dbm: Option<i32>,
+    /// The bars and the reading, or the blank the name lines up behind.
+    meter: String,
+    /// Between the meter and the name: two columns, except behind a meter
+    /// that was not there.
+    gap: &'static str,
+    /// The name, and whatever the firmware wrote after it.
+    tail: String,
+}
+
+/// One scan row: the meter and the reading in front, then the name, then the
 /// radio's own notes.
 ///
 /// The signal moves to the front because a list is read as a ranking — which
 /// of these is worth joining — and a number at the end of a row that may be
-/// clipped off is a number nobody sees. A line the firmware wrote without a
-/// reading gets no invented bars; its name simply starts where the others'
-/// names do.
-fn scan_row(result: &str) -> String {
+/// clipped off is a number nobody sees.
+///
+/// Split into parts rather than painted as one string, because the meter is
+/// the one piece that does not wear the muted grey: see
+/// [`Theme::signal_style`] for why a meter in the dim colour disappears in
+/// half the themes a user can pick.
+fn scan_row(result: &str) -> ScanRow {
     let crate::accessory::WifiResult {
         name,
         signal_dbm,
@@ -311,8 +328,18 @@ fn scan_row(result: &str) -> String {
         format!("{name} {rest}")
     };
     match signal_dbm {
-        Some(dbm) => format!("{} {:>4}dBm  {tail}", text::signal_bars(dbm), dbm),
-        None => format!("{:12}{tail}", ""),
+        Some(dbm) => ScanRow {
+            dbm: Some(dbm),
+            meter: format!("{} {:>4}dBm", text::signal_bars(dbm), dbm),
+            gap: "  ",
+            tail,
+        },
+        None => ScanRow {
+            dbm: None,
+            meter: format!("{:12}", ""),
+            gap: "",
+            tail,
+        },
     }
 }
 
@@ -404,14 +431,31 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             if on(NetworkRow::ScanResult(index)) {
                 // The chip, as the form's fields wear it: the keyboard is
                 // here, and what pressing Enter takes is the name inside the
-                // line.
-                let chip = format!("▸ {row}");
+                // line. One style throughout, selected: a chip is one surface,
+                // and a meter painted a strength colour on it would be a smudge
+                // on the highlight.
+                let chip = format!("▸ {}{}{}", row.meter, row.gap, row.tail);
                 lines.push(Line::from(Span::styled(
                     text::clip_to(&chip, width as usize),
                     theme.selected(),
                 )));
             } else {
-                lines.push(note(&format!("  {row}"), width, theme));
+                // Two spans, one row: the meter wears the strength ladder, the
+                // name stays muted. A row drawn in one dim colour is a row
+                // whose signal is invisible in the themes where that colour is
+                // nearly the panel. The meter is clipped first and the name
+                // takes what is left, so the row still fits the pane.
+                let meter_style = match row.dbm {
+                    Some(dbm) => theme.signal_style(dbm),
+                    None => theme.muted(),
+                };
+                let meter = text::clip_to(&format!("  {}", row.meter), width as usize);
+                let room = (width as usize).saturating_sub(text::columns(&meter));
+                let tail = text::clip_to(&format!("{}{}", row.gap, row.tail), room);
+                lines.push(Line::from(vec![
+                    Span::styled(meter, meter_style),
+                    Span::styled(tail, theme.muted()),
+                ]));
             }
         }
     }
@@ -654,6 +698,31 @@ mod tests {
             "the row leads with the signal it was heard at: {text}"
         );
         assert!(!text.contains("no results yet"), "{text}");
+    }
+
+    /// The meter is not painted in the row's muted grey: in three of the six
+    /// themes that grey sits within a whisker of the panel, and the bars then
+    /// go missing — which is the report this answers.
+    #[test]
+    fn the_scan_meter_is_painted_to_be_seen() {
+        let theme = Theme::SOLARIZED;
+        let mut a = app(Lang::En);
+        a.network.scan_results = vec!["Home wpa2 ch=6 -48dBm".into()];
+        let painted = lines(&a, &theme, 80);
+        let row = painted
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.content.contains("Home")))
+            .expect("the scan row");
+        let meter = &row.spans[0];
+        assert!(meter.content.contains("▂▄▆█"), "{:?}", meter.content);
+        assert_eq!(
+            meter.style.fg,
+            theme.signal_style(-48).fg,
+            "the meter wears the strength ladder"
+        );
+        let ink = meter.style.fg.expect("a painted colour");
+        let ratio = crate::theme::contrast_ratio(ink, theme.panel).expect("both are RGB");
+        assert!(ratio >= 3.0, "the meter is {ratio:.2}:1 against its panel");
     }
 
     /// The focus walks the rows in the order they draw, and steps off what the

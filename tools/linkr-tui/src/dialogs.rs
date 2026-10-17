@@ -22,7 +22,7 @@
 //! dialog.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
@@ -899,57 +899,89 @@ fn level_badge(level: NoticeLevel) -> (&'static str, Entry) {
 }
 
 /// The prompt's field: what has been typed, with a caret on the character the
-/// next keystroke will go before.
+/// next keystroke will go before — drawn as a place, not as a line of text.
 ///
 /// The caret is drawn *in* the text rather than placed with the terminal's own
 /// cursor. The box is painted by a `Paragraph`, which has no cursor to move, and
 /// a caret that only existed in the live TUI would make the dialog unreadable in
 /// a `--print-frame` preview — and untestable.
-fn prompt_field(prompt: &Prompt, lang: Lang, theme: &Theme) -> Line<'static> {
-    if prompt.field.text.is_empty() {
+fn prompt_field(prompt: &Prompt, lang: Lang, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let spans = if prompt.field.text.is_empty() {
         // Nothing typed: the caret, then what shape of answer the field wants.
-        let mut line = field_line(&prompt.field, theme);
-        line.spans
-            .push(Span::styled(entry(prompt.placeholder, lang), theme.muted()));
-        return line;
+        let mut spans = field_spans(&prompt.field, theme);
+        spans.push(Span::styled(entry(prompt.placeholder, lang), theme.muted()));
+        spans
+    } else if !prompt.masked {
+        field_spans(&prompt.field, theme)
+    } else {
+        // A masked field shows one star per character, so revealing it does not
+        // move the caret — and the character under the caret stays exactly one
+        // cell (the split hands back a space at the end of the line, which stays
+        // a space).
+        let (before, under, after) = prompt.field.split();
+        let stars = |text: &str| "*".repeat(text.chars().count());
+        vec![
+            Span::styled(stars(before), theme.text()),
+            Span::styled(
+                if under == " " {
+                    " ".to_string()
+                } else {
+                    "*".to_string()
+                },
+                theme.selected(),
+            ),
+            Span::styled(stars(after), theme.text()),
+        ]
+    };
+    field_rows(spans, theme, width)
+}
+
+/// The two rows an input field occupies: what it holds, and the rule under it.
+///
+/// A field that is only its own text is a field nobody can see — on a dark
+/// terminal the space between two labels and the place to type into look the
+/// same — so the box is drawn: a filled row and a rule under it, which is the
+/// web client's input (a background and a bottom border) in a terminal's
+/// vocabulary. It is also what makes an *empty* field a place rather than a
+/// gap, which is the state every prompt opens in.
+fn field_rows(spans: Vec<Span<'static>>, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    const INDENT: &str = "  ";
+    let used = text::columns(INDENT)
+        + spans
+            .iter()
+            .map(|span| text::columns(&span.content))
+            .sum::<usize>();
+    let mut row = vec![Span::styled(INDENT.to_string(), theme.input())];
+    row.extend(spans);
+    // Filled to the edge the rule below runs to, so the two rows read as one
+    // box rather than as a highlight that stops mid-air.
+    let fill = width.saturating_sub(used);
+    if fill > 0 {
+        row.push(Span::styled(" ".repeat(fill), theme.input()));
     }
-    if !prompt.masked {
-        return field_line(&prompt.field, theme);
-    }
-    // A masked field shows one star per character, so revealing it does not
-    // move the caret — and the character under the caret stays exactly one
-    // cell (the split hands back a space at the end of the line, which stays
-    // a space).
-    let (before, under, after) = prompt.field.split();
-    let stars = |text: &str| "*".repeat(text.chars().count());
+    vec![Line::from(row), field_rule(theme, width)]
+}
+
+/// The rule under a field: one span of `─`, in the colour of a border the
+/// keyboard is on. Its indent is the card's own ground, so the rule does not
+/// sit on two columns of another surface.
+fn field_rule(theme: &Theme, width: usize) -> Line<'static> {
+    const INDENT: &str = "  ";
+    let rule = "─".repeat(width.saturating_sub(text::columns(INDENT)));
     Line::from(vec![
-        Span::styled(format!("  {}", stars(before)), theme.text()),
-        Span::styled(
-            if under == " " {
-                " ".to_string()
-            } else {
-                "*".to_string()
-            },
-            theme.selected(),
-        ),
-        Span::styled(stars(after), theme.text()),
+        Span::styled(INDENT.to_string(), theme.card()),
+        Span::styled(rule, Style::default().fg(theme.line_strong)),
     ])
 }
 
-/// A field's line: what has been typed, with a caret on the character the
-/// next keystroke will go before.
-///
-/// The caret is drawn *in* the text rather than placed with the terminal's own
-/// cursor. The box is painted by a `Paragraph`, which has no cursor to move, and
-/// a caret that only existed in the live TUI would make the dialog unreadable in
-/// a `--print-frame` preview — and untestable.
-fn field_line(field: &Field, theme: &Theme) -> Line<'static> {
+/// A field's own spans: what has been typed, with a chip under the caret.
+fn field_spans(field: &Field, theme: &Theme) -> Vec<Span<'static>> {
     let (before, under, after) = field.split();
-    Line::from(vec![
-        Span::styled(format!("  {before}"), theme.text()),
+    vec![
+        Span::styled(before.to_string(), theme.text()),
         Span::styled(under.to_string(), theme.selected()),
         Span::styled(after.to_string(), theme.text()),
-    ])
+    ]
 }
 
 /// The cheat sheet's body: a heading per group, the commands under it, and a
@@ -1137,11 +1169,14 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             ]));
             out
         }
-        Dialog::Prompt(prompt) => vec![
-            Line::from(Span::styled(entry(prompt.label, lang), theme.muted())),
-            Line::default(),
-            prompt_field(prompt, lang, theme),
-        ],
+        Dialog::Prompt(prompt) => {
+            let mut out = vec![
+                Line::from(Span::styled(entry(prompt.label, lang), theme.muted())),
+                Line::default(),
+            ];
+            out.extend(prompt_field(prompt, lang, theme, width));
+            out
+        }
         // The bridge's window: the syntax named under the title, the spec in
         // a field, and the bridge's own words under it — its answer, or its
         // refusal — wrapped, because an `ERR` line is a sentence.
@@ -1149,9 +1184,9 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             let mut out = vec![
                 Line::from(Span::styled(entry(UART_PROMPT, lang), theme.muted())),
                 Line::default(),
-                field_line(&uart.field, theme),
-                Line::default(),
             ];
+            out.extend(field_rows(field_spans(&uart.field, theme), theme, width));
+            out.push(Line::default());
             match (&uart.error, &uart.status) {
                 (Some(error), _) => out.extend(
                     wrap_rows(error, width.max(1))
@@ -1288,7 +1323,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // The pick dials the board, and says so: a link the user
                 // asked for by name is news; whether it caught is the log's.
                 Some(device) => {
-                    app.connect_to_board(&device.id, device.rssi, false);
+                    app.connect_to_board(&device.id, device.name.as_deref(), device.rssi, false);
                 }
                 None if !pick.scanning => {
                     let _ = app.start_ble_scan();
@@ -2550,8 +2585,10 @@ mod tests {
         assert_eq!(field.answer(), "固件.bin");
     }
 
-    /// The field is painted with a one-cell caret in it, and the placeholder only
-    /// while there is nothing to show.
+    /// The field is painted with a one-cell caret in it, the placeholder only
+    /// while there is nothing to show, and a rule under it: an input nobody can
+    /// see is the state every prompt opens in, so the place to type into is
+    /// drawn whether or not it holds anything.
     #[test]
     fn the_field_paints_its_caret() {
         let app = App {
@@ -2559,32 +2596,52 @@ mod tests {
             ..App::default()
         };
         let theme = Theme::DARK;
-        let row = |prompt: Prompt| -> Line<'static> {
-            body(&Dialog::Prompt(prompt), &app, 60, &theme)
-                .pop()
-                .expect("the field row")
+        let field_row = |prompt: Prompt| -> Line<'static> {
+            let rows = body(&Dialog::Prompt(prompt), &app, 60, &theme);
+            rows[rows.len() - 2].clone()
+        };
+        let rule_row = |prompt: Prompt| -> Line<'static> {
+            let rows = body(&Dialog::Prompt(prompt), &app, 60, &theme);
+            rows[rows.len() - 1].clone()
         };
 
-        let empty = row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
+        let empty = field_row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
         let shown: String = empty.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             shown.contains("for example BenchNet"),
             "an empty field says what it wants: {shown:?}"
         );
+        let caret = empty
+            .spans
+            .iter()
+            .position(|span| span.style == theme.selected())
+            .expect("a caret chip");
+        assert_eq!(empty.spans[caret].content, " ", "the caret is one cell");
+        // The row is a place: filled to the box's own edge, on the input
+        // ground, so it reads as a field rather than as a gap between labels.
+        assert_eq!(empty.spans[0].style, theme.input());
         assert_eq!(
-            empty.spans[1].style,
-            theme.selected(),
-            "the caret is the highlighted cell"
+            empty.spans.last().expect("the fill").style,
+            theme.input(),
+            "the row is filled to the edge"
         );
+        assert_eq!(text::columns(&shown), 60, "the field fills the row");
+
+        // The rule under it is the field's own bottom edge: the strong border
+        // colour, one row of it, indented like the field.
+        let rule = rule_row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
+        assert_eq!(rule.spans[0].content, "  ");
+        assert!(rule.spans[1].content.starts_with("──────"), "{rule:?}");
+        assert_eq!(rule.spans[1].style, Style::default().fg(theme.line_strong));
 
         let mut typed = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         typed.field.insert('x');
-        let shown: String = row(typed)
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(shown, "  x ", "the caret sits after what was typed");
+        let typed_row = field_row(typed);
+        let shown: String = typed_row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            shown.starts_with("  x "),
+            "the caret sits after what was typed: {shown:?}"
+        );
     }
 
     /// A prompt carries its own title and legend, in the interface language.
@@ -2986,7 +3043,7 @@ mod pick_tests {
             .lines()
             .find(|row| row.contains("Bee"))
             .expect("the row is drawn");
-        assert!(bee.contains("▂▄▆_  -58dBm"), "{bee}");
+        assert!(bee.contains("▂▄▆▁  -58dBm"), "{bee}");
         let far = text
             .lines()
             .find(|row| row.contains("Far"))

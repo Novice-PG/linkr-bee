@@ -113,12 +113,16 @@ pub fn human_bytes(bytes: u64) -> String {
 /// A number on its own is a measurement; four bars are a ranking, which is
 /// what a list is read for — which of these is worth joining. The thresholds
 /// are the usual WiFi ones, and the reading is the firmware's own.
+///
+/// The empty slots are `▁`, the bottom eighth of the same block family, not
+/// an underscore: an underscore sits on the baseline where a border sits, and
+/// a row of them reads as a stray rule rather than as a meter with room left.
 pub fn signal_bars(dbm: i32) -> &'static str {
     match dbm {
         -55.. => "▂▄▆█",
-        -65..=-56 => "▂▄▆_",
-        -75..=-66 => "▂▄__",
-        _ => "▂___",
+        -65..=-56 => "▂▄▆▁",
+        -75..=-66 => "▂▄▁▁",
+        _ => "▂▁▁▁",
     }
 }
 
@@ -245,13 +249,17 @@ mod tests {
     fn signal_bars_rank_a_reading() {
         assert_eq!(signal_bars(-30), "▂▄▆█");
         assert_eq!(signal_bars(-55), "▂▄▆█");
-        assert_eq!(signal_bars(-56), "▂▄▆_");
-        assert_eq!(signal_bars(-65), "▂▄▆_");
-        assert_eq!(signal_bars(-66), "▂▄__");
-        assert_eq!(signal_bars(-75), "▂▄__");
-        assert_eq!(signal_bars(-76), "▂___");
-        assert_eq!(signal_bars(-100), "▂___");
+        assert_eq!(signal_bars(-56), "▂▄▆▁");
+        assert_eq!(signal_bars(-65), "▂▄▆▁");
+        assert_eq!(signal_bars(-66), "▂▄▁▁");
+        assert_eq!(signal_bars(-75), "▂▄▁▁");
+        assert_eq!(signal_bars(-76), "▂▁▁▁");
+        assert_eq!(signal_bars(-100), "▂▁▁▁");
         assert_eq!(columns(signal_bars(-54)), 4, "four columns, whichever bars");
+        assert!(
+            !signal_bars(-100).contains('_'),
+            "an empty slot is a block, not a rule under the row"
+        );
     }
 
     /// A meter is `width` cells whatever the share: half up, clamped to the

@@ -87,41 +87,28 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
     }
 }
 
-/// The column of air the page leaves on the left.
-///
-/// A frame painted flush against the terminal's edge looks glued to it, and a
-/// terminal is made of whole cells — there is no half a space to draw — so the
-/// smallest step there is, one column, is what "a little air" gets.
-const LEFT_AIR: u16 = 1;
-
 /// The cell grid the terminal pane's emulator is sized to, for a window of
 /// `cols`×`rows`.
 ///
-/// This is the paint's own arithmetic: no column of air, and the rail counted
-/// even when it is closed, so toggling it does not rewrap the device's whole
-/// history. Every column of the rect is one the paint fills, which is what
-/// keeps the device's own wrap between the pane's edges.
+/// This is the paint's own arithmetic: the rail counted even when it is
+/// closed, so toggling it does not rewrap the device's whole history. Every
+/// column of the rect is one the paint fills, which is what keeps the device's
+/// own wrap between the pane's edges.
 pub fn pane_area(cols: u16, rows: u16) -> Rect {
-    regions(
-        Rect::new(LEFT_AIR, 0, cols.saturating_sub(LEFT_AIR), rows),
-        true,
-    )
-    .centre
+    regions(Rect::new(0, 0, cols, rows), true).centre
 }
 
 /// Paint one frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = app.theme();
-    // The page moves right; the window does not, so the right edge stays
-    // where it was and only the width gives up the column. On the old
-    // Windows console the *window* gives up its last columns to the
-    // scrollbar first, which is what `drawing_area` decides.
-    let full = legacy::drawing_area(frame.area(), app.legacy_console);
-    let area = Rect {
-        x: full.x + LEFT_AIR,
-        width: full.width.saturating_sub(LEFT_AIR),
-        ..full
-    };
+    // The frame takes the window whole: the page is not shifted sideways as a
+    // block — the only thing that looks worse in a terminal than a border one
+    // column in is one column out, because every edge the user can see stops
+    // lining up with the window's — so the air a pane wants lives *inside* the
+    // pane, in the indent its own rows carry. On the old Windows console the
+    // *window* gives up its last columns to the scrollbar first, which is what
+    // `drawing_area` decides.
+    let area = legacy::drawing_area(frame.area(), app.legacy_console);
 
     // The page ground first, so no cell keeps the emulator's default background.
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
@@ -561,9 +548,9 @@ mod tests {
         assert_eq!(
             pane_area(80, 24),
             Rect {
-                x: 1 + SIDEBAR_WIDTH,
+                x: SIDEBAR_WIDTH,
                 y: 1,
-                width: 80 - 1 - SIDEBAR_WIDTH,
+                width: 80 - SIDEBAR_WIDTH,
                 height: 22,
             }
         );
@@ -574,6 +561,39 @@ mod tests {
             assert!(pane.right() <= w && pane.bottom() <= h, "{w}x{h}: {pane:?}");
             assert_eq!(pane.height, h - 2, "{w}x{h}");
             assert!(pane.width >= 1, "{w}x{h}: the pane vanished");
+        }
+    }
+
+    /// The page takes the window whole: no column is held back as air on
+    /// either side.
+    ///
+    /// A page shifted sideways as a block is what a terminal shows up worst —
+    /// every edge stops lining up with the window's own — and the small air a
+    /// pane wants is already inside the pane, in the indent its rows carry.
+    #[test]
+    fn the_frame_takes_the_window_whole() {
+        for (w, h) in [(110u16, 30u16), (80, 24), (40, 10)] {
+            let regions = regions(area(w, h), true);
+            assert_eq!(regions.top_bar.x, 0, "{w}x{h}");
+            assert_eq!(regions.top_bar.width, w, "{w}x{h}");
+            assert_eq!(regions.sidebar.x, 0, "{w}x{h}: the rail is not indented");
+            assert_eq!(
+                regions.centre.right(),
+                w,
+                "{w}x{h}: the last column is used"
+            );
+            // And the first column is ink, not a margin: the rail's ground is
+            // painted there.
+            let app = App::default();
+            let buffer = render_buffer(&app, w, h).expect("a frame");
+            let ground = buffer
+                .cell((0, h / 2))
+                .expect("the first column is painted");
+            assert_eq!(
+                ground.style().bg,
+                Some(app.theme().panel),
+                "{w}x{h}: column 0 is not the rail's ground"
+            );
         }
     }
 
@@ -741,7 +761,7 @@ mod tests {
                 let before = row.split(DIVIDER_GLYPH).next().unwrap();
                 assert_eq!(
                     crate::text::columns(before),
-                    SIDEBAR_TEXT_WIDTH as usize + LEFT_AIR as usize,
+                    SIDEBAR_TEXT_WIDTH as usize,
                     "row {y} puts the rule in the wrong column: {row:?}"
                 );
             }
@@ -1038,8 +1058,8 @@ mod tests {
         assert_eq!(lines.len(), 40);
         let last = lines[39];
         assert!(
-            last.starts_with(" [终端]"),
-            "the air column, then the bar: {last:?}"
+            last.starts_with("[终端]"),
+            "the bar starts at the window's edge, with no air column: {last:?}"
         );
         assert!(last.contains("Ctrl+Q 退出"), "{last:?}");
         for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"] {

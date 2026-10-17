@@ -207,7 +207,13 @@ impl Session {
         self.lan_host = opened.lan_host.clone();
         self.lan_secured = opened.lan_secured;
         self.describe = opened.description.clone();
-        self.handle = Some(LinkHandle::from_opened(opened));
+        let handle = LinkHandle::from_opened(opened);
+        // Made reachable from *anywhere* on the way out, not just from this
+        // session: the exits that most need the goodbye — a panic, a console
+        // window being closed — never reach the session at all. See
+        // [`crate::hangup`].
+        crate::hangup::register(handle.ender());
+        self.handle = Some(handle);
         self.state = Some(ConnectionState::Connecting);
     }
 
@@ -219,6 +225,28 @@ impl Session {
         self.handle = None;
         self.state = None;
         self.describe.clear();
+        // The link this session had is the one the last hang-up hook would
+        // have ended; leaving it registered would point a later emergency exit
+        // at a link that is already gone.
+        crate::hangup::clear();
+    }
+
+    /// Hang up on the way out, and wait for the goodbye to land.
+    ///
+    /// [`Self::close`] drops the handle, which asks the transport to stop —
+    /// and a process that exits in the same millisecond leaves the board
+    /// connected to a client that no longer exists. This asks for the link
+    /// itself to end where the bearer can end it, waits up to `grace` for the
+    /// end to be *heard*, and only then lets the handle go. `true` means the
+    /// link is down; `false` means the grace ran out with the reader still
+    /// parked, which is as much as a blocking read can promise.
+    pub fn hang_up(&mut self, grace: Duration) -> bool {
+        let ended = match self.handle.as_ref() {
+            Some(handle) => handle.hangup_and_wait(grace),
+            None => true,
+        };
+        self.close();
+        ended
     }
 
     /// Move the session to a state the caller decided (a failed dial).
@@ -380,6 +408,25 @@ mod tests {
         assert_eq!(received, b"hello".to_vec());
         assert_eq!(session.rx(), 5, "the counter matches the payload");
         assert_eq!(session.tx(), 0);
+    }
+
+    /// Leaving the process ends the link, and the end is waited for: the
+    /// messaging is what frees the board for the next client, so a session
+    /// that only dropped its handle would leave a board connected to a client
+    /// that no longer exists.
+    #[test]
+    fn hanging_up_ends_the_link_out_loud_and_is_heard() {
+        let link = MemoryLink::new();
+        let mut session = Session::new();
+        session.connect(link.link()).expect("opens");
+        assert!(pump_until(&mut session, |s| s.state()
+            == Some(ConnectionState::Connected)));
+        assert!(session.hang_up(Duration::from_millis(500)), "heard");
+        assert!(link.hung_up(), "the transport was asked to end the link");
+        assert!(!session.is_live());
+        assert_eq!(session.state(), None, "no opinion survives a hang-up");
+        // And a second hang-up is a session with nothing left to hang up.
+        assert!(session.hang_up(Duration::from_millis(50)));
     }
 
     /// Sending moves the transmit counter by exactly the bytes handed over,

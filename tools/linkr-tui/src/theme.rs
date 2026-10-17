@@ -404,6 +404,25 @@ impl Theme {
         Style::default().bg(self.terminal_bg)
     }
 
+    /// A window's ground: one step above the panel, so a box that took the
+    /// keyboard reads as raised rather than as another pane.
+    ///
+    /// The middle of the three surfaces every palette steps through — pane,
+    /// card, field — which is what gives a dialog and the field inside it two
+    /// edges to be told apart by instead of one.
+    pub fn card(&self) -> Style {
+        Style::default().bg(self.panel_2)
+    }
+
+    /// A place to type into: the ground of a dialog's input field.
+    ///
+    /// The raised panel surface, which every palette keeps a visible step away
+    /// from the card a window is drawn on — so a field reads as a field even
+    /// when it is empty, which is the state every prompt opens in.
+    pub fn input(&self) -> Style {
+        Style::default().bg(self.panel_3)
+    }
+
     /// The selected row of a list: accent fill with the ink the web puts on
     /// primary buttons. Used for the sidebar selection, list cursors and the
     /// command palette's highlighted action.
@@ -450,6 +469,47 @@ impl Theme {
         }
     }
 
+    /// The ink a signal meter draws in, by the strength of the reading.
+    ///
+    /// A ladder rather than one colour, because the meter is a ranking: the
+    /// accent for a link that is carrying well, amber when it is not, danger
+    /// when it is nearly gone. The dim grey a meter used to be drawn in is a
+    /// grey that is nearly the background in three of the six themes, which is
+    /// how a meter becomes invisible in exactly the themes a user has chosen.
+    fn signal_ink(&self, dbm: i32) -> Color {
+        match dbm {
+            -55.. => self.accent_strong,
+            -65..=-56 => self.accent,
+            -75..=-66 => self.warn,
+            _ => self.danger,
+        }
+    }
+
+    /// The style a signal meter draws in: [`Self::signal_ink`], kept readable.
+    pub fn signal_style(&self, dbm: i32) -> Style {
+        Style::default().fg(self.legible(self.signal_ink(dbm)))
+    }
+
+    /// `color`, unless it cannot be read on this theme's panels — then the
+    /// theme's own text colour, which every theme keeps legible on its own
+    /// surfaces.
+    ///
+    /// The promise is the one a user needs and a view cannot make: a token is
+    /// either the colour the design gave it or a colour that can be read,
+    /// never one that has disappeared into the surface behind it. A role the
+    /// design treats as "secondary" in one theme can land within a whisker of
+    /// the background in another, and this is where that stops being every
+    /// view's problem.
+    pub fn legible(&self, color: Color) -> Color {
+        /// The WCAG large-text floor. Below this a coloured glyph is a smudge
+        /// rather than a glyph; above it, dim is a style choice.
+        const READABLE: f32 = 3.0;
+        match contrast_ratio(color, self.panel) {
+            Some(ratio) if ratio < READABLE => self.text,
+            _ => color,
+        }
+    }
+
     // --- chrome -------------------------------------------------------------
 
     /// A framed view in the centre column: panel surface, resting border, the
@@ -468,13 +528,14 @@ impl Theme {
     }
 
     /// A window that took the keyboard (command palette, dialogs): the stronger
-    /// border the web gives a focused surface, panel ground, accent title.
+    /// border the web gives a focused surface, a ground raised a step above the
+    /// pane behind it, accent title.
     pub fn overlay_block(&self, title: impl Into<String>) -> Block<'static> {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(self.line_strong))
-            .style(self.panel())
+            .style(self.card())
             .title(Span::styled(
                 format!(" {} ", title.into()),
                 self.section_header(),
@@ -568,9 +629,95 @@ impl ThemeChoice {
     }
 }
 
+/// How much light a colour puts out, 0.0 to 1.0 — the WCAG relative luminance.
+///
+/// `None` for a colour this theme did not name as RGB: a terminal's own
+/// `Reset`, or an ANSI index the emulator owns, cannot be judged from here and
+/// is left as the caller asked for it.
+fn relative_luminance(color: Color) -> Option<f32> {
+    let Color::Rgb(red, green, blue) = color else {
+        return None;
+    };
+    fn channel(value: u8) -> f32 {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    Some(0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue))
+}
+
+/// The contrast between two colours: 1.0 for identical, 21.0 for black on
+/// white. `None` when either is not an RGB colour.
+pub fn contrast_ratio(first: Color, second: Color) -> Option<f32> {
+    let (first, second) = (relative_luminance(first)?, relative_luminance(second)?);
+    let (lighter, darker) = if first >= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every theme a user can pick paints a signal meter that can be *read*:
+    /// the ink of every strength stays clear of the panel behind it. Three of
+    /// the six themes keep their muted grey within a whisker of the surface,
+    /// which is how the meter used to disappear in exactly the themes a user
+    /// had chosen.
+    #[test]
+    fn every_theme_keeps_its_signal_meter_readable() {
+        for choice in THEMES {
+            let theme = Theme::for_choice(choice);
+            for dbm in [-30, -55, -60, -70, -80, -100] {
+                let Style { fg, .. } = theme.signal_style(dbm);
+                let Some(ink) = fg else {
+                    panic!("{choice:?} paints the meter with no colour at all");
+                };
+                let ratio = contrast_ratio(ink, theme.panel)
+                    .unwrap_or_else(|| panic!("{choice:?} has a colour that cannot be judged"));
+                assert!(
+                    ratio >= 3.0,
+                    "{choice:?} paints {dbm} dBm at {ratio:.2}:1 against its panel"
+                );
+            }
+        }
+    }
+
+    /// A colour that cannot be read on the panel is not used: the theme hands
+    /// back its own text colour instead, so no view has to know which of the
+    /// six themes it is painting.
+    #[test]
+    fn a_colour_too_close_to_the_panel_falls_back_to_text() {
+        let theme = Theme::NORD;
+        assert_eq!(theme.legible(theme.text), theme.text, "a readable colour");
+        let invisible = Color::Rgb(0x2e, 0x34, 0x40);
+        let ratio = contrast_ratio(invisible, theme.panel).expect("both are RGB");
+        assert!(ratio < 3.0, "the fixture is meant to be unreadable");
+        assert_eq!(theme.legible(invisible), theme.text);
+        // A colour this theme did not name as RGB is left alone: the terminal
+        // owns how it looks, and a guess here would repaint a user's palette.
+        assert_eq!(theme.legible(Color::Reset), Color::Reset);
+        assert_eq!(theme.legible(Color::Indexed(4)), Color::Indexed(4));
+    }
+
+    /// The contrast helper is the WCAG one: identical colours are 1:1, black
+    /// on white is 21:1, and the order of the arguments does not matter.
+    #[test]
+    fn contrast_is_measured_the_wcag_way() {
+        let black = Color::Rgb(0, 0, 0);
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(contrast_ratio(black, black), Some(1.0));
+        let extremes = contrast_ratio(black, white).expect("both are RGB");
+        assert!((extremes - 21.0).abs() < 0.01, "{extremes}");
+        assert_eq!(contrast_ratio(black, white), contrast_ratio(white, black));
+        assert_eq!(contrast_ratio(black, Color::Reset), None);
+    }
 
     /// The dark palette is the web `:root` block, value for value.
     #[test]
@@ -624,6 +771,7 @@ mod tests {
         for (dark, light) in [
             (Theme::DARK.bg, Theme::LIGHT.bg),
             (Theme::DARK.panel, Theme::LIGHT.panel),
+            (Theme::DARK.panel_2, Theme::LIGHT.panel_2),
             (Theme::DARK.panel_3, Theme::LIGHT.panel_3),
             (Theme::DARK.text, Theme::LIGHT.text),
             (Theme::DARK.accent, Theme::LIGHT.accent),
@@ -639,10 +787,32 @@ mod tests {
     fn roles_follow_the_theme_they_are_asked_of() {
         assert_eq!(Theme::DARK.text().fg, Some(Theme::DARK.text));
         assert_eq!(Theme::LIGHT.text().fg, Some(Theme::LIGHT.text));
+        assert_eq!(Theme::DARK.card().bg, Some(Theme::DARK.panel_2));
+        assert_eq!(Theme::LIGHT.card().bg, Some(Theme::LIGHT.panel_2));
+        assert_eq!(Theme::DARK.input().bg, Some(Theme::DARK.panel_3));
+        assert_eq!(Theme::LIGHT.input().bg, Some(Theme::LIGHT.panel_3));
         assert_eq!(Theme::DARK.selected().bg, Some(Theme::DARK.accent));
         assert_eq!(Theme::DARK.selected().fg, Some(Theme::DARK.accent_ink));
         assert_eq!(Theme::LIGHT.selected().bg, Some(Theme::LIGHT.accent));
         assert_eq!(Theme::LIGHT.selected().fg, Some(Theme::LIGHT.accent_ink));
+    }
+
+    /// A card sits on a pane and a field sits in the card: three surfaces, and
+    /// a palette that lets any two of them agree would draw a dialog onto the
+    /// screen and its fields onto nothing.
+    #[test]
+    fn every_palette_steps_through_three_surfaces() {
+        for choice in THEMES {
+            let theme = Theme::for_choice(choice);
+            assert_ne!(
+                theme.panel_2, theme.panel,
+                "{choice:?}: the card is the pane"
+            );
+            assert_ne!(
+                theme.panel_3, theme.panel_2,
+                "{choice:?}: the field is the card"
+            );
+        }
     }
 
     /// A selected row is always an accent fill, in both themes: that is the
@@ -752,6 +922,7 @@ mod tests {
             }
             for (role, value) in [
                 ("panel", theme.panel),
+                ("panel_2", theme.panel_2),
                 ("panel_3", theme.panel_3),
                 ("muted", theme.muted),
                 ("line", theme.line),

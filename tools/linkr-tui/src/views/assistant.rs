@@ -24,7 +24,18 @@ use crate::clipboard::read_system_clipboard;
 use crate::exec::executor::Mode;
 use crate::text;
 use crate::theme::Theme;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long the character that was just typed into the key field stays in the
+/// clear.
+///
+/// A key is typed once and read back never, so the field paints stars — but a
+/// field that paints *only* stars is a field with no sign the keyboard is
+/// reaching it, which is how a key gets typed twice letter by letter. The
+/// character with the caret on it is therefore shown for a moment and then
+/// goes under a star with the rest: long enough to see the keystroke land,
+/// short enough that a shoulder is not a reader.
+const KEY_REVEAL: Duration = Duration::from_millis(1500);
 
 /// Everything the assistant view knows.
 #[derive(Debug, Clone, Default)]
@@ -91,6 +102,37 @@ pub struct AssistantState {
     /// Prompts already handed to a task, newest first. They are goals the agent
     /// has not run a model against yet, and this is what the composer becomes.
     pub inbox: Vec<String>,
+    /// The character of the key that is still in the clear, as its index among
+    /// the key's characters, and when it goes back under its star.
+    ///
+    /// Only ever the character a keystroke or a paste just put there. See
+    /// [`KEY_REVEAL`].
+    pub key_reveal: Option<(usize, Instant)>,
+}
+
+impl AssistantState {
+    /// A character just landed in the field the keyboard is on: if that field
+    /// holds the key, the character the caret left behind stays in the clear
+    /// until its moment passes.
+    ///
+    /// Called by every door text can come through — the settings handler and a
+    /// paste — so the sign that the keyboard is working is the same whichever
+    /// way a key arrives.
+    fn show_last_key_char(&mut self) {
+        if self.focus == AgentField::ApiKey {
+            self.key_reveal = Some((
+                self.api_key.chars().count().saturating_sub(1),
+                Instant::now() + KEY_REVEAL,
+            ));
+        }
+    }
+
+    /// Forget the revealed character: the edit that just ran took it away, and
+    /// a reveal left pointing into the text would show whatever moved into its
+    /// place.
+    fn hide_key_char(&mut self) {
+        self.key_reveal = None;
+    }
 }
 
 /// The field the keyboard is typing into.
@@ -225,6 +267,26 @@ fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
         text::clip_to(text, width as usize),
         theme.muted(),
     ))
+}
+
+/// The key field's value as painted: one star per character, except the one
+/// that was just typed, which is still in the clear.
+///
+/// The count is as much the point as the hiding: a field that paints the same
+/// thing whatever is typed into it is a field the keyboard may not be reaching,
+/// and a key typed blind gets typed letter by letter. The stars say how much
+/// has landed; the one character in the clear says the last keystroke did.
+fn key_row(state: &AssistantState) -> String {
+    let revealed = match state.key_reveal {
+        Some((at, until)) if Instant::now() < until => Some(at),
+        _ => None,
+    };
+    state
+        .api_key
+        .chars()
+        .enumerate()
+        .map(|(at, ch)| if revealed == Some(at) { ch } else { '*' })
+        .collect()
 }
 
 /// One `label: value` body row. The label is clipped first, so a pane narrower
@@ -388,6 +450,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Backspace => {
             let text = field_text_mut(app);
             text.pop();
+            app.assistant.hide_key_char();
         }
         KeyCode::Up if app.assistant.focus == AgentField::Notes => {
             app.assistant.note_cursor = app.assistant.note_cursor.saturating_sub(1);
@@ -411,6 +474,9 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             let text = field_text_mut(app);
             text.push(ch);
+            // The key field's own half of the bargain: one star per character,
+            // and the one just typed still in the clear. See [`KEY_REVEAL`].
+            app.assistant.show_last_key_char();
         }
         _ => return false,
     }
@@ -908,10 +974,12 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
     for field in SETTINGS {
         let focused = state.focus == field;
         let caret = if focused { "▌" } else { " " };
-        // The key field never paints its value: a shoulder-surfed key is a
-        // rotated key, and the value is one backspace from being retyped.
+        // The key field paints stars rather than its value — a shoulder-surfed
+        // key is a rotated key — except the character that was just typed,
+        // which is still in the clear so the keystroke can be seen to land.
+        // See [`KEY_REVEAL`].
         let value = if field.is_secret() && !state.api_key.is_empty() {
-            s.agent_key_hidden.to_string()
+            key_row(state)
         } else if field.text(state).is_empty() {
             s.value_unknown.to_string()
         } else {
@@ -1113,9 +1181,9 @@ mod tests {
         assert!(window.contains("disk"), "{window}");
     }
 
-    /// The key field is painted as a placeholder, never as the key — and it is
-    /// painted in the window now, so that is where the test looks. Neither
-    /// surface gets the value.
+    /// The key field is painted as stars, never as the key — and it is painted
+    /// in the window now, so that is where the test looks. Neither surface gets
+    /// the value.
     #[test]
     fn a_key_field_is_never_painted() {
         let a = app(Lang::En);
@@ -1123,9 +1191,60 @@ mod tests {
         a.assistant.api_key = "sk-super-secret".to_string();
         let window = body_text(&settings_lines(&a, &a.theme(), 80));
         assert!(!window.contains("sk-super-secret"), "the window painted it");
-        assert!(window.contains(a.strings().agent_key_hidden), "{window}");
+        assert!(
+            window.contains("***************"),
+            "one star per character, so the field shows the key landing: {window}"
+        );
         let view = body_text(&lines(&a, &a.theme(), 80));
         assert!(!view.contains("sk-super-secret"), "the view painted it");
+    }
+
+    /// A character typed into the key field is shown in the clear until its
+    /// moment passes: the keystroke can be seen to land, and the key still does
+    /// not read as a key.
+    #[test]
+    fn the_character_just_typed_into_the_key_is_shown_for_a_moment() {
+        let mut a = app(Lang::En);
+        a.assistant.api_key = "abcd".to_string();
+
+        // Just typed: the `d` is in the clear and the rest are stars.
+        a.assistant.key_reveal = Some((3, Instant::now() + Duration::from_millis(600)));
+        let window = body_text(&settings_lines(&a, &a.theme(), 80));
+        assert!(window.contains("***d"), "{window}");
+        assert!(!window.contains("abcd"), "{window}");
+
+        // The moment gone: the whole key is stars, and the row is unchanged in
+        // every other way.
+        a.assistant.key_reveal = Some((3, Instant::now() - Duration::from_millis(1)));
+        let window = body_text(&settings_lines(&a, &a.theme(), 80));
+        assert!(window.contains("****"), "{window}");
+        assert!(!window.contains("abcd"), "{window}");
+    }
+
+    /// Typing into the key through the handler is what arms the reveal, and a
+    /// backspace takes it away with the character it pointed at.
+    #[test]
+    fn typing_a_key_leaves_the_last_character_in_the_clear() {
+        let mut a = app(Lang::En);
+        a.assistant.focus = AgentField::ApiKey;
+        let type_key = |app: &mut App, code: KeyCode| {
+            handle_settings_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+        };
+        type_key(&mut a, KeyCode::Char('k'));
+        type_key(&mut a, KeyCode::Char('e'));
+        assert_eq!(a.assistant.api_key, "ke");
+        assert_eq!(
+            a.assistant.key_reveal.map(|(at, _)| at),
+            Some(1),
+            "the character just typed is the one shown"
+        );
+
+        type_key(&mut a, KeyCode::Backspace);
+        assert_eq!(a.assistant.api_key, "k");
+        assert!(
+            a.assistant.key_reveal.is_none(),
+            "a reveal left over the gap would show whatever moved into it"
+        );
     }
 
     #[test]
@@ -1651,6 +1770,10 @@ pub fn paste_at_caret(app: &mut App, text: &str) {
     };
     let count = pasted.trim().chars().count();
     field.push_str(&pasted);
+    // The paste lands in one of the fields the window paints, the key among
+    // them: a pasted key shows its last character the way a typed one does,
+    // rather than all of it.
+    app.assistant.show_last_key_char();
     let s = app.strings();
     app.push_notice(crate::app::Notice {
         text: format!("{} {}", s.clipboard_pasted, count),

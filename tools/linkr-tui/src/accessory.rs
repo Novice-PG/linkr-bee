@@ -456,6 +456,66 @@ pub struct WifiStatus {
     pub ip: String,
 }
 
+/// Another WiFi operation holds the bridge's gate (`-EBUSY`).
+///
+/// The firmware answers `@w=` and `@w off` with `ERR wifi=<errno>` when its
+/// one-operation gate is taken — a join already in flight, or the bridge's own
+/// background retry between attempts. It is the common refusal on a board that
+/// has just been asked to do something else, and the one worth waiting out.
+pub const WIFI_BUSY: i64 = -16;
+
+/// The bridge already holds the radio (`-EALREADY`).
+///
+/// The arithmetic here is the C library's, the one the firmware is built with
+/// and not the one Linux runs: there `EALREADY` is 120, and 114 is
+/// `ENETUNREACH` — good news and a router to look at, respectively. The gate is
+/// the radio's *state*, so a join is refused this way while any network is up,
+/// whatever name it was handed: switching means dropping the one that is.
+pub const WIFI_ALREADY: i64 = -120;
+
+/// The network will not carry the board (`-ENETUNREACH`).
+pub const WIFI_UNREACHABLE: i64 = -114;
+
+/// The join, or the lease after it, ran out of time (`-ETIMEDOUT`).
+pub const WIFI_TIMEOUT: i64 = -116;
+
+/// A name or key the firmware will not take (`-EINVAL`).
+pub const WIFI_BAD_ARGUMENT: i64 = -22;
+
+/// The radio is not up yet (`-ENODEV`).
+pub const WIFI_NO_RADIO: i64 = -19;
+
+/// The board ran out of memory (`-ENOMEM`).
+pub const WIFI_NO_MEMORY: i64 = -12;
+
+/// A failed association, in the radio's own counting (`enum wifi_conn_status`).
+///
+/// A join is not a syscall: what the firmware publishes as the `result` of a
+/// failure is one of these — small, positive — or the `net_mgmt` error the
+/// request itself came back with. One table words both halves.
+pub const WIFI_CONN_FAIL: i64 = 1;
+pub const WIFI_CONN_WRONG_PASSWORD: i64 = 2;
+pub const WIFI_CONN_TIMEOUT: i64 = 3;
+pub const WIFI_CONN_AP_NOT_FOUND: i64 = 4;
+
+/// The `errno` in a management line that reports one: `ERR wifi=-16`,
+/// `ERR scan=-16`.
+///
+/// Only the two nouns the firmware uses are read. Anything else is a line to
+/// show as it came: inventing a meaning for a word this does not know would be
+/// inventing an error.
+pub fn wifi_error_code(line: &str) -> Option<i64> {
+    let line = line.trim();
+    if !starts_with_word(line, "err") {
+        return None;
+    }
+    let rest = line.get(3..)?.trim_start();
+    let rest = rest
+        .strip_prefix("wifi=")
+        .or_else(|| rest.strip_prefix("scan="))?;
+    rest.trim().parse().ok()
+}
+
 /// `OK wifi=connected,ssid=MyNet,ip=192.168.1.5` or `OK wifi off`. The address
 /// is taken from the last `,ip=` because an SSID may itself contain a comma.
 pub fn parse_wifi_status(text: &str) -> Option<WifiStatus> {
@@ -735,6 +795,42 @@ mod tests {
         assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "ok"));
         assert!(!starts_with_word("非你莫属 wpa2 ch=6 -54dBm", "err"));
         assert!(!reply_status("非你莫属 wpa2 ch=6 -54dBm").ok);
+    }
+
+    /// The `errno` a refusal came as is read only from the two nouns the
+    /// firmware uses, and anything else — including a line that merely says
+    /// `ERR` — is not a code at all.
+    #[test]
+    fn a_wifi_errno_is_read_from_the_bridges_own_line() {
+        assert_eq!(wifi_error_code("ERR wifi=-16\r\n"), Some(-16));
+        assert_eq!(wifi_error_code("ERR scan=-114"), Some(-114));
+        assert_eq!(wifi_error_code("err wifi=-22"), Some(-22));
+        assert_eq!(wifi_error_code("ERR wifi not configured"), None);
+        assert_eq!(wifi_error_code("ERR format: @w=ssid,pass"), None);
+        assert_eq!(wifi_error_code("ERR"), None);
+        assert_eq!(wifi_error_code("OK wifi=-16"), None);
+        assert_eq!(wifi_error_code("非你莫属 wpa2 ch=6 -16dBm"), None);
+    }
+
+    /// These are the firmware's own arithmetic — the C library it is built
+    /// with, not Linux's — and each is worth a bell. Getting one wrong is not
+    /// a typo a compiler catches: `-114` held here as "already connected"
+    /// turned a board saying "I am fine" into a router fault, and it took live
+    /// traffic to notice.
+    #[test]
+    fn the_wifi_codes_are_the_builds_own_errnos() {
+        assert_eq!(WIFI_BUSY, -16); // EBUSY
+        assert_eq!(WIFI_ALREADY, -120); // EALREADY
+        assert_eq!(WIFI_UNREACHABLE, -114); // ENETUNREACH
+        assert_eq!(WIFI_TIMEOUT, -116); // ETIMEDOUT
+        assert_eq!(WIFI_BAD_ARGUMENT, -22); // EINVAL
+        assert_eq!(WIFI_NO_RADIO, -19); // ENODEV
+        assert_eq!(WIFI_NO_MEMORY, -12); // ENOMEM
+                                         // The radio's own statuses, which are positive and not errnos at all.
+        assert_eq!(WIFI_CONN_FAIL, 1);
+        assert_eq!(WIFI_CONN_WRONG_PASSWORD, 2);
+        assert_eq!(WIFI_CONN_TIMEOUT, 3);
+        assert_eq!(WIFI_CONN_AP_NOT_FOUND, 4);
     }
 
     /// A scan result's line is the radio's note about a network; the name is
