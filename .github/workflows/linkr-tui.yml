@@ -372,12 +372,16 @@ jobs:
               # The paint path, through the same renderer the TUI uses.
               "$found" --print-frame 80x24 --lang en --sample > /dev/null
               # And the resident session — the mode an agent harness keeps
-              # open — answers one request and quits over the loopback.
-              echo '{"id":1,"op":"state"}' | "$found" --bridge - --serve |
-                grep -q '"event":"ready"' || {
-                  echo "the resident session did not come up" >&2
-                  exit 1
-                }
+              # open — answers one request and quits over the loopback. The
+              # whole answer is read before it is judged: `grep -q` as the
+              # reader exits the moment it matches, and a session whose next
+              # write lands after that dies of the closed pipe — a race that
+              # failed a runner once, not the question being asked.
+              echo '{"id":1,"op":"state"}' | "$found" --bridge - --serve > /tmp/session.json
+              grep -q '"event":"ready"' /tmp/session.json || {
+                echo "the resident session did not come up" >&2
+                exit 1
+              }
             fi
             # A dial that cannot open must fail loudly rather than start a broken
             # session — this is the exit code the tool documents. (`|| status=$?`
