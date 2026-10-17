@@ -62,7 +62,7 @@ pub const BLE_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// reads the console, and a scan that blocked the pump would be a scan that
 /// froze the frame it is filling. The radio library is async and this program
 /// is not, so the scan owns a thread of its own exactly as the BLE link does.
-/// `Debug` by hand: `App` derives it, and the two channels behind a scan do not
+/// `Debug` by hand: `App` derives it, and the channel behind a scan does not
 /// implement it and should not — what a scan is, in a diagnostic, is how many
 /// devices it heard and whether it is still listening.
 impl std::fmt::Debug for BleScan {
@@ -76,14 +76,14 @@ impl std::fmt::Debug for BleScan {
 
 #[derive(Default)]
 pub struct BleScan {
-    /// What it has found so far.
+    /// What it has found so far. Replaced on every update, and filled while
+    /// the scan is still listening, so a dialog built on it grows instead of
+    /// arriving all at once when the window closes.
     pub devices: Vec<crate::cli::FoundDevice>,
     /// Whether the scan is still listening.
     running: bool,
-    /// Where the scan's thread posts what it saw.
-    rx: Option<std::sync::mpsc::Receiver<Vec<crate::cli::FoundDevice>>>,
-    /// Where the scan's thread posts a reason it could not run at all.
-    failure: Option<std::sync::mpsc::Receiver<String>>,
+    /// Where the scan posts what it hears, as it hears it.
+    rx: Option<std::sync::mpsc::Receiver<crate::cli::ScanEvent>>,
 }
 
 impl BleScan {
@@ -92,7 +92,8 @@ impl BleScan {
     /// `Err` is a sentence rather than a panic because the three ways this
     /// fails — no adapter, no Bluetooth on the host, a library that refuses —
     /// are all ordinary facts about the machine and all things a user can act
-    /// on, unlike a bug in this program.
+    /// on, unlike a bug in this program. The failures that come *later*, once
+    /// a scan is under way, arrive through [`BleScan::poll`] instead.
     pub fn start(&mut self, timeout: std::time::Duration) -> Result<(), String> {
         self.listen(timeout, false)
     }
@@ -110,31 +111,14 @@ impl BleScan {
         if self.running {
             return Err("a scan is already running".to_string());
         }
-        let (tx, rx) = std::sync::mpsc::channel();
+        let until = if first_board {
+            crate::cli::Until::ABoardAnswers
+        } else {
+            crate::cli::Until::TheWindowEnds
+        };
         self.running = true;
-        self.rx = Some(rx);
         self.devices.clear();
-        // A second channel for the "no adapter, no point going on" case, because
-        // that answer is a sentence and not a device: posting it through the
-        // device channel would make a caller think a scan succeeded and came
-        // back with nothing.
-        let (fail_tx, fail_rx) = std::sync::mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            let outcome = if first_board {
-                crate::cli::scan_first_board(timeout)
-            } else {
-                crate::cli::scan_devices(timeout)
-            };
-            match outcome {
-                Ok(devices) => {
-                    let _ = tx.send(devices);
-                }
-                Err(why) => {
-                    let _ = fail_tx.send(why);
-                }
-            }
-        });
-        self.failure = Some(fail_rx);
+        self.rx = Some(crate::cli::scan_stream(timeout, until));
         Ok(())
     }
 
@@ -143,49 +127,55 @@ impl BleScan {
         self.running
     }
 
-    /// What the scan has seen, and whether it has finished.
+    /// What the scan has seen since this was last asked, and whether there is
+    /// news.
     ///
-    /// `Ok(false)` means "still running, nothing new". The devices are replaced
-    /// rather than appended because the whole list arrives at once when the
-    /// scan comes back: a device that went out of range then disappears from
+    /// `Ok(true)` while `is_running` means the list grew or shrank and the
+    /// screen should be repainted from it; `Ok(true)` once it has stopped is
+    /// the final list, the answer the scan was run for. `Ok(false)` is
+    /// "nothing new". `Err` is a scan that could not run at all, carrying the
+    /// sentence to show.
+    ///
+    /// The devices are replaced rather than appended because each update is
+    /// the whole list: a device that went out of range then disappears from
     /// the list rather than sticking on the screen as a ghost.
     pub fn poll(&mut self) -> Result<bool, String> {
-        if !self.running {
-            return Ok(false);
-        }
-        // The failure channel is checked first so a scan that could not start
-        // reports its reason instead of its empty list: a user who sees "no
-        // devices" when the machine has no adapter is a user who goes looking
-        // for a firmware bug.
-        if let Some(fail_rx) = self.failure.as_ref() {
-            if let Ok(why) = fail_rx.try_recv() {
-                self.running = false;
-                return Err(why);
-            }
-        }
         let Some(rx) = self.rx.as_ref() else {
             self.running = false;
             return Ok(false);
         };
-        match rx.try_recv() {
-            Ok(devices) => {
-                self.devices = devices;
-                self.running = false;
-                Ok(true)
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(false),
-            Err(_) => {
-                self.running = false;
-                Ok(false)
+        let mut news = false;
+        let mut failure = None;
+        loop {
+            match rx.try_recv() {
+                Ok(crate::cli::ScanEvent::Seen(devices)) => {
+                    self.devices = devices;
+                    news = true;
+                }
+                Ok(crate::cli::ScanEvent::Done(devices)) => {
+                    self.devices = devices;
+                    self.running = false;
+                    news = true;
+                }
+                Ok(crate::cli::ScanEvent::Failed(why)) => {
+                    self.running = false;
+                    failure = Some(why);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.running = false;
+                    break;
+                }
             }
         }
-    }
-
-    /// Why the scan could not run, when it could not.
-    pub fn take_failure(&mut self) -> Option<String> {
-        let fail_rx = self.failure.as_ref()?;
-        let why = fail_rx.try_recv().ok()?;
-        Some(why)
+        if !self.running {
+            self.rx = None;
+        }
+        match failure {
+            Some(why) => Err(why),
+            None => Ok(news),
+        }
     }
 
     /// Stop listening and forget what was heard.
@@ -193,7 +183,6 @@ impl BleScan {
         self.running = false;
         self.devices.clear();
         self.rx = None;
-        self.failure = None;
     }
 }
 
@@ -421,6 +410,12 @@ pub struct App {
     /// narrow terminal — that case is handled inside [`crate::ui::regions`],
     /// which shrinks the rail rather than dropping it.
     pub sidebar_visible: bool,
+    /// Whether frames are painted for the legacy Windows console (conhost).
+    ///
+    /// Set once by the event loop before the first paint, and false everywhere
+    /// else — the tests and `--print-frame` paint the frame the design asks
+    /// for. What the pass then does is [`crate::ui::legacy`]'s to say.
+    pub legacy_console: bool,
     pub transport: Transport,
     /// True while switching the transport is refused: a dial took the link out
     /// on one kind, or a command-line flag named it.
@@ -625,6 +620,7 @@ impl Default for App {
             focus: Focus::default(),
             latch: Latch::default(),
             sidebar_visible: true,
+            legacy_console: false,
             transport: Transport::default(),
             transport_locked: false,
             transport_pinned: false,
@@ -2072,28 +2068,53 @@ impl App {
     /// a scan whose results appeared only after the pump would look like a scan
     /// that had finished and then thought of something.
     fn poll_ble_scan(&mut self) {
-        if !self.ble_scan.is_running() {
-            // Finished or never started: the one-shot intent goes with it, and
-            // the dialog's "listening" flag clears so the legend stops offering
-            // a cancel that would do nothing.
-            self.scan_connects_one = false;
-            if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-                pick.scanning = false;
-            }
-            // A failure has a sentence, and a sentence is what the user is
-            // owed: "no adapter" is not the same news as "no boards".
-            if let Some(why) = self.ble_scan.take_failure() {
-                self.report_scan_failure(why);
-            }
-            return;
-        }
         match self.ble_scan.poll() {
+            // Devices while the scan is still listening: the list on screen is
+            // refilled where the user is already looking, so a scan that takes
+            // its time is a scan the user can watch working — the same way the
+            // web's own chooser fills as devices answer.
+            Ok(true) if self.ble_scan.is_running() => self.refresh_scan_list(),
             Ok(true) => {
                 let devices = std::mem::take(&mut self.ble_scan.devices);
                 self.settle_scan(devices);
             }
             Ok(false) => {}
+            // A failure has a sentence, and a sentence is what the user is
+            // owed: "no adapter" is not the same news as "no boards".
             Err(why) => self.report_scan_failure(why),
+        }
+        if !self.ble_scan.is_running() {
+            // Finished, failed or never started: the one-shot intent goes with
+            // it, and the dialog's "listening" flag clears so the legend stops
+            // offering a cancel that would do nothing.
+            self.scan_connects_one = false;
+            if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+                pick.scanning = false;
+            }
+        }
+    }
+
+    /// Refill an open picker from the scan's live list.
+    ///
+    /// Only boards that offer the serial service, as in [`App::settle_scan`]:
+    /// a keyboard on the bench is noise a user does not want to wait through.
+    /// The cursor follows the row it was on by device rather than by index,
+    /// because a device that appears above the cursor would otherwise move
+    /// the selection under the user's fingers.
+    fn refresh_scan_list(&mut self) {
+        let mut devices = std::mem::take(&mut self.ble_scan.devices);
+        devices.retain(|device| device.board);
+        if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
+            let selected = pick.selected().map(|device| device.id.clone());
+            pick.devices = devices;
+            if let Some(id) = selected {
+                if let Some(index) = pick.devices.iter().position(|device| device.id == id) {
+                    pick.cursor = index;
+                }
+            }
+            if pick.cursor >= pick.devices.len() {
+                pick.cursor = pick.devices.len().saturating_sub(1);
+            }
         }
     }
 

@@ -265,18 +265,26 @@ impl LoopbackDevice {
     /// The reply to one complete line, as the board would print it.
     ///
     /// A hair more shell than the banner admits, because the CLI's `exec`
-    /// completion rule (`cmd; echo "LINKR_RC:$?"`) has to be answerable
-    /// without hardware: `echo`, `true`, `false`, `$?` and `;`-separated
-    /// lists are understood, and a `sleep` or a `sudo` password prompt is
-    /// left hanging the way a real one would be. The banner's own commands
-    /// keep their exact answers, and anything else stays "not found".
+    /// contract (`cmd; echo "LINKR_RC:$?"`) has to be answerable without
+    /// hardware: `echo`, `printf`, `true`, `false`, `exit`, `$?` and
+    /// `;`-separated lists are understood, quotes group words the way a
+    /// shell's do, and a `sleep` or a `sudo` password prompt is left hanging
+    /// the way a real one would be. The banner's own commands keep their
+    /// exact answers, and anything else stays "not found".
+    ///
+    /// One deliberate difference from a real shell: `exit N` ends *the
+    /// command* with status N and the rest of the line still runs. The CLI
+    /// wraps a command as `cmd; echo "LINKR_RC:$?"`, so an `exit` that took
+    /// the console down would swallow the status echo and make the exit path
+    /// untestable offline; on a real target that is what happens, and the
+    /// timeout is the honest answer there.
     fn reply(&self, line: &str) {
         let command = line.trim();
         if command.is_empty() {
             return;
         }
         let mut status = 0;
-        for segment in command.split(';') {
+        for segment in segments(command) {
             match self.run_segment(segment.trim(), status) {
                 Some(next) => status = next,
                 // A segment that keeps the shell waiting — a sleep, or a
@@ -294,19 +302,35 @@ impl LoopbackDevice {
     /// waiting rather than returning a status; the status returned is what
     /// `$?` sees in the segment that follows.
     fn run_segment(&self, segment: &str, status: i32) -> Option<i32> {
-        let words: Vec<String> = segment
-            .split_whitespace()
-            .map(|word| word.trim_matches('"').replace("$?", &status.to_string()))
+        let words: Vec<String> = words(segment)
+            .into_iter()
+            .map(|word| word.replace("$?", &status.to_string()))
             .collect();
         let (head, rest) = match words.split_first() {
-            Some((head, rest)) => (head.as_str(), rest.join(" ")),
+            Some((head, rest)) => (head.as_str(), rest),
             None => return Some(status),
         };
         match head {
             // The shell builtins the CLI's exec contract is built on.
             "echo" => {
-                self.push(&format!("{rest}\r\n"));
+                self.push(&format!("{}\r\n", rest.join(" ")));
                 Some(0)
+            }
+            // `printf` is here for the CLI's prompt classifier: a format with
+            // no trailing newline is a prompt a person would answer, and
+            // `needs_input` has to be producible without hardware. Only the
+            // escapes and conversions that path needs are real — `\n`, `\r`,
+            // `\t`, `\\`, `%%`, `%s`, `%d` — and anything else is printed as
+            // it was typed, which is the tolerant half of what shells do.
+            "printf" => Some(self.printf(rest)),
+            // See the note on `reply`: the status ends the command, and the
+            // wrapper's own status echo still runs after it.
+            "exit" => {
+                let code = rest
+                    .first()
+                    .and_then(|word| word.parse::<i32>().ok())
+                    .unwrap_or(0);
+                Some(code)
             }
             "true" => Some(0),
             "false" => Some(1),
@@ -330,11 +354,11 @@ impl LoopbackDevice {
                 self.push("linkr-bee 1.0.0 (loopback)\r\n");
                 Some(0)
             }
-            "uname" if rest == "-a" => {
+            "uname" if rest.join(" ") == "-a" => {
                 self.push("Linux bee 6.6.0-linkr #1 SMP aarch64 GNU/Linux\r\n");
                 Some(0)
             }
-            "df" if rest == "-h" => {
+            "df" if rest.join(" ") == "-h" => {
                 self.push(
                     "Filesystem      Size  Used Avail Use% Mounted on\r\n\
                      /dev/root        28G  7.4G   19G  29% /\r\n\
@@ -348,6 +372,142 @@ impl LoopbackDevice {
             }
         }
     }
+
+    /// A shell's `printf`, as much of it as this device needs.
+    ///
+    /// The format is reused while arguments remain, as POSIX says, and a
+    /// conversion with no argument left prints an empty string (`%s`) or a
+    /// zero (`%d`). Newlines are the console's own `\r\n`: this device is a
+    /// serial console, and a bare `\n` would leave the pane drawing a
+    /// staircase.
+    fn printf(&self, args: &[String]) -> i32 {
+        let Some((format, values)) = args.split_first() else {
+            self.push("sh: printf: usage: printf <format> [arguments]\r\n");
+            return 2;
+        };
+        let mut values = values.iter();
+        let mut out = String::new();
+        loop {
+            let mut consumed = false;
+            let mut chars = format.chars();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\\' => match chars.next() {
+                        Some('n') => out.push('\n'),
+                        Some('r') => out.push('\r'),
+                        Some('t') => out.push('\t'),
+                        Some('\\') => out.push('\\'),
+                        Some(other) => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                        None => out.push('\\'),
+                    },
+                    '%' => match chars.next() {
+                        Some('%') => out.push('%'),
+                        Some(conversion @ ('s' | 'd')) => {
+                            let value = values.next();
+                            consumed = value.is_some();
+                            let text = value.cloned().unwrap_or_default();
+                            if conversion == 'd' {
+                                out.push_str(&text.parse::<i64>().unwrap_or(0).to_string());
+                            } else {
+                                out.push_str(&text);
+                            }
+                        }
+                        Some(other) => {
+                            out.push('%');
+                            out.push(other);
+                        }
+                        None => out.push('%'),
+                    },
+                    other => out.push(other),
+                }
+            }
+            // The format runs again only when it actually used an argument
+            // and there is another one waiting.
+            if !consumed || values.len() == 0 {
+                break;
+            }
+        }
+        self.push(&out.replace('\n', "\r\n"));
+        0
+    }
+}
+
+/// Split a command line on its `;` separators, ignoring the ones inside
+/// quotes: `echo "a;b"` is one segment and prints `a;b`.
+fn segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut segment = String::new();
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        match quote {
+            Some(open) if ch == open => {
+                quote = None;
+                segment.push(ch);
+            }
+            Some(_) => segment.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                segment.push(ch);
+            }
+            None if ch == ';' => segments.push(std::mem::take(&mut segment)),
+            None => segment.push(ch),
+        }
+    }
+    segments.push(segment);
+    segments
+}
+
+/// Split one segment into words, the way a shell splits them.
+///
+/// Quotes group: `echo "a  b"` is two words and the second keeps its inner
+/// spaces, which is what a quoted argument has always meant and what
+/// `split_whitespace` alone gets wrong. Both quote characters are honoured;
+/// neither can be escaped, and a quote left open at the end of the segment
+/// takes the rest of it, the way a shell's would before it goes on waiting
+/// for more. `$?` is expanded by the caller in every word, quoted or not —
+/// closer to the point than to POSIX, and every test that matters quotes it
+/// because the value is not known until the segment runs.
+fn words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    // Distinguished from "no word yet": `echo ""` is one empty argument, and
+    // losing it would turn a quoted empty into a missing one.
+    let mut started = false;
+    for ch in segment.chars() {
+        match quote {
+            Some(open) => {
+                if ch == open {
+                    quote = None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                ch => {
+                    word.push(ch);
+                    started = true;
+                }
+            },
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 struct DeviceWriter {
@@ -764,5 +924,80 @@ mod tests {
             .flatten()
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Everything the device has printed since the last read.
+    fn outbox(device: &LoopbackDevice) -> String {
+        let bytes: Vec<u8> = match device.outbox.lock() {
+            Ok(mut outbox) => outbox.drain(..).collect(),
+            Err(_) => Vec::new(),
+        };
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Quotes group words, which is what makes a quoted command testable at
+    /// all: the old whitespace-splitter turned `printf "Password:"` into
+    /// `printf` and `Password:` — the second one found nowhere — and a
+    /// quoted argument with spaces in it into two arguments.
+    #[test]
+    fn shell_words_honour_quotes() {
+        assert_eq!(words("echo a b"), vec!["echo", "a", "b"]);
+        assert_eq!(words("printf \"Password:\""), vec!["printf", "Password:"]);
+        assert_eq!(words("echo 'a  b'"), vec!["echo", "a  b"]);
+        assert_eq!(words("printf \"it's\""), vec!["printf", "it's"]);
+        assert_eq!(words("echo \"a 'b' c\""), vec!["echo", "a 'b' c"]);
+        // An empty quoted argument is an argument, not a missing one.
+        assert_eq!(words("printf \"\""), vec!["printf", ""]);
+        // A quote left open takes the rest of the segment.
+        assert_eq!(words("echo \"open"), vec!["echo", "open"]);
+    }
+
+    /// A `;` inside quotes is part of the argument, not a separator: the old
+    /// splitter ran it as a second command.
+    #[test]
+    fn shell_segments_ignore_quoted_semicolons() {
+        assert_eq!(segments("echo a; echo b"), vec!["echo a", " echo b"]);
+        assert_eq!(segments("echo \"a;b\""), vec!["echo \"a;b\""]);
+        assert_eq!(
+            segments("printf 'x;y'; true"),
+            vec!["printf 'x;y'", " true"]
+        );
+    }
+
+    /// `printf "Password:"` is the offline `needs_input`: a prompt with no
+    /// newline, exactly what the classifier reads.
+    #[test]
+    fn printf_prints_a_prompt_with_no_newline() {
+        let device = LoopbackDevice::default();
+        device.reply("printf \"Password:\"");
+        let text = outbox(&device);
+        assert!(text.starts_with("Password:"), "{text:?}");
+        assert!(!text.contains('\n'), "a prompt gained a newline: {text:?}");
+        assert!(text.ends_with(PROMPT), "no prompt followed: {text:?}");
+    }
+
+    /// The conversions and escapes the offline tests lean on, and the
+    /// console's own line ending on a format that asks for a newline.
+    #[test]
+    fn printf_understands_its_own_escapes_and_conversions() {
+        let device = LoopbackDevice::default();
+        device.reply("printf 'a\\nb\\t%s %% %d' done 7");
+        let text = outbox(&device);
+        assert!(text.starts_with("a\r\nb\tdone % 7"), "{text:?}");
+    }
+
+    /// `exit N` ends the command with status N — and the wrapper's own echo,
+    /// which is what carries the status to the CLI, still runs after it.
+    #[test]
+    fn exit_sets_the_status_the_wrapper_reads() {
+        let device = LoopbackDevice::default();
+        device.reply("exit 42; echo \"LINKR_RC:$?\"");
+        let text = outbox(&device);
+        assert!(text.contains("LINKR_RC:42"), "{text:?}");
+        // And a bare `exit` is status zero, the way a shell means it.
+        let device = LoopbackDevice::default();
+        device.reply("exit; echo \"LINKR_RC:$?\"");
+        let text = outbox(&device);
+        assert!(text.contains("LINKR_RC:0"), "{text:?}");
     }
 }

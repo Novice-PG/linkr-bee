@@ -38,6 +38,7 @@ three rules:
 | `ui/chrome.rs` | Top bar (state dot, busy indicator, counters, speed, autoscroll, clock) and bottom bar (focus, view, state, key hints) |
 | `ui/sidebar.rs` | The four sidebar sections, the accent-chip selection, and the display-width wrap that keeps a long row inside its column |
 | `ui/body.rs` | The centre column: which view's content goes in it, and the frame that does or does not wrap it |
+| `ui/legacy.rs` | The compatibility pass for the old Windows console: no synthetic bold, one-cell stand-ins for the ambiguous-width glyphs, and the margin the scrollbar sits over |
 | `ui/toast.rs` | The notice stack in the top-right corner |
 | `ui/overlay.rs` | The modal layer: where a palette or a dialog is measured and centred, and the only place that knows a `Rect` |
 | `views/diagnostics.rs` | The `@i?` read, end to end: `@info` parsing, the six web-client formatters, the read's state machine, and the grid |
@@ -54,6 +55,7 @@ three rules:
 | `device.rs` | The request/response bookkeeping over that service: one question at a time, an answer claimed only by the id that asked for it, and a timeout that reports a slow bridge as slow rather than as silent |
 | `accessory.rs` | The bridge's own settings as commands and as parsed data: `@u=…`, `@w=…`, `@d=…`, their limits, and the redaction that keeps a password off every screen but the wire |
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
+| `serve.rs` | The resident session: the request grammar, the one-link loop, and the begin/end frame a caller correlates its answers by |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
 | `views/network.rs` | The WiFi and WebDAV form: ten rows the keyboard walks, each action raising an approval card that names the change rather than the command |
 
@@ -94,6 +96,7 @@ cargo run -- --ble-name Linkr --wifi BenchNet --wifi-key-file ~/.wifi
 cargo run -- --ble-name Linkr --wifi-scan --loopback-test --no-terminal
 cargo run -- --print-completion zsh
 cargo run -- --scan --timeout 5
+cargo run -- --ble-name Linkr --serve
 ```
 
 `--no-terminal` is implied by any flag that asks for something: a command line
@@ -123,6 +126,52 @@ discipline wants, and `--enter` names what Enter actually puts on the wire
 (`raw`, `cr`, `lf`, `crlf`) — a target that wants `\r` and is given `\n`
 simply never answers, and the symptom looks exactly like a dead link.
 
+## Keeping a session open
+
+`--serve` holds one link and answers requests on standard input, one JSON object
+a line, until the input ends — which is what a program with a dozen things to ask
+wants, because every command line pays for the dial again and on Bluetooth the
+dial is seconds:
+
+```console
+$ linkr --ble-name Linkr --serve
+{"event":"ready","program":"linkr","version":"1.0.0","link":"ble:name:Linkr",
+ "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
+        "lan","exec","loopback-test","state","quit"]}
+{"id":1,"op":"state"}
+{"event":"begin","id":1,"op":"state"}
+{"event":"result","what":"state","live":false,…}
+{"event":"end","id":1,"code":0}
+{"id":2,"op":"exec","cmd":"uname -a"}
+{"event":"begin","id":2,"op":"exec"}
+…
+{"event":"end","id":2,"code":0}
+{"id":3,"op":"quit"}
+{"event":"end","id":3,"code":0}
+```
+
+Every request is framed by a `begin` naming the `id` it was sent with and an
+`end` carrying the exit code its one-shot equivalent would have had, so a caller
+that has several requests in flight can tell the answers apart without counting
+lines; between the two come the same events the corresponding `--json` command
+line prints. `id` is echoed, not required. `"format":"text"` on a request gets
+the events the text output would have printed instead; the frame lines stay JSON
+either way.
+
+The operations are the request flags, spelled as JSON: `info`, `uart` (a
+`"value"` like `"921600,8,n,1,none"` writes, none reads), `wifi` (an `"ssid"`
+and optional `"pass"` write, none reads), `wifi-off`, `wifi-scan`, `webdav` (a
+`"url"` writes, none reads), `webdav-off`, `lan`, `exec` (`"cmd"`, and optional
+`"timeout_ms"`, `"idle_ms"`, `"retry"`), `loopback-test` (`"data"`, and optional
+`"timeout_ms"`), `state` and `quit`. Nothing needs the link until a request that
+does: `state`, `quit` and a line that is not a request are answered without one,
+and the first request that needs a board dials it once and keeps it. A dial that
+cannot be made answers `{"event":"error","code":"not_connected"}` with the code
+`255` and leaves the session up, so a caller can wait for the board and ask
+again; a line that is not a request, or an operation this build does not answer,
+is `bad_request` with the code `2`, and the session keeps reading. End of input
+is the caller hanging up, and the session exits `0`.
+
 ## Gates — all four must pass before a commit
 
 ```sh
@@ -131,19 +180,23 @@ cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
 cargo test                                          # headless
 cargo clippy --all-targets --no-default-features --features cli -- -D warnings
 cargo test --no-default-features --features cli     # the CLI face gets its own pass
+cargo clippy --all-targets --no-default-features --features tui -- -D warnings
+cargo test --no-default-features --features tui     # and so does the interface alone
 for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-         x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-pc-windows-msvc \
-         x86_64-apple-darwin aarch64-apple-darwin; do
-  cargo check --target "$t" --all-targets || exit 1  # 7 targets, cross-platform
+         i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf \
+         x86_64-pc-windows-msvc x86_64-pc-windows-gnu i686-pc-windows-gnu \
+         aarch64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-darwin; do
+  cargo check --target "$t" --all-targets || exit 1  # 10 targets, cross-platform
 done
 ```
 
 Every target is checked because the crate ships to Linux, macOS and Windows on
-both x86-64 and ARM. There are no C dependencies: the only runtime requirement
-on Linux is glibc's base libraries.
+x86-64 and ARM, and to 32-bit x86 as well. On Linux the Bluetooth link goes
+through BlueZ over libdbus — the one library outside glibc's base set that a
+binary needs, and the one the `.deb` declares.
 
 The toolchain is declared, not assumed: `rust-toolchain.toml` names the channel,
-the `clippy`/`rustfmt` components and those seven targets, so rustup installs
+the `clippy`/`rustfmt` components and those ten targets, so rustup installs
 exactly what the gates need and a laptop, CI and the packaging script cannot
 disagree about the compiler.
 
@@ -183,28 +236,41 @@ large, and everything in them is reproducible from the source.
 
 ## Releasing
 
-`dev/package.sh <target>` builds the release binary and lays out the archive — the
-binary, this README and the licence, in `linkr-<version>-<target>.tar.gz`. It is
-the *only* definition of that layout: the CI matrix and a developer's shell call
-the same script, so a release cannot be assembled two ways. A `--cli` before the
-target packs the same program built without the interface, as
-`linkr-cli-<version>-<target>.tar.gz` — the archive an agent harness is handed,
-and the smaller of the two.
+`dev/package.sh <target>` builds the release binary and lays the archive out —
+the binary, this README and the licence — in the format the target's platform
+reaches for: a `.zip` on Windows, a `.dmg` **and** a `.tar.gz` on macOS (a volume
+image is a heavy thing to mount on a machine that only wants the binary), a
+`.tar.gz` on Linux. The Linux packages are `dev/package-deb.sh <target>`, in the
+four Debian architectures the crate ships to: `amd64`, `arm64`, `armhf`, `i386`.
+The scripts are the *only* definition of those layouts: the CI matrix and a
+developer's shell call the same ones, so a release cannot be assembled two ways.
+A `--cli` before the target packs the same program built without the interface,
+as `linkr-cli-<version>-<target>.<ext>` — the archive an agent harness is handed,
+and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu         # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-unknown-linux-gnu   # → dist/linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-cli-1.0.0-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr_1.0.0_armhf.deb
 ```
 
+A Linux target other than the host links *that* target's libdbus, which is not
+in the runner's sources for ARM or i386: `dev/stage-cross-dbus.sh <target>`
+fetches the matching packages, unpacks them and prints the environment the build
+wants (`PKG_CONFIG_LIBDIR` and the cargo target's `RUSTFLAGS`), in the shape CI
+appends to `$GITHUB_ENV`.
+
 `.github/workflows/linkr-tui.yml` runs the gates, then packages both faces of all
-seven targets — Linux on x86-64 and ARM, Windows on both ABIs, macOS on both
-architectures — and on a `linkr-tui-v<version>` tag it attaches the archives and
-a `SHA256SUMS` to the release. The archives for the host's own targets are
-*executed* before they are uploaded (`--version`, one frame or one loopback exec,
-and a bridge to a missing program that must exit `2`), because linking is not the
-same as running. The tag is namespaced so it cannot collide with the firmware's
-`v*` releases.
+ten targets — Linux on x86-64, ARM64, ARMv7 and i386 as tarballs and `.deb`s,
+Windows on both ABIs and both architectures as `.zip`s, macOS on both
+architectures as `.dmg`s and tarballs — and on a `linkr-tui-v<version>` tag it
+attaches them all, with a `SHA256SUMS`. Every archive is read back entry by entry
+before it is uploaded, and the archives for the host's own targets are *executed*
+(`--version`, one frame or one loopback exec, a resident session answering one
+request, and a bridge to a missing program that must exit `2`), because linking
+is not the same as running. The tag is namespaced so it cannot collide with the
+firmware's `v*` releases.
 
 ## Deliberate differences from the previous TUI
 

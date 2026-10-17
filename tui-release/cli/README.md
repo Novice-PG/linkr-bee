@@ -16,14 +16,14 @@
 ## 一、快速开始
 
 ```sh
-# Linux / macOS：解压后运行（按机器架构选包）
+# Linux / macOS：解压后运行（按机器架构选包；macOS 也可用上一级 macos/ 里的 .dmg）
 tar xzf linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
 ./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --version
 ./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
-# Windows：解压后（自带 tar.exe 或 7-Zip）
+# Windows：解压 .zip（右键「全部解压缩」或 7-Zip）
 .\linkr-cli.exe --version
 .\linkr-cli.exe --scan
 ```
@@ -43,7 +43,7 @@ Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包：它装的是�
 | 连接超时 | `--connect-timeout <秒>`（默认 20；蓝牙链路最多再等 30） |
 
 只跑一个动作时：连上 → 动作 → 打印 → 退出。`--cli-then-tui` 会在参数阶段被本 CLI 构建拒绝
-（它要打开终端界面，而这枚程序没有），提示改用 `--no-terminal`（见第六节）。
+（它要打开终端界面，而这枚程序没有），提示改用 `--no-terminal`。
 
 ## 三、常用动作（一次一个）
 
@@ -123,7 +123,63 @@ linkr --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 `--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落
 （本 CLI 构建的 `operations` 里没有 `tui`——这里没有界面可开）。
 
-## 七、安全与留档
+## 七、常驻会话：`--serve`
+
+一次一个动作要**每次重新拨号**（蓝牙尤其慢）。`--serve` 只拨一次、一直用，从 stdin 逐行读
+JSON 请求，适合脚本与 Agent 连续问很多件事：
+
+```sh
+linkr-cli --ble-address EE:C7:42:34:48:CF --serve
+{"event":"ready","program":"linkr","version":"1.0.0","link":"ble:EE:…","ops":[…]}
+{"id":1,"op":"state"}
+{"event":"begin","id":1,"op":"state"}
+{"event":"result","what":"state","live":false,…}
+{"event":"end","id":1,"code":0}
+{"id":2,"op":"exec","cmd":"uname -a"}
+{"event":"begin","id":2,"op":"exec"}
+…（与一次性 `--json` 相同的事件）…
+{"event":"end","id":2,"code":0}
+{"id":3,"op":"quit"}
+{"event":"end","id":3,"code":0}
+```
+
+框架行（`ready` / `begin` / `end`）之外的字段：
+
+| 行 | 字段 | 说明 |
+|---|---|---|
+| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是本构建支持的请求 |
+| `begin` | `id` `op` | 每个请求的开口，`id` 原样回显（可不给） |
+| `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第七节） |
+
+请求就是「动作的参数换成 JSON」，`op` 名与 `--` 参数一一对应：
+
+| `op` | 字段 | 对应命令行 |
+|---|---|---|
+| `info` | —— | `--query-info` |
+| `uart` | 给 `value`：写；不给：读 | `--uart 921600,8,n,1,none` / `--query-uart` |
+| `wifi` | 给 `ssid`（+可选 `pass`）：连；不给：读 | `--wifi` / `--query-wifi` |
+| `wifi-off` | —— | `--wifi-off` |
+| `wifi-scan` | —— | `--wifi-scan` |
+| `webdav` | 给 `url`：设；不给：读 | `--webdav` / `--query-webdav` |
+| `webdav-off` | —— | `--webdav-off` |
+| `lan` | —— | 读桥的局域网状态（`@s?`）：`ws=` 与 token 是否已捕获；界面里是连接区的一行 |
+| `exec` | `cmd`（必填）、`timeout_ms`、`idle_ms`、`retry` | `--exec` 全部参数 |
+| `loopback-test` | `data`（十六进制）、`timeout_ms`（默认 3000） | `--loopback-test` |
+| `state` | —— | 本地状态：链路是否活着、已连、计数 |
+| `quit` | —— | 结束会话（会话也随 stdin 关闭而结束） |
+
+行为约定：
+
+- **懒拨号**：`state`、`quit`、格式错误的行都不需要链路；第一个需要链路的请求才真正连接。
+  拨号失败回 `{"event":"error","code":"not_connected","message":…}`（`code` 255，会话不死），
+  等板子就绪再发一次即可。
+- **坏请求不致命**：不是合法 JSON、或 `op` 不认识 → `{"event":"error","code":"bad_request"}`（`code` 2）；
+  参数缺失（如 `exec` 没给 `cmd`）同理。会话继续读下一行。
+- **请求内格式**：请求里加 `"format":"text"`，该请求内部的事件按文本输出（框架两行仍是 JSON）。
+- **结束**：`quit` 或 stdin 关闭 → 退出码 0。启动时若已给 `--ble-address` 等连接参数，
+  会话只记住它、不提前拨号。
+
+## 八、安全与留档
 
 - **token 永不回显**：桥自述里带 token 的字段上屏前一律打码；记住的 token 存在
   `~/.config/linkr/lan-tokens`（0600），不进日志、不进通知。

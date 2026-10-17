@@ -20,6 +20,7 @@ pub mod palette;
 pub mod private_file;
 pub mod protocol;
 pub mod serial;
+pub mod serve;
 pub mod session;
 pub mod settings;
 pub mod text;

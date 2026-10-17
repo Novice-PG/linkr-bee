@@ -20,8 +20,13 @@
 #   linkr-cli-<version>-<target>/README.md    as above
 #   linkr-cli-<version>-<target>/LICENSE      as above
 #
-# `tar.gz` for every platform including Windows: `tar.exe` has shipped with
-# Windows since 10 1803, and one archive format is one thing to verify.
+# The archive format is the one the platform's own users reach for: a `.zip` on
+# Windows, a `.dmg` on macOS, a `.tar.gz` on Linux — and a `.tar.gz` beside the
+# `.dmg` as well, because a volume image is a heavy thing to mount on a machine
+# that only wants the binary. Linux also ships `.deb`s, built by
+# `dev/package-deb.sh` from the same target and the same source. Every path
+# this script writes is printed, one per line, so a caller can pick them up
+# without knowing the rule.
 set -eu
 
 variant=
@@ -74,7 +79,50 @@ if [ -f "$repo_dir/LICENSE" ]; then
 fi
 
 mkdir -p "$outdir"
-archive=$(CDPATH='' cd -- "$outdir" && pwd)/"$name.tar.gz"
-(umask 022 && cd "$stage" && tar -czf "$archive" "$name")
+outdir=$(CDPATH='' cd -- "$outdir" && pwd)
 
-echo "$archive"
+# tarball() is the fallback and the Linux format both; the two platform cases
+# below are additions to it, not replacements.
+tarball() {
+  archive="$outdir/$name.tar.gz"
+  (umask 022 && cd "$stage" && tar -czf "$archive" "$name")
+  echo "$archive"
+}
+
+case "$target" in
+  *windows*)
+    # `zip` is the tool on a Linux host, `7z` is on the Windows runners, and
+    # bsdtar — what Windows and Git Bash ship — writes a zip when the name
+    # ends in `.zip`. The version is asked first because GNU tar accepts `-a`
+    # with any name and quietly writes a *tar*: an archive called `.zip` that
+    # is not one is worse than no archive at all.
+    archive="$outdir/$name.zip"
+    if command -v zip >/dev/null 2>&1; then
+      (umask 022 && cd "$stage" && zip -q -r "$archive" "$name")
+    elif command -v 7z >/dev/null 2>&1; then
+      (umask 022 && cd "$stage" && 7z a -bd -y "$archive" "$name" >/dev/null)
+    elif tar --version 2>/dev/null | grep -qi bsdtar &&
+         tar -a -c -f "$archive" -C "$stage" "$name" 2>/dev/null; then
+      : # written by bsdtar
+    else
+      echo "error: no zip writer here: install zip(1) or 7z(1)" >&2
+      exit 1
+    fi
+    echo "$archive"
+    ;;
+  *apple-darwin*)
+    # The volume holds the files themselves — no top folder — so the window it
+    # opens in shows `linkr` to drag wherever the user keeps tools. The
+    # tarball is written first because it is the format the smoke test reads
+    # on a machine that cannot mount images.
+    tarball
+    archive="$outdir/$name.dmg"
+    rm -f "$archive"
+    hdiutil create -quiet -volname "$name" -srcfolder "$stage/$name" \
+      -ov -format UDZO "$archive"
+    echo "$archive"
+    ;;
+  *)
+    tarball
+    ;;
+esac

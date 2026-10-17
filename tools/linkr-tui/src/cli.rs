@@ -190,6 +190,11 @@ pub const FLAGS: &[Flag] = &[
         "run the asked-for commands, then open the terminal",
     ),
     Flag::new(
+        "--serve",
+        Value::None,
+        "hold the link and answer JSON requests on stdin until it ends",
+    ),
+    Flag::new(
         "--json",
         Value::None,
         "write events to stdout as JSON lines",
@@ -658,7 +663,7 @@ pub struct FoundDevice {
 
 /// Which answer a scan is after.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Until {
+pub enum Until {
     /// Everything the room has to say, until `timeout` runs out: the `--scan`
     /// list and the picker's own scan, where the user asked what is around.
     TheWindowEnds,
@@ -676,7 +681,7 @@ enum Until {
 /// not offering the serial service is a different problem from one that is
 /// switched off, and the list is how you tell them apart.
 pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
-    listen(timeout, Until::TheWindowEnds)
+    drain_scan(scan_stream(timeout, Until::TheWindowEnds))
 }
 
 /// Listen until the first board answers, or `timeout` runs out.
@@ -688,7 +693,60 @@ pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
 /// feels instant and one the user goes looking at the radio for. A bench with
 /// two boards is what the `--scan` list is for, where the user asked.
 pub fn scan_first_board(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
-    listen(timeout, Until::ABoardAnswers)
+    drain_scan(scan_stream(timeout, Until::ABoardAnswers))
+}
+
+/// One line of a scan in flight.
+///
+/// A scan is slow the way a conversation is slow: the radio waits, then
+/// something answers, and a list that only appears when the window closes
+/// makes every wait look like nothing happening. The stream is what lets a
+/// caller show what the adapter has heard *while* it is still listening —
+/// `--scan` prints each device as it arrives, and the interface's picker
+/// fills while its dialog is open.
+pub enum ScanEvent {
+    /// Everything heard so far, posted whenever the set of devices changes.
+    /// Sorted the way the final list is, so a live list and a finished one
+    /// read the same.
+    Seen(Vec<FoundDevice>),
+    /// The scan is over, and this is the final list.
+    Done(Vec<FoundDevice>),
+    /// The scan could not run. Carried here because a scan that fails part
+    /// way — the adapter is pulled, the manager dies — has no list to end
+    /// with and would otherwise look like a scan that heard nothing.
+    Failed(String),
+}
+
+/// Run a scan on a thread of its own and post what it hears as it hears it.
+///
+/// The channel is the whole interface: [`ScanEvent::Seen`] whenever the set
+/// of devices changes, then exactly one [`ScanEvent::Done`] or
+/// [`ScanEvent::Failed`]. A caller that only wants the answer drains it with
+/// [`scan_devices`]; one that wants to show progress reads it as it goes.
+pub fn scan_stream(timeout: Duration, until: Until) -> std::sync::mpsc::Receiver<ScanEvent> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let last = match listen(timeout, until, &tx) {
+            Ok(devices) => ScanEvent::Done(devices),
+            Err(why) => ScanEvent::Failed(why),
+        };
+        let _ = tx.send(last);
+    });
+    rx
+}
+
+/// Read a scan stream to its answer, ignoring what it saw on the way.
+fn drain_scan(rx: std::sync::mpsc::Receiver<ScanEvent>) -> Result<Vec<FoundDevice>, String> {
+    while let Ok(event) = rx.recv() {
+        match event {
+            ScanEvent::Seen(_) => {}
+            ScanEvent::Done(devices) => return Ok(devices),
+            ScanEvent::Failed(why) => return Err(why),
+        }
+    }
+    // The sender drops without an answer only when the scan's own thread
+    // died, which the old join reported as a panic.
+    Err("the scan's own thread panicked".to_string())
 }
 
 /// How often the scan's results are looked at while a scan is listening.
@@ -700,67 +758,83 @@ const SCAN_POLL: Duration = Duration::from_millis(250);
 /// The body both scans share: one reactor of its own on its own thread, for the
 /// same reason the BLE link builds one — this program is synchronous and the
 /// radio library is not.
-fn listen(timeout: Duration, until: Until) -> Result<Vec<FoundDevice>, String> {
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(why) => return Err(format!("the scan could not be started: {why}")),
+fn listen(
+    timeout: Duration,
+    until: Until,
+    tx: &std::sync::mpsc::Sender<ScanEvent>,
+) -> Result<Vec<FoundDevice>, String> {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(why) => return Err(format!("the scan could not be started: {why}")),
+    };
+    runtime.block_on(async move {
+        let manager = match Manager::new().await {
+            Ok(manager) => manager,
+            Err(why) => return Err(format!("no Bluetooth manager could be opened: {why}")),
         };
-        runtime.block_on(async move {
-            let manager = match Manager::new().await {
-                Ok(manager) => manager,
-                Err(why) => return Err(format!("no Bluetooth manager could be opened: {why}")),
-            };
-            let adapters = match manager.adapters().await {
-                Ok(adapters) => adapters,
-                Err(why) => return Err(format!("no Bluetooth adapter could be listed: {why}")),
-            };
-            let Some(adapter) = adapters.into_iter().next() else {
-                return Err(
-                    "this machine has no Bluetooth adapter — one is needed to look for the board"
-                        .to_string(),
-                );
-            };
-            // A second client holding the adapter answers `In Progress`; the
-            // retry gives it a moment to let go instead of failing a scan the
-            // user just asked for.
-            crate::transport::ble::retry_busy(|| async {
-                adapter
-                    .start_scan(btleplug::api::ScanFilter::default())
-                    .await
-            })
-            .await
-            .map_err(|why| format!("the scan would not start: {why}"))?;
-            let deadline = Instant::now() + timeout;
-            let mut found: Vec<FoundDevice>;
-            loop {
-                found = heard(&adapter).await?;
-                let answered = found.iter().any(|device| device.board);
-                if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(SCAN_POLL).await;
-            }
-            let _ = adapter.stop_scan().await;
-            found.sort_by(|left, right| {
-                right
-                    .board
-                    .cmp(&left.board)
-                    .then_with(|| left.name.cmp(&right.name))
-                    // Two boards with one name are told apart by who is
-                    // closer: the stronger reading is the one the user is
-                    // probably standing next to.
-                    .then_with(|| right.rssi.cmp(&left.rssi))
-            });
-            Ok(found)
+        let adapters = match manager.adapters().await {
+            Ok(adapters) => adapters,
+            Err(why) => return Err(format!("no Bluetooth adapter could be listed: {why}")),
+        };
+        let Some(adapter) = adapters.into_iter().next() else {
+            return Err(
+                "this machine has no Bluetooth adapter — one is needed to look for the board"
+                    .to_string(),
+            );
+        };
+        // A second client holding the adapter answers `In Progress`; the
+        // retry gives it a moment to let go instead of failing a scan the
+        // user just asked for.
+        crate::transport::ble::retry_busy(|| async {
+            adapter
+                .start_scan(btleplug::api::ScanFilter::default())
+                .await
         })
+        .await
+        .map_err(|why| format!("the scan would not start: {why}"))?;
+        let deadline = Instant::now() + timeout;
+        let mut found: Vec<FoundDevice>;
+        // The ids already posted, so an unchanged list is not posted again
+        // every quarter of a second: what a caller is watching for is a new
+        // device appearing, not the same five devices on a timer. A device
+        // that goes out of range changes the set too, and the list it is
+        // missing from is as true as the one it was on.
+        let mut posted: Vec<String> = Vec::new();
+        loop {
+            found = heard(&adapter).await?;
+            sort_found(&mut found);
+            let ids: Vec<String> = found.iter().map(|device| device.id.clone()).collect();
+            if ids != posted {
+                posted = ids;
+                let _ = tx.send(ScanEvent::Seen(found.clone()));
+            }
+            let answered = found.iter().any(|device| device.board);
+            if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(SCAN_POLL).await;
+        }
+        let _ = adapter.stop_scan().await;
+        Ok(found)
     })
-    .join()
-    .map_err(|_| "the scan's own thread panicked".to_string())?
+}
+
+/// Most useful first: boards before strangers, then by name, then by signal.
+fn sort_found(devices: &mut [FoundDevice]) {
+    devices.sort_by(|left, right| {
+        right
+            .board
+            .cmp(&left.board)
+            .then_with(|| left.name.cmp(&right.name))
+            // Two boards with one name are told apart by who is
+            // closer: the stronger reading is the one the user is
+            // probably standing next to.
+            .then_with(|| right.rssi.cmp(&left.rssi))
+    });
 }
 
 /// What the adapter has heard so far, as the rows the list shows.
@@ -911,7 +985,7 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
             // The question carries its own long patience: a scan is the
             // board's radio working through every channel, and the ordinary
             // reply timeout would call a running scan a silent bridge.
-            Ok(()) => failed += wait_and_report(app, crate::device::Query::WifiScan, format),
+            Ok(()) => failed += wait_and_report_scan(app, format),
         }
     }
 
@@ -984,12 +1058,67 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
 ///
 /// The wait is bounded by the connect window. A link that never gets there
 /// is not this loop's to report: every request that follows says for itself
-/// that nothing went out, which is the report a user can act on.
-fn wait_for_connected(app: &mut App, window: Duration) {
+/// that nothing went out, which is the report a user can act on. The resident
+/// session waits here too, once per dial it makes on a request's behalf.
+pub(crate) fn wait_for_connected(app: &mut App, window: Duration) {
     let deadline = Instant::now() + window;
     while app.session.is_live() && !app.connected() && Instant::now() < deadline {
         app.pump();
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wait for a scan's answer, and — when it failed — say why it failed.
+///
+/// A scan that fails says "retry in a moment", which is not a reason: the
+/// reason is in the bridge's state, and a bridge whose WiFi is off fails every
+/// scan for that one cause. `--query-info` would have shown it, but a caller
+/// who asked for a scan should not have to also ask why it did not happen —
+/// so when the failure arrives without a state behind it, the state is read
+/// once, best effort, and carried into the report. The read cannot turn the
+/// failure into a success: the sentence to report was captured first, and a
+/// bridge that will not answer the state question either keeps its own words.
+fn wait_and_report_scan(app: &mut App, format: Format) -> i32 {
+    let window = crate::device::Query::WifiScan.patience() + SETTLE_SLACK;
+    let answered = settle(app, format, window);
+    if !answered {
+        let why = app
+            .diagnostics
+            .error
+            .clone()
+            .or_else(|| app.network.error.clone())
+            .unwrap_or_else(|| "the bridge did not answer".to_string());
+        return report(format, "wifi-scan", false, &with_wifi_state(app, &why));
+    }
+    let Some(why) = app.network.error.clone() else {
+        return report_query(app, crate::device::Query::WifiScan, format);
+    };
+    if app.network.wifi.is_none() && app.session.is_live() {
+        let patience = crate::device::Query::Wifi.patience() + SETTLE_SLACK;
+        if app.ask_device(crate::device::Query::Wifi).is_ok() {
+            settle(app, format, patience);
+        }
+    }
+    let detail = with_wifi_state(app, &why);
+    report(format, "wifi-scan", false, &detail)
+}
+
+/// A failure sentence, with the WiFi state it happened in when that is known.
+///
+/// The spelling is the one the diagnostics use (`state=off`), so the two
+/// lines can be read side by side; a state already spelled in the sentence is
+/// not repeated.
+fn with_wifi_state(app: &App, why: &str) -> String {
+    let Some(wifi) = &app.network.wifi else {
+        return why.to_string();
+    };
+    if wifi.state.is_empty() || why.contains(&format!("state={}", wifi.state)) {
+        return why.to_string();
+    }
+    if wifi.ssid.is_empty() {
+        format!("{why} (wifi state={})", wifi.state)
+    } else {
+        format!("{why} (wifi state={}, ssid={})", wifi.state, wifi.ssid)
     }
 }
 
@@ -1184,6 +1313,13 @@ pub enum Json<'a> {
     Number(i64),
     Bool(bool),
     Null,
+    /// A value already spelled as JSON.
+    ///
+    /// For the lists and nested shapes this writer is not big enough to
+    /// build — an operation list in a session's opening line — where the
+    /// alternative is a second writer or a string that has to be decoded
+    /// again. What goes in must be JSON: nothing here escapes it.
+    Raw(&'a str),
 }
 
 /// One JSON object on one line, escaped by hand.
@@ -1211,6 +1347,7 @@ pub fn json_event(fields: &[(&str, Json)]) -> String {
             Json::Bool(true) => out.push_str("true"),
             Json::Bool(false) => out.push_str("false"),
             Json::Null => out.push_str("null"),
+            Json::Raw(raw) => out.push_str(raw),
         }
     }
     out.push('}');

@@ -7,6 +7,7 @@
 
 pub mod body;
 pub mod chrome;
+pub mod legacy;
 pub mod overlay;
 pub mod scroll;
 pub mod sidebar;
@@ -112,8 +113,10 @@ pub fn pane_area(cols: u16, rows: u16) -> Rect {
 pub fn draw(frame: &mut Frame, app: &App) {
     let theme = app.theme();
     // The page moves right; the window does not, so the right edge stays
-    // where it was and only the width gives up the column.
-    let full = frame.area();
+    // where it was and only the width gives up the column. On the old
+    // Windows console the *window* gives up its last columns to the
+    // scrollbar first, which is what `drawing_area` decides.
+    let full = legacy::drawing_area(frame.area(), app.legacy_console);
     let area = Rect {
         x: full.x + LEFT_AIR,
         width: full.width.saturating_sub(LEFT_AIR),
@@ -144,6 +147,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // including the toasts, which the user is not reading while answering a
     // confirmation.
     overlay::paint(frame, app, area);
+    // And the compatibility pass last of all, because it is about the cells
+    // every widget has finished painting rather than about any one of them.
+    if app.legacy_console {
+        legacy::prepare(frame.buffer_mut());
+    }
 }
 
 /// One bar: the left half flush left, the right half flush right, split so they

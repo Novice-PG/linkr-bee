@@ -6,15 +6,20 @@ channel = "stable"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
 
-# Every target the crate ships to. The seven-target `cargo check` is one of the
-# four gates, and rustup installing them from here is what keeps that gate from
-# needing a setup step of its own in CI.
+# Every target the crate ships to. The `cargo check` gate walks the ones a
+# Linux runner can compile for — four of these ten — and rustup installing them
+# from here is what keeps that gate from needing a setup step of its own in CI.
+# The rest are built for real by the package matrix, each on the system whose
+# format it ships in.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "i686-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
     "x86_64-pc-windows-gnu",
+    "i686-pc-windows-gnu",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]

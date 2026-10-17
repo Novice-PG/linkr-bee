@@ -15,7 +15,11 @@
 //!   never reports success — sending is not finishing.
 //! * an **idle window** (`--idle`): the output has been quiet for that long.
 //!   Weaker by construction — a command that is thinking looks like one that is
-//!   done — and offered because a wrapper is not always wanted on the wire.
+//!   done — and offered because a wrapper is not always wanted on the wire. It
+//!   never reports success: `ok` is false, `verified` is false and the exit
+//!   code is 1, because nothing read the command's status. The output is still
+//!   reported; the status is the thing that is missing, and saying so is the
+//!   only honest way to end a run that cannot say how it ended.
 //!
 //! What this module deliberately does not have: any notion of approval (that is
 //! the caller's, and `--dry-run` is what it is given to approve with), any
@@ -154,11 +158,16 @@ pub fn code(outcome: &Outcome) -> Option<&'static str> {
 /// needed a person, or ran out of clock, is the same 1. A run that could not be
 /// sent, or whose link died holding the answer, is this program's own failure:
 /// 255.
+///
+/// Idle is 1 and not 0 for the reason the module opens with: a run that never
+/// saw a status has not reported success, and a `&&` in a script must not read
+/// one into it. The output is still there to be read; the *status* is what is
+/// missing, and 1 is what says so.
 pub fn exit_code(outcome: &Outcome) -> i32 {
     match outcome {
         Outcome::Rc(status) if (0..=127).contains(status) => *status,
         Outcome::Rc(_) => 1,
-        Outcome::Idle => 0,
+        Outcome::Idle => 1,
         Outcome::NeedsInput(_) | Outcome::Timeout => 1,
         Outcome::Lost | Outcome::Refused(_) => 255,
     }
@@ -407,7 +416,8 @@ fn report(app: &App, run: &Run, format: Format, execution_id: &str, last: &Attem
                     format!("exec: rc {status} ({seconds:.2} s, {} bytes)", last.bytes)
                 }
                 Outcome::Idle => format!(
-                    "exec: the output went quiet ({seconds:.2} s, {} bytes)",
+                    "exec: the output went quiet, no exit status was read \
+                     ({seconds:.2} s, {} bytes)",
                     last.bytes
                 ),
                 Outcome::NeedsInput(prompt) => format!("exec: needs input — {prompt}"),
@@ -431,12 +441,22 @@ fn report(app: &App, run: &Run, format: Format, execution_id: &str, last: &Attem
                 Outcome::Rc(status) => {
                     fields.push(("event", cli::Json::Text("result")));
                     fields.push(("ok", cli::Json::Bool(true)));
+                    // The target's own status was read, which is the whole
+                    // difference between this ending and an idle one.
+                    fields.push(("verified", cli::Json::Bool(true)));
                     fields.push(("rc", cli::Json::Number(i64::from(*status))));
                     fields.push(("mode", cli::Json::Text("rc-marker")));
                 }
                 Outcome::Idle => {
                     fields.push(("event", cli::Json::Text("result")));
-                    fields.push(("ok", cli::Json::Bool(true)));
+                    // `ok` is false because nothing was verified: the output
+                    // going quiet is what `--idle` asked for, but no status
+                    // came back, and a caller that branches on `ok` alone —
+                    // or a shell reading the exit code — must not read a
+                    // success into it. The mode and the null rc say the same
+                    // thing in a shape a fuller report can use.
+                    fields.push(("ok", cli::Json::Bool(false)));
+                    fields.push(("verified", cli::Json::Bool(false)));
                     fields.push(("rc", cli::Json::Null));
                     fields.push(("mode", cli::Json::Text("idle")));
                 }
@@ -463,7 +483,7 @@ fn report(app: &App, run: &Run, format: Format, execution_id: &str, last: &Attem
 fn message(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Rc(status) => format!("the command finished with status {status}"),
-        Outcome::Idle => "the output went quiet".to_string(),
+        Outcome::Idle => "the output went quiet, so no exit status was read".to_string(),
         Outcome::NeedsInput(prompt) => format!("the target is waiting for input: {prompt}"),
         Outcome::Timeout => "the command did not end within the timeout".to_string(),
         Outcome::Lost => "the link went away mid-command".to_string(),
@@ -534,7 +554,10 @@ mod tests {
         assert_eq!(exit_code(&Outcome::Rc(0)), 0);
         assert_eq!(exit_code(&Outcome::Rc(127)), 127);
         assert_eq!(exit_code(&Outcome::Rc(128)), 1, "a signal is not a status");
-        assert_eq!(exit_code(&Outcome::Idle), 0);
+        // Idle is not a status either: the run ended because the output went
+        // quiet, and 0 would let a script's `&&` read a success nothing
+        // verified.
+        assert_eq!(exit_code(&Outcome::Idle), 1);
         assert_eq!(exit_code(&Outcome::NeedsInput("x".into())), 1);
         assert_eq!(exit_code(&Outcome::Timeout), 1);
         assert_eq!(exit_code(&Outcome::Lost), 255);
@@ -606,7 +629,9 @@ mod tests {
         };
         let attempt = attempt_once(&mut app, &run, Format::Text, false);
         assert_eq!(attempt.outcome, Outcome::Idle);
-        assert_eq!(exit_code(&attempt.outcome), 0);
+        // Not 0: the output went quiet, which is what `--idle` asked for, but
+        // no status was read — and a script's `&&` must not read one into it.
+        assert_eq!(exit_code(&attempt.outcome), 1);
     }
 
     #[test]

@@ -5,10 +5,13 @@ name: Host terminal (linkr-tui)
 # its own release artifacts, so
 # it is a workflow of its own rather than jobs bolted onto the firmware one:
 # a TUI change should not spin up five Zephyr toolchains, and a firmware change
-# should not rebuild the host's fourteen archives.
+# should not rebuild the host's release matrix.
 #
-# Tag a release with `linkr-tui-v<version>`; the archives are attached to it.
-# The tag is namespaced so it cannot collide with the firmware's `v*` releases.
+# Every binary a release carries is built here, in the format its platform's
+# users reach for: `.zip` for Windows, a `.dmg` (and a `.tar.gz` beside it) for
+# macOS, `.tar.gz` and `.deb` for Linux. Tag a release with
+# `linkr-tui-v<version>`; the archives are attached to it. The tag is namespaced
+# so it cannot collide with the firmware's `v*` releases.
 
 on:
   push:
@@ -57,7 +60,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # rust-toolchain.toml names the channel, the components and the seven
+      # rust-toolchain.toml names the channel, the components and the ten
       # targets, so there is nothing to install here beyond honouring it.
       - name: Show the toolchain
         run: |
@@ -101,6 +104,16 @@ jobs:
       - name: Tests of the CLI build
         run: cargo test --locked --no-default-features --features cli
 
+      # The third face: the interface without the request flags around it. A
+      # CLI-only build notices what the interface was holding up; this is the
+      # reverse — the interface on its own, and the only build in which the
+      # request path is not compiled at all.
+      - name: Lints of the interface build, warnings are errors
+        run: cargo clippy --all-targets --locked --no-default-features --features tui -- -D warnings
+
+      - name: Tests of the interface build
+        run: cargo test --locked --no-default-features --features tui
+
       - name: Firmware rate arithmetic
         # No Zephyr, no toolchain: src/uart_autobaud_math.h is plain integers,
         # and this is the only part of the firmware a host compiler can judge.
@@ -129,7 +142,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 \
-                                  libdbus-1-dev pkg-config
+                                  gcc-mingw-w64-i686 libdbus-1-dev pkg-config
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
@@ -138,15 +151,15 @@ jobs:
           key: targets
 
       # The fourth gate: the targets a Linux runner can genuinely compile
-      # for. Windows MSVC and the Apple targets want SDKs that cannot be
-      # installed here; they are built for real by the package matrix on
-      # their own systems — a stronger claim than a check. This job is the
-      # fast one, not the only one.
+      # for. The other six are built for real by the package matrix — on their
+      # own systems, with the SDKs or the staged cross libraries only their leg
+      # installs — which is a stronger claim than a check. This job is the fast
+      # one, not the only one.
       - name: Check the cross targets
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-                        x86_64-pc-windows-gnu; do
+                        x86_64-pc-windows-gnu i686-pc-windows-gnu; do
             echo "::group::$target"
             cargo check --locked --all-targets --target "$target"
             cargo check --locked --all-targets --no-default-features --features cli \
@@ -170,18 +183,45 @@ jobs:
             target: x86_64-unknown-linux-gnu
             native: true
             apt: libdbus-1-dev
-          # Linux on ARM: needs a cross linker, installed below.
+            deb: true
+          # Linux on ARM and on 32-bit x86: cross builds, each with its own
+          # linker and its own staged libdbus. Both are Debian architectures
+          # (arm64, armhf, i386) as well as Rust targets, which is what the two
+          # extra columns are for.
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             apt: gcc-aarch64-linux-gnu
             linker_var: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
             linker: aarch64-linux-gnu-gcc
+            stage: true
+            deb: true
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            apt: gcc-arm-linux-gnueabihf
+            linker_var: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+            linker: arm-linux-gnueabihf-gcc
+            stage: true
+            deb: true
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            apt: gcc-i686-linux-gnu
+            linker_var: CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
+            linker: i686-linux-gnu-gcc
+            stage: true
+            deb: true
           # Windows, GNU ABI: built on Linux, where mingw-w64 is one apt away.
+          # `zip` writes the archive there and `unzip` reads it back for the
+          # listing check; a Windows runner falls back to 7z and PowerShell.
           - os: ubuntu-latest
             target: x86_64-pc-windows-gnu
-            apt: gcc-mingw-w64-x86-64
+            apt: gcc-mingw-w64-x86-64 zip unzip
             linker_var: CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
             linker: x86_64-w64-mingw32-gcc
+          - os: ubuntu-latest
+            target: i686-pc-windows-gnu
+            apt: gcc-mingw-w64-i686 zip unzip
+            linker_var: CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER
+            linker: i686-w64-mingw32-gcc
           # Windows, MSVC ABI, on Windows: the ARM64 tools ship with the
           # Visual Studio build the runner has.
           - os: windows-latest
@@ -206,42 +246,19 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y "${{ matrix.apt }}"
-          # The arm64 leg links the arm64 libdbus, which lives on the ports
-          # archive — the runner's own sources only carry amd64. Extract it the
-          # way a laptop cross build does, then aim the probe at the tree.
-          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then
-            stage=/tmp/arm64-dbus
-            mkdir -p "$stage"
-            fetch() {
-              local dir=$1 pattern=$2 deb
-              deb=$(curl -fsSL "http://ports.ubuntu.com/ubuntu-ports/pool/main/$dir/" |
-                grep -oE "$pattern" | sort -V | tail -1)
-              echo "fetching $deb"
-              curl -fsSL -o "/tmp/$deb" \
-                "http://ports.ubuntu.com/ubuntu-ports/pool/main/$dir/$deb"
-              dpkg-deb -x "/tmp/$deb" "$stage"
-            }
-            fetch d/dbus 'libdbus-1-dev_[^"]*_arm64\.deb'
-            # The dev package's `libdbus-1.so` points at the runtime library,
-            # which only the runtime package ships. With it missing the symlink
-            # dangles, `-ldbus-1` silently falls back to the static archive in
-            # the dev tree, and that archive wants systemd's `sd_listen_fds` at
-            # link time — a symbol no link line here asks for.
-            fetch d/dbus 'libdbus-1-3_[^"]*_arm64\.deb'
-            fetch s/systemd 'libsystemd-dev_[^"]*_arm64\.deb'
-            fetch s/systemd 'libsystemd0_[^"]*_arm64\.deb'
-            pc="$stage/usr/lib/aarch64-linux-gnu/pkgconfig"
-            sed -i -E \
-              "s#^(prefix|exec_prefix|libdir|includedir)=/usr#\1=$stage/usr#" \
-              "$pc/dbus-1.pc" "$pc/libsystemd.pc"
-            {
-              echo "PKG_CONFIG_LIBDIR=$pc"
-              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-Wl,-rpath-link,$stage/usr/lib/aarch64-linux-gnu"
-            } >> "$GITHUB_ENV"
-          fi
+          sudo apt-get install -y ${{ matrix.apt }}
 
-      - name: Point cargo at it
+      # A cross Linux leg cannot link the host's libdbus: the target's own
+      # `.pc` files are what `libdbus-sys` asks pkg-config for, and the runner
+      # has them for neither ARM nor i386. The script knows which archive
+      # carries which architecture and prints the environment; appending it to
+      # `$GITHUB_ENV` is what hands it to every step after this one.
+      - name: Stage the target's libdbus
+        if: matrix.stage
+        shell: bash
+        run: dev/stage-cross-dbus.sh "${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Point cargo at the linker
         if: matrix.linker_var != ''
         shell: bash
         run: echo "${{ matrix.linker_var }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
@@ -252,24 +269,56 @@ jobs:
           workspaces: tools/linkr-tui -> target
           key: ${{ matrix.target }}
 
-      # The layout of the archive is decided in one place, by the script, and
+      # The layout of an archive is decided in one place, by the script, and
       # the workflow only calls it — the same call a developer makes by hand.
-      # Both faces of the program are packaged: the interface and the CLI.
+      # Both faces of the program are packaged: the interface and the CLI. The
+      # format follows the target's platform, and the Debian packages are built
+      # from the same source and the same target one line later.
       - name: Build and package
         shell: bash
         run: |
           dev/package.sh "${{ matrix.target }}"
           dev/package.sh --cli "${{ matrix.target }}"
+          if [ "${{ matrix.deb }}" = "true" ]; then
+            dev/package-deb.sh "${{ matrix.target }}"
+          fi
 
+      # What a release carries is read back before it is uploaded: the entries
+      # of every archive, the package's own name and the binary inside it.
       - name: Check the archives
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          for archive in dist/*.tar.gz; do
+          for archive in dist/*; do
             echo "archive: $archive"
-            listing=$(tar -tzf "$archive")
+            case "$archive" in
+              *.deb)
+                # `dpkg-deb -c` prints a long listing, and a `grep -q` on the
+                # far end of a pipe exits the moment it matches — which kills
+                # the writer with SIGPIPE and, under `pipefail`, fails a check
+                # that just succeeded. Capture first, match on the string.
+                fields=$(dpkg-deb -f "$archive" Package Architecture)
+                echo "$fields"
+                grep -qx 'Package: linkr' <<<"$fields" || {
+                  echo "unexpected package name" >&2
+                  exit 1
+                }
+                contents=$(dpkg-deb -c "$archive")
+                grep -E ' \./usr/bin/linkr$' <<<"$contents" >/dev/null || {
+                  echo "the package holds no binary" >&2
+                  exit 1
+                }
+                continue
+                ;;
+              *.tar.gz) listing=$(tar -tzf "$archive") ;;
+              *.zip)    listing=$(unzip -Z1 "$archive") ;;
+              *) continue ;;
+            esac
             echo "$listing"
-            name=$(basename "$archive" .tar.gz)
+            stem=$(basename "$archive")
+            name=${stem%.tar.gz}
+            name=${name%.zip}
             bin=linkr
             case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
             # Nothing may be in here that the script did not put there: a stray
@@ -277,13 +326,13 @@ jobs:
             allowed=$(printf '%s\n' "$name/" "$name/$bin" "$name/$bin.exe" \
                                     "$name/README.md" "$name/LICENSE")
             for entry in $listing; do
-              echo "$allowed" | grep -qx "$entry" || {
+              grep -qx "$entry" <<<"$allowed" || {
                 echo "unexpected entry in the archive: $entry" >&2
                 exit 1
               }
             done
             # And one of them must be the binary itself.
-            echo "$listing" | grep -qE "^$name/$bin(\.exe)?$" || {
+            grep -E "^$name/$bin(\.exe)?$" <<<"$listing" >/dev/null || {
               echo "the archive holds no binary" >&2
               exit 1
             }
@@ -295,16 +344,46 @@ jobs:
         if: matrix.native
         shell: bash
         run: |
-          set -euo pipefail
+          set -eu
           rm -rf /tmp/smoke && mkdir -p /tmp/smoke
-          for archive in dist/*.tar.gz; do
-            stem=$(basename "$archive" .tar.gz)
-            dir=/tmp/smoke/$stem
+          mounted=""
+          cleanup() {
+            for mount in $mounted; do
+              hdiutil detach "$mount" -quiet || true
+            done
+          }
+          trap cleanup EXIT
+          for archive in dist/*; do
+            stem=$(basename "$archive")
+            dir=/tmp/smoke/"$stem"
             mkdir -p "$dir"
-            tar -xzf "$archive" -C "$dir"
+            case "$archive" in
+              *.tar.gz) tar -xzf "$archive" -C "$dir" ;;
+              *.zip)
+                case "$(uname -s)" in
+                  MINGW*|MSYS*)
+                    powershell -NoProfile -Command \
+                      "Expand-Archive -LiteralPath '$archive' -DestinationPath '$dir' -Force"
+                    ;;
+                  *) unzip -q "$archive" -d "$dir" ;;
+                esac
+                ;;
+              *.dmg)
+                # A volume image is proved by mounting it: the file that lands
+                # under `$dir` is the one the user will double-click.
+                mounted="$mounted $dir"
+                hdiutil attach "$archive" -nobrowse -quiet -mountpoint "$dir"
+                ;;
+              *.deb) dpkg-deb -x "$archive" "$dir" ;;
+              *) continue ;;
+            esac
             bin=linkr
             case "$stem" in linkr-cli-*) bin=linkr-cli ;; esac
             found=$(find "$dir" -type f \( -name "$bin" -o -name "$bin.exe" \) | head -1)
+            if [ -z "$found" ]; then
+              echo "no $bin in $archive" >&2
+              exit 1
+            fi
             echo "running $found"
             "$found" --version
             if [ "$bin" = linkr-cli ]; then
@@ -323,6 +402,13 @@ jobs:
             else
               # The paint path, through the same renderer the TUI uses.
               "$found" --print-frame 80x24 --lang en --sample > /dev/null
+              # And the resident session — the mode an agent harness keeps
+              # open — answers one request and quits over the loopback.
+              echo '{"id":1,"op":"state"}' | "$found" --bridge - --serve |
+                grep -q '"event":"ready"' || {
+                  echo "the resident session did not come up" >&2
+                  exit 1
+                }
             fi
             # A dial that cannot open must fail loudly rather than start a broken
             # session — this is the exit code the tool documents. (`|| status=$?`
@@ -337,7 +423,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linkr-tui-${{ matrix.target }}
-          path: tools/linkr-tui/dist/*.tar.gz
+          path: tools/linkr-tui/dist/*
           if-no-files-found: error
 
   release:
@@ -366,7 +452,11 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          # Every format the matrix writes, and nothing else: a checksum file
+          # that names a file nobody uploaded is worse than no file.
+          shopt -s nullglob
+          files=(*.tar.gz *.zip *.dmg *.deb)
+          sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create the release if it is not there yet
@@ -380,9 +470,14 @@ jobs:
               --title "linkr-tui $GITHUB_REF_NAME" --generate-notes
 
       # `--clobber` so re-running a workflow over an existing tag replaces the
-      # archives rather than failing halfway.
+      # archives rather than failing halfway. The globs are expanded from a
+      # list so a format a platform did not produce is not a missing argument.
       - name: Upload the archives and the checksums
         working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS --clobber
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.deb dist/SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber

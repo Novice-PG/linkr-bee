@@ -217,6 +217,10 @@ struct Args {
     /// middle of the three modes, and the one nothing had a way to ask for:
     /// the command line either exited when it was done or never ran anything.
     cli_then_tui: bool,
+    /// Hold the link open and answer requests until the input ends. The
+    /// resident-session mode: one dial, many questions, for a caller that
+    /// works through a problem instead of asking one thing.
+    serve: bool,
     /// Report what happened as JSON lines rather than as sentences.
     json: bool,
     /// Say nothing on stderr that is not an error.
@@ -358,14 +362,16 @@ impl Args {
     }
 }
 
-/// The three ways the command line can be used, and the one thing that
-/// decides between them.
+/// The ways the command line can be used, and the one thing that decides
+/// between them.
 ///
 /// A tool that is both a terminal and a script has to know which of the two it
 /// is this time. The answer has always been one of three, but until now only
 /// two were reachable: a command line that asked for something exited when it
 /// was done, and one that asked for nothing opened the terminal. The middle —
-/// configure the board, then *watch it* — had no spelling.
+/// configure the board, then *watch it* — had no spelling. The fourth is the
+/// resident session: configure nothing, ask nothing, and answer whatever
+/// arrives until the input ends.
 #[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -375,6 +381,68 @@ pub enum Mode {
     Cli,
     /// Configure and report, then take the terminal over and stay there.
     CliThenTui,
+    /// Hold the link and answer requests until the input ends.
+    Serve,
+}
+
+/// Why this command line cannot be a resident session, if it cannot.
+///
+/// Apart from the mode decision so it can be asked *early*: `--capabilities`,
+/// `--scan` and `--dry-run` are answered before a mode is worked out at all,
+/// and a command line that named one of those with `--serve` would otherwise
+/// watch the flag win silently — which is the one outcome the refusals exist
+/// to prevent. `None` is a session that can open.
+#[cfg(feature = "cli")]
+fn serve_refusal(args: &Args) -> Option<String> {
+    if args.cli_then_tui {
+        return Some(
+            "the resident session and the configure-then-watch mode ask \
+             for opposite things; pick one"
+                .to_string(),
+        );
+    }
+    if args.scan {
+        return Some(
+            "the resident session and the scan each run to an end of \
+             their own; ask the session for its state instead"
+                .to_string(),
+        );
+    }
+    for (named, what) in [
+        (args.capabilities, "--capabilities"),
+        (args.print_frame.is_some(), "--print-frame"),
+        (args.exec.is_some(), "--exec"),
+        (args.loopback.is_some(), "--loopback-test"),
+        (args.sample, "--sample"),
+    ] {
+        if named {
+            return Some(format!(
+                "the resident session answers what arrives on its \
+                 input; {what} would be answered and would exit \
+                 before the session opened"
+            ));
+        }
+    }
+    if !args.requests.is_empty() {
+        return Some(
+            "the resident session answers requests on its input; the \
+             request flags would each be asked once and released, not \
+             served. Send them as requests instead"
+                .to_string(),
+        );
+    }
+    if args.bridge.is_none()
+        && args.ble_address.is_none()
+        && args.ble_name.is_none()
+        && args.lan_host.is_none()
+    {
+        return Some(
+            "the resident session has no link to hold: name one with \
+             --bridge, --ble-address, --ble-name or --lan-host"
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[cfg(feature = "cli")]
@@ -392,6 +460,15 @@ impl Mode {
                 "the script mode and the configure-then-watch mode ask for \
                  opposite things; pick one",
             );
+        }
+        // The resident session is decided before the modes below, because
+        // every flag it refuses would otherwise be *taken* by one of them and
+        // answered once instead of being named as the contradiction it is.
+        if args.serve {
+            if let Some(why) = serve_refusal(args) {
+                fail(prog, &why);
+            }
+            return Mode::Serve;
         }
         if args.no_terminal || args.cli_then_tui {
             return if args.cli_then_tui {
@@ -441,6 +518,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         connect_timeout: None,
         no_terminal: false,
         cli_then_tui: false,
+        serve: false,
         json: bool::default(),
         quiet: false,
         requests: cli::Requests::default(),
@@ -522,6 +600,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--capabilities" => args.capabilities = true,
             "--no-terminal" => args.no_terminal = true,
             "--cli-then-tui" => args.cli_then_tui = true,
+            "--serve" => args.serve = true,
             "--json" => args.json = true,
             "--quiet" => args.quiet = true,
             "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
@@ -774,6 +853,9 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\"marker\":\"cmd; echo \\\"LINKR_RC:$?\\\"\",",
                 "\"codes\":[\"needs_input\",\"timeout\",\"link_lost\",\"not_connected\"],",
                 "\"retry\":\"off; --retry N resends after a timeout, after reading state\"}},",
+                "\"session\":{{\"flag\":\"--serve\",\"ops\":{},\"codes\":[\"bad_request\",",
+                "\"not_connected\"],\"frame\":\"begin then the one-shot events then ",
+                "end, per request, ids as sent\"}},",
                 "\"exit_codes\":{{\"0-125\":\"the command's own status\",",
                 "\"126-127\":\"reserved for the shell\",",
                 "\"1\":\"executed but not as expected, needs input, or timed out\",",
@@ -786,6 +868,7 @@ fn capabilities(prog: &str, json: bool) -> String {
             cli::DEFAULT_SCAN_TIMEOUT.as_millis(),
             cli::DEFAULT_CONNECT_TIMEOUT.as_millis(),
             linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis(),
+            linkr_tui::serve::operations_json(),
         )
     } else {
         format!(
@@ -802,6 +885,8 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "            --retry N                  resend it after a timeout\n",
                 "            --dry-run                  show the bytes instead\n",
                 "wire test   --loopback-test [BYTES]    prove the target's UART round trip\n",
+                "session     --serve                    hold the link, answer JSON requests on\n",
+                "                                       stdin (one per line) until it ends\n",
                 "{}",
                 "\n",
                 "Exit codes: 0-125 the command's own status, 1 executed but not as\n",
@@ -981,6 +1066,15 @@ fn main() -> io::Result<()> {
     let argv: Vec<String> = raw.map(|arg| arg.to_string_lossy().into_owned()).collect();
 
     let mut args = parse_args(&prog, &argv);
+    // A session is refused here, *before* the flags that answer and exit: a
+    // `--serve --capabilities` would otherwise print a capability list and
+    // leave, and the caller would never learn that no session was opened.
+    #[cfg(feature = "cli")]
+    if args.serve {
+        if let Some(why) = serve_refusal(&args) {
+            fail(&prog, &why);
+        }
+    }
     // Two answers need no link, and both ask to be given before anything is
     // dialled: a caller asking what this tool can do is not asking the radio
     // anything, and `--dry-run`'s whole point is to show the bytes *before*
@@ -1027,9 +1121,58 @@ fn main() -> io::Result<()> {
     // terminal to do something that takes three seconds and prints three lines.
     #[cfg(feature = "cli")]
     if args.scan {
-        match cli::scan_devices(args.scan_window()) {
-            Ok(devices) => {
-                for device in &devices {
+        // Printed as they are heard rather than all at the end: the window is
+        // ten seconds long, and a list that appears in the last of them reads
+        // as a scan that found nothing until it found everything. `posted`
+        // keeps a device from being printed twice when a later update still
+        // carries it — an update is the whole list, not an increment.
+        let stream = cli::scan_stream(args.scan_window(), cli::Until::TheWindowEnds);
+        let mut posted: Vec<String> = Vec::new();
+        let mut failure = None;
+        while let Ok(event) = stream.recv() {
+            let (devices, done) = match event {
+                cli::ScanEvent::Seen(devices) => (devices, false),
+                cli::ScanEvent::Done(devices) => (devices, true),
+                cli::ScanEvent::Failed(why) => {
+                    failure = Some(why);
+                    break;
+                }
+            };
+            for device in &devices {
+                if posted.iter().any(|id| id == &device.id) {
+                    continue;
+                }
+                posted.push(device.id.clone());
+                if args.json {
+                    // `board` is the same distinction the text row's mark
+                    // makes: the one device here this program could dial, as
+                    // opposed to everything else that happened to be on the
+                    // air. `rssi` is null when the adapter has no reading yet,
+                    // which is not the same as a weak one.
+                    println!(
+                        "{}",
+                        cli::json_event(&[
+                            ("event", cli::Json::Text("device")),
+                            ("board", cli::Json::Bool(device.board)),
+                            (
+                                "name",
+                                device
+                                    .name
+                                    .as_deref()
+                                    .map(cli::Json::Text)
+                                    .unwrap_or(cli::Json::Null)
+                            ),
+                            ("id", cli::Json::Text(&device.id)),
+                            (
+                                "rssi",
+                                device
+                                    .rssi
+                                    .map(|rssi| cli::Json::Number(rssi as i64))
+                                    .unwrap_or(cli::Json::Null)
+                            ),
+                        ])
+                    );
+                } else {
                     let name = device.name.as_deref().unwrap_or("(no name advertised)");
                     // Marked, because a row the scan could dial and a row it
                     // could not are two different answers to "is my board on":
@@ -1038,19 +1181,36 @@ fn main() -> io::Result<()> {
                     let kind = if device.board { "bee" } else { "-" };
                     println!("{kind:>3}  {name}  {}", device.id);
                 }
-                if devices.is_empty() && !args.quiet {
-                    eprintln!(
-                        "no Bluetooth device was seen in {} s",
-                        args.scan_window().as_secs()
-                    );
-                }
-                return Ok(());
             }
-            Err(why) => {
-                eprintln!("error: {why}");
-                std::process::exit(1);
+            if done {
+                break;
             }
         }
+        if let Some(why) = failure {
+            eprintln!("error: {why}");
+            std::process::exit(1);
+        }
+        if args.json {
+            // A terminator, because a stream of device lines is not an answer
+            // on its own: a script needs to know the window closed, and how
+            // many rows to have expected. Without it the last line written is
+            // indistinguishable from a scan that is still listening.
+            println!(
+                "{}",
+                cli::json_event(&[
+                    ("event", cli::Json::Text("result")),
+                    ("what", cli::Json::Text("scan")),
+                    ("ok", cli::Json::Bool(true)),
+                    ("count", cli::Json::Number(posted.len() as i64)),
+                ])
+            );
+        } else if posted.is_empty() && !args.quiet {
+            eprintln!(
+                "no Bluetooth device was seen in {} s",
+                args.scan_window().as_secs()
+            );
+        }
+        return Ok(());
     }
 
     // A dial that cannot be *asked for* — an unreadable token file, a
@@ -1188,39 +1348,56 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    if let Some(dial) = dial {
+    // A resident session dials for itself — lazily, once per request that
+    // needs the link — so the eager dial below is skipped for it: a session
+    // started before the board is powered is a session that can still be
+    // asked things, and the first request that needs the board dials it. What
+    // the command line named is carried along either way, because that is
+    // exactly what the session dials.
+    if args.serve {
+        app.state = ConnectionState::Disconnected;
+        if let Some(Dial::Lan { host, token }) = dial.as_ref() {
+            app.lan_host = host.clone();
+            app.lan_token = token.clone().unwrap_or_default();
+        }
+    } else if let Some(dial) = dial.as_ref() {
         // The dial happens before the terminal is taken over, so a link that
         // cannot be opened prints an ordinary error instead of a corrupted
         // screen.
-        if let Err(err) = app.dial(&dial) {
-            // A caller that asked for a command gets the failure in the events
-            // it would have read either way, with the code that names it; a
-            // dial that could not be made is this tool's own failure (255)
-            // when a command was waiting on it, and the usage-shaped 2 it has
-            // always been for every other run.
-            if args.exec.is_some() && args.json {
-                let code = if err.kind() == io::ErrorKind::TimedOut {
-                    "link_timeout"
-                } else {
-                    "link_failed"
-                };
+        if let Err(err) = app.dial(dial) {
+            // A caller that asked for something gets the failure in the events
+            // it would have read either way, with the code that names it and
+            // the exit its one-shot shape has always had: a script run whose
+            // link could not be made is this tool's own failure (255), and the
+            // usage-shaped 2 is kept for a plain launch, where no command was
+            // waiting on the link.
+            let scripted = args.no_terminal
+                || args.cli_then_tui
+                || !args.requests.is_empty()
+                || args.exec.is_some()
+                || args.loopback.is_some();
+            if args.json && scripted {
                 println!(
                     "{}",
                     cli::json_event(&[
                         ("event", cli::Json::Text("error")),
-                        ("code", cli::Json::Text(code)),
+                        // One code for every dial that could not be made:
+                        // a caller branches on "there is no link", and the
+                        // reason — board off, wrong address, radio busy —
+                        // is the message's to carry.
+                        ("code", cli::Json::Text("not_connected")),
                         ("message", cli::Json::Text(&err.to_string())),
                         ("still_running", cli::Json::Bool(false)),
                     ])
                 );
             }
             eprintln!("error: {err}");
-            std::process::exit(if args.exec.is_some() { 255 } else { 2 });
+            std::process::exit(if scripted { 255 } else { 2 });
         }
         // What the command line dialled is also what the sidebar's LAN rows
         // describe from now on: an address named once must not have to be
         // typed again to reconnect.
-        if let Dial::Lan { host, token } = &dial {
+        if let Dial::Lan { host, token } = dial {
             app.lan_host = host.clone();
             app.lan_token = token.clone().unwrap_or_default();
         }
@@ -1320,6 +1497,14 @@ fn main() -> io::Result<()> {
     }
     #[cfg(feature = "cli")]
     if mode != Mode::Tui {
+        // The resident session: the link is held, the input is answered, and
+        // there is no report to make on the way out — the caller reads each
+        // answer as it arrives. It returns when its input ends or a request
+        // asks it to quit, and that answer is the exit code.
+        if mode == Mode::Serve {
+            let code = linkr_tui::serve::run(&mut app, dial, args.connect_window());
+            std::process::exit(code);
+        }
         if !args.quiet && app.session.is_live() {
             eprintln!("connected to {}", app.session.describe());
         }
@@ -1417,7 +1602,13 @@ fn main() -> io::Result<()> {
     }
 
     #[cfg(feature = "tui")]
-    let outcome = run(&mut app);
+    let outcome = {
+        // The interactive path is the one that paints for a person and the
+        // only place the compatibility pass is decided: `--print-frame` and
+        // every test paint the frame the design asks for, on every platform.
+        app.legacy_console = ui::legacy::legacy_console();
+        run(&mut app)
+    };
     #[cfg(not(feature = "tui"))]
     let outcome: io::Result<()> = Ok(());
     outcome
@@ -1531,9 +1722,13 @@ fn pane_cell_at(app: &App, cols: u16, rows: u16, column: u16, row: u16) -> Optio
 ///
 /// Both callers go through here — the preview, which knows the size it was asked
 /// to draw, and the event loop, which asks the terminal — so a preview cannot
-/// size the pane differently from the live loop.
+/// size the pane differently from the live loop. The width the pane is sized
+/// for is the width it is *painted* at: on the legacy console the frame gives
+/// its right margin to the scrollbar, and an emulator sized for the whole
+/// window would wrap the device's lines under it.
 fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
-    let pane = pane_area(cols, rows);
+    let painted = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console).width;
+    let pane = pane_area(painted, rows);
     app.terminal.set_size(pane.width, pane.height);
     // The frame itself, kept where a key handler can read it: keys are handled
     // between two paints, and the settings window keeps its caret inside a
@@ -2390,6 +2585,37 @@ mod tests {
         assert_eq!(
             Mode::from(&args(&["--cli-then-tui"]), "linkr"),
             Mode::CliThenTui
+        );
+    }
+
+    /// The resident session is a mode of its own: the link is held and the
+    /// input is answered until it ends, which is neither "ask and leave" nor
+    /// "ask and then watch".
+    ///
+    /// The refusals exit, so they are checked from outside, in
+    /// `tests/serve.rs`; what is checked here is the mode and the two lists
+    /// that have to agree about it — the ready line's operations and the ones
+    /// `--capabilities` prints.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn the_resident_session_is_a_mode_of_its_own() {
+        assert!(!args(&[]).serve, "a session is asked for, never assumed");
+        let parsed = args(&["--bridge", "-", "--serve"]);
+        assert!(parsed.serve);
+        assert_eq!(Mode::from(&parsed, "linkr"), Mode::Serve);
+        // A session holds the link the command line named, so naming one is
+        // what it takes; the same mode either way, because what it dials is
+        // the same question and the session answers it lazily.
+        assert_eq!(
+            Mode::from(&args(&["--ble-name", "Linkr", "--serve"]), "linkr"),
+            Mode::Serve
+        );
+
+        let json = capabilities("linkr", true);
+        assert!(json.contains("\"session\""), "{json}");
+        assert!(
+            json.contains(&linkr_tui::serve::operations_json()),
+            "the session's operations and the ready line's disagree: {json}"
         );
     }
 
