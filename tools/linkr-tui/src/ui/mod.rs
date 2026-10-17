@@ -202,6 +202,12 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Min(0), Constraint::Length(unit)]).areas(area);
     draw_bar(frame, app, bar_area, left, right);
 
+    // The unit's own ground, laid before anything in it. The arrows and the
+    // graphs are drawn by widgets that carry no background of their own, and a
+    // cell that nobody gave a ground keeps the console's — a darker rectangle
+    // in the middle of the bar that moves with the traffic.
+    frame.render_widget(Block::default().style(chrome::bar_style(&theme)), unit_area);
+
     let label = chrome::traffic_label(app, &theme);
     let label_width = (label.width() as u16).min(unit);
     let [label_area, graph_area] =
@@ -878,6 +884,50 @@ mod tests {
         assert!(
             head.contains("RX 0 · TX 0"),
             "the counters went with it: {head:?}"
+        );
+    }
+
+    /// A quiet link is a shape, not a hole: with nothing in the windows the
+    /// graphs draw their zero line — the lowest block — where the stock symbol
+    /// set would leave the strip blank, and every cell of the unit stands on
+    /// the bar's own ground rather than on the console's.
+    #[test]
+    fn an_idle_traffic_unit_draws_a_zero_line_on_its_ground() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        // A session up long enough for both windows to fill, that has heard
+        // nothing yet.
+        app.traffic.rx_window.extend([0u64; 48]);
+        app.traffic.tx_window.extend([0u64; 48]);
+
+        let width = 120u16;
+        let buffer = render_buffer(&app, width, 30).expect("a frame");
+        let theme = app.theme();
+        let unit = chrome::traffic_unit(width);
+        let start = width - unit;
+        // The whole unit is on the bar's ground: the console's own background
+        // is what showed through as a moving patch before.
+        for x in start..width {
+            assert_eq!(
+                buffer[(x, 0)].bg,
+                theme.panel,
+                "column {x} of the unit is not on the ground"
+            );
+        }
+        // Both halves carry the zero line, each in its own colour.
+        let zeros: Vec<u16> = (start..width)
+            .filter(|x| buffer[(*x, 0)].symbol() == "▁")
+            .collect();
+        assert!(zeros.len() >= 4, "the zero line is missing: {zeros:?}");
+        assert!(
+            zeros.iter().any(|x| buffer[(*x, 0)].fg == theme.accent),
+            "the RX half's zero line is not in the RX colour"
+        );
+        assert!(
+            zeros.iter().any(|x| buffer[(*x, 0)].fg == theme.focus),
+            "the TX half's zero line is not in the TX colour"
         );
     }
 

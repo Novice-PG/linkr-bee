@@ -85,7 +85,11 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
 /// `MIN_HEIGHT` would make `clamp`'s own bounds cross, and the guard in
 /// `paint` is a fragile place to keep that from happening.
 fn ceiling_height(height: u16) -> u16 {
-    (height * HEIGHT_PERCENT / 100).clamp(MIN_HEIGHT, height.max(MIN_HEIGHT))
+    // Wide arithmetic before the cast: a region taller than 862 rows is
+    // reachable from the command line (`--print-frame`), and a percentage
+    // multiplication that overflows is a panic where a clamp was meant.
+    let share = (u32::from(height) * u32::from(HEIGHT_PERCENT) / 100) as u16;
+    share.clamp(MIN_HEIGHT, height.max(MIN_HEIGHT))
 }
 
 /// The height of a dialog box for a body of `body_rows`: the body plus the two
@@ -98,7 +102,9 @@ fn box_height(body_rows: usize, ceiling: u16) -> u16 {
 
 /// The size a modal asks for, given how much of the width it wants.
 fn wanted(area: Rect, share: u16, max_height: u16) -> (u16, u16) {
-    let width = (area.width * share / 100)
+    // Wide like the ceiling above: the frame's own width times a share of it
+    // must not wrap before the clamp that was written for oversized values.
+    let width = ((u32::from(area.width) * u32::from(share) / 100) as u16)
         .clamp(MIN_WIDTH, MAX_WIDTH)
         .min(area.width);
     let height = ceiling_height(area.height).min(max_height);

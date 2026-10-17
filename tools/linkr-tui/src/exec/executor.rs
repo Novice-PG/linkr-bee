@@ -587,7 +587,14 @@ impl<C: Clock, B: Backend> DeviceExecutor<C, B> {
         }
         let record_id = record.id.clone();
         self.records.push(record.clone());
-        self.active = Some(ActiveApproval { record_id });
+        // Only a record that was actually put to a person holds the slot. A
+        // command that was ready to send must not leave the slot held if the
+        // caller's send fails or never comes: the next `stage` would be
+        // refused with "another serial action is still active" for a record
+        // nobody is waiting on.
+        if needs_approval {
+            self.active = Some(ActiveApproval { record_id });
+        }
         if self.records.len() > 50 {
             self.records.remove(0);
         }
@@ -616,13 +623,28 @@ impl<C: Clock, B: Backend> DeviceExecutor<C, B> {
             .cloned()
             .ok_or_else(|| "execution record is unavailable for this device session".to_string())?;
 
-        // A record still awaiting a click, or already refused, must not send.
-        if record.state == RecordState::AwaitingApproval {
-            return Err("this input is still awaiting approval".to_string());
+        // Only a record that has not been sent may be sent. A second `send` on
+        // an already-sent record would type the same command into the console
+        // again, which on a device is not a retry — it is a duplicate, and the
+        // one thing this machine exists to make impossible.
+        if !matches!(record.state, RecordState::Proposed | RecordState::Approved) {
+            return Err(match record.state {
+                RecordState::AwaitingApproval => {
+                    "this input is still awaiting approval".to_string()
+                }
+                RecordState::Denied => "user rejected this input".to_string(),
+                RecordState::Cancelled => "this input was cancelled".to_string(),
+                RecordState::Failed => "this input already failed to send".to_string(),
+                _ => "this input has already been sent".to_string(),
+            });
         }
-        if record.state == RecordState::Denied {
-            return Err("user rejected this input".to_string());
-        }
+
+        // The decision was made before this call, so whatever the send does
+        // from here — including refusing it for a stale session — the approval
+        // slot is done with. Leaving it held on an error path would refuse the
+        // next stage for a record nobody is waiting on, which is the same
+        // wedge as a slot taken at stage time and never released.
+        self.active = None;
 
         let status = self.backend.status();
         if !status.connected || status.session_id != record.session_id {

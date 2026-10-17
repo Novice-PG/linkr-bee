@@ -304,10 +304,7 @@ pub fn rows(app: &App) -> Vec<Row> {
     ));
     // The state row is read, not chosen: it is not a cursor target, which is
     // why it takes no cursor index.
-    rows.push(
-        Row::at(app.state_name(), RowStyle::State, HEADER_INDENT)
-            .trailing(format!(" · {}", app.link_text())),
-    );
+    rows.push(Row::at(app.state_name(), RowStyle::State, HEADER_INDENT));
 
     let transport = next_cursor();
     rows.push(Row::at(
@@ -466,12 +463,14 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             }
             RowStyle::Selected => {
                 // The chip hugs the whole row, marker included, so a selected
-                // dangerous shortcut stays one unbroken chip.
-                let text = clip_to(&format!("{CURSOR_MARKER}{}", row.text), width);
-                let mut chip = text;
-                if let Some(marker) = row.marker {
-                    chip.push_str(&format!(" {marker}"));
-                }
+                // dangerous shortcut stays one unbroken chip — which means the
+                // marker's columns are reserved *before* the text is fitted:
+                // clip first and append after and the clip eats exactly the
+                // warning that made the row worth selecting.
+                let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
+                let room = width.saturating_sub(crate::text::columns(&tail));
+                let mut chip = clip_to(&format!("{CURSOR_MARKER}{}", row.text), room);
+                chip.push_str(&tail);
                 Line::from(Span::styled(chip, theme.selected()))
             }
             other => {
@@ -558,8 +557,8 @@ mod tests {
         assert_eq!(rows[0].style, RowStyle::Header);
     }
 
-    /// The connection block opens with the session's state and its link, which
-    /// is read rather than chosen: the cursor never lands on it.
+    /// The connection block opens with the session's state, which is read
+    /// rather than chosen: the cursor never lands on it.
     #[test]
     fn the_connection_block_opens_with_the_state_row() {
         let app = app_en();
@@ -567,7 +566,7 @@ mod tests {
         let state = &rows[1];
         assert_eq!(state.style, RowStyle::State);
         assert_eq!(state.text, "disconnected");
-        assert_eq!(state.tail.as_deref(), Some(" · ─"));
+        assert_eq!(state.tail, None, "the state row names only the state");
         assert!(!state.selectable(), "the state row is a cursor target");
         assert!(
             !targets(&app).iter().any(|t| t == "disconnected"),
@@ -773,7 +772,6 @@ mod tests {
                         "the state glyph takes the state's colour"
                     );
                     assert_eq!(line.spans[1].style.fg, Some(theme.text));
-                    assert_eq!(line.spans[2].style.fg, Some(theme.muted));
                 }
                 _ => assert_eq!(first.style.fg, Some(theme.text)),
             }
@@ -895,6 +893,37 @@ mod tests {
         );
         assert_eq!(chip.spans.len(), 1, "the chip is broken into two spans");
         assert_eq!(chip.spans[0].style, theme.selected());
+    }
+
+    /// And when the dangerous row is the *long* one — the row that has to be
+    /// cut to fit — selecting it still keeps the warning. The marker's columns
+    /// are reserved before the text is fitted, so the clip eats the tail of
+    /// the text and not the thing that makes the row dangerous.
+    #[test]
+    fn a_selected_dangerous_row_that_runs_long_still_shows_its_warning() {
+        let mut app = app_en();
+        app.quick_send = vec![crate::app::QuickSend::guarded(
+            "reboot into the bootloader and wait for the host",
+        )];
+        app.sidebar_cursor = rows(&app)
+            .iter()
+            .filter(|r| r.selectable())
+            .position(|r| r.marker.is_some())
+            .expect("the dangerous shortcut is selectable");
+        let theme = Theme::DARK;
+        let chip = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
+            .into_iter()
+            .find(|l| text_of(l).starts_with(CURSOR_MARKER))
+            .expect("the chip");
+        let text = text_of(&chip);
+        assert!(
+            text.ends_with(DANGER_MARKER),
+            "the cut chip lost its warning: {text:?}"
+        );
+        assert!(
+            columns(&text) <= SIDEBAR_TEXT_WIDTH as usize,
+            "the chip outgrew the column: {text:?}"
+        );
     }
 
     /// The chip hugs its text instead of spanning the column: the design's

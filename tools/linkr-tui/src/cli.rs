@@ -171,7 +171,12 @@ pub const FLAGS: &[Flag] = &[
     Flag::new(
         "--timeout",
         Value::Free,
-        "seconds to listen for devices while scanning",
+        "seconds for a scan to listen, or for --exec to run",
+    ),
+    Flag::new(
+        "--connect-timeout",
+        Value::Free,
+        "seconds to wait for a dialled link to come up",
     ),
     // Scripting
     Flag::new(
@@ -190,6 +195,39 @@ pub const FLAGS: &[Flag] = &[
         "write events to stdout as JSON lines",
     ),
     Flag::new("--quiet", Value::None, "suppress progress lines on stderr"),
+    // Command execution, which is what a caller wiring this into something
+    // else came for: one command, one definite ending, the target's own exit
+    // status.
+    Flag::new(
+        "--exec",
+        Value::Free,
+        "run this shell command on the target and return its exit code",
+    ),
+    Flag::new(
+        "--idle",
+        Value::Free,
+        "end --exec when its output has been quiet this long",
+    ),
+    Flag::new(
+        "--rc-marker",
+        Value::None,
+        "end --exec on the status it prints (the default)",
+    ),
+    Flag::new(
+        "--retry",
+        Value::Free,
+        "send --exec again up to this many times if it times out",
+    ),
+    Flag::new(
+        "--dry-run",
+        Value::None,
+        "print what --exec would send, and exit",
+    ),
+    Flag::new(
+        "--capabilities",
+        Value::None,
+        "print what this tool is and can do, and exit",
+    ),
     // The bridge itself
     Flag::new(
         "--query-info",
@@ -607,9 +645,11 @@ pub struct FoundDevice {
     /// CoreBluetooth. Either is accepted by `--ble-address`, which is why both
     /// are shown.
     pub id: String,
-    /// Whether it offers the Nordic UART Service, which is the only kind this
-    /// program can dial.
-    pub nus: bool,
+    /// Whether it looks like a board this program can dial — it advertises
+    /// the UART or the management service, or carries the firmware's name.
+    /// See [`crate::transport::ble::is_board`] for why one signal is not
+    /// enough to ask every platform.
+    pub board: bool,
     /// How strong the advertisement was heard, in dBm. `None` when the
     /// adapter's own report had no reading — a fresh scan on a busy adapter
     /// can hear a device before it has a number for it.
@@ -699,7 +739,7 @@ fn listen(timeout: Duration, until: Until) -> Result<Vec<FoundDevice>, String> {
             let mut found: Vec<FoundDevice>;
             loop {
                 found = heard(&adapter).await?;
-                let answered = found.iter().any(|device| device.nus);
+                let answered = found.iter().any(|device| device.board);
                 if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
                     break;
                 }
@@ -708,8 +748,8 @@ fn listen(timeout: Duration, until: Until) -> Result<Vec<FoundDevice>, String> {
             let _ = adapter.stop_scan().await;
             found.sort_by(|left, right| {
                 right
-                    .nus
-                    .cmp(&left.nus)
+                    .board
+                    .cmp(&left.board)
                     .then_with(|| left.name.cmp(&right.name))
                     // Two boards with one name are told apart by who is
                     // closer: the stronger reading is the one the user is
@@ -736,12 +776,12 @@ async fn heard(adapter: &btleplug::platform::Adapter) -> Result<Vec<FoundDevice>
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
+        let board =
+            crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref());
         found.push(FoundDevice {
             name: properties.local_name,
             id: candidate.id().to_string(),
-            nus: properties
-                .services
-                .contains(&crate::transport::ble::NUS_SERVICE),
+            board,
             rssi: properties.rssi,
         });
     }
@@ -789,7 +829,13 @@ impl Requests {
 /// The BLE transport itself gives a dial twenty seconds before calling the
 /// link dead; this waits beside the same clock rather than inventing a second
 /// one.
-const CONNECT_WINDOW: Duration = Duration::from_secs(20);
+/// How long `--scan` listens when the command line did not say.
+pub const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a dialled link has to come up when the command line did not say:
+/// the window a script run pumps while the link settles into "connected", and
+/// the number `--connect-timeout` replaces.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A little longer than a question's own patience.
 ///
@@ -818,13 +864,13 @@ pub enum Format {
 /// Each request is sent and *waited for* rather than fired off together,
 /// because the bridge answers one question at a time and two outstanding ones
 /// would have two `OK`s arriving in no order anyone can rely on.
-pub fn run_requests(app: &mut App, requests: &Requests, format: Format) -> i32 {
+pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect: Duration) -> i32 {
     app.collect_output = true;
     // The dial opened the link; the session reports itself connected a pump
     // later. Asking in between came back "not connected — nothing was sent"
     // for a link that was up a moment after the question, which is a wrong
     // answer about the one state the user had just watched come up.
-    wait_for_connected(app);
+    wait_for_connected(app, connect);
     let mut failed = 0;
 
     for query in &requests.queries {
@@ -936,11 +982,11 @@ pub fn loopback_test(app: &mut App, payload: &[u8], timeout: Duration, format: F
 
 /// Pump until a dialled link is connected enough to be asked things.
 ///
-/// The wait is bounded by [`CONNECT_WINDOW`]. A link that never gets there
+/// The wait is bounded by the connect window. A link that never gets there
 /// is not this loop's to report: every request that follows says for itself
 /// that nothing went out, which is the report a user can act on.
-fn wait_for_connected(app: &mut App) {
-    let deadline = Instant::now() + CONNECT_WINDOW;
+fn wait_for_connected(app: &mut App, window: Duration) {
+    let deadline = Instant::now() + window;
     while app.session.is_live() && !app.connected() && Instant::now() < deadline {
         app.pump();
         thread::sleep(Duration::from_millis(5));
@@ -1004,7 +1050,7 @@ fn drain(app: &mut App, format: Format) {
     }
 }
 
-fn print_raw(bytes: &[u8]) {
+pub fn print_raw(bytes: &[u8]) {
     use std::io::Write as _;
     let out = std::io::stdout();
     let mut lock = out.lock();
@@ -1036,11 +1082,13 @@ fn report(format: Format, what: &str, ok: bool, detail: &str) -> i32 {
         }
         Format::Json => println!(
             "{}",
-            json_line(&[
-                ("event", "result"),
-                ("what", what),
-                ("ok", &ok.to_string()),
-                ("detail", detail),
+            json_event(&[
+                ("event", Json::Text("result")),
+                ("what", Json::Text(what)),
+                // A boolean, not its spelling: `"ok":"false"` is a string, and
+                // a script that branches on `ok` reads every string as true.
+                ("ok", Json::Bool(ok)),
+                ("detail", Json::Text(detail)),
             ])
         ),
     }
@@ -1113,24 +1161,38 @@ fn report_query(app: &App, query: crate::device::Query, format: Format) -> i32 {
         }
         Format::Json => println!(
             "{}",
-            json_line(&[
-                ("event", "result"),
-                ("what", query_name(query)),
-                ("ok", "true"),
-                ("reply", &detail.replace('\n', "\\n")),
+            json_event(&[
+                ("event", Json::Text("result")),
+                ("what", Json::Text(query_name(query))),
+                ("ok", Json::Bool(true)),
+                // Raw: the writer escapes the string, and a newline escaped
+                // here first came out as a literal `\n` in the value.
+                ("reply", Json::Text(&detail)),
             ])
         ),
     }
     0
 }
 
+/// One JSON value, for the events whose payload is not all text.
+///
+/// The exec events carry numbers a caller sorts on (`rc`, `elapsed_ms`) and
+/// booleans it branches on (`ok`), so a writer that could only spell strings
+/// would put quotes around values the events are meant to be read as bare.
+pub enum Json<'a> {
+    Text(&'a str),
+    Number(i64),
+    Bool(bool),
+    Null,
+}
+
 /// One JSON object on one line, escaped by hand.
 ///
 /// Written rather than brought in as a dependency for two reasons: the payload
-/// is five fields of known shape, and a crate that would let a bridge's answer
-/// become malformed JSON is a crate that has to be trusted with a device's
-/// output for no gain.
-fn json_line(fields: &[(&str, &str)]) -> String {
+/// is a handful of fields of known shape, and a crate that would let a bridge's
+/// answer become malformed JSON is a crate that has to be trusted with a
+/// device's output for no gain.
+pub fn json_event(fields: &[(&str, Json)]) -> String {
     let mut out = String::from("{");
     for (index, (key, value)) in fields.iter().enumerate() {
         if index > 0 {
@@ -1138,12 +1200,31 @@ fn json_line(fields: &[(&str, &str)]) -> String {
         }
         out.push('"');
         out.push_str(&escape(key));
-        out.push_str("\":\"");
-        out.push_str(&escape(value));
-        out.push('"');
+        out.push_str("\":");
+        match value {
+            Json::Text(text) => {
+                out.push('"');
+                out.push_str(&escape(text));
+                out.push('"');
+            }
+            Json::Number(number) => out.push_str(&number.to_string()),
+            Json::Bool(true) => out.push_str("true"),
+            Json::Bool(false) => out.push_str("false"),
+            Json::Null => out.push_str("null"),
+        }
     }
     out.push('}');
     out
+}
+
+/// The all-text shape of [`json_event`], for the events that have always been
+/// plain strings.
+fn json_line(fields: &[(&str, &str)]) -> String {
+    let typed: Vec<(&str, Json)> = fields
+        .iter()
+        .map(|(key, value)| (*key, Json::Text(value)))
+        .collect();
+    json_event(&typed)
 }
 
 fn escape(text: &str) -> String {
@@ -1164,7 +1245,7 @@ fn escape(text: &str) -> String {
 
 /// Bytes as text, replacing what cannot be read rather than failing: a JSON
 /// line that could not be produced is worse than one with a replacement in it.
-fn lossy(bytes: &[u8]) -> String {
+pub fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
@@ -1197,6 +1278,36 @@ mod tests {
                 "{quoted} is parsed but never advertised"
             );
         }
+    }
+
+    /// A boolean is written bare and a string that spells one stays quoted:
+    /// `"ok":"false"` is a string, and a script that branches on `ok` reads
+    /// every string as true.
+    #[test]
+    fn a_boolean_is_written_bare() {
+        let line = json_event(&[
+            ("ok", Json::Bool(false)),
+            ("live", Json::Bool(true)),
+            ("rc", Json::Number(-3)),
+            ("none", Json::Null),
+        ]);
+        assert_eq!(line, r#"{"ok":false,"live":true,"rc":-3,"none":null}"#);
+        assert_eq!(
+            json_event(&[("ok", Json::Text("false"))]),
+            r#"{"ok":"false"}"#,
+            "text that spells a boolean is still text"
+        );
+    }
+
+    /// And a string with a newline in it comes out escaped once: the escaping
+    /// is the writer's job, and a caller that escaped first spelled `\n` three
+    /// characters wide.
+    #[test]
+    fn a_newline_is_escaped_once() {
+        assert_eq!(
+            json_event(&[("reply", Json::Text("a\nb"))]),
+            r#"{"reply":"a\nb"}"#
+        );
     }
 
     /// The flag literals a hand-written parser says it accepts. Read from the
@@ -1374,7 +1485,7 @@ mod tests {
             !app.connected(),
             "the state arrives with a pump, not with the dial"
         );
-        wait_for_connected(&mut app);
+        wait_for_connected(&mut app, Duration::from_secs(2));
         assert!(app.connected(), "and the wait was what brought it");
     }
 

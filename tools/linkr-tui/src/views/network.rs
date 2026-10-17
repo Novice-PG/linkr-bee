@@ -227,7 +227,9 @@ fn field_row(label: &str, value: &str, selected: bool, width: u16, theme: &Theme
         ));
     }
     let budget = width as usize;
-    let indent = 2;
+    // The indent never exceeds the row: a field row at width 0 or 1 paints the
+    // columns it has, which is what the body's contract asks of every view.
+    let indent = 2.min(budget);
     let label_style = theme.focus();
     let mut spans = vec![Span::styled(" ".repeat(indent), theme.text())];
     let label_cols = text::columns(label);

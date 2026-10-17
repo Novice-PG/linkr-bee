@@ -289,6 +289,10 @@ pub struct DevicePick {
     pub devices: Vec<crate::cli::FoundDevice>,
     /// Which row the keyboard is on.
     pub cursor: usize,
+    /// The first row the window shows. The cursor walks the list; this walks
+    /// the window, so a bench with more boards than the modal has rows still
+    /// shows the row the keyboard is on.
+    pub scroll: usize,
     /// Whether the scan is still listening.
     pub scanning: bool,
     /// Why the scan could not run, when it could not.
@@ -316,9 +320,28 @@ impl DevicePick {
         }
     }
 
-    /// Scroll the list so the cursor stays visible in `height` rows.
+    /// Move the window the least amount that keeps the cursor inside `room`
+    /// visible rows.
+    ///
+    /// `room` is what the modal can show, which the key handler asks for the
+    /// same way the settings form does — through the painter's own arithmetic,
+    /// so the two cannot disagree about how tall the box is. Zero means no
+    /// paint has said (a headless test, the first tick): the window keeps what
+    /// it had.
+    pub fn follow(&mut self, room: usize) {
+        if room == 0 {
+            return;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + room {
+            self.scroll = self.cursor + 1 - room;
+        }
+    }
+
+    /// The first row the window shows.
     pub fn scroll(&self) -> usize {
-        0
+        self.scroll
     }
 }
 
@@ -612,11 +635,11 @@ impl Dialog {
             | Dialog::Notices(offset)
             | Dialog::Settings(offset)
             | Dialog::Cheat(Cheat { scroll: offset, .. }) => *offset,
-            Dialog::Confirm(_)
-            | Dialog::Prompt(_)
-            | Dialog::DevicePick(_)
-            | Dialog::Uart(_)
-            | Dialog::ThemePick(_) => 0,
+            // The list's window is its own: the cursor walks the devices and
+            // the scroll keeps up with it, which a dialog-wide offset has no
+            // way to know.
+            Dialog::DevicePick(pick) => pick.scroll(),
+            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::Uart(_) | Dialog::ThemePick(_) => 0,
         }
     }
 }
@@ -1000,10 +1023,16 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 ))];
             }
             if pick.devices.is_empty() {
-                return vec![Line::from(Span::styled(
-                    entry(PICK_EMPTY, lang),
-                    theme.muted(),
-                ))];
+                // What the scan said, when it said anything: "no adapter" and
+                // "nothing answered" are different news, and painting the
+                // generic line over the first is how a user comes to chase a
+                // board that was never being listened for.
+                let why = if pick.message.is_empty() {
+                    entry(PICK_EMPTY, lang).to_string()
+                } else {
+                    pick.message.clone()
+                };
+                return vec![Line::from(Span::styled(why, theme.muted()))];
             }
             // One row per device, the way the help is one row per key: the box
             // is then a fixed height for a known list, and the cursor stays on
@@ -1013,7 +1042,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 .enumerate()
                 .map(|(index, device)| {
                     let name = device.name.as_deref().unwrap_or("(no name)");
-                    let nus = if device.nus { "nus" } else { "-" };
+                    let board = if device.board { "bee" } else { "-" };
                     // The signal the scan heard it at, ranked by bars and
                     // named by the number: a full column even when the
                     // adapter had no reading for a device it heard, so the
@@ -1022,7 +1051,14 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                         Some(dbm) => format!("{} {:>4}dBm", text::signal_bars(i32::from(dbm)), dbm),
                         None => format!("{:>12}", "—"),
                     };
-                    let row = format!("{nus:>3} {signal} {name:<24} {}", device.id);
+                    // Padded by columns, not by characters: a name in a wide
+                    // script is wider than it is long, and the id column is
+                    // what would move.
+                    let row = format!(
+                        "{board:>3} {signal} {} {}",
+                        text::pad_to(name, 24),
+                        device.id
+                    );
                     let style = if index == pick.cursor {
                         theme.selected()
                     } else {
@@ -1228,8 +1264,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // Escape closes without dialling. A user who opened a scan by
             // mistake wants out, not to answer a question nobody asked.
             KeyCode::Esc => app.cancel_ble_scan(),
-            KeyCode::Up => pick.move_cursor(false),
-            KeyCode::Down => pick.move_cursor(true),
+            // Up and down walk the list, and the window follows the cursor so
+            // a board past the bottom of the box is one the keyboard can
+            // reach. Every moving key hands the picker back to the dialog:
+            // what was taken must be put back, or a press of ↓ closes the
+            // window the user was reading.
+            KeyCode::Up | KeyCode::Down => {
+                pick.move_cursor(key.code == KeyCode::Down);
+                let room = crate::ui::overlay::dialog_body_room(
+                    app.screen,
+                    app.sidebar_visible,
+                    pick.rows().max(1),
+                );
+                pick.follow(room);
+                app.dialog = Some(Dialog::DevicePick(pick));
+            }
             // Enter dials the row under the cursor — by address, which is the
             // only part of a scan result that identifies a device exactly,
             // since a name is a substring and two boards can carry it. With
@@ -2853,11 +2902,11 @@ mod tests {
 mod pick_tests {
     use super::*;
 
-    fn device(name: &str, id: &str, nus: bool) -> crate::cli::FoundDevice {
+    fn device(name: &str, id: &str, board: bool) -> crate::cli::FoundDevice {
         crate::cli::FoundDevice {
             name: Some(name.to_string()),
             id: id.to_string(),
-            nus,
+            board,
             rssi: None,
         }
     }
@@ -2871,6 +2920,7 @@ mod pick_tests {
             cursor: 0,
             scanning: false,
             message: String::new(),
+            scroll: 0,
         };
         pick.move_cursor(false);
         assert_eq!(pick.cursor, 0, "up from the top");
@@ -2881,19 +2931,20 @@ mod pick_tests {
     }
 
     /// The dialog paints a row for every device the list carries and marks
-    /// whether it speaks the serial service; which devices deserve a row is the
+    /// whether it looks like a board; which devices deserve a row is the
     /// scan's decision, not the dialog's.
     #[test]
-    fn a_device_without_nus_is_still_listed() {
+    fn a_device_that_is_not_a_board_is_still_listed() {
         let pick = DevicePick {
             devices: vec![device("Bee", "aa", true), device("Other", "bb", false)],
             cursor: 1,
             scanning: false,
             message: String::new(),
+            scroll: 0,
         };
         assert_eq!(pick.rows(), 2);
         assert!(pick.selected().is_some());
-        assert!(!pick.selected().expect("a device").nus);
+        assert!(!pick.selected().expect("a device").board);
     }
 
     /// An empty list has no selection, which is what makes Enter scan again
@@ -2905,6 +2956,7 @@ mod pick_tests {
             cursor: 0,
             scanning: true,
             message: String::new(),
+            scroll: 0,
         };
         assert_eq!(pick.rows(), 0);
         assert!(pick.selected().is_none());
@@ -2927,17 +2979,9 @@ mod pick_tests {
             cursor: 0,
             scanning: false,
             message: String::new(),
+            scroll: 0,
         });
-        let text: String = lines(&dialog, &app, 70, 20)
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = painted(&dialog, &app, 70, 20);
         let bee = text
             .lines()
             .find(|row| row.contains("Bee"))
@@ -2949,6 +2993,68 @@ mod pick_tests {
             .expect("the row is drawn");
         assert!(far.contains('—'), "no reading, no invented number: {far}");
         assert!(!far.contains("dBm"), "no reading, no unit: {far}");
+    }
+
+    /// The body of a dialog as text, one row per line: what the test reads is
+    /// what the user would see.
+    fn painted(dialog: &Dialog, app: &App, width: u16, height: usize) -> String {
+        lines(dialog, app, width, height)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The window follows the cursor: on a bench with more boards than the
+    /// modal has rows, moving past the bottom scrolls by the least that keeps
+    /// the highlighted row on screen, and walking back up brings the top row
+    /// back. Without this, Enter dials whatever the cursor is on — a board the
+    /// user cannot see.
+    #[test]
+    fn the_window_follows_the_cursor_it_cannot_show_at_once() {
+        let mut pick = DevicePick {
+            devices: (0..10)
+                .map(|index| device("bee", &format!("id{index}"), true))
+                .collect(),
+            cursor: 0,
+            scanning: false,
+            message: String::new(),
+            scroll: 0,
+        };
+        for _ in 0..4 {
+            pick.move_cursor(true);
+            pick.follow(3);
+        }
+        assert_eq!(pick.cursor, 4);
+        assert_eq!(pick.scroll(), 2, "the least move that shows the cursor");
+        for _ in 0..9 {
+            pick.move_cursor(false);
+            pick.follow(3);
+        }
+        assert_eq!(pick.cursor, 0);
+        assert_eq!(pick.scroll(), 0, "and the top of the list shows again");
+    }
+
+    /// A scan that could not run says why in the dialog rather than being
+    /// painted over with "no board answered": the two are different news, and
+    /// the first is the one that sends the user to check an adapter.
+    #[test]
+    fn a_scan_that_could_not_run_says_why() {
+        let app = App::default();
+        let dialog = Dialog::DevicePick(DevicePick {
+            devices: Vec::new(),
+            cursor: 0,
+            scanning: false,
+            message: "no Bluetooth adapter on this machine".to_string(),
+            scroll: 0,
+        });
+        let text = painted(&dialog, &app, 60, 4);
+        assert!(text.contains("no Bluetooth adapter"), "{text:?}");
     }
 
     /// The picker's body says what is happening and its legend says which keys
@@ -2966,6 +3072,7 @@ mod pick_tests {
                 cursor: 0,
                 scanning,
                 message: String::new(),
+                scroll: 0,
             });
             let body_text: String = lines(&dialog, &app, 70, 20)
                 .iter()
@@ -3000,6 +3107,7 @@ mod pick_tests {
             cursor: 3,
             scanning: false,
             message: String::new(),
+            scroll: 0,
         };
         // The app clamps on the way in; this is the invariant it relies on —
         // that up from any position reaches the top and stops.

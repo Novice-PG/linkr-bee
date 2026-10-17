@@ -241,7 +241,7 @@ pub fn parse_json_array(raw: &str) -> Option<Vec<std::collections::BTreeMap<Stri
 
 pub fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     let mut parts = Vec::new();
-    let mut depth = 0;
+    let mut depth: i32 = 0;
     let mut in_str = false;
     let mut escape = false;
     let mut start = 0;
@@ -259,7 +259,9 @@ pub fn split_top_level(s: &str, sep: char) -> Vec<&str> {
         match c {
             '"' => in_str = true,
             '{' | '[' => depth += 1,
-            '}' | ']' => depth -= 1,
+            // Saturating: a stray closer in a hand-written line must not read
+            // as one level deeper, which is what a wrapped `0 - 1` amount to.
+            '}' | ']' => depth = depth.saturating_sub(1),
             c if c == sep && depth == 0 => {
                 parts.push(&s[start..i]);
                 start = i + c.len_utf8();
@@ -338,6 +340,16 @@ pub fn parse_json_string_literal(s: &str) -> Option<String> {
                 'n' => out.push('\n'),
                 'r' => out.push('\r'),
                 't' => out.push('\t'),
+                // The writer escapes every other control character as
+                // `\uXXXX`. Without this arm the six characters came back as
+                // text, and the next save escaped the backslash: a note grew
+                // by one escape per round trip.
+                'u' => match read_hex_escape(&mut chars) {
+                    Some(ch) => out.push(ch),
+                    // A malformed escape is left as the writer wrote it, which
+                    // is this reader's habit for everything it cannot read.
+                    None => out.push_str("\\u"),
+                },
                 other => {
                     out.push('\\');
                     out.push(other);
@@ -348,6 +360,38 @@ pub fn parse_json_string_literal(s: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// The four hex digits of a `\u` escape, and the low half of a surrogate pair
+/// when the value is a high surrogate — `json_escape` writes one escape per
+/// UTF-16 unit, so a character above the BMP arrives as two.
+///
+/// `None` for anything malformed, including a `\u` with no digits behind it.
+fn read_hex_escape(chars: &mut std::str::Chars) -> Option<char> {
+    let mut code = 0u32;
+    for _ in 0..4 {
+        code = code * 16 + chars.next()?.to_digit(16)?;
+    }
+    if (0xd800..0xdc00).contains(&code) {
+        // A pair arrives as `\uXXXX\uYYYY` and is one character; a lone high
+        // surrogate is not a character at all. The lookahead runs on a clone,
+        // so a `\` that turns out to be content is still there for the next
+        // round of the caller's loop.
+        let mut probe = chars.clone();
+        if probe.next() != Some('\\') || probe.next() != Some('u') {
+            return Some('\u{fffd}');
+        }
+        let mut low = 0u32;
+        for _ in 0..4 {
+            low = low * 16 + probe.next()?.to_digit(16)?;
+        }
+        if !(0xdc00..0xe000).contains(&low) {
+            return Some('\u{fffd}');
+        }
+        *chars = probe;
+        return char::from_u32(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00));
+    }
+    Some(char::from_u32(code).unwrap_or('\u{fffd}'))
 }
 
 #[cfg(test)]
@@ -429,5 +473,42 @@ mod tests {
         store.clear("a");
         assert!(store.list("a").is_empty());
         assert_eq!(store.list("b").len(), 1);
+    }
+
+    /// The writer spells a control character `\uXXXX`; the reader has to read
+    /// that spelling back. Read as six characters of text instead, the escape
+    /// was escaped again on the next save and the text grew by one escape for
+    /// every round trip through the store.
+    #[test]
+    fn a_control_character_survives_its_escaped_spelling() {
+        let original = "line\u{1b}[31mred\u{7}bell\u{1f}\r\nnext";
+        let quoted = json_escape(original);
+        let read_back = parse_json_string_literal(&quoted).expect("the writer's own quoting");
+        assert_eq!(read_back, original);
+        // Twice, because the growth only showed on the second pass.
+        let again = parse_json_string_literal(&json_escape(&read_back)).expect("again");
+        assert_eq!(again, original, "the text must not grow a round trip");
+    }
+
+    /// A character above the BMP is two escapes and one character, and a lone
+    /// surrogate is the replacement character rather than a panic.
+    #[test]
+    fn a_surrogate_pair_reads_as_one_character() {
+        assert_eq!(
+            parse_json_string_literal("\"\\ud83d\\ude00\"").expect("a pair"),
+            "😀"
+        );
+        assert_eq!(
+            parse_json_string_literal("\"\\ud83dx\"").expect("a lone high half"),
+            "\u{fffd}x"
+        );
+        assert_eq!(
+            parse_json_string_literal("\"\\udc00\"").expect("a lone low half"),
+            "\u{fffd}"
+        );
+        assert_eq!(
+            parse_json_string_literal("\"\\u0041\"").expect("plain ASCII"),
+            "A"
+        );
     }
 }

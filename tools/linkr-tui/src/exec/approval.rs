@@ -296,19 +296,23 @@ fn is_command_word(candidate: &str, word: &str) -> bool {
 
 /// `rm … -r` / `rm … -f` / `rm … --recursive` — the web's
 /// `rm\b[^\n]*\s-{1,2}[a-z]*[rf]`.
+///
+/// Every flag token is looked at, not just the first: `rm --force -r /` and
+/// `rm -i -rf /` are the same command as `rm -rf /`, and a guard that reads
+/// only the first dash is a guard those spellings walk straight past.
 fn rm_has_force_recursive(candidate: &str) -> bool {
-    // Must have a flag cluster containing `r` or `f` after `rm`.
-    let rest = &candidate[2..];
-    let Some(flag_pos) = rest.find('-') else {
-        return false;
-    };
-    let flags = &rest[flag_pos + 1..];
-    // The flag cluster is the letters immediately after the dash(es).
-    let flag_word: String = flags
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect();
-    flag_word.contains('r') || flag_word.contains('f')
+    for token in candidate.split_whitespace() {
+        let Some(flags) = token.strip_prefix('-') else {
+            continue;
+        };
+        // A long flag spells the letter out and a short cluster is letters by
+        // definition; either way the guard is looking for the two letters the
+        // web regex is looking for.
+        if flags.contains('r') || flags.contains('f') {
+            return true;
+        }
+    }
+    false
 }
 
 /// `find … -delete` / `find … -exec rm`.
@@ -401,6 +405,25 @@ mod tests {
                 mode,
                 "rm -rf /",
                 "rm -rf /\r",
+                false,
+                true,
+                None
+            ));
+            // The same command spelled the long way, and spelled with the
+            // force flag second: a guard that reads only the first dash is a
+            // guard these walk past.
+            assert!(requires_input_approval(
+                mode,
+                "rm --force --recursive /",
+                "rm --force --recursive /\r",
+                false,
+                true,
+                None
+            ));
+            assert!(requires_input_approval(
+                mode,
+                "rm -i -rf /",
+                "rm -i -rf /\r",
                 false,
                 true,
                 None

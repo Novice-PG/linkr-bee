@@ -237,6 +237,9 @@ struct LoopbackDevice {
     outbox: Mutex<VecDeque<u8>>,
     /// The channel to wake a blocked reader with.
     waker: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// Set when the host hangs the console up, which is the reader's
+    /// end-of-stream: the writer dropping is the only hang-up this device has.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl LoopbackDevice {
@@ -351,6 +354,24 @@ struct DeviceWriter {
     device: Arc<LoopbackDevice>,
 }
 
+impl Drop for DeviceWriter {
+    fn drop(&mut self) {
+        // The console is closed, and the writer dropping is the only hang-up
+        // this device has: whoever was reading is told, so the reader thread
+        // finishes instead of waiting for bytes that will never come. The
+        // parked read is woken as well — a reader already inside
+        // `recv_timeout` would otherwise sit out its timeout first.
+        self.device
+            .closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(waker) = self.device.waker.lock() {
+            if let Some(sender) = waker.as_ref() {
+                let _ = sender.send(());
+            }
+        }
+    }
+}
+
 impl LinkWriter for DeviceWriter {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         for byte in buf {
@@ -427,6 +448,12 @@ impl LinkReader for DeviceReader {
                 }
                 return Ok(n);
             }
+            // Nothing left to say and the writer is gone: this is the end of
+            // the stream, and saying so is what lets the reader thread finish
+            // instead of polling a console that will never speak again.
+            if self.device.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(0);
+            }
             // Nothing to say: wait for the writer to wake us, the way a real
             // read waits on the wire. A timeout keeps the shutdown path from
             // hanging if the wake-up is missed.
@@ -490,6 +517,39 @@ mod tests {
             String::from_utf8_lossy(&bytes).contains(needle)
         });
         bytes
+    }
+
+    /// The console hanging up is the reader's end of stream: a poll that finds
+    /// the writer gone says so instead of waiting for bytes that will never
+    /// come. That is what lets the reader thread finish — otherwise it is one
+    /// thread per dial, each ticking at 20 Hz for the life of the process.
+    #[test]
+    fn a_closed_console_ends_the_read() {
+        let device = Arc::new(LoopbackDevice::default());
+        let (sender, outbox) = std::sync::mpsc::channel();
+        let mut reader = DeviceReader {
+            device: Arc::clone(&device),
+            outbox,
+            pending: VecDeque::new(),
+            greeted: false,
+            sender,
+        };
+        let writer = DeviceWriter {
+            device: Arc::clone(&device),
+        };
+
+        // What is buffered is read before the hang-up is honoured: the
+        // greeting the reader asked for is still the first thing it hears.
+        let mut buf = [0u8; 256];
+        let n = reader.read(&mut buf).expect("reads the banner");
+        assert!(n > 0, "the banner is the first thing a reader hears");
+        drop(writer);
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            reader.read(&mut buf).expect("reads"),
+            0,
+            "a console that is gone is the end of the stream"
+        );
     }
 
     /// A command is split the way a user writes it, and a command that cannot

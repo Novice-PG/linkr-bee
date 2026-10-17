@@ -17,6 +17,7 @@ pub mod exec;
 pub mod i18n;
 pub mod lan_token_store;
 pub mod palette;
+pub mod private_file;
 pub mod protocol;
 pub mod serial;
 pub mod session;

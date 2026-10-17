@@ -50,7 +50,12 @@ use linkr_tui::{dialogs, palette};
 #[cfg(feature = "tui")]
 const TICK: Duration = Duration::from_millis(250);
 
-const ABOUT: &str = "Terminal over BLE Nordic UART Service for Linkr Bee bridge";
+/// What the tool is and does, in the first line of the help.
+///
+/// One line, because help is read at a glance: every option below it is the
+/// long answer, and this is the short one — what the program is, what it can
+/// be asked to do — a person needs to know they have opened the right one.
+const ABOUT: &str = "Run a Linkr Bee wireless serial bridge: scan for a board, query and configure it, run shell commands on its target, or open its terminal";
 
 /// The help text, generated from the one table `cli` keeps.
 ///
@@ -171,8 +176,14 @@ struct Args {
     feed: Option<String>,
     /// List the nearby boards and stop.
     scan: bool,
-    /// How long `--scan` listens, in seconds.
-    scan_timeout: Duration,
+    /// How long a scan listens and how long a command may run, when the
+    /// command line named one with `--timeout`: one number for both, because
+    /// the two reads are the same request for patience, and one word with two
+    /// flags is how a script comes to set the wrong one.
+    timeout: Option<Duration>,
+    /// `--connect-timeout`, when the command line named one: how long a
+    /// dialled link gets to come up, and how long a script run waits for it.
+    connect_timeout: Option<Duration>,
     /// Connect, do what was asked, hang up — no terminal is taken over.
     no_terminal: bool,
     /// Run the asked-for commands first, then take the terminal over. The
@@ -185,6 +196,20 @@ struct Args {
     quiet: bool,
     /// What the bridge was asked to do or report, when it was asked anything.
     requests: cli::Requests,
+    /// The command `--exec` asked the target to run.
+    exec: Option<String>,
+    /// `--idle`'s window: the ending where quiet means finished. `None` means
+    /// the marker ending, which is the default.
+    exec_idle: Option<Duration>,
+    /// `--rc-marker` was named. The marker is the default; naming it says so
+    /// out loud, and naming both endings is refused rather than ranked.
+    rc_marker: bool,
+    /// `--retry`: how many times a timed-out command may be sent again.
+    retry: u32,
+    /// Print what `--exec` would send, and exit without touching a link.
+    dry_run: bool,
+    /// `--capabilities`: describe this tool and exit.
+    capabilities: bool,
     /// A file the WiFi password is read from, so it never reaches `argv` —
     /// where every other process on the machine can see it.
     wifi_key_file: Option<PathBuf>,
@@ -262,13 +287,42 @@ impl Args {
         if !named && self.transport != Some(Transport::Ble) {
             return None;
         }
-        Some(Dial::Ble(if let Some(address) = &self.ble_address {
-            Selection::Address(address.clone())
-        } else if let Some(name) = &self.ble_name {
-            Selection::Name(name.clone())
-        } else {
-            Selection::Any
-        }))
+        Some(Dial::Ble(
+            if let Some(address) = &self.ble_address {
+                Selection::Address(address.clone())
+            } else if let Some(name) = &self.ble_name {
+                Selection::Name(name.clone())
+            } else {
+                Selection::Any
+            },
+            self.connect_timeout,
+        ))
+    }
+
+    /// How long a scan listens.
+    fn scan_window(&self) -> Duration {
+        self.timeout.unwrap_or(cli::DEFAULT_SCAN_TIMEOUT)
+    }
+
+    /// How long a dialled link gets to come up: the window the link itself is
+    /// given, and the window a script run waits for it.
+    fn connect_window(&self) -> Duration {
+        self.connect_timeout.unwrap_or(cli::DEFAULT_CONNECT_TIMEOUT)
+    }
+
+    /// The command `--exec` asked for, with the terms it was asked on.
+    fn exec_run(&self) -> Option<linkr_tui::exec::cli::Run> {
+        self.exec.as_ref().map(|command| linkr_tui::exec::cli::Run {
+            command: command.clone(),
+            ending: match self.exec_idle {
+                Some(window) => linkr_tui::exec::cli::Ending::Idle(window),
+                None => linkr_tui::exec::cli::Ending::RcMarker,
+            },
+            timeout: self
+                .timeout
+                .unwrap_or(linkr_tui::exec::cli::DEFAULT_TIMEOUT),
+            retry: self.retry,
+        })
     }
 }
 
@@ -313,7 +367,7 @@ impl Mode {
             };
         }
         // Nothing asked for, or a plain launch: the terminal is the answer.
-        if args.requests.is_empty() && args.loopback.is_none() {
+        if args.requests.is_empty() && args.loopback.is_none() && args.exec.is_none() {
             return Mode::Tui;
         }
         // Something was asked for, so the answer is the thing being asked
@@ -349,12 +403,19 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         overlay: None,
         feed: None,
         scan: false,
-        scan_timeout: Duration::from_secs(10),
+        timeout: None,
+        connect_timeout: None,
         no_terminal: false,
         cli_then_tui: false,
         json: bool::default(),
         quiet: false,
         requests: cli::Requests::default(),
+        exec: None,
+        exec_idle: None,
+        rc_marker: false,
+        retry: 0,
+        dry_run: false,
+        capabilities: false,
         wifi_key_file: None,
         enter: None,
         local_echo: false,
@@ -402,14 +463,29 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--scan" => args.scan = true,
             "--timeout" => {
                 let raw = value("--timeout");
-                let seconds: f64 = raw.parse().ok().filter(|s| *s > 0.0).unwrap_or_else(|| {
+                args.timeout = Some(parse_seconds(prog, "--timeout", &raw));
+            }
+            "--connect-timeout" => {
+                let raw = value("--connect-timeout");
+                args.connect_timeout = Some(parse_seconds(prog, "--connect-timeout", &raw));
+            }
+            "--exec" => args.exec = Some(value("--exec")),
+            "--idle" => {
+                let raw = value("--idle");
+                args.exec_idle = Some(parse_span(prog, "--idle", &raw));
+            }
+            "--rc-marker" => args.rc_marker = true,
+            "--retry" => {
+                let raw = value("--retry");
+                args.retry = raw.parse().unwrap_or_else(|_| {
                     fail(
                         prog,
-                        &format!("invalid value '{raw}' for '--timeout <SECONDS>'"),
+                        &format!("invalid value '{raw}' for '--retry <COUNT>'"),
                     )
                 });
-                args.scan_timeout = Duration::from_secs_f64(seconds);
             }
+            "--dry-run" => args.dry_run = true,
+            "--capabilities" => args.capabilities = true,
             "--no-terminal" => args.no_terminal = true,
             "--cli-then-tui" => args.cli_then_tui = true,
             "--json" => args.json = true,
@@ -450,12 +526,16 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             }
             "--loopback-timeout" => {
                 let raw = value("--loopback-timeout");
-                let seconds: f64 = raw.parse().ok().filter(|s| *s > 0.0).unwrap_or_else(|| {
-                    fail(
-                        prog,
-                        &format!("invalid value '{raw}' for '--loopback-timeout <SECONDS>'"),
-                    )
-                });
+                let seconds: f64 = raw
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s > 0.0)
+                    .unwrap_or_else(|| {
+                        fail(
+                            prog,
+                            &format!("invalid value '{raw}' for '--loopback-timeout <SECONDS>'"),
+                        )
+                    });
                 args.loopback_timeout = Duration::from_secs_f64(seconds);
             }
             "--enter" => {
@@ -555,7 +635,153 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         }
         i += 1;
     }
+    // The two endings are different answers to one question, and a command
+    // line that asks both has not decided. The flags that only mean something
+    // with `--exec` say so instead of being quietly ignored.
+    if args.rc_marker && args.exec_idle.is_some() {
+        fail(
+            prog,
+            "the marker ending and the idle ending ask for opposite things; pick one",
+        );
+    }
+    if args.exec.is_none() {
+        if args.exec_idle.is_some() {
+            fail(prog, "--idle is the ending of a command; it needs --exec");
+        }
+        if args.retry > 0 {
+            fail(prog, "--retry repeats a command; it needs --exec");
+        }
+        if args.dry_run {
+            fail(
+                prog,
+                "a dry run shows what a command would send; --dry-run needs --exec",
+            );
+        }
+    }
     args
+}
+
+/// A number of seconds, as a person writes it.
+///
+/// Finite and positive before `Duration` sees it: `inf` and `1e300` are what a
+/// script produces when a variable expanded to nothing, and a panic from
+/// `from_secs_f64` would be a worse answer than a usage error.
+fn parse_seconds(prog: &str, flag: &str, raw: &str) -> Duration {
+    let seconds: f64 = raw
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| {
+            fail(
+                prog,
+                &format!("invalid value '{raw}' for '{flag} <SECONDS>'"),
+            )
+        });
+    Duration::from_secs_f64(seconds)
+}
+
+/// A span of time, as a person writes it: bare seconds, or a suffix when the
+/// window is short enough that seconds would be a fraction.
+fn parse_span(prog: &str, flag: &str, raw: &str) -> Duration {
+    let (number, scale) = if let Some(number) = raw.strip_suffix("ms") {
+        (number, 0.001)
+    } else if let Some(number) = raw.strip_suffix('s') {
+        (number, 1.0)
+    } else {
+        (raw, 1.0)
+    };
+    let value: f64 = number
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or_else(|| {
+            fail(
+                prog,
+                &format!("invalid value '{raw}' for '{flag} <SECONDS|MS>'"),
+            )
+        });
+    Duration::from_secs_f64(value * scale)
+}
+
+/// What this tool is and can do: the document a caller reads before writing a
+/// script against it.
+///
+/// The operations are named as the flags that ask for them, because that is
+/// how they are asked for today; the numbers are the defaults a caller has to
+/// plan around, and the exit codes are the contract that makes a script
+/// possible at all. Written as one document rather than assembled from parts:
+/// its shape is part of the answer, and interpolating a few numbers into it is
+/// the whole of the work.
+fn capabilities(prog: &str, json: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if json {
+        format!(
+            concat!(
+                "{{\"version\":\"{}\",\"protocol\":{},",
+                "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
+                "\"query-webdav\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",\"webdav\",",
+                "\"webdav-off\",\"exec\",\"loopback-test\",\"tui\"],",
+                "\"defaults\":{{\"scan_timeout_ms\":{},\"connect_timeout_ms\":{},",
+                "\"exec_timeout_ms\":{}}},",
+                "\"exec\":{{\"endings\":[\"rc-marker\",\"idle\"],",
+                "\"marker\":\"cmd; echo \\\"LINKR_RC:$?\\\"\",",
+                "\"codes\":[\"needs_input\",\"timeout\",\"link_lost\",\"not_connected\"],",
+                "\"retry\":\"off; --retry N resends after a timeout, after reading state\"}},",
+                "\"exit_codes\":{{\"0-125\":\"the command's own status\",",
+                "\"126-127\":\"reserved for the shell\",",
+                "\"1\":\"executed but not as expected, needs input, or timed out\",",
+                "\"2\":\"usage error\",",
+                "\"255\":\"this tool could not send or hold the link\"}}}}\n"
+            ),
+            version,
+            linkr_tui::protocol::MGMT_API_MAJOR,
+            cli::DEFAULT_SCAN_TIMEOUT.as_millis(),
+            cli::DEFAULT_CONNECT_TIMEOUT.as_millis(),
+            linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis(),
+        )
+    } else {
+        format!(
+            concat!(
+                "{} {} — run a Linkr Bee bridge from the command line.\n",
+                "\n",
+                "scan        --scan                     list what is on the air\n",
+                "read        --query-info --query-uart  ask the bridge what it is doing\n",
+                "            --query-wifi --query-webdav --wifi-scan\n",
+                "configure   --uart --wifi --wifi-off   change that, then read it back\n",
+                "            --webdav --webdav-off\n",
+                "execute     --exec COMMAND             run a shell command on the target\n",
+                "            --idle WINDOW              end it when the output goes quiet\n",
+                "            --retry N                  resend it after a timeout\n",
+                "            --dry-run                  show the bytes instead\n",
+                "wire test   --loopback-test [BYTES]    prove the target's UART round trip\n",
+                "interface   (no operation flags)       open the terminal\n",
+                "\n",
+                "Exit codes: 0-125 the command's own status, 1 executed but not as\n",
+                "expected (or needs input, or timed out), 2 usage, 255 the link or\n",
+                "the send failed.\n",
+            ),
+            prog, version
+        )
+    }
+}
+
+/// What `--exec` would put on the wire, and nothing else: no link is dialled
+/// and no setting is read. A caller approving a command needs exactly this.
+fn dry_run(run: &linkr_tui::exec::cli::Run, json: bool) -> String {
+    let wire = run.wire();
+    if json {
+        let mut line = cli::json_event(&[
+            ("event", cli::Json::Text("dry_run")),
+            ("cmd", cli::Json::Text(&run.command)),
+            ("wire", cli::Json::Text(&cli::lossy(&wire))),
+            ("bytes", cli::Json::Number(wire.len() as i64)),
+        ]);
+        line.push('\n');
+        line
+    } else {
+        format!("{}\n", linkr_tui::trace::debugged(&wire))
+    }
 }
 
 fn parse_size(prog: &str, raw: &str) -> (u16, u16) {
@@ -674,20 +900,30 @@ fn without_capability(err: io::Error) -> io::Result<()> {
     }
 }
 
-/// Undo raw mode and the alternate screen without a handle to the terminal,
-/// for the panic hook and for the guard's own drop.
 /// Undo raw mode and the alternate screen without a handle, for the panic hook.
+///
+/// The guard's own `restore` does the same through its terminal; this copy
+/// exists because a panicking process never runs `Drop` — the release profile
+/// sets `panic = "abort"` — and a terminal left in raw mode with the mouse
+/// reporting to a program that has died is a shell the user has to repair by
+/// hand. Every capability the guard turned on is turned off here.
 #[cfg(feature = "tui")]
 fn restore_best_effort() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout, DisableMouseCapture);
+    let _ = execute!(stdout, DisableBracketedPaste);
     let _ = execute!(stdout, LeaveAlternateScreen);
 }
 
 fn main() -> io::Result<()> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let prog = std::env::args()
+    // Read as `OsString` and soften what cannot be text: `env::args()` panics
+    // on an argument that is not UTF-8 — a byte-sequence path on Linux is the
+    // ordinary case — and a crash is a worse answer than a file name that will
+    // not open.
+    let mut raw = std::env::args_os();
+    let prog = raw
         .next()
         .and_then(|path| {
             std::path::Path::new(&path)
@@ -695,8 +931,23 @@ fn main() -> io::Result<()> {
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "linkr".to_string());
+    let argv: Vec<String> = raw.map(|arg| arg.to_string_lossy().into_owned()).collect();
 
     let mut args = parse_args(&prog, &argv);
+    // Two answers need no link, and both ask to be given before anything is
+    // dialled: a caller asking what this tool can do is not asking the radio
+    // anything, and `--dry-run`'s whole point is to show the bytes *before*
+    // anything is sent.
+    if args.capabilities {
+        print!("{}", capabilities(&prog, args.json));
+        return Ok(());
+    }
+    if args.dry_run {
+        // Refused without `--exec` at the parser, so one exists here.
+        let run = args.exec_run().expect("--dry-run needs --exec");
+        print!("{}", dry_run(&run, args.json));
+        return Ok(());
+    }
     // The password is read as late as possible and never put back: the point of
     // `--wifi-key-file` is that `argv` is visible to every process on the
     // machine, and a password copied from the command line into a struct is a
@@ -729,20 +980,21 @@ fn main() -> io::Result<()> {
     // terminal to do something that takes three seconds and prints three lines.
     #[cfg(feature = "cli")]
     if args.scan {
-        match cli::scan_devices(args.scan_timeout) {
+        match cli::scan_devices(args.scan_window()) {
             Ok(devices) => {
                 for device in &devices {
                     let name = device.name.as_deref().unwrap_or("(no name advertised)");
-                    // Marked, because a board that is advertising but not
-                    // offering the serial service is a firmware problem and not
-                    // a radio one, and the difference is what to do next.
-                    let kind = if device.nus { "nus" } else { "-" };
+                    // Marked, because a row the scan could dial and a row it
+                    // could not are two different answers to "is my board on":
+                    // one is ready to connect to, the other is somebody else's
+                    // device that happened to be on the air.
+                    let kind = if device.board { "bee" } else { "-" };
                     println!("{kind:>3}  {name}  {}", device.id);
                 }
                 if devices.is_empty() && !args.quiet {
                     eprintln!(
                         "no Bluetooth device was seen in {} s",
-                        args.scan_timeout.as_secs()
+                        args.scan_window().as_secs()
                     );
                 }
                 return Ok(());
@@ -823,7 +1075,10 @@ fn main() -> io::Result<()> {
     }
     app.seed_lan_token_from_store();
     if !stored.address.is_empty() {
-        app.last_dial = Some(Dial::Ble(Selection::Address(stored.address.clone())));
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address(stored.address.clone()),
+            args.connect_timeout,
+        ));
     }
     if storing {
         app.settings = Some(settings);
@@ -891,8 +1146,29 @@ fn main() -> io::Result<()> {
         // cannot be opened prints an ordinary error instead of a corrupted
         // screen.
         if let Err(err) = app.dial(&dial) {
+            // A caller that asked for a command gets the failure in the events
+            // it would have read either way, with the code that names it; a
+            // dial that could not be made is this tool's own failure (255)
+            // when a command was waiting on it, and the usage-shaped 2 it has
+            // always been for every other run.
+            if args.exec.is_some() && args.json {
+                let code = if err.kind() == io::ErrorKind::TimedOut {
+                    "link_timeout"
+                } else {
+                    "link_failed"
+                };
+                println!(
+                    "{}",
+                    cli::json_event(&[
+                        ("event", cli::Json::Text("error")),
+                        ("code", cli::Json::Text(code)),
+                        ("message", cli::Json::Text(&err.to_string())),
+                        ("still_running", cli::Json::Bool(false)),
+                    ])
+                );
+            }
             eprintln!("error: {err}");
-            std::process::exit(2);
+            std::process::exit(if args.exec.is_some() { 255 } else { 2 });
         }
         // What the command line dialled is also what the sidebar's LAN rows
         // describe from now on: an address named once must not have to be
@@ -985,7 +1261,14 @@ fn main() -> io::Result<()> {
         } else {
             cli::Format::Text
         };
-        let mut failed = cli::run_requests(&mut app, &args.requests, format);
+        let mut failed = cli::run_requests(&mut app, &args.requests, format, args.connect_window());
+        // The command is the last thing asked of the target before the wire
+        // test, and its own status is the program's: a caller wiring this into
+        // a script needs the target's answer, not a summary of it.
+        let mut exec_code = 0;
+        if let Some(run) = args.exec_run() {
+            exec_code = linkr_tui::exec::cli::run(&mut app, &run, format);
+        }
         // The loopback goes last and stands alone: it is answered by the
         // target's UART rather than by the bridge, so running it before the
         // management requests would put its echo in what they read back.
@@ -1000,10 +1283,23 @@ fn main() -> io::Result<()> {
         // wants to watch.
         if mode == Mode::Cli {
             app.session.close();
+            // The order the codes are decided in: the command's own status
+            // first, then whether anything else that was asked for failed,
+            // then success.
+            if exec_code != 0 {
+                std::process::exit(exec_code);
+            }
             if failed > 0 {
                 std::process::exit(1);
             }
             return Ok(());
+        }
+        if exec_code != 0 {
+            // A command that ran and answered with a status is not a reason to
+            // keep the terminal away; it is a reason to say so before it opens.
+            eprintln!(
+                "note: the command exited with code {exec_code}; opening the terminal anyway"
+            );
         }
         if failed > 0 {
             // The link stays up either way: a failed request is a report, not
@@ -1040,7 +1336,7 @@ fn main() -> io::Result<()> {
     #[cfg(feature = "tui")]
     if !app.session.is_live() && app.transport == linkr_tui::app::Transport::Ble {
         match app.last_dial.clone() {
-            Some(dial @ Dial::Ble(_)) => {
+            Some(dial @ Dial::Ble(..)) => {
                 app.dial_async(&dial, true);
             }
             _ => {
@@ -1784,6 +2080,109 @@ mod tests {
     fn args(list: &[&str]) -> Args {
         let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
         parse_args("linkr", &owned)
+    }
+
+    /// `--exec` and its terms travel together, because they are one request
+    /// with several answers to the question "how does it end": the marker is
+    /// the default, `--idle` names the other, and `--timeout` is the same word
+    /// a scan uses with a longer default.
+    #[test]
+    fn exec_travels_with_the_terms_it_was_asked_on() {
+        let run = args(&["--exec", "df -h"])
+            .exec_run()
+            .expect("the command line names a command");
+        assert_eq!(run.command, "df -h");
+        assert_eq!(run.ending, linkr_tui::exec::cli::Ending::RcMarker);
+        assert_eq!(run.timeout, linkr_tui::exec::cli::DEFAULT_TIMEOUT);
+        assert_eq!(run.retry, 0);
+
+        let run = args(&[
+            "--exec",
+            "df -h",
+            "--idle",
+            "400ms",
+            "--timeout",
+            "7",
+            "--retry",
+            "2",
+        ])
+        .exec_run()
+        .expect("the command line names a command");
+        assert_eq!(
+            run.ending,
+            linkr_tui::exec::cli::Ending::Idle(Duration::from_millis(400))
+        );
+        assert_eq!(run.timeout, Duration::from_secs(7));
+        assert_eq!(run.retry, 2);
+        // An idle window in seconds reads the way every other span does.
+        assert_eq!(
+            args(&["--exec", "x", "--idle", "1.5"])
+                .exec_run()
+                .expect("a command")
+                .ending,
+            linkr_tui::exec::cli::Ending::Idle(Duration::from_millis(1500))
+        );
+        assert_eq!(args(&["--no-terminal"]).exec_run(), None);
+    }
+
+    /// The dry run is the byte-level half of the contract: what a caller
+    /// approves is what would be typed, and the length is part of it.
+    #[test]
+    fn a_dry_run_shows_the_bytes_a_command_would_send() {
+        let run = args(&["--exec", "df -h"]).exec_run().expect("a command");
+        let text = dry_run(&run, false);
+        assert!(text.contains("LINKR_RC"), "the wrapper is visible: {text}");
+        assert!(text.ends_with('\n'));
+        let json = dry_run(&run, true);
+        assert!(json.contains("\"wire\":"), "{json}");
+        assert!(json.contains(&format!("\"bytes\":{}", run.wire().len())));
+        assert!(json.starts_with('{') && json.ends_with("}\n"));
+    }
+
+    /// Capabilities is the one answer a caller can check a script against
+    /// before running it, so it has to name the parts a script depends on.
+    #[test]
+    fn capabilities_names_the_contract_a_script_depends_on() {
+        let json = capabilities("linkr", true);
+        assert!(json.starts_with("{\"version\":\""), "{json}");
+        assert!(json.ends_with("}\n"));
+        assert!(json.contains("\"exec\""), "{json}");
+        assert!(json.contains("rc-marker"), "{json}");
+        assert!(json.contains("\"exit_codes\""), "{json}");
+        assert!(json.contains(&format!(
+            "\"exec_timeout_ms\":{}",
+            linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis()
+        )));
+
+        let text = capabilities("linkr", false);
+        assert!(text.starts_with("linkr "), "{text}");
+        assert!(text.contains("--exec COMMAND"), "{text}");
+        assert!(text.contains("Exit codes"), "{text}");
+    }
+
+    /// The flag table is what the parser matches on and what the help is
+    /// generated from, so every one of the exec flags has to be in both — the
+    /// same bidirectional check the rest of the table gets, run on the new
+    /// names by name.
+    #[test]
+    fn the_exec_flags_are_parsed_and_documented() {
+        for flag in [
+            "--exec",
+            "--idle",
+            "--rc-marker",
+            "--retry",
+            "--dry-run",
+            "--capabilities",
+            "--connect-timeout",
+        ] {
+            assert!(
+                cli::FLAGS.iter().any(|entry| entry.name == flag),
+                "{flag} is missing from the flag table"
+            );
+        }
+        // And the endings conflict rather than rank: `--rc-marker` with
+        // `--idle` is a command line that has not decided.
+        assert_eq!(args(&["--exec", "x", "--rc-marker"]).exec_idle, None);
     }
 
     /// The wire settings are read off the command line in the forms the
@@ -2553,27 +2952,40 @@ mod tests {
             args(&["--transport", "ble"])
                 .dial()
                 .expect("the command line parses"),
-            Some(Dial::Ble(Selection::Any)),
+            Some(Dial::Ble(Selection::Any, None)),
             "pinned to Bluetooth and nothing named: whichever one it finds"
         );
         assert_eq!(
             args(&["--ble-name", "Linkr"])
                 .dial()
                 .expect("the command line parses"),
-            Some(Dial::Ble(Selection::Name("Linkr".into())))
+            Some(Dial::Ble(Selection::Name("Linkr".into()), None))
         );
         assert_eq!(
             args(&["--ble-address", "EE:C7:42:34:48:CF"])
                 .dial()
                 .expect("the command line parses"),
-            Some(Dial::Ble(Selection::Address("EE:C7:42:34:48:CF".into())))
+            Some(Dial::Ble(
+                Selection::Address("EE:C7:42:34:48:CF".into()),
+                None
+            ))
         );
         assert_eq!(
-            args(&["--ble-name", "Linkr", "--ble-address", "EE:C7:42:34:48:CF"])
-                .dial()
-                .expect("the command line parses"),
-            Some(Dial::Ble(Selection::Address("EE:C7:42:34:48:CF".into()))),
-            "and the address wins when both are given"
+            args(&[
+                "--ble-name",
+                "Linkr",
+                "--ble-address",
+                "EE:C7:42:34:48:CF",
+                "--connect-timeout",
+                "9"
+            ])
+            .dial()
+            .expect("the command line parses"),
+            Some(Dial::Ble(
+                Selection::Address("EE:C7:42:34:48:CF".into()),
+                Some(Duration::from_secs(9))
+            )),
+            "and the address wins when both are given, and the window travels with it"
         );
     }
 

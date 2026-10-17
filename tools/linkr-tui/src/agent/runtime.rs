@@ -676,6 +676,14 @@ fn unquote(literal: &str) -> Option<String> {
                     for _ in 0..4 {
                         low = low * 16 + chars.next()?.to_digit(16)?;
                     }
+                    // The escape after a high surrogate has to be a low one.
+                    // Anything else is a lone surrogate, and subtracting the
+                    // low range's start from a value below it would wrap — a
+                    // provider typo is a replacement character, not a panic.
+                    if !(0xdc00..0xe000).contains(&low) {
+                        out.push('\u{fffd}');
+                        continue;
+                    }
                     match char::from_u32(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00)) {
                         Some(paired) => out.push(paired),
                         None => out.push('\u{fffd}'),

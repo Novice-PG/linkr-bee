@@ -13,7 +13,7 @@
 //! loses its last line because the process exited is a trace missing exactly
 //! the moment that mattered.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +50,10 @@ impl ByteTrace {
     /// session when today's started is a log nobody can compare against, and
     /// comparing is the whole point of keeping one.
     pub fn to_file(path: &Path) -> std::io::Result<ByteTrace> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        // Owner-only where the platform has permissions, asked for at
+        // creation: a trace can carry what was typed, and what is typed can be
+        // a secret.
+        let file = crate::private_file::open_private_append(path)?;
         Ok(ByteTrace {
             file: Some(file),
             stderr: false,
@@ -100,8 +103,10 @@ impl ByteTrace {
     /// being drawn in. Owner-only where the platform has permissions: a trace
     /// can carry what was typed, and what is typed can be a secret.
     pub fn set_trace_file(&mut self, path: &Path) -> std::io::Result<()> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        let _ = restrict(path);
+        let file = crate::private_file::open_private_append(path)?;
+        // Again on a file that already existed: one written before the mode was
+        // asked for at creation keeps the mode it was made with.
+        let _ = crate::private_file::restrict(path);
         self.stderr = false;
         self.trace_file = Some(file);
         Ok(())
@@ -171,20 +176,6 @@ impl ByteTrace {
 /// that corrupts the screen it is meant to explain has explained nothing.
 pub fn default_trace_path() -> PathBuf {
     std::env::temp_dir().join(format!("linkr-trace-{}.log", std::process::id()))
-}
-
-/// Take away the group and other bits where the platform has them.
-#[cfg(unix)]
-fn restrict(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-/// Nothing to do on a platform whose files are not readable by others by
-/// default, or where the ACL is the user's business.
-#[cfg(not(unix))]
-fn restrict(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// How bytes are shown: printable ones as themselves and the rest as `\xNN`,

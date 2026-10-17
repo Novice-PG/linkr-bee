@@ -460,8 +460,13 @@ impl Screen {
         }
         if self.wrap_pending {
             self.wrap_pending = false;
-            self.carriage_return();
-            self.linefeed();
+            // With autowrap off the cursor stays where it is and the glyph
+            // overwrites the last cell: DECAWM off means the line never moves
+            // by itself, and wrapping here is exactly that move.
+            if self.autowrap {
+                self.carriage_return();
+                self.linefeed();
+            }
         }
         // A wide glyph never straddles the edge: at the last column it moves to
         // the next row instead, which is what every terminal does and what keeps
@@ -640,12 +645,17 @@ impl Screen {
 
     pub fn cursor_down(&mut self, n: usize) {
         let stop = self.margin_bottom();
-        self.cursor_row = (self.cursor_row + n).min(stop);
+        // Saturating: `n` comes straight off the wire as a `u32`, and a 32-bit
+        // build must not wrap the arithmetic into a panic on `ESC [ 4294967295 B`.
+        self.cursor_row = self.cursor_row.saturating_add(n).min(stop);
         self.wrap_pending = false;
     }
 
     pub fn cursor_forward(&mut self, n: usize) {
-        self.cursor_col = (self.cursor_col + n).min(self.cols - 1);
+        self.cursor_col = self
+            .cursor_col
+            .saturating_add(n)
+            .min(self.cols.saturating_sub(1));
         self.wrap_pending = false;
     }
 
@@ -798,7 +808,7 @@ impl Screen {
     pub fn erase_chars(&mut self, n: usize) {
         let pen = self.pen;
         let (row, col) = (self.cursor_row, self.cursor_col);
-        for c in col..(col + n).min(self.cols) {
+        for c in col..col.saturating_add(n).min(self.cols) {
             self.set_cell(row, c, Cell::blank(pen));
         }
     }
@@ -1016,6 +1026,32 @@ mod tests {
         assert_eq!(screen.row_text(0), "abcd");
         assert_eq!(screen.row_text(1), "ef");
         assert_eq!(screen.cursor(), (1, 2));
+    }
+
+    /// With autowrap off the line never moves by itself: the glyph that would
+    /// have started the next row overwrites the last cell instead.
+    #[test]
+    fn autowrap_off_overwrites_the_last_cell() {
+        let mut screen = Screen::new(4, 3);
+        feed(&mut screen, "abcd");
+        screen.autowrap = false;
+        screen.print('X');
+        assert_eq!(screen.row_text(0), "abcX", "the last cell took the glyph");
+        assert_eq!(screen.row_text(1), "", "and no row was started");
+        assert_eq!(screen.cursor().0, 0, "the cursor did not move down");
+    }
+
+    /// A parameter arrives as a `u32` off the wire. The arithmetic must
+    /// saturate rather than wrap: a debug build panicking on
+    /// `ESC [ 4294967295 B` is a hostile device crashing the interface.
+    #[test]
+    fn an_enormous_parameter_saturates() {
+        let mut screen = Screen::new(4, 3);
+        screen.cursor_forward(usize::MAX);
+        screen.cursor_down(usize::MAX);
+        screen.erase_chars(usize::MAX);
+        assert_eq!(screen.cursor_col, 3, "forward stops at the last column");
+        assert_eq!(screen.cursor_row, 2, "down stops at the last row");
     }
 
     /// A wide glyph takes two cells and never straddles the edge: at the last

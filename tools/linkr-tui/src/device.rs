@@ -155,7 +155,12 @@ struct Pending {
     /// The request id the answer carries, which is how it finds this question.
     id: u32,
     query: Query,
+    /// Complete lines of the answer.
     lines: Vec<String>,
+    /// The tail of the last line that has arrived so far, still waiting for
+    /// its terminator: a fragment boundary is where the bridge's frame ran
+    /// out, not where a line ends.
+    partial: String,
     /// The bridge has said this is the last piece of the answer.
     finalised: bool,
     since: Instant,
@@ -220,6 +225,7 @@ impl Conversation {
             id,
             query,
             lines: Vec::new(),
+            partial: String::new(),
             finalised: false,
             since: now,
         });
@@ -238,11 +244,29 @@ impl Conversation {
         if pending.id != header.request_id {
             return false;
         }
-        let text = String::from_utf8_lossy(payload);
-        for line in text.lines() {
-            pending.lines.push(line.to_string());
+        // A fragment boundary is wherever the bridge's frame ran out, not where
+        // a line ends: an `@info done` split across two frames is two halves no
+        // rule can match, and the fallback that finishes an answer without a
+        // FINAL flag would never fire. The unfinished tail is held and joined
+        // to the next fragment's beginning.
+        pending.partial.push_str(&String::from_utf8_lossy(payload));
+        let mut lines: Vec<String> = pending.partial.lines().map(str::to_string).collect();
+        if pending.partial.ends_with('\n') || pending.partial.ends_with('\r') {
+            pending.partial.clear();
+        } else {
+            // The last line is still arriving; the rest of it is what the next
+            // fragment starts with.
+            pending.partial = lines.pop().unwrap_or_default();
         }
+        pending.lines.extend(lines);
         if management_fragment_is_final(header) {
+            // Anything that arrived without a terminator is still the last line
+            // of the answer — the bridge is done, so no more is coming to
+            // finish it.
+            if !pending.partial.is_empty() {
+                let tail = std::mem::take(&mut pending.partial);
+                pending.lines.push(tail);
+            }
             pending.finalised = true;
         }
         true
@@ -438,12 +462,32 @@ mod tests {
         assert_eq!(reply.lines.len(), 3);
     }
 
+    /// And the split can land *inside* a line: `@info done` halved across two
+    /// frames is one line arriving in two pieces, not two lines. Read as two it
+    /// would never match the shape the answer ends on, and the read would wait
+    /// out its patience for an answer it already had.
+    #[test]
+    fn a_split_inside_a_line_is_joined_before_it_is_read() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let (id, _) = talk.ask(Query::Diagnostics, start);
+        let (head, part) = response(id, "@info fw vers", 0);
+        assert!(talk.offer(&head, &part));
+        assert!(talk.take_reply().is_none(), "half a word is not a read");
+        let (tail, rest) = response(id, "ion=0.2.0\n@info done", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&tail, &rest));
+        let reply = talk.take_reply().expect("whole now");
+        assert_eq!(reply.lines.len(), 2, "the halves are one line each");
+        assert_eq!(reply.lines[0], "@info fw version=0.2.0");
+        assert_eq!(reply.lines[1], "@info done");
+    }
+
     #[test]
     fn a_completed_shape_is_read_even_without_the_final_flag() {
         let start = Instant::now();
         let mut talk = Conversation::new();
         let (id, _) = talk.ask(Query::Uart, start);
-        let (header, body) = response(id, "OK uart=115200,8,N,1,none", 0);
+        let (header, body) = response(id, "OK uart=115200,8,N,1,none\r\n", 0);
         assert!(talk.offer(&header, &body));
         let reply = talk.take_reply().expect("the shape says it is whole");
         assert!(reply.status.ok);
@@ -471,16 +515,16 @@ mod tests {
         let start = Instant::now();
         let mut talk = Conversation::new();
         let (id, _) = talk.ask(Query::WifiScan, start);
-        let (accepted, body) = response(id, "OK accepted", MGMT_FLAG_FINAL);
+        let (accepted, body) = response(id, "OK accepted\r\n", MGMT_FLAG_FINAL);
         assert!(talk.offer(&accepted, &body));
         assert!(
             talk.take_reply().is_none(),
             "the acceptance is not the answer"
         );
-        let (result, body) = response(id, "@scan result BenchNet wpa2 ch=6 -54dBm", 0);
+        let (result, body) = response(id, "@scan result BenchNet wpa2 ch=6 -54dBm\r\n", 0);
         assert!(talk.offer(&result, &body));
         assert!(talk.take_reply().is_none(), "nor is a network");
-        let (done, body) = response(id, "@scan done", MGMT_FLAG_FINAL);
+        let (done, body) = response(id, "@scan done\r\n", MGMT_FLAG_FINAL);
         assert!(talk.offer(&done, &body));
         let reply = talk.take_reply().expect("the terminator ends it");
         assert_eq!(reply.query, Query::WifiScan);

@@ -5,6 +5,7 @@
 //! would overlap the moment a counter grew a digit.
 
 use ratatui::style::Style;
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{RenderDirection, Sparkline};
 
@@ -14,10 +15,11 @@ use crate::theme::Theme;
 /// The separator between the top bar's groups.
 const DOT: &str = " · ";
 
-/// The top bar's left half: the state's glyph, the state's name, and the two
-/// facts that describe the link — the level it negotiated and the signal it is
-/// carrying. Both read as placeholders until the device reports them, which is
-/// what the design's first frame shows.
+/// The top bar's left half: the state's glyph, the state's name, and the signal
+/// the link is carrying. The signal is the only fact the device reports about
+/// the link — the web client's strip carries RSSI too, and nothing carries a
+/// negotiated level — so the placeholder is the one reading waiting on a dial,
+/// and it fills as soon as there is one.
 pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -25,8 +27,6 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
             theme.state_dot(app.state),
         ),
         Span::styled(app.state_name().to_string(), theme.text()),
-        Span::styled(DOT.to_string(), theme.muted()),
-        Span::styled(app.link_text(), theme.muted()),
         Span::styled(DOT.to_string(), theme.muted()),
         Span::styled(app.signal_text(), theme.muted()),
     ])
@@ -126,8 +126,22 @@ fn samples(data: impl IntoIterator<Item = u64>, scale: u64, style: Style) -> Spa
         .data(data)
         .max(scale)
         .direction(RenderDirection::RightToLeft)
+        .bar_set(GRAPH_BARS)
         .style(style)
 }
+
+/// The bars both graphs are drawn with: ratatui's nine levels with the zero
+/// level made visible.
+///
+/// The stock set leaves a zero sample blank, which drew an idle link as an
+/// empty strip beside its `0 B/s` — a fresh session read as a broken
+/// instrument rather than a quiet one — and left the pauses between bursts
+/// invisible too. The lowest block draws the line the graph stands on, and
+/// the graphs are the only thing on the screen using these glyphs.
+const GRAPH_BARS: symbols::bar::Set<'static> = symbols::bar::Set {
+    empty: "▁",
+    ..symbols::bar::NINE_LEVELS
+};
 
 /// The glyph that heads the RX graph, in the colour that graph is drawn in.
 pub fn rx_arrow(theme: &Theme) -> Span<'static> {
@@ -312,23 +326,16 @@ mod tests {
             ..App::default()
         };
         app.state = ConnectionState::Connecting;
-        assert_eq!(line_text(&top_left(&app, &theme)), "◐ 连接中… · ─ · ─");
+        assert_eq!(line_text(&top_left(&app, &theme)), "◐ 连接中… · ─");
 
         app.state = ConnectionState::Connected;
-        assert_eq!(line_text(&top_left(&app, &theme)), "● 已连接 · ─ · ─");
+        assert_eq!(line_text(&top_left(&app, &theme)), "● 已连接 · ─");
 
-        app.link_level = Some(2);
         app.signal_dbm = Some(-58);
-        assert_eq!(
-            line_text(&top_left(&app, &theme)),
-            "● 已连接 · 链路 L2 · -58 dBm"
-        );
+        assert_eq!(line_text(&top_left(&app, &theme)), "● 已连接 · -58 dBm");
 
         app.lang = Lang::En;
-        assert_eq!(
-            line_text(&top_left(&app, &theme)),
-            "● connected · link L2 · -58 dBm"
-        );
+        assert_eq!(line_text(&top_left(&app, &theme)), "● connected · -58 dBm");
     }
 
     /// The glyph changes with the state, and takes the state's colour.

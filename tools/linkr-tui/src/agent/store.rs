@@ -97,20 +97,28 @@ impl JsonFile {
             let _ = std::fs::create_dir_all(parent);
         }
         // Write beside it and rename, so an interrupted write leaves the old
-        // file rather than a half-written one.
+        // file rather than a half-written one. The temp is created owner-only:
+        // it holds the same API key the real file does, and it exists under a
+        // name the umask — not this program — chooses the mode of.
         let mut tmp = path.clone();
         let mut stamp = std::process::id();
         tmp.set_extension(format!("tmp{stamp:08x}"));
         loop {
-            if std::fs::write(&tmp, &out).is_ok() && std::fs::rename(&tmp, path).is_ok() {
-                // After the rename, not before. The file that stays is the one
-                // the umask made — 0664 on a group-friendly default — and this
-                // file holds the model's API key, so restricting it is the whole
-                // point. Doing it earlier restricts a path nothing has written,
-                // and the renamed file keeps whatever the umask gave it.
-                let _ = restrict(path);
+            if crate::private_file::write_private(&tmp, out.as_bytes()).is_ok()
+                && std::fs::rename(&tmp, path).is_ok()
+            {
+                // Again after the rename, not before. The file that stays is
+                // the one the umask made — 0664 on a group-friendly default —
+                // and this file holds the model's API key, so restricting it is
+                // the whole point. Doing it earlier restricts a path nothing has
+                // written yet, and the renamed file keeps whatever the umask
+                // gave it.
+                let _ = crate::private_file::restrict(path);
                 return;
             }
+            // A failed rename leaves a file holding the key behind; it is
+            // removed rather than abandoned.
+            let _ = std::fs::remove_file(&tmp);
             // A collision on the temp name is the only recoverable failure; a
             // full disk or a read-only directory is reported rather than spun
             // on, and the in-memory copy is still correct either way.
@@ -296,23 +304,6 @@ fn default_path() -> Option<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     let base = Path::new(&home).join(".config");
     Some(base.join(DEFAULT_FILE))
-}
-
-/// Take away the group and other bits, where the platform has them.
-///
-/// This file holds the model's API key, so the restriction is not decoration:
-/// the token store next to it is already 0600 for exactly the same reason, and a
-/// credential left world-readable is a credential that survived one `ls`.
-#[cfg(unix)]
-fn restrict(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-/// Nothing to do where the file's ACL is the user's own business.
-#[cfg(not(unix))]
-fn restrict(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

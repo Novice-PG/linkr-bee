@@ -136,8 +136,11 @@ impl TokenStore {
     }
 
     /// Write the store out. The directory is created if it is missing, and the
-    /// file is given owner-only permissions where the platform has them,
-    /// because a token is a key.
+    /// file is given owner-only permissions, because a token is a key.
+    ///
+    /// Written beside the real file and renamed over it: the store is never on
+    /// disk wearing the umask's permissions, and never half written — a partial
+    /// store read back as an empty map is a bridge that will not authenticate.
     pub fn save(&self) -> io::Result<()> {
         let Some(path) = &self.path else {
             return Err(io::Error::new(
@@ -148,8 +151,15 @@ impl TokenStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, render(&self.entries))?;
-        restrict(path)?;
+        let mut tmp = path.clone();
+        tmp.set_extension("tmp");
+        crate::private_file::write_private(&tmp, render(&self.entries).as_bytes())?;
+        if let Err(err) = std::fs::rename(&tmp, path) {
+            // A failed rename leaves the temp behind: it holds the same secret
+            // the real file does, so it is removed rather than abandoned.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err);
+        }
         Ok(())
     }
 }
@@ -303,20 +313,6 @@ fn render(entries: &BTreeMap<String, String>) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Take away the group and other bits where the platform has them.
-#[cfg(unix)]
-fn restrict(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-}
-
-/// Nothing to do on a platform whose files are not readable by others by
-/// default, or where the ACL is the user's business.
-#[cfg(not(unix))]
-fn restrict(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

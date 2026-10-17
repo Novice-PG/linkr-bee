@@ -339,8 +339,13 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
 
     let (fill, track) = text::meter(used, total, METER_CELLS);
     // The share as the reader's own percentage: the meter shows it, the
-    // number states it, and both come from the pair the device sent.
-    let percent = (used.min(total) * 100 + total / 2) / total;
+    // number states it, and both come from the pair the device sent. In wide
+    // arithmetic, like `text::meter` itself — the pair arrives verbatim from
+    // the wire, and a `used` near `u64::MAX` must not wrap into a wrong
+    // number or panic in a debug build.
+    let wide_used = u128::from(used.min(total));
+    let wide_total = u128::from(total);
+    let percent = (wide_used * 100 + wide_total / 2) / wide_total.max(1);
     let dropped = get(groups, "uart", "dropped").unwrap_or("0");
     let value = format!("{used}/{total} {fill}{track} {percent}% · drop {dropped}");
     if text::columns(&value) > budget - head_columns {
@@ -348,7 +353,7 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
         return row_line(&label, &raw, width, theme);
     }
 
-    let ink = if percent >= METER_WARN_PERCENT {
+    let ink = if percent >= u128::from(METER_WARN_PERCENT) {
         theme.warn()
     } else {
         theme.accent()

@@ -118,6 +118,9 @@ pub struct SerialWatch {
     boot_loop_window_ms: i64,
     findings: Vec<(Finding, String)>, // (finding, dedup key)
     buffered: String,
+    /// Bytes of an incomplete character, held across reads: a chunk boundary
+    /// in the middle of a multi-byte character is ordinary on every link.
+    carry: Vec<u8>,
     lines: usize,
     dropped: usize,
     boot_count: usize,
@@ -239,6 +242,7 @@ impl SerialWatch {
             boot_loop_window_ms: options.boot_loop.window_ms.clamp(1, 3_600_000),
             findings: Vec::new(),
             buffered: String::new(),
+            carry: Vec::new(),
             lines: 0,
             dropped: 0,
             boot_count: 0,
@@ -299,18 +303,36 @@ impl SerialWatch {
     /// Feed raw bytes as UTF-8. Split multi-byte sequences are held across calls
     /// rather than turned into replacement characters.
     pub fn feed_bytes(&mut self, bytes: &[u8], at: i64) -> Vec<Finding> {
-        // The journal already handles streaming UTF-8; here we decode greedily
-        // and pass the remainder through a lossy-free path. For the watch engine
-        // a split multi-byte character is simply deferred.
-        match std::str::from_utf8(bytes) {
-            Ok(text) => self.feed(text, at),
-            Err(_) => {
-                // Decode the valid prefix, hold the rest is not possible without
-                // a decoder; feed the lossy text — the web feeds decoded text too.
-                let text = String::from_utf8_lossy(bytes);
-                self.feed(&text, at)
+        // A multi-byte character can straddle two reads — BLE and LAN both hand
+        // over whatever arrived, and a boundary inside a `…` is ordinary. The
+        // unfinished tail waits here for the rest of itself, rather than
+        // becoming two replacement characters that both mangle the text and
+        // hide the line's real content from the rules.
+        let mut chunk = std::mem::take(&mut self.carry);
+        chunk.extend_from_slice(bytes);
+        let text = match std::str::from_utf8(&chunk) {
+            Ok(text) => {
+                let text = text.to_string();
+                chunk.clear();
+                text
             }
-        }
+            Err(error) if error.error_len().is_none() => {
+                // Only the last character is incomplete: decode what is whole
+                // and keep the rest for the next call.
+                let (whole, rest) = chunk.split_at(error.valid_up_to());
+                let text = String::from_utf8_lossy(whole).into_owned();
+                self.carry = rest.to_vec();
+                text
+            }
+            Err(_) => {
+                // Genuinely invalid bytes: replacement characters are the
+                // honest reading, and the one the web client shows too.
+                let text = String::from_utf8_lossy(&chunk).into_owned();
+                chunk.clear();
+                text
+            }
+        };
+        self.feed(&text, at)
     }
 
     /// Retained findings, oldest first.
@@ -322,6 +344,7 @@ impl SerialWatch {
     pub fn clear(&mut self) -> WatchSnapshot {
         self.findings.clear();
         self.buffered.clear();
+        self.carry.clear();
         self.dropped = 0;
         self.boot_loop = BootLoop::default();
         self.snapshot()
@@ -343,6 +366,7 @@ impl SerialWatch {
             boot_loop_window_ms: window,
             findings: Vec::new(),
             buffered: String::new(),
+            carry: Vec::new(),
             lines: 0,
             dropped: 0,
             boot_count: 0,
@@ -645,6 +669,31 @@ mod tests {
         let found = w.feed("watchdog: BUG: soft lockup\n", 1000);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "watchdog-bug");
+    }
+
+    /// The bytes of a character can arrive in two reads, and the engine holds
+    /// the unfinished tail and joins it. Decoded lossily instead, the two
+    /// halves become two replacement characters — the text is mangled *and*
+    /// the rule that was watching for the word stops matching it.
+    #[test]
+    fn a_character_split_across_reads_is_joined() {
+        let mut w = SerialWatch::new(WatchOptions {
+            max_findings: 20,
+            patterns: vec![Pattern {
+                id: "no-memory".to_string(),
+                text: "mémoire".to_string(),
+                label: None,
+            }],
+            ..WatchOptions::default()
+        });
+        let line = "réserve: mémoire insuffisante\n";
+        let bytes = line.as_bytes();
+        let cut = line.find('é').expect("the accent is there") + 1;
+        let first = w.feed_bytes(&bytes[..cut], 1000);
+        assert!(first.is_empty(), "half a character is not a finding yet");
+        let second = w.feed_bytes(&bytes[cut..], 1001);
+        assert_eq!(second.len(), 1, "the word was joined across the reads");
+        assert_eq!(second[0].id, "no-memory");
     }
 
     #[test]

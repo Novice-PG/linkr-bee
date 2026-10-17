@@ -127,9 +127,21 @@ impl Params {
     /// `38;5;n` and `38:5:n` are the same colour to everything that matters
     /// here, and one flat list reads the same either way.
     ///
-    /// Past the cap the rest are dropped, digits included: letting them fall
-    /// into the last slot would report a parameter value the sender never sent.
+    /// A separator closes the slot before it, and closes it as a *stated* zero
+    /// when no digits were written: `ESC [ ; 5 m` is parameter 0 followed by 5,
+    /// and letting the separator advance past slot 0 would shift 5 into its
+    /// place. Past the cap the rest are dropped, digits included: letting them
+    /// fall into the last slot would report a parameter value the sender never
+    /// sent.
     fn next(&mut self) {
+        if self.len == 0 {
+            self.len = 1;
+        }
+        let last = self.len - 1;
+        if !self.given[last] {
+            self.given[last] = true;
+            self.values[last] = 0;
+        }
         if self.len < MAX_PARAMS {
             self.len += 1;
         } else {
@@ -198,6 +210,12 @@ pub struct Parser {
 /// How long an OSC argument may get before the rest is dropped.
 const DEFAULT_MAX_OSC: usize = 4096;
 
+/// How many intermediate bytes a sequence may carry before the rest are
+/// dropped. No real sequence uses more than two (`ESC ( B`), and the cap is
+/// what keeps a stream that never sends a final byte from growing the list
+/// without bound.
+const MAX_INTERMEDIATES: usize = 4;
+
 impl Parser {
     pub fn new() -> Parser {
         Parser {
@@ -216,14 +234,41 @@ impl Parser {
     /// Feed one character.
     pub fn feed(&mut self, ch: char, handler: &mut impl Handler) {
         if !ch.is_ascii() {
-            // Outside the ground state a non-ASCII character cannot be part of
-            // the sequence (all structure is ASCII), so it ends the sequence
-            // and is shown. Swallowing it would lose a glyph; reporting it as a
-            // parameter would corrupt the sequence.
-            self.state = State::Ground;
-            self.params.clear();
-            self.intermediates.clear();
-            handler.print(ch);
+            match self.state {
+                // Inside a string a non-ASCII character is *content*: an OSC
+                // title is text and can be in any script, so ending the string
+                // on it would cut the title short at its first accented letter,
+                // and printing it would spill the tail of the title into the
+                // pane.
+                State::Osc | State::OscEsc => {
+                    if self.state == State::OscEsc {
+                        // The ESC was literal content after all, exactly as the
+                        // ASCII path decides for any other byte.
+                        self.push_osc(0x1b);
+                        self.state = State::Osc;
+                    }
+                    let mut utf8 = [0u8; 4];
+                    for byte in ch.encode_utf8(&mut utf8).bytes() {
+                        self.push_osc(byte);
+                    }
+                }
+                // A DCS body is consumed and discarded, whatever it holds.
+                State::Dcs | State::DcsEsc => {
+                    if self.state == State::DcsEsc {
+                        self.state = State::Dcs;
+                    }
+                }
+                // Outside a string a non-ASCII character cannot be part of the
+                // sequence (all structure is ASCII), so it ends the sequence
+                // and is shown. Swallowing it would lose a glyph; reporting it
+                // as a parameter would corrupt the sequence.
+                _ => {
+                    self.state = State::Ground;
+                    self.params.clear();
+                    self.intermediates.clear();
+                    handler.print(ch);
+                }
+            }
             return;
         }
         let byte = ch as u8;
@@ -236,7 +281,7 @@ impl Parser {
             State::Escape => self.escape(byte, handler),
             State::EscIntermediate => match byte {
                 0x1b => self.begin_escape(),
-                0x20..=0x2f => self.intermediates.push(byte),
+                0x20..=0x2f => self.push_intermediate(byte),
                 0x30..=0x7e => {
                     self.state = State::Ground;
                     handler.esc(byte, &self.intermediates);
@@ -247,7 +292,7 @@ impl Parser {
             State::CsiEntry | State::CsiParam => self.csi_byte(byte, handler),
             State::CsiIntermediate => match byte {
                 0x1b => self.begin_escape(),
-                0x20..=0x2f => self.intermediates.push(byte),
+                0x20..=0x2f => self.push_intermediate(byte),
                 0x40..=0x7e => {
                     self.state = State::Ground;
                     handler.csi(&self.params, self.private, &self.intermediates, byte);
@@ -310,6 +355,15 @@ impl Parser {
         }
     }
 
+    /// Add an intermediate byte, up to [`MAX_INTERMEDIATES`]: the list is only
+    /// ever handed to a handler, and a sender that never sends a final byte must
+    /// not be able to grow it without bound.
+    fn push_intermediate(&mut self, byte: u8) {
+        if self.intermediates.len() < MAX_INTERMEDIATES {
+            self.intermediates.push(byte);
+        }
+    }
+
     fn end_osc(&mut self, handler: &mut impl Handler) {
         self.state = State::Ground;
         handler.osc(&self.osc);
@@ -333,7 +387,7 @@ impl Parser {
             // of them carries anything this terminal acts on.
             b'P' | b'X' | b'^' | b'_' => self.state = State::Dcs,
             0x20..=0x2f => {
-                self.intermediates.push(byte);
+                self.push_intermediate(byte);
                 self.state = State::EscIntermediate;
             }
             0x30..=0x7e => {
@@ -362,7 +416,7 @@ impl Parser {
                 self.state = State::CsiParam;
             }
             0x20..=0x2f => {
-                self.intermediates.push(byte);
+                self.push_intermediate(byte);
                 self.state = State::CsiIntermediate;
             }
             0x40..=0x7e => {
@@ -567,6 +621,72 @@ mod tests {
         parser.feed('\x07', &mut recorder);
         let osc = &recorder.events[0];
         assert!(osc.len() <= DEFAULT_MAX_OSC + 16, "{} chars", osc.len());
+    }
+
+    /// A title can be in any script. A non-ASCII character inside an OSC is
+    /// content, not the end of the string: cutting the title at its first
+    /// accented letter — which is what "print it and go back to ground"
+    /// amounted to — loses the rest of it and spills it into the pane.
+    #[test]
+    fn a_title_in_another_script_keeps_its_characters() {
+        let r = parse("\x1b]0;温度计 20°C\x07");
+        assert_eq!(r.events, vec!["osc \"0;温度计 20°C\""]);
+    }
+
+    /// And inside a DCS the same character is consumed with the rest of the
+    /// payload rather than dropped out of the string and printed.
+    #[test]
+    fn a_non_ascii_dcs_payload_is_still_discarded() {
+        let r = parse("\x1bP温度\x1b\\after");
+        assert_eq!(r.events[0], "print 'a'", "the payload itself never shows");
+        assert!(
+            !r.events.iter().any(|event| event.contains(['温', '度'])),
+            "{:?}",
+            r.events
+        );
+    }
+
+    /// An omitted parameter keeps its own slot: `ESC [ ; 5 m` is zero followed
+    /// by five, and advancing the separator past slot zero — which is what the
+    /// parser used to do — reads the five as the first parameter.
+    #[test]
+    fn an_omitted_parameter_stays_in_its_own_slot() {
+        let r = parse("\x1b[;5m");
+        assert_eq!(r.events, vec!["csi m [0 5] m"]);
+        let r = parse("\x1b[;;5m");
+        assert_eq!(r.events, vec!["csi m [0 0 5] m"]);
+        let r = parse("\x1b[5;m");
+        assert_eq!(r.events, vec!["csi m [5 _] m"]);
+    }
+
+    /// Intermediate bytes are bounded too: a sender that never sends a final
+    /// byte can otherwise grow the list with every byte it sends.
+    #[test]
+    fn an_endless_run_of_intermediates_is_bounded() {
+        /// A handler that only counts the intermediates it was handed.
+        #[derive(Default)]
+        struct Intermediates(usize);
+        impl Handler for Intermediates {
+            fn print(&mut self, _: char) {}
+            fn execute(&mut self, _: u8) {}
+            fn esc(&mut self, _: u8, intermediates: &[u8]) {
+                self.0 = intermediates.len();
+            }
+            fn csi(&mut self, _: &Params, _: Option<u8>, intermediates: &[u8], _: u8) {
+                self.0 = intermediates.len();
+            }
+            fn osc(&mut self, _: &[u8]) {}
+        }
+
+        let mut parser = Parser::new();
+        let mut seen = Intermediates::default();
+        parser.feed_str(&format!("\x1b[{}H", " ".repeat(1_000)), &mut seen);
+        assert_eq!(seen.0, MAX_INTERMEDIATES, "a CSI run is capped");
+
+        let mut parser = Parser::new();
+        let mut seen = Intermediates::default();
+        parser.feed_str(&format!("\x1b{}B", " ".repeat(1_000)), &mut seen);
+        assert_eq!(seen.0, MAX_INTERMEDIATES, "and an ESC run too");
     }
 
     /// A non-ASCII character inside a sequence ends it and is still shown: the

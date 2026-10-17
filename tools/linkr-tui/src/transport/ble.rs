@@ -70,6 +70,38 @@ pub const MGMT_COMMAND: Uuid = Uuid::from_u128(0x4c4b0004_9a7e_4f4e_8b8a_3d6f12a
 /// Notify: the responses, as one `protocol::ManagementReassembler` stream.
 pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12a0c001);
 
+/// The name the bridge's firmware ships with, which its scan response carries
+/// when the advertisement itself has no room for it.
+///
+/// A prefix rather than the whole name: a bench with several units suffixes
+/// the name to tell them apart (`Linkr BLE UART 7F2C`), and the name is only
+/// one of the three signals [`is_board`] accepts.
+pub const BOARD_NAME: &str = "Linkr BLE UART";
+
+/// Whether an advertisement describes a board this program can dial.
+///
+/// Three signals, any one of them enough, because what an advertisement
+/// carries depends on the platform as much as on the firmware. The board
+/// itself advertises the **management service** and puts its **name** in the
+/// scan response — the UART service lives in the GATT table and is not on the
+/// air at all. BlueZ folds cached GATT services into what it reports, so a
+/// Linux that has met this board before lists the UART service too and a
+/// UART-only test works there; Windows reports the advertisement and nothing
+/// else, so that same test found nothing at all on Windows. All three signals
+/// are accepted, and which one answered is not kept: what the device *is* is
+/// checked once the link is up, where [`wire`] refuses anything without the
+/// UART characteristics — a device that merely looks like a board fails with
+/// the right error instead of reading as silence.
+pub fn is_board(services: &[Uuid], name: Option<&str>) -> bool {
+    services
+        .iter()
+        .any(|uuid| *uuid == NUS_SERVICE || *uuid == MGMT_SERVICE)
+        || name.is_some_and(|name| {
+            name.get(..BOARD_NAME.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(BOARD_NAME))
+        })
+}
+
 /// Ceiling for one ATT write.
 ///
 /// 250 is the largest attribute value BLE 4.2 can carry and 3 bytes of that
@@ -108,14 +140,26 @@ const SCAN_POLL: Duration = Duration::from_millis(250);
 /// link: the state of a failed attempt is known there, and the interface is
 /// owed the real reason the moment there is one — not twenty seconds of
 /// waiting for an answer that was never coming.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+///
+/// Sized to cover the worst dial the reactor will attempt — a scan that runs
+/// out its window, one connect that runs out its own, and the handshake on top
+/// — because a window shorter than the work turns a slow board into a missing
+/// one. A caller that would rather wait less says `--connect-timeout`, and
+/// [`Link::open`]'s late-success path hangs the link up again rather than
+/// leaving a radio nobody is reading.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long one dial attempt may take before it counts as failed.
 ///
 /// btleplug's own ceiling is half a minute; that is a bound on the D-Bus call,
 /// not on a person's patience, and a screen that says "connecting" for it is
-/// worse than an attempt that starts over from nothing.
-const DIAL_ATTEMPT: Duration = Duration::from_secs(8);
+/// worse than an attempt that starts over from nothing. Fifteen seconds and
+/// not less, because a Windows connect builds a fresh GATT session every time
+/// — WinRT keeps no service cache between sessions — and a first dial to a
+/// board this machine has not seen this boot takes several of them; cutting at
+/// eight read as a refusal on a board that was merely slow, while the host
+/// tool this program replaces allowed for it.
+const DIAL_ATTEMPT: Duration = Duration::from_secs(15);
 
 /// The wall-clock budget every retry loop gets: three backoffs' worth.
 const RETRY_BUDGET: Duration = Duration::from_millis(2250);
@@ -275,18 +319,32 @@ enum Frame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BleLink {
     selection: Selection,
+    /// How long the whole dial may take. `None` is the radio's own patience,
+    /// which is what an interface dial gets; a script that named
+    /// `--connect-timeout` hands its own window down here.
+    within: Option<Duration>,
 }
 
 impl BleLink {
     /// Look for `selection`. No radio is touched until [`Link::open`].
     pub fn new(selection: Selection) -> BleLink {
-        BleLink { selection }
+        BleLink {
+            selection,
+            within: None,
+        }
+    }
+
+    /// Give the whole dial this much time at most.
+    pub fn within(mut self, window: Option<Duration>) -> BleLink {
+        self.within = window;
+        self
     }
 
     /// Connect to whichever device turns up.
     pub fn discovering() -> BleLink {
         BleLink {
             selection: Selection::Any,
+            within: None,
         }
     }
 
@@ -294,6 +352,7 @@ impl BleLink {
     pub fn named(name: impl Into<String>) -> BleLink {
         BleLink {
             selection: Selection::Name(name.into()),
+            within: None,
         }
     }
 
@@ -301,6 +360,7 @@ impl BleLink {
     pub fn addressed(address: impl Into<String>) -> BleLink {
         BleLink {
             selection: Selection::Address(address.into()),
+            within: None,
         }
     }
 
@@ -344,12 +404,13 @@ impl Link for BleLink {
         // else in the product, and a link that reported itself open while the
         // stack was still turning over would have the interface painting
         // before there was anything to paint.
-        match ready_rx.recv_timeout(CONNECT_TIMEOUT) {
+        let window = self.within.unwrap_or(CONNECT_TIMEOUT);
+        match ready_rx.recv_timeout(window) {
             Err(why) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
                     "the BLE link did not come up within {} s ({why})",
-                    CONNECT_TIMEOUT.as_secs()
+                    window.as_secs()
                 ),
             )),
             Ok(Err(why)) => Err(why),
@@ -449,7 +510,16 @@ fn radio(
         // Reported only once the subscription is live. A read that succeeds
         // and a notify that never arrives looks exactly like a dead target,
         // so "connected" means bytes can already flow both ways.
-        let _ = ready.send(Ok(()));
+        if ready.send(Ok(())).is_err() {
+            // The caller gave up (or went away) while this dial was still
+            // working, so there is no reader for the bytes below and a link
+            // left open is a radio the next dial has to fight for. Hanging it
+            // up is ours to do only when the dial was.
+            if dialled_here {
+                let _ = peripheral.disconnect().await;
+            }
+            return;
+        }
         carry(&peripheral, &inbound, outbound, &management).await;
         // The one signal that means "stop reading" to whoever is waiting on
         // us, sent once the loop above has decided the device went away.
@@ -632,12 +702,11 @@ async fn find(selection: &Selection) -> Result<(Peripheral, bool), String> {
     }
 
     let chosen = chosen.ok_or_else(|| match selection {
-        Selection::Any => "nothing advertising the Nordic UART Service was found within \
-         {} s — is the board powered?"
+        Selection::Any => "no board was found within {} s — is the board powered?"
             .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
-        Selection::Name(name) => format!("no Nordic UART device named “{name}” was found"),
+        Selection::Name(name) => format!("no board named “{name}” was found"),
         Selection::Address(address) => {
-            format!("no Nordic UART device at {address} was found")
+            format!("no board at {address} was found")
         }
     })?;
 
@@ -645,14 +714,14 @@ async fn find(selection: &Selection) -> Result<(Peripheral, bool), String> {
     Ok((chosen, dialled_here))
 }
 
-/// The first device that is a board this interface can talk to — it advertises
-/// the Nordic UART Service — and that `selection` accepts, or `None` while
-/// nobody like that has answered yet.
+/// The first device that is a board this interface can talk to — see
+/// [`is_board`] — and that `selection` accepts, or `None` while nobody like
+/// that has answered yet.
 ///
-/// The service check is here and not in the scan's filter on purpose: a
-/// filtered scan only hears devices whose advertisement names the service,
-/// and a board whose advertisement is (or reads as) partial is still a board
-/// this bridge can dial. A device named by *address* is the exception, and is
+/// The check is here and not in the scan's filter on purpose: a filtered scan
+/// only hears devices whose advertisement names the filter's UUIDs, and a
+/// board whose advertisement is (or reads as) partial is still a board this
+/// bridge can dial. A device named by *address* is the exception, and is
 /// dialled on BlueZ's word alone: a bonded board that is not advertising right
 /// now has no UUIDs to check, and the characteristic check that matters happens
 /// once the link is up (`wire`).
@@ -670,7 +739,7 @@ async fn pick(
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
-        let speaks_nus = properties.services.contains(&NUS_SERVICE);
+        let looks_like_a_board = is_board(&properties.services, properties.local_name.as_deref());
         let wanted = selection.accepts(
             properties.local_name.as_deref(),
             &candidate.id().to_string(),
@@ -680,7 +749,7 @@ async fn pick(
             Some(&properties.address.to_string()),
         );
         let named_by_address = matches!(selection, Selection::Address(_));
-        if wanted && (speaks_nus || named_by_address) {
+        if wanted && (looks_like_a_board || named_by_address) {
             return Ok(Some(candidate));
         }
     }
@@ -1024,6 +1093,44 @@ mod tests {
         let empty = Selection::Address("::".to_string());
         assert!(!empty.accepts(Some("Linkr BLE UART-3"), "EE:C7:42:34:48:CF", None));
         assert!(!empty.accepts(Some("Anything"), "", None));
+    }
+
+    /// The firmware's own advertisement is the Windows case: it carries the
+    /// management service and the name, and never the UART service — so a
+    /// board test that wanted UART found nothing at all on a Windows host
+    /// while BlueZ, holding a service cache from an earlier session, found
+    /// the same board on Linux. Each of the three signals alone is a board.
+    #[test]
+    fn a_board_is_recognised_by_any_of_its_signals() {
+        let none = None;
+        assert!(
+            is_board(&[NUS_SERVICE], none),
+            "the UART service, cached by BlueZ"
+        );
+        assert!(
+            is_board(&[MGMT_SERVICE], none),
+            "the management service, as advertised"
+        );
+        assert!(
+            is_board(&[], Some("Linkr BLE UART")),
+            "exactly the shipped name"
+        );
+        assert!(
+            is_board(&[], Some("linkr ble uart 7f2c")),
+            "another unit's suffix does not make it a stranger"
+        );
+    }
+
+    /// A name that merely starts the same way is not the board, and a short
+    /// or non-ASCII name must be answered rather than panicked over — the
+    /// prefix is cut from the candidate's bytes, not the constant's.
+    #[test]
+    fn a_name_that_only_sounds_like_the_board_is_not_one() {
+        assert!(!is_board(&[], Some("Linkr BLE UAR")));
+        assert!(!is_board(&[], Some("Linkr BLE Something")));
+        assert!(!is_board(&[], None));
+        assert!(!is_board(&[], Some("连接加热器")));
+        assert!(!is_board(&[], Some("")));
     }
 
     /// Segmentation is what keeps a long write legal, and the thing it must

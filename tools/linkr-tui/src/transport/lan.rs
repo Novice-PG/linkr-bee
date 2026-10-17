@@ -490,7 +490,12 @@ fn serve(
             }
         };
 
-        let _ = ready.send(Ok(()));
+        if ready.send(Ok(())).is_err() {
+            // Nobody is waiting for this socket any more — the caller gave up
+            // while the dial was still retrying. Returning drops it and closes
+            // the connection, instead of carrying a link whose reader has gone.
+            return;
+        }
         carry(socket, token.is_some(), &inbound, outbound).await;
     });
     drop(runtime);

@@ -522,6 +522,12 @@ pub mod testing {
 
     /// Build one management response for `id`, framed the way the bridge
     /// frames them, ending with the flag that says the answer is complete.
+    ///
+    /// Bodies are raw bytes, as the wire carries them. The real firmware ends
+    /// every line with CRLF (`snprintk("…\r\n")` throughout `main.c`), so a
+    /// fixture that means a whole line should spell the terminator — and one
+    /// that leaves it off is saying the line is still arriving, which is what
+    /// a fragment boundary can look like on the wire.
     pub fn answer(id: u32, body: &str) -> Vec<u8> {
         let mut frame = Vec::new();
         frame.extend_from_slice(b"LK");

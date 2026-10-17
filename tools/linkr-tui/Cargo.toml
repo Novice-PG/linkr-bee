@@ -36,6 +36,15 @@ uuid = { version = "1", features = ["v4"] }
 futures = "0.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset", "http2", "stream"] }
 
+# The Windows executable wears the project's mark, which lives in a Windows
+# resource section and nowhere else: `build.rs` embeds `assets/icon.ico`. The
+# dependency is unconditional because a build script is compiled for the
+# *host*; the embedding itself happens only when the target is Windows, and
+# cross-compiled Windows builds go through windres, which the mingw packages
+# already provide wherever the mingw linker is.
+[build-dependencies]
+winresource = "0.1"
+
 
 [profile.release]
 opt-level = "z"

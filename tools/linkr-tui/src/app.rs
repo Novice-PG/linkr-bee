@@ -12,7 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ratatui::layout::Rect;
 
 use crate::accessory::{self, UartSettings};
-use crate::clipboard::{osc52_copy, MAX_OSC52_CHARS};
+use crate::clipboard::osc52_copy;
 use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
 use crate::i18n::Lang;
@@ -338,9 +338,14 @@ pub const MAX_NOTICES: usize = 3;
 pub const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_millis(2200);
 
 /// What a token in hand reads as in the sidebar: that one is there, never
-/// which. A fixed run of stars rather than one per character — the length of a
-/// secret has no business on a screen either.
-const LAN_TOKEN_MASK: &str = "******";
+/// which.
+///
+/// Thirty-two stars because that is exactly how long the thing under the mask
+/// is — the protocol fixes a token at thirty-two hexadecimal characters — so
+/// the run says nothing the wire format does not. A shorter one did: a reader
+/// who knew the count saw a six-character secret, and a reader who did not
+/// saw a tool that had lost most of one.
+const LAN_TOKEN_MASK: &str = "********************************";
 
 /// How many notices the *log* keeps. Deeper than the toast stack, because the
 /// log dialog is where a user goes to find out what happened while they were
@@ -432,10 +437,7 @@ pub struct App {
     pub traffic: crate::traffic::Traffic,
     /// The link speed once the device has reported one.
     pub baud: Option<u32>,
-    /// The BLE link level the device reports (`L1`, `L2`). Unknown until the
-    /// link exists, which is why the chrome shows a placeholder while dialling.
-    pub link_level: Option<u8>,
-    /// The signal the link is carrying, in dBm. Also unknown until connected.
+    /// The signal the link is carrying, in dBm. Unknown until connected.
     pub signal_dbm: Option<i32>,
     pub autoscroll: bool,
     /// `HH:MM:SS`, filled by the event loop so a frame is a pure function.
@@ -631,7 +633,6 @@ impl Default for App {
             tx: 0,
             traffic: crate::traffic::Traffic::default(),
             baud: None,
-            link_level: None,
             signal_dbm: None,
             autoscroll: true,
             clock: "00:00:00".to_string(),
@@ -699,15 +700,17 @@ impl App {
     /// The current language's table.
     /// The key the agent's per-device state is stored under.
     ///
-    /// The name the user gave the link, or the address when they did not name
-    /// one. Two boards that are both "Linkr BLE UART" share a store, which is
-    /// the one case this gets wrong and the reason the address wins whenever
-    /// there is one to use.
+    /// The link the app is on, spelled the way it dialled: `ble:EE:C7:…` names
+    /// an address, `lan:host` a bridge, `stdio:…` a command. The interface's
+    /// own display name is a default — two boards are both "Linkr BLE UART" —
+    /// and a store they shared would answer a new board with the last one's
+    /// tasks and notes.
     pub fn agent_device_key(&self) -> String {
-        if self.device_name.trim().is_empty() {
+        let described = self.session.describe();
+        if described.trim().is_empty() {
             "unknown".to_string()
         } else {
-            self.device_name.clone()
+            described.to_string()
         }
     }
 
@@ -771,15 +774,6 @@ impl App {
     pub fn baud_text(&self) -> String {
         match self.baud {
             Some(baud) => baud.to_string(),
-            None => self.unknown().to_string(),
-        }
-    }
-
-    /// The link level, as the chrome names it (`link L1`), or the placeholder
-    /// while there is no link to report one.
-    pub fn link_text(&self) -> String {
-        match self.link_level {
-            Some(level) => format!("{}{level}", self.strings().diag_link_level),
             None => self.unknown().to_string(),
         }
     }
@@ -1125,7 +1119,7 @@ impl App {
             // Only an addressed Bluetooth dial updates it; a LAN dial was not
             // about a board and must not forget the one that was.
             address: match &self.last_dial {
-                Some(Dial::Ble(crate::transport::ble::Selection::Address(address))) => {
+                Some(Dial::Ble(crate::transport::ble::Selection::Address(address), _)) => {
                     address.clone()
                 }
                 _ => stored.address,
@@ -1279,9 +1273,15 @@ impl App {
         if self.transport == Transport::Lan {
             return self.lan_dial();
         }
-        self.last_dial
-            .clone()
-            .ok_or_else(|| self.strings().no_link.to_string())
+        // Anything but LAN is recalled, because a board is picked by the
+        // scan's result and a bridge by its child process — neither can be
+        // rebuilt from the rows. A *LAN* dial is not recalled onto a
+        // Bluetooth row: that is the link the user just moved away from, and
+        // connecting to it would flip the row they had chosen.
+        match &self.last_dial {
+            Some(dial) if !matches!(dial, Dial::Lan { .. }) => Ok(dial.clone()),
+            _ => Err(self.strings().no_link.to_string()),
+        }
     }
 
     /// The LAN dial the sidebar rows describe, or the sentence saying why they
@@ -1582,13 +1582,36 @@ impl App {
             // and the answer would stop half-way through without a `Done` to
             // close it.
             let mut closed = false;
+            let mut last: Option<String> = None;
             while let Ok(item) = receiver.try_recv() {
                 closed = !matches!(item.1, crate::agent::runtime::Progress::Delta(_));
+                last = Some(item.0.clone());
                 arrived.push(item);
             }
-            if !closed {
-                self.agent_replies.push(receiver);
+            if closed {
+                continue;
             }
+            // A worker that is *gone* is the end of its stream as well, and the
+            // one ending that sends nothing: without this, a channel cut off
+            // after its last delta is kept for ever and the task it belongs to
+            // says the model is still typing. The task is closed as malformed —
+            // the same sentence a provider that answered with no completion
+            // gets — because an answer that stopped mid-stream is exactly that.
+            if matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ) {
+                if let Some(task_id) = last {
+                    arrived.push((
+                        task_id,
+                        crate::agent::runtime::Progress::Failed(
+                            crate::agent::runtime::Failure::Malformed,
+                        ),
+                    ));
+                }
+                continue;
+            }
+            self.agent_replies.push(receiver);
         }
 
         for (task_id, progress) in arrived {
@@ -1886,7 +1909,11 @@ impl App {
             self.observe(b"\n", wall_clock_ms());
             // Nothing else can arrive on this link, so a question left open
             // would otherwise be abandoned only at its timeout — reporting a
-            // hang-up as a slow bridge.
+            // hang-up as a slow bridge. Its view slot is closed first, or the
+            // pane it was asked for keeps spinning for a bridge that is gone.
+            if let Some(question) = self.talk.waiting() {
+                self.stop_waiting(question);
+            }
             self.talk.reset();
             self.management.reset();
             // And the half-typed line goes with it.
@@ -1960,6 +1987,7 @@ impl App {
                 cursor: 0,
                 scanning: true,
                 message: String::new(),
+                scroll: 0,
             },
         ));
         Ok(())
@@ -2022,7 +2050,7 @@ impl App {
     /// board coming up, and nothing announces it.
     pub fn connect_to_board(&mut self, address: &str, rssi: Option<i16>, quiet: bool) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
-        if !self.dial_async(&crate::session::Dial::Ble(selection), quiet) {
+        if !self.dial_async(&crate::session::Dial::Ble(selection, None), quiet) {
             return;
         }
         // The signal the scan heard the board at. A connected board stops
@@ -2091,7 +2119,7 @@ impl App {
         // Taken rather than read: the intent is the startup scan's alone, and a
         // scan that has answered cannot still hold it.
         let connect_single = std::mem::take(&mut self.scan_connects_one);
-        devices.retain(|device| device.nus);
+        devices.retain(|device| device.board);
         if connect_single {
             // A user who moved on while the scan listened — switched the
             // transport to LAN, dialled something by hand — is not waiting for
@@ -2116,6 +2144,7 @@ impl App {
                             cursor: 0,
                             scanning: false,
                             message: String::new(),
+                            scroll: 0,
                         },
                     ));
                 }
@@ -2125,6 +2154,15 @@ impl App {
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
             pick.devices = devices;
             pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
+            // A fresh answer is not the old failure: what the scan said before
+            // belongs to the scan before.
+            pick.message.clear();
+            let room = crate::ui::overlay::dialog_body_room(
+                self.screen,
+                self.sidebar_visible,
+                pick.rows().max(1),
+            );
+            pick.follow(room);
         }
     }
 
@@ -2181,10 +2219,27 @@ impl App {
             // user waits for a reply that was never going to come.
             return Err(self.strings().diag_no_ble.to_string());
         }
+        // Asking replaces whatever was outstanding, so the question being
+        // replaced has its view slot closed first: without that, the spinner
+        // of the read this ask just replaced spins until the *new* answer
+        // lands — or for ever, if it never does.
+        if let Some(previous) = self.talk.waiting() {
+            self.stop_waiting(previous);
+        }
         let (id, body) = self.talk.ask(query, Instant::now());
-        let frame = crate::protocol::encode_management_request(id, body.as_bytes())
-            .map_err(|why| why.message(false).to_string())?;
+        let frame = match crate::protocol::encode_management_request(id, body.as_bytes()) {
+            Ok(frame) => frame,
+            Err(why) => {
+                // The question was opened before the frame could be built;
+                // dropping it is what keeps the view from waiting for an
+                // answer to a request that never left — and blaming the bridge
+                // for the silence.
+                self.talk.reset();
+                return Err(why.message(false).to_string());
+            }
+        };
         if !self.session.send_management(frame) {
+            self.talk.reset();
             return Err(self.strings().not_connected.to_string());
         }
         // A read that has gone out owns its own view slot: nothing else will
@@ -2287,10 +2342,21 @@ impl App {
         // goes through the scrubber.
         let shown = accessory::redact_command(command);
         let now = Instant::now();
+        // The question this replaces loses its spinner here rather than when
+        // the new answer arrives; see `ask_device`.
+        if let Some(previous) = self.talk.waiting() {
+            self.stop_waiting(previous);
+        }
         let (id, _) = self.talk.ask(query, now);
-        let frame = crate::protocol::encode_management_request(id, command.as_bytes())
-            .map_err(|why| why.message(false).to_string())?;
+        let frame = match crate::protocol::encode_management_request(id, command.as_bytes()) {
+            Ok(frame) => frame,
+            Err(why) => {
+                self.talk.reset();
+                return Err(why.message(false).to_string());
+            }
+        };
         if !self.session.send_management(frame) {
+            self.talk.reset();
             return Err(self.strings().not_connected.to_string());
         }
         // A WiFi write is answered twice, and only the phases that follow its
@@ -2664,7 +2730,10 @@ impl App {
     /// works over SSH and in tmux, and a complaint about a missing `xclip` on
     /// the way to a copy that *did* happen is noise, not information.
     pub fn copy_text(&mut self, text: &str) -> Notice {
-        let kept: String = text.chars().take(MAX_OSC52_CHARS).collect();
+        // The cap keeps the *end*, and the arithmetic lives with the cap so
+        // the test can read it: taking the beginning would throw away the
+        // answer the user just watched arrive.
+        let kept = crate::clipboard::copy_tail(text);
         let copied = kept.chars().count();
         if copied > 0 {
             osc52_copy(&kept);
@@ -3011,7 +3080,6 @@ mod tests {
         assert!(!app.transport_pinned);
         assert!(app.autoscroll);
         assert_eq!(app.baud, None);
-        assert_eq!(app.link_level, None);
         assert_eq!(app.signal_dbm, None);
         assert_eq!(app.rx, 0);
         assert_eq!(app.tx, 0);
@@ -3162,7 +3230,7 @@ mod tests {
         pane.set_size(40, 8);
         // More than the cap, so the trimming actually has to choose.
         let mut text = String::new();
-        for _ in 0..(MAX_OSC52_CHARS + 64) {
+        for _ in 0..(crate::clipboard::MAX_OSC52_CHARS + 64) {
             text.push('x');
         }
         text.push_str("TAIL");
@@ -3179,7 +3247,11 @@ mod tests {
             .nth(1)
             .and_then(|n| n.parse::<usize>().ok())
             .expect("the notice names the count");
-        assert_eq!(copied, MAX_OSC52_CHARS, "the cap is what was copied");
+        assert_eq!(
+            copied,
+            crate::clipboard::MAX_OSC52_CHARS,
+            "the cap is what was copied"
+        );
     }
 
     /// Copying a screen that has said nothing still reports — and reports the
@@ -3610,7 +3682,7 @@ mod tests {
         // the point of the test is what a refused dial does to the frame, not
         // whether BlueZ is reachable.
         assert!(app
-            .dial(&Dial::Ble(Selection::Address("nonsense".to_string())))
+            .dial(&Dial::Ble(Selection::Address("nonsense".to_string()), None))
             .is_err());
         assert!(!app.session.is_live());
         assert_eq!(app.state, ConnectionState::Connecting);
@@ -3824,11 +3896,11 @@ mod tests {
     fn a_scan_lists_serial_boards_and_dials_a_lone_one() {
         use crate::cli::FoundDevice;
 
-        fn board(name: &str, id: &str, nus: bool) -> FoundDevice {
+        fn board(name: &str, id: &str, board: bool) -> FoundDevice {
             FoundDevice {
                 name: Some(name.to_string()),
                 id: id.to_string(),
-                nus,
+                board,
                 // Signal is the picker's business; the scan's own tests are
                 // about which boards get dialled, not how loudly they were
                 // heard on the way.
@@ -3842,6 +3914,7 @@ mod tests {
                 cursor: 0,
                 scanning: true,
                 message: String::new(),
+                scroll: 0,
             })
         }
 
@@ -4004,7 +4077,10 @@ mod tests {
             ..App::default()
         };
         app.dial_async(
-            &Dial::Ble(crate::transport::ble::Selection::Address("nonsense".into())),
+            &Dial::Ble(
+                crate::transport::ble::Selection::Address("nonsense".into()),
+                None,
+            ),
             false,
         );
         assert!(app.transport_locked, "the choice is held while it tries");
@@ -4057,7 +4133,12 @@ mod tests {
 
         // A token in hand is shown as stars, and the row never spells it.
         app.lan_status.token = "0123456789abcdef0123456789abcdef".into();
-        assert_eq!(app.lan_token_text(), "******");
+        assert_eq!(app.lan_token_text(), LAN_TOKEN_MASK);
+        assert_eq!(
+            LAN_TOKEN_MASK.chars().count(),
+            32,
+            "as long as a real token, so the run leaks no length"
+        );
         assert!(!app.lan_token_text().contains("0123456789"));
 
         // The board's own address is the fallback.
@@ -4672,9 +4753,9 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "OK accepted"));
-        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
-        wire.feed_management(partial(id, "@scan result Guest open ch=11 -71dBm"));
+        wire.feed_management(answer(id, "OK accepted\r\n"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm\r\n"));
+        wire.feed_management(partial(id, "@scan result Guest open ch=11 -71dBm\r\n"));
 
         assert!(pump_until(&mut app, |app| !app
             .network
@@ -4684,7 +4765,7 @@ mod tests {
             app.waiting_on_device(),
             "an accepted scan is not a finished one"
         );
-        wire.feed_management(answer(id, "@scan done"));
+        wire.feed_management(answer(id, "@scan done\r\n"));
         assert!(pump_until(&mut app, |app| !app.waiting_on_device()));
         assert_eq!(
             app.network.scan_results,
@@ -4715,8 +4796,8 @@ mod tests {
         // `@scan done` carries FINAL — so a body with an `OK` line in it would
         // be recognised as a finished answer by shape alone. The acceptance is
         // what says the rest is coming.
-        wire.feed_management(answer(id, "OK accepted"));
-        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
+        wire.feed_management(answer(id, "OK accepted\r\n"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm\r\n"));
 
         assert!(pump_until(&mut app, |app| !app
             .network
@@ -4742,9 +4823,9 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "OK accepted"));
-        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm"));
-        wire.feed_management(answer(id, "@scan done"));
+        wire.feed_management(answer(id, "OK accepted\r\n"));
+        wire.feed_management(partial(id, "@scan result BenchNet wpa2 ch=6 -54dBm\r\n"));
+        wire.feed_management(answer(id, "@scan done\r\n"));
 
         assert!(pump_until(&mut app, |app| !app.network.loading));
         assert_eq!(
@@ -4764,8 +4845,8 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::En);
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "OK accepted"));
-        wire.feed_management(answer(id, "@scan error"));
+        wire.feed_management(answer(id, "OK accepted\r\n"));
+        wire.feed_management(answer(id, "@scan error\r\n"));
 
         assert!(pump_until(&mut app, |app| !app.network.loading));
         assert_eq!(
@@ -4795,9 +4876,9 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::Zh);
         app.scan_wifi().expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "OK accepted"));
-        wire.feed_management(partial(id, "@scan result 非你莫属 wpa2 ch=6 -54dBm"));
-        wire.feed_management(answer(id, "@scan done"));
+        wire.feed_management(answer(id, "OK accepted\r\n"));
+        wire.feed_management(partial(id, "@scan result 非你莫属 wpa2 ch=6 -54dBm\r\n"));
+        wire.feed_management(answer(id, "@scan done\r\n"));
 
         assert!(pump_until(&mut app, |app| !app.network.loading));
         assert_eq!(
@@ -5026,9 +5107,10 @@ mod tests {
             ..App::default()
         };
         app.settings = Some(crate::settings::SettingsStore::at(&path));
-        app.last_dial = Some(Dial::Ble(Selection::Address(
-            "EE:C7:42:34:48:CF".to_string(),
-        )));
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("EE:C7:42:34:48:CF".to_string()),
+            None,
+        ));
         app.set_view(View::Terminal);
         assert_eq!(
             crate::settings::SettingsStore::at(&path).read().address,

@@ -7,5 +7,6 @@
 //! destructive guard, a pending input line, or a mode that asks by design.
 
 pub mod approval;
+pub mod cli;
 pub mod executor;
 pub mod policy;

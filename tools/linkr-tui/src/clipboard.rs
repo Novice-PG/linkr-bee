@@ -16,6 +16,18 @@
 /// the user just read always is.
 pub const MAX_OSC52_CHARS: usize = 64 * 1024;
 
+/// The tail of `text` that fits an OSC 52 copy.
+///
+/// A pure helper so the copy path and its test cannot disagree about which end
+/// a cap keeps: the *end*, where the answer the user just watched arrive is,
+/// rather than hours of boot noise they have long scrolled past.
+pub fn copy_tail(text: &str) -> String {
+    let total = text.chars().count();
+    text.chars()
+        .skip(total.saturating_sub(MAX_OSC52_CHARS))
+        .collect()
+}
+
 /// Put `text` on the terminal's clipboard with OSC 52.
 ///
 /// Written straight to stdout rather than through the frame: a clipboard copy
@@ -120,4 +132,22 @@ pub fn write_system_clipboard(text: &str) -> Result<(), String> {
         }
     }
     Err("no clipboard tool worked".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A copy that cannot fit keeps the end of the screen: what it drops is
+    /// the part the user scrolled past, not the part they were reading.
+    #[test]
+    fn a_capped_copy_keeps_the_end_of_a_screen() {
+        let short = "the answer";
+        assert_eq!(copy_tail(short), short, "what fits is copied whole");
+        let mut text = "x".repeat(MAX_OSC52_CHARS + 64);
+        text.push_str("TAIL");
+        let kept = copy_tail(&text);
+        assert_eq!(kept.chars().count(), MAX_OSC52_CHARS);
+        assert!(kept.ends_with("TAIL"), "the end is what was kept");
+    }
 }

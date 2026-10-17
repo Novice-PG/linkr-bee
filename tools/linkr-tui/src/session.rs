@@ -8,6 +8,7 @@
 //! or a socket.
 
 use std::io;
+use std::time::Duration;
 
 use crate::event::ConnectionState;
 use crate::transport::ble::Selection;
@@ -27,7 +28,10 @@ pub enum Dial {
     /// Bluetooth Low Energy. The [`Selection`] is which board to look for;
     /// [`Selection::Any`] takes the first Nordic UART service on the air, and
     /// a named or addressed one has to be found before anything is dialled.
-    Ble(Selection),
+    /// The second field is how long the whole dial may take: `None` is the
+    /// radio's own patience, which is what an interface dial gets; a script
+    /// that named `--connect-timeout` hands its own window down.
+    Ble(Selection, Option<Duration>),
     /// The LAN socket, at `host`, with the token the bridge asks for. A token
     /// is optional because a bridge that was never given one does not ask; see
     /// `transport::lan`.
@@ -48,13 +52,13 @@ impl Dial {
             // read is not the same event as a board that is switched off, and
             // turning one into the other would send the user to look at the
             // wrong thing. See `ble::Selection::reachable`.
-            Dial::Ble(selection) => {
+            Dial::Ble(selection, within) => {
                 if let Err(why) = selection.reachable() {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
                 }
-                Ok(Box::new(crate::transport::ble::BleLink::new(
-                    selection.clone(),
-                )))
+                Ok(Box::new(
+                    crate::transport::ble::BleLink::new(selection.clone()).within(*within),
+                ))
             }
             // The token is part of the dial and never part of its description:
             // a description is shown and pasted, and a token that reaches a
@@ -86,7 +90,7 @@ impl Dial {
     pub fn kind(&self) -> LinkKind {
         match self {
             Dial::Stdio(_) => LinkKind::Stdio,
-            Dial::Ble(_) => LinkKind::Ble,
+            Dial::Ble(..) => LinkKind::Ble,
             Dial::Lan { .. } => LinkKind::Lan,
         }
     }
@@ -97,7 +101,7 @@ impl Dial {
             Dial::Stdio(command) => {
                 crate::transport::stdio::StdioBridge::command_description(command)
             }
-            Dial::Ble(selection) => format!("ble:{}", selection.label()),
+            Dial::Ble(selection, _) => format!("ble:{}", selection.label()),
             Dial::Lan { host, .. } => format!("lan:{}", crate::transport::lan::host_key(host)),
         }
     }
@@ -430,7 +434,7 @@ mod tests {
     fn every_dial_builds_into_a_link_it_can_describe() {
         let dials = [
             Dial::Stdio("cat".into()),
-            Dial::Ble(Selection::Address("EE:C7:42:34:48:CF".into())),
+            Dial::Ble(Selection::Address("EE:C7:42:34:48:CF".into()), None),
             Dial::Lan {
                 host: "192.168.0.44".into(),
                 token: None,
@@ -473,8 +477,8 @@ mod tests {
     #[test]
     fn an_unreadable_ble_address_is_refused_before_the_radio() {
         for dial in [
-            Dial::Ble(Selection::Address("not-an-address".to_string())),
-            Dial::Ble(Selection::Address("::".to_string())),
+            Dial::Ble(Selection::Address("not-an-address".to_string()), None),
+            Dial::Ble(Selection::Address("::".to_string()), None),
         ] {
             let err = match dial.open() {
                 Ok(_) => panic!("{dial:?} dialled a radio for an address with no digits"),
@@ -494,11 +498,11 @@ mod tests {
         assert_eq!(Dial::Stdio("cat".into()).describe(), "stdio: cat");
         assert_eq!(Dial::Stdio("-".into()).describe(), "stdio: -");
         assert_eq!(Dial::Stdio("cat".into()).kind(), LinkKind::Stdio);
-        assert_eq!(Dial::Ble(Selection::Any).kind(), LinkKind::Ble);
+        assert_eq!(Dial::Ble(Selection::Any, None).kind(), LinkKind::Ble);
         // And a Bluetooth dial names the board it is looking for, which is
         // what makes two boards on one bench tellable apart.
         assert_eq!(
-            Dial::Ble(Selection::Address("ee:c7:42:34:48:cf".into())).describe(),
+            Dial::Ble(Selection::Address("ee:c7:42:34:48:cf".into()), None).describe(),
             "ble:EE:C7:42:34:48:CF"
         );
     }
