@@ -177,15 +177,54 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
     spans.push(Span::styled(app.state_name().to_string(), state_style));
     // The latch, while one is armed: the announcement times out, the chip
     // does not, so a user who looked away still sees what the next key will
-    // carry.
+    // carry. One span with its own separator, so the bar can give the whole
+    // chip up when it runs out of room rather than leaving ` · ` behind.
     if app.latch.is_armed() {
-        spans.push(Span::styled(DOT.to_string(), theme.muted()));
         spans.push(Span::styled(
-            format!("{} {}", app.latch.names(), s.latch_pending),
+            format!("{DOT}{} {}", app.latch.names(), s.latch_pending),
+            theme.warn(),
+        ));
+    }
+    // What the pane could not read as text. The device's bytes arrive as
+    // *something* and the pane paints a replacement character for each byte
+    // that was not UTF-8; the count is the part of that fact a user can act
+    // on, so it rides the bar — where the state is — and not the pane, where
+    // it would cover the very text it is talking about. One span, for the
+    // same reason the latch chip is one.
+    let lost = app.terminal.decode_lost();
+    if lost > 0 {
+        spans.push(Span::styled(
+            format!("{DOT}{} {lost}B", s.decode_loss),
             theme.warn(),
         ));
     }
     Line::from(spans)
+}
+
+/// The left half of a bar, cut down to the room it really has.
+///
+/// The right half is painted *over* the left, so a line that reaches past it is
+/// not laid out around its neighbour — it is covered by it, mid-glyph: a chip
+/// that needed one column more came out as `· 乱` with the rest of the row on
+/// top of it, which reads as a broken frame rather than as a full bar. Chips
+/// are given up whole instead, from the end, and the last span stays: a bar
+/// with room for nothing else still says what the keyboard is on.
+pub fn trim_to_width(line: Line<'static>, width: u16) -> Line<'static> {
+    let mut line = line;
+    while line.width() as u16 > width && line.spans.len() > 1 {
+        line.spans.pop();
+    }
+    // A separator with nothing after it is not a fact either: `… · 已连接` had
+    // its state given up, and the ` · ` in front of it is a mark with no word.
+    while line.spans.len() > 1
+        && line
+            .spans
+            .last()
+            .is_some_and(|span| span.content.trim() == "·")
+    {
+        line.spans.pop();
+    }
+    line
 }
 
 /// What the keyboard is on inside the focused view, in the interface language.
@@ -497,6 +536,94 @@ mod tests {
         let text = line_text(&bottom_left(&app, &Theme::DARK));
         assert!(text.starts_with("[侧栏] 网络 / "), "{text}");
         assert!(text.contains("传输"), "the row is named: {text}");
+    }
+
+    /// Bytes the pane could not read as text ride the bottom bar: the pane
+    /// paints `�` for them, and a screenful of `�` with nothing said about it
+    /// reads as the view's fault. The count is the part a user can carry to
+    /// the device — how much of what it sent never arrived as text.
+    #[test]
+    fn the_bottom_bar_names_the_bytes_the_pane_could_not_read() {
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        let clean = line_text(&bottom_left(&app, &Theme::DARK));
+        assert!(
+            !clean.contains("乱码"),
+            "nothing lost, nothing said: {clean}"
+        );
+
+        app.terminal.push(b"\xff\xff");
+        let line = bottom_left(&app, &Theme::DARK);
+        assert!(
+            line_text(&line).ends_with(" · 乱码 2B"),
+            "{}",
+            line_text(&line)
+        );
+        assert_eq!(
+            line.spans.last().expect("the marker is there").style.fg,
+            Some(Theme::DARK.warn)
+        );
+
+        app.lang = Lang::En;
+        let text = line_text(&bottom_left(&app, &Theme::DARK));
+        assert!(text.ends_with(" · garbled 2B"), "{text}");
+    }
+
+    /// A line the bar has no room for is given up a chip at a time, not cut
+    /// through the middle of one: the right half is painted *over* the left, so
+    /// a chip that was one column too long came out as `· 乱`, which reads as a
+    /// broken frame. And later, more important facts survive it — the state is
+    /// what the user is looking at, the chip is a bonus.
+    #[test]
+    fn a_left_half_too_long_gives_up_chips_whole() {
+        let theme = Theme::DARK;
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        app.state = ConnectionState::Connected;
+        app.terminal.push(&[0xffu8; 57]);
+        app.latch.ctrl = true;
+        let full = bottom_left(&app, &theme);
+        let text = line_text(&full);
+        assert!(text.ends_with(" · 乱码 57B"), "{text}");
+        assert!(text.contains(" · Ctrl 待发 "), "{text}");
+
+        // Room for both chips, and no more: nothing is given up.
+        let width = full.width() as u16;
+        assert_eq!(
+            line_text(&trim_to_width(full.clone(), width)),
+            line_text(&full)
+        );
+        let one_chip = line_text(&trim_to_width(full.clone(), width - 1));
+        assert!(one_chip.ends_with(" · Ctrl 待发"), "{one_chip}");
+
+        // The bar the screenshot came from: room for the core and nothing
+        // else — the last chip goes whole, the state stays.
+        let core = line_text(&trim_to_width(full.clone(), 37));
+        assert!(core.ends_with("已连接"), "{core}");
+        assert!(!core.contains("乱"), "a chip is not cut: {core}");
+        assert!(!core.contains("待发"), "{core}");
+
+        // Room for neither the state nor a chip: the focus and the view are
+        // what a bar this narrow still says.
+        let narrow = line_text(&trim_to_width(full.clone(), 12));
+        assert!(narrow.starts_with("[终端]"), "{narrow}");
+        assert!(narrow.len() < 30, "{narrow}");
+
+        // A state given up takes the ` · ` in front of it: a mark with no word
+        // after it is not a fact.
+        let headless = line_text(&trim_to_width(full.clone(), 28));
+        assert!(!headless.ends_with("· "), "{headless}");
+        assert!(headless.ends_with("输入"), "{headless}");
+
+        // And a bar with room for nothing at all still says what Enter will
+        // act on: one span, never none.
+        let nothing = trim_to_width(full, 0);
+        assert_eq!(nothing.spans.len(), 1);
+        assert_eq!(line_text(&nothing), "[终端] ");
     }
 
     /// The right half lists the four designed hints, in order, in both

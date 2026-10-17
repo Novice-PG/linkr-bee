@@ -24,7 +24,11 @@
 //!   every ambiguous glyph pushes the rest of its line a cell to the right:
 //!   labels ride over their neighbours and the line's end is clipped. The
 //!   pass replaces the glyphs this interface draws with one-cell stand-ins
-//!   ([`STAND_INS`]) — the same shapes in ASCII, which no font renders wide.
+//!   ([`STAND_INS`]) — the same shapes in ASCII, which no font renders wide —
+//!   and every *other* ambiguous glyph with a `?` ([`UNKNOWN`]): the device's
+//!   own text is full of them too (the replacement character a bad byte turns
+//!   into, `℃`, `±`, `°`), and one of those widening in place walks the rest
+//!   of the device's line to the right just as surely as a label's arrow did.
 //! * **The right edge.** The console's scrollbar lies over the window's last
 //!   column or two, and the frame's right edge — the counters, the tail of a
 //!   line — is painted under it. [`RIGHT_MARGIN`] columns are left unpainted
@@ -38,6 +42,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+use unicode_width::UnicodeWidthChar;
 
 /// Columns kept free at the right edge under the legacy console, where the
 /// scrollbar sits over the window's last cells.
@@ -150,19 +155,42 @@ const STAND_INS: [(char, &str); 32] = [
     ('\u{2570}', "`"), // ╰ bottom-left arc
 ];
 
-/// The one-cell stand-in for an ambiguous-width glyph.
+/// The one-cell stand-in for a glyph the console would draw two cells wide.
 ///
 /// ASCII returns early — it is most of every frame and none of it needs a
-/// stand-in — and the table is walked only for the rest.
+/// stand-in — and the table is walked only for the rest: this interface's own
+/// glyphs have stand-ins chosen for the shape they keep. Anything else that
+/// is ambiguous by Unicode's tables gets [`UNKNOWN`], because the *layout* is
+/// the thing that must not give way: the device picks the glyphs in its own
+/// text, and a `�` the console draws two cells wide would shove the rest of
+/// that line into its neighbour.
+///
+/// A glyph that is wide in *every* context — CJK itself — is left alone: the
+/// frame and the console agree about it, and the text stays readable.
 fn narrow(ch: char) -> Option<&'static str> {
     if ch.is_ascii() {
         return None;
     }
-    STAND_INS
+    if let Some(stand_in) = STAND_INS
         .iter()
         .find(|(glyph, _)| *glyph == ch)
         .map(|(_, stand_in)| *stand_in)
+    {
+        return Some(stand_in);
+    }
+    let narrow = UnicodeWidthChar::width(ch);
+    let cjk = UnicodeWidthChar::width_cjk(ch);
+    (narrow != cjk).then_some(UNKNOWN)
 }
+
+/// The stand-in for ambiguous glyphs the table has no shape for.
+///
+/// `?` is the character a console writes for a glyph it cannot draw, which is
+/// the truth about these cells on the old console: the byte arrived, the
+/// glyph did not render the way the frame was laid out, and the pane still
+/// has to be readable. The count in the bottom bar says how many there were;
+/// the notice beside it says what to check.
+const UNKNOWN: &str = "?";
 
 #[cfg(test)]
 mod tests {
@@ -244,7 +272,7 @@ mod tests {
             .set_style(Style::default().add_modifier(Modifier::BOLD));
         buffer[(2, 0)].set_symbol("a");
         buffer[(3, 0)].set_symbol("→");
-        buffer[(4, 0)].set_symbol("é");
+        buffer[(4, 0)].set_symbol("■");
 
         prepare(&mut buffer);
 
@@ -263,8 +291,88 @@ mod tests {
         );
         assert_eq!(buffer[(2, 0)].symbol(), "a");
         assert_eq!(buffer[(3, 0)].symbol(), ">");
-        // A glyph with no stand-in is left alone rather than guessed at.
-        assert_eq!(buffer[(4, 0)].symbol(), "é");
+        // An ambiguous glyph the table has no shape for: the console would
+        // draw it two cells wide, so it gets the one-cell `?` rather than a
+        // line that walks right. `■` is ambiguous by the same table `℃` and
+        // `±` are, and this interface never draws it — the device's text is
+        // where it comes from.
+        assert_eq!(buffer[(4, 0)].symbol(), "?");
+    }
+
+    /// The replacement character most of all: it is what the pane paints for
+    /// a byte that is not text, and a console with a CJK font draws it two
+    /// cells wide — a whole row of them was the screenshot that asked for
+    /// this rule.
+    #[test]
+    fn the_glyphs_a_device_paints_and_this_table_never_drew_are_narrowed_too() {
+        // None of these is in [`STAND_INS`] — they are the device's text, not
+        // this interface's — so the substitute is the generic one, which is
+        // why the fallback has to exist at all.
+        assert_eq!(narrow('\u{fffd}'), Some("?"), "U+FFFD, the lost byte");
+        assert_eq!(narrow('\u{2103}'), Some("?"), "℃");
+        assert_eq!(narrow('\u{b1}'), Some("?"), "±");
+        assert_eq!(narrow('\u{25a0}'), Some("?"), "■");
+    }
+
+    /// Wide glyphs are not ambiguous: the frame and the console both count a
+    /// CJK character as two cells, so the text stays as the device wrote it.
+    #[test]
+    fn a_wide_glyph_is_not_ambiguous() {
+        assert_eq!(narrow('中'), None);
+        assert_eq!(narrow('，'), None, "CJK punctuation is wide, not ambiguous");
+        assert_eq!(narrow('한'), None, "Hangul is wide");
+    }
+
+    /// The invariant the pass exists for, over every character there is: no
+    /// cell of a painted frame may hold a glyph the console would draw wider
+    /// than the width tables the frame was laid out with.
+    ///
+    /// The ambiguous set is 138k code points — Unicode reserves whole planes
+    /// for CJK — so the sweep runs a screenful at a time; the pass is a
+    /// per-cell function, and every ambiguous glyph goes through it either
+    /// way.
+    #[test]
+    fn no_ambiguous_glyph_survives_the_pass() {
+        use unicode_width::UnicodeWidthChar;
+
+        let ambiguous: Vec<char> = (0..=char::MAX as u32)
+            .filter_map(char::from_u32)
+            .filter(|ch| UnicodeWidthChar::width(*ch) != UnicodeWidthChar::width_cjk(*ch))
+            .collect();
+        assert!(
+            ambiguous.len() > 100_000,
+            "the sweep found {} glyphs, which is too few to be every ambiguous one",
+            ambiguous.len()
+        );
+
+        const COLS: u16 = 200;
+        const ROWS: u16 = 36;
+        let mut swept = 0;
+        for chunk in ambiguous.chunks(COLS as usize * ROWS as usize) {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, COLS, ROWS));
+            for (i, ch) in chunk.iter().enumerate() {
+                buffer[(i as u16 % COLS, i as u16 / COLS)].set_symbol(&ch.to_string());
+            }
+
+            prepare(&mut buffer);
+
+            for cell in &buffer.content {
+                let symbol = cell.symbol();
+                let mut chars = symbol.chars();
+                let Some(ch) = chars.next() else { continue };
+                if chars.next().is_some() {
+                    continue;
+                }
+                assert_eq!(
+                    UnicodeWidthChar::width(ch),
+                    UnicodeWidthChar::width_cjk(ch),
+                    "{ch:?} (U+{:04X}) survived the pass, so the console would draw it wider than the frame did",
+                    ch as u32
+                );
+            }
+            swept += chunk.len();
+        }
+        assert_eq!(swept, ambiguous.len(), "every ambiguous glyph was painted");
     }
 
     #[test]

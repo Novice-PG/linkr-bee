@@ -533,6 +533,13 @@ pub struct App {
     pub agent_replies: Vec<std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
+    /// Whether the pane's first undecodable byte has already been announced.
+    ///
+    /// Said once, not once per read: a device that speaks something that is
+    /// not UTF-8 produces a replacement character in nearly every burst, and a
+    /// corner that repeats the same sentence forever is a corner nobody reads.
+    /// The count in the bottom bar keeps saying it after the toast has gone.
+    pub decode_loss_noticed: bool,
     /// The questions asked of the bridge about itself, and their answers.
     ///
     /// The bridge answers these on a channel of its own, so they are never
@@ -666,6 +673,7 @@ impl Default for App {
             agent_client: None,
             agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
+            decode_loss_noticed: false,
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
             line_mode: false,
@@ -1755,6 +1763,7 @@ impl App {
             match event {
                 LinkEvent::Data(bytes) => {
                     self.terminal.push(&bytes);
+                    self.note_decode_loss();
                     self.trace.rx(&bytes);
                     if self.collect_output {
                         self.output.push_back(bytes.clone());
@@ -2849,6 +2858,38 @@ impl App {
     /// Throw the pane's history away. The device is not told.
     pub fn clear_terminal(&mut self) {
         self.terminal.clear();
+        // The screen the bar was describing is gone, so the next undecodable
+        // byte gets to say so again.
+        self.decode_loss_noticed = false;
+    }
+
+    /// Say the first time the pane could not read the device's bytes as text.
+    ///
+    /// The pane paints a replacement character for a byte that is not UTF-8 —
+    /// that much a console can do — but a screenful of `�` with no
+    /// explanation reads as the view's fault, and the fix is on the wire: the
+    /// device is speaking something that is not UTF-8, or the serial link is
+    /// not carrying what the device sent (a baud rate or a frame that does not
+    /// match). Both are the user's to check, and neither can be found from the
+    /// pane unless the sentence names them.
+    ///
+    /// Once per screen: see [`App::decode_loss_noticed`]. The count stays in
+    /// the bottom bar, which is the part of the frame that keeps saying it
+    /// after the toast has expired.
+    fn note_decode_loss(&mut self) {
+        if self.decode_loss_noticed {
+            return;
+        }
+        let lost = self.terminal.decode_lost();
+        if lost == 0 {
+            return;
+        }
+        self.decode_loss_noticed = true;
+        let text = crate::text::fill(self.strings().decode_loss_notice, &[lost.to_string()]);
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Warn,
+        });
     }
 
     /// Keep the pane pinned to the newest row again.
@@ -4235,6 +4276,61 @@ mod tests {
         assert!(pump_until(&mut app, |app| app.connected()));
         assert_eq!(app.transport, Transport::Ble);
         (app, wire)
+    }
+
+    /// Undecodable bytes are what a device speaking something that is not
+    /// UTF-8 — or a serial frame that does not match what the device sends —
+    /// looks like from inside the app: the pane paints `�` for each byte, and
+    /// the fact is said once per screen, because saying it per burst would be
+    /// saying it forever to a user whose device will not change.
+    #[test]
+    fn undecodable_bytes_are_announced_once_per_screen() {
+        let (mut app, wire) = connected(Lang::En);
+
+        wire.feed(b"ok\r\n");
+        assert!(pump_until(&mut app, |app| app.rx > 0));
+        assert_eq!(app.terminal.decode_lost(), 0);
+        assert!(
+            app.notices
+                .iter()
+                .all(|notice| !notice.text.contains("UTF-8")),
+            "valid text is not announced: {:?}",
+            app.notices
+        );
+
+        wire.feed(b"\xff\xfe");
+        assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 2));
+        let telling = |app: &App| {
+            app.notices
+                .iter()
+                .filter(|notice| notice.text.contains("UTF-8"))
+                .count()
+        };
+        assert_eq!(telling(&app), 1, "the loss is named: {:?}", app.notices);
+        assert_eq!(
+            app.notices.last().expect("the notice").level,
+            NoticeLevel::Warn,
+            "a device that cannot be read is a warning, not a progress report"
+        );
+        assert!(
+            app.notices.last().expect("the notice").text.contains('2'),
+            "and it carries the count: {:?}",
+            app.notices.last()
+        );
+
+        // More of the same: the sentence has been said, and the bottom bar's
+        // count keeps saying it.
+        wire.feed(b"\xff\xff\xff\xff");
+        assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 6));
+        assert_eq!(telling(&app), 1, "once, not once per read");
+
+        // Clearing the screen clears the count with it, so the next loss is a
+        // new fact about the screen that is now in front of the user.
+        app.clear_terminal();
+        assert_eq!(app.terminal.decode_lost(), 0);
+        wire.feed(b"\xfe");
+        assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 1));
+        assert_eq!(telling(&app), 2, "a fresh screen gets a fresh sentence");
     }
 
     /// Asking the bridge what it is must fill the grid it is drawn from.

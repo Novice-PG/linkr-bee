@@ -165,9 +165,13 @@ fn draw_bar(
 ) {
     let theme = app.theme();
     let ground = chrome::bar_style(&theme);
+    let right_width = right.width() as u16;
+    // The left half is given the room the right one leaves, because the right
+    // half is painted over it: a line that reaches past its neighbour is
+    // covered mid-glyph, not laid out around it. See [`chrome::trim_to_width`].
+    let left = chrome::trim_to_width(left, area.width.saturating_sub(right_width));
     frame.render_widget(Paragraph::new(left).style(ground), area);
 
-    let right_width = right.width() as u16;
     if right_width < area.width {
         let [_, right_area] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
@@ -571,6 +575,77 @@ mod tests {
             assert_eq!(pane.height, h - 2, "{w}x{h}");
             assert!(pane.width >= 1, "{w}x{h}: the pane vanished");
         }
+    }
+
+    /// The screenshot's frame, painted: a device whose bytes are not text, on
+    /// the old console.
+    ///
+    /// The pane paints `U+FFFD` for every byte it could not decode, and conhost
+    /// draws each of those two cells wide — a row of them walked the rest of
+    /// the line off its own end. The compatibility pass is what stops that, and
+    /// this is the invariant at the level the user saw it: *nothing in a
+    /// painted frame is a glyph the old console would widen.*
+    #[test]
+    fn a_painted_frame_holds_no_glyph_the_old_console_would_widen() {
+        use unicode_width::UnicodeWidthChar;
+
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        app.legacy_console = true;
+        // A line's worth of bytes that are not text, then the tail the
+        // screenshot showed beside them.
+        app.terminal.push(&[0xffu8; 57]);
+        app.terminal.push(b" 25.3C");
+
+        let painted = render_buffer(&app, 100, 30).expect("the frame paints");
+        assert!(
+            painted.content.iter().any(|cell| cell.symbol() == "?"),
+            "the pane's lost bytes are painted as something"
+        );
+        for cell in &painted.content {
+            let mut chars = cell.symbol().chars();
+            let Some(ch) = chars.next() else { continue };
+            if chars.next().is_some() {
+                // A composed cell (none today) is not one glyph, and not what
+                // this pass is about.
+                continue;
+            }
+            assert_eq!(
+                UnicodeWidthChar::width(ch),
+                UnicodeWidthChar::width_cjk(ch),
+                "{ch:?} survived into the painted frame: the old console would draw it two cells wide and walk the rest of the row"
+            );
+        }
+
+        // And it was the pass that did it: with the pass off — the frame the
+        // design asks for, on a terminal that agrees with it — the pane still
+        // carries the replacement glyphs the device earned, and the bar still
+        // counts the bytes behind them.
+        app.legacy_console = false;
+        let design = render_buffer(&app, 100, 30).expect("the frame paints");
+        assert!(
+            design
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "\u{fffd}"),
+            "the pane paints the device's bytes as they arrived"
+        );
+        let text = render_to_text(&app, 100, 30);
+        assert!(
+            text.contains("乱码 57B"),
+            "and the bottom bar says how many bytes were lost:\n{text}"
+        );
+
+        // The window the screenshot came from: no room for the chip beside the
+        // key hints, so it is given up whole rather than drawn half-way — and
+        // the state, which is what that row is for, is still there.
+        let narrow = render_to_text(&app, 85, 24);
+        let bottom = narrow.lines().last().unwrap_or_default().to_string();
+        assert!(bottom.contains(app.state_name()), "{bottom}");
+        assert!(!bottom.contains("乱"), "the chip is not cut: {bottom}");
+        assert!(!bottom.contains("待发"), "nor a chip that is not armed");
     }
 
     /// With the rail closed the centre takes the whole middle band: same bottom

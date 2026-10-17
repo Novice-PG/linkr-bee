@@ -109,6 +109,18 @@ pub struct Strings {
     pub latch_disarmed: &'static str,
     pub latch_pending: &'static str,
 
+    // --- what the wire did ------------------------------------------------
+    /// The bottom bar's marker for bytes the pane could not read as UTF-8.
+    /// The count follows it in the bar (`乱码 41B`), so the label stays short.
+    pub decode_loss: &'static str,
+    /// The one-time notice that explains those bytes; `{}` is the count.
+    ///
+    /// It names both things that produce them — a device speaking something
+    /// that is not UTF-8, and a serial link whose framing does not match the
+    /// device's — because either one is the user's to check and neither is
+    /// visible from the pane the user is looking at.
+    pub decode_loss_notice: &'static str,
+
     // --- views -----------------------------------------------------------
     /// Title of the serial terminal view.
     pub view_terminal: &'static str,
@@ -384,6 +396,8 @@ const ZH: Strings = Strings {
     latch_armed: "{} 已武装：下一次按键会带上它",
     latch_disarmed: "{} 已取消武装",
     latch_pending: "待发",
+    decode_loss: "乱码",
+    decode_loss_notice: "串口收到 {} 字节不是有效 UTF-8 文本：终端里显示为 �（旧控制台上是 ?）。请检查设备的串口参数（--query-uart 查看、--uart 设置），或确认设备没有用 GBK 等非 UTF-8 编码。",
     view_terminal: "串口终端",
     view_diagnostics: "诊断",
     view_network: "网络",
@@ -533,6 +547,8 @@ const EN: Strings = Strings {
     latch_armed: "{} armed — the next key carries it",
     latch_disarmed: "{} disarmed",
     latch_pending: "armed",
+    decode_loss: "garbled",
+    decode_loss_notice: "{} bytes from the serial link are not valid UTF-8: the pane shows � (? on the old console). Check the device's serial parameters (--query-uart reads them, --uart sets them), or whether it speaks GBK rather than UTF-8.",
     view_terminal: "Serial Terminal",
     view_diagnostics: "Diagnostics",
     view_network: "Network",

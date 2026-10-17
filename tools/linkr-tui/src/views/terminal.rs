@@ -44,6 +44,12 @@ use crate::vt::{Ansi, Cell, CellStyle, Parser, Vt};
 pub struct Utf8Stream {
     /// Bytes that did not form a complete character yet.
     pending: Vec<u8>,
+    /// Bytes replaced with `U+FFFD` since the stream was made. A device that
+    /// is not speaking UTF-8 — or a line that is not carrying the bytes it
+    /// thinks it is — arrives here, and this count is what the frame says
+    /// about it: the pane can only paint the replacement, but the bar can say
+    /// *how many* bytes the wire lost.
+    lost: usize,
 }
 
 impl Utf8Stream {
@@ -76,6 +82,7 @@ impl Utf8Stream {
                         Some(len) => {
                             out.push('\u{fffd}');
                             self.pending.drain(..valid + len);
+                            self.lost += len;
                         }
                     }
                 }
@@ -86,6 +93,11 @@ impl Utf8Stream {
     /// Whether a partial character is still waiting for its bytes.
     pub fn is_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// How many bytes this stream has replaced with `U+FFFD`.
+    pub fn lost(&self) -> usize {
+        self.lost
     }
 }
 
@@ -231,6 +243,16 @@ impl TerminalPane {
     pub fn is_empty(&self) -> bool {
         let screen = self.vt.screen();
         screen.scrollback_len() == 0 && screen.is_blank() && self.vt.title().is_empty()
+    }
+
+    /// How many bytes of the device's output never decoded as UTF-8.
+    ///
+    /// Zero for every device that speaks text, which is most of them. Anything
+    /// else is a fact about the wire the frame should carry: the pane paints
+    /// `U+FFFD` for those bytes, and a screenful of `�` with no explanation
+    /// reads as the view's fault rather than the device's.
+    pub fn decode_lost(&self) -> usize {
+        self.decoder.lost()
     }
 
     /// The whole retained output as plain text, escape sequences resolved.
@@ -770,6 +792,40 @@ mod tests {
         let text = stream.push(b"ok\xffmore");
         assert_eq!(text, "ok\u{fffd}more");
         assert!(!stream.is_pending());
+    }
+
+    /// The bytes behind the replacement characters are counted, because the
+    /// pane's `�` is the only thing a screen shows and the count is the only
+    /// thing that says the loss is the wire's, not the view's. A held tail is
+    /// not a loss: nothing has gone wrong while the bytes are still coming.
+    #[test]
+    fn the_bytes_behind_the_replacement_characters_are_counted() {
+        let mut stream = Utf8Stream::default();
+        assert_eq!(stream.lost(), 0);
+        stream.push("中文".as_bytes());
+        assert_eq!(stream.lost(), 0, "valid text loses nothing");
+        stream.push(b"a\xffb\xff\xffc");
+        assert_eq!(stream.lost(), 3, "one count per replaced byte");
+        // A half character is pending, not lost.
+        stream.push(&"中".as_bytes()[..2]);
+        assert!(stream.is_pending());
+        assert_eq!(stream.lost(), 3);
+        stream.push(&"中".as_bytes()[2..]);
+        assert_eq!(stream.lost(), 3, "the held bytes were not lost");
+    }
+
+    /// The pane the frame reads says the same thing: a device speaking
+    /// something that is not UTF-8 shows up in the count, and clearing the
+    /// screen clears it — the bar is describing the screen in front of it.
+    #[test]
+    fn a_pane_counts_its_own_losses_and_forgets_them_on_clear() {
+        let mut pane = sized(20, 4);
+        pane.push(b"ok");
+        assert_eq!(pane.decode_lost(), 0);
+        pane.push(b"\xff\xfe");
+        assert_eq!(pane.decode_lost(), 2);
+        pane.clear();
+        assert_eq!(pane.decode_lost(), 0);
     }
 
     /// Decoding byte by byte gives the same text as decoding it all at once:
