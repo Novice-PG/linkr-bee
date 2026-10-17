@@ -76,7 +76,13 @@ const TICK: Duration = Duration::from_millis(250);
 /// One line, because help is read at a glance: every option below it is the
 /// long answer, and this is the short one — what the program is, what it can
 /// be asked to do — a person needs to know they have opened the right one.
+#[cfg(feature = "tui")]
 const ABOUT: &str = "Run a Linkr Bee wireless serial bridge: scan for a board, query and configure it, run shell commands on its target, or open its terminal";
+
+/// The same line for a build with no interface: it says what this one can be
+/// asked for rather than promising a terminal it cannot open.
+#[cfg(not(feature = "tui"))]
+const ABOUT: &str = "Run a Linkr Bee wireless serial bridge: scan for a board, query and configure it, or run shell commands on its target";
 
 /// The help text, generated from the one table `cli` keeps.
 ///
@@ -735,6 +741,18 @@ fn parse_span(prog: &str, flag: &str, raw: &str) -> Duration {
 /// What this tool is and can do: the document a caller reads before writing a
 /// script against it.
 ///
+/// The one operation, and the one help line, that a build without an interface
+/// cannot offer. `--capabilities` is the contract a script reads, so it says
+/// what *this* build can be asked for rather than what the other one can.
+#[cfg(feature = "tui")]
+const TUI_OPERATION: &str = ",\"tui\"";
+#[cfg(not(feature = "tui"))]
+const TUI_OPERATION: &str = "";
+#[cfg(feature = "tui")]
+const INTERFACE_CAPABILITY: &str = "interface   (no operation flags)       open the terminal\n";
+#[cfg(not(feature = "tui"))]
+const INTERFACE_CAPABILITY: &str = "";
+
 /// The operations are named as the flags that ask for them, because that is
 /// how they are asked for today; the numbers are the defaults a caller has to
 /// plan around, and the exit codes are the contract that makes a script
@@ -749,7 +767,7 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
                 "\"query-webdav\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",\"webdav\",",
-                "\"webdav-off\",\"exec\",\"loopback-test\",\"tui\"],",
+                "\"webdav-off\",\"exec\",\"loopback-test\"{}],",
                 "\"defaults\":{{\"scan_timeout_ms\":{},\"connect_timeout_ms\":{},",
                 "\"exec_timeout_ms\":{}}},",
                 "\"exec\":{{\"endings\":[\"rc-marker\",\"idle\"],",
@@ -764,6 +782,7 @@ fn capabilities(prog: &str, json: bool) -> String {
             ),
             version,
             linkr_tui::protocol::MGMT_API_MAJOR,
+            TUI_OPERATION,
             cli::DEFAULT_SCAN_TIMEOUT.as_millis(),
             cli::DEFAULT_CONNECT_TIMEOUT.as_millis(),
             linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis(),
@@ -783,13 +802,13 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "            --retry N                  resend it after a timeout\n",
                 "            --dry-run                  show the bytes instead\n",
                 "wire test   --loopback-test [BYTES]    prove the target's UART round trip\n",
-                "interface   (no operation flags)       open the terminal\n",
+                "{}",
                 "\n",
                 "Exit codes: 0-125 the command's own status, 1 executed but not as\n",
                 "expected (or needs input, or timed out), 2 usage, 255 the link or\n",
                 "the send failed.\n",
             ),
-            prog, version
+            prog, version, INTERFACE_CAPABILITY
         )
     }
 }
@@ -1288,6 +1307,16 @@ fn main() -> io::Result<()> {
         eprintln!("Usage: {prog} [OPTIONS]\n");
         eprintln!("For more information, try '--help'.");
         std::process::exit(2);
+    }
+    // The middle mode asks for the terminal *after* the requests, and there is
+    // none to open here: refuse it before the requests run, rather than run
+    // them and stop as if the interface had been opened.
+    #[cfg(all(feature = "cli", not(feature = "tui")))]
+    if args.cli_then_tui {
+        fail(
+            &prog,
+            "this build has no interface: --cli-then-tui has nothing to open, use --no-terminal",
+        );
     }
     #[cfg(feature = "cli")]
     if mode != Mode::Tui {
@@ -2203,6 +2232,13 @@ mod tests {
         assert!(json.contains("\"exec\""), "{json}");
         assert!(json.contains("rc-marker"), "{json}");
         assert!(json.contains("\"exit_codes\""), "{json}");
+        // The interface is an operation of the build that has one, and not of
+        // the build that does not: the list says what *this* binary can be
+        // asked for, because it is the contract a script reads.
+        #[cfg(feature = "tui")]
+        assert!(json.contains("\"tui\""), "{json}");
+        #[cfg(not(feature = "tui"))]
+        assert!(!json.contains("\"tui\""), "{json}");
         assert!(json.contains(&format!(
             "\"exec_timeout_ms\":{}",
             linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis()
@@ -2212,6 +2248,10 @@ mod tests {
         assert!(text.starts_with("linkr "), "{text}");
         assert!(text.contains("--exec COMMAND"), "{text}");
         assert!(text.contains("Exit codes"), "{text}");
+        #[cfg(feature = "tui")]
+        assert!(text.contains("open the terminal"), "{text}");
+        #[cfg(not(feature = "tui"))]
+        assert!(!text.contains("open the terminal"), "{text}");
     }
 
     /// The flag table is what the parser matches on and what the help is
