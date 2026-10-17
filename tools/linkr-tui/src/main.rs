@@ -1705,9 +1705,10 @@ fn main() -> io::Result<()> {
                 failed += 1;
             }
         }
-        // The loopback goes last and stands alone: it is answered by the
-        // target's UART rather than by the bridge, so running it before the
-        // management requests would put its echo in what they read back.
+        // The loopback goes after the questions and stands alone: it is
+        // answered by the target's UART rather than by the bridge, so running
+        // it before the management requests would put its echo in what they
+        // read back.
         if let Some(payload) = &args.loopback {
             if !cli::loopback_test(&mut app, payload.as_bytes(), args.loopback_timeout, format) {
                 failed += 1;

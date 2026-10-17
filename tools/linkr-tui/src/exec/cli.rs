@@ -149,6 +149,12 @@ pub fn code(outcome: &Outcome) -> Option<&'static str> {
     }
 }
 
+/// The status this program answers with when the run itself could not happen:
+/// nothing was put on the wire, or the link went away holding the answer. It is
+/// not a target's status, so it is not confused with one — no process exits
+/// 255 by accident here.
+pub const LINK_FAILED: i32 = 255;
+
 /// The process exit code for an outcome.
 ///
 /// The table, written once so `main` and the tests cannot disagree: a marker's
@@ -157,7 +163,7 @@ pub fn code(outcome: &Outcome) -> Option<&'static str> {
 /// spelling a signal, which is "executed, not as expected" — 1. A run that
 /// needed a person, or ran out of clock, is the same 1. A run that could not be
 /// sent, or whose link died holding the answer, is this program's own failure:
-/// 255.
+/// [`LINK_FAILED`].
 ///
 /// Idle is 1 and not 0 for the reason the module opens with: a run that never
 /// saw a status has not reported success, and a `&&` in a script must not read
@@ -169,7 +175,7 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
         Outcome::Rc(_) => 1,
         Outcome::Idle => 1,
         Outcome::NeedsInput(_) | Outcome::Timeout => 1,
-        Outcome::Lost | Outcome::Refused(_) => 255,
+        Outcome::Lost | Outcome::Refused(_) => LINK_FAILED,
     }
 }
 

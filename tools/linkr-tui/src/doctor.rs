@@ -307,6 +307,15 @@ fn probe_check(app: &mut App, format: Format) -> Check {
             "the probe did not finish — the console is waiting for input, or it \
              timed out; the event above says which",
         ),
+        // The exec module's own failure: nothing went out, or the link went
+        // away holding the answer. That contradicts the link check, which
+        // called this session up a moment ago — the console never spoke, so
+        // blaming it for a status would be a lie in the other direction.
+        crate::exec::cli::LINK_FAILED => Check::new(
+            "target",
+            State::Mismatch,
+            "the probe could not be sent, or the link went away while it was out",
+        ),
         other => Check::new(
             "target",
             State::Mismatch,

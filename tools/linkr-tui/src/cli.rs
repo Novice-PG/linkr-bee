@@ -561,10 +561,16 @@ fn take_send_marker(
     for word in words.drain(..) {
         match word.as_str() {
             "--line" | "--raw" => {
-                if chosen.is_some() {
-                    return Err("send takes --line or --raw, not both".to_string());
+                let how = if word == "--line" { "line" } else { "raw" };
+                match *chosen {
+                    // Writing the same marker twice says the same thing twice,
+                    // which is what every other flag on this command line lets
+                    // a caller do; only the two different markers contradict.
+                    Some(already) if already != how => {
+                        return Err("send takes --line or --raw, not both".to_string())
+                    }
+                    _ => *chosen = Some(how),
                 }
-                *chosen = Some(if word == "--line" { "line" } else { "raw" });
             }
             _ => kept.push(word),
         }
@@ -1343,13 +1349,21 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
     let mut input = stdin.lock();
     let mut sent = 0usize;
     let mut missing = 0usize;
+    // Why standard input stopped before its end, if it did: an end is `Ok(0)`,
+    // and anything else that ends the loop means the rest of the answer was
+    // never read — which is not the same as there being nothing to send.
+    let mut unreadable: Option<std::io::Error> = None;
     let mut buffer = Vec::new();
     loop {
         buffer.clear();
         let read = if how == Framing::Line {
             match input.read_until(b'\n', &mut buffer) {
                 Ok(read) => read,
-                Err(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    unreadable = Some(err);
+                    break;
+                }
             }
         } else {
             // A read at a time: `raw` has no framing of its own, so the only
@@ -1360,7 +1374,11 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
                     buffer.truncate(read);
                     read
                 }
-                Err(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    unreadable = Some(err);
+                    break;
+                }
             }
         };
         if read == 0 {
@@ -1400,23 +1418,43 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
         drain(app, format);
         thread::sleep(Duration::from_millis(5));
     }
-    if sent == 0 && missing == 0 {
-        return report(
-            format,
-            "send",
-            false,
-            "standard input was empty: nothing was sent",
-        );
+    match send_detail(sent, missing, unreadable.as_ref()) {
+        Ok(detail) => report(format, "send", true, &detail),
+        Err(detail) => report(format, "send", false, &detail),
     }
+}
+
+/// The sentence a `send` ends with, given what happened on the way.
+///
+/// The three failures are different things and say so: bytes the link would
+/// not take (the link went away), an input that stopped early (the run does
+/// not know what it was handed), and an input with nothing in it (the run did
+/// nothing, and a run that did nothing is not a success). `Ok` is the one
+/// success sentence.
+fn send_detail(
+    sent: usize,
+    missing: usize,
+    unreadable: Option<&std::io::Error>,
+) -> Result<String, String> {
     if missing > 0 {
-        return report(
-            format,
-            "send",
-            false,
-            &format!("{sent} bytes sent, {missing} could not be sent — the link went away"),
-        );
+        return Err(format!(
+            "{sent} bytes sent, {missing} could not be sent — the link went away"
+        ));
     }
-    report(format, "send", true, &format!("{sent} bytes sent"))
+    if let Some(err) = unreadable {
+        // Read to an end is `Ok(0)`; this is the input itself failing (a
+        // background process reading its terminal gets `EIO`), and a run whose
+        // input stopped early has not sent what the caller handed it.
+        return Err(if sent == 0 {
+            format!("standard input could not be read: {err}")
+        } else {
+            format!("{sent} bytes sent, then standard input could not be read: {err}")
+        });
+    }
+    if sent == 0 {
+        return Err("standard input was empty: nothing was sent".to_string());
+    }
+    Ok(format!("{sent} bytes sent"))
 }
 
 /// Send `payload` and require the same bytes back.
@@ -2208,6 +2246,34 @@ mod tests {
         ));
     }
 
+    /// What a `send` says at the end is a small decision table, and every row
+    /// is a different kind of bad — which is why the sentence cannot be built
+    /// from the byte count alone: a run whose input failed does not know what
+    /// it was handed, and calling that "empty" would blame the caller.
+    #[test]
+    fn a_send_ends_with_the_thing_that_actually_happened() {
+        // The one success row reports only the count.
+        assert_eq!(send_detail(8, 0, None).as_deref(), Ok("8 bytes sent"));
+        // Nothing to send is a failure, for the same reason an empty `--exec`
+        // is: a run that did nothing must not report that it worked.
+        assert_eq!(
+            send_detail(0, 0, None).unwrap_err(),
+            "standard input was empty: nothing was sent"
+        );
+        // The link going away names how much of the caller's input was left.
+        let why = send_detail(5, 3, None).expect_err("the link went away");
+        assert!(why.contains("5 bytes sent, 3 could not be sent"), "{why}");
+        // An input that failed is not an empty one, whether or not some bytes
+        // had already gone out.
+        let failed = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        let why = send_detail(0, 0, Some(&failed)).expect_err("the input failed");
+        assert!(why.contains("could not be read"), "{why}");
+        assert!(why.contains("broken pipe"), "{why}");
+        assert!(!why.contains("empty"), "{why}");
+        let why = send_detail(4, 0, Some(&failed)).expect_err("the input failed");
+        assert!(why.starts_with("4 bytes sent, then"), "{why}");
+    }
+
     /// An app on the end of an in-memory link, which is what a script run is
     /// driven by here: no radio, and the pump is pumped by hand.
     fn connected_app() -> (App, crate::transport::testing::MemoryLink) {
@@ -2329,6 +2395,13 @@ mod tests {
             (&["loopback", "AB"], &["--loopback-test", "AB"]),
             (&["send", "--line"], &["--send", "line"]),
             (&["send", "--raw"], &["--send", "raw"]),
+            // The same framing said twice is the same framing; only the two
+            // different ones contradict (see the refusal test below).
+            (&["send", "--line", "--line"], &["--send", "line"]),
+            (
+                &["--quiet", "send", "--raw", "--json"],
+                &["--quiet", "--send", "raw", "--json"],
+            ),
             (
                 &["--ble-name", "UART-1", "exec", "--", "uname -a"],
                 &["--ble-name", "UART-1", "--exec", "uname -a"],
