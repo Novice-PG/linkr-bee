@@ -8,11 +8,18 @@
  * direction that has to hold — the SBC must not be asked to change a single
  * stty to suit this board.
  *
- * ESP32 has a hardware autobaud detector (TRM 19.3.4, UART_AUTOBAUD_REG), but
- * it only measures. Armed, it records the shortest low and high pulse seen on
- * RXD into UART_LOWPULSE / UART_HIGHPULSE in source-clock cycles. Software has
- * to turn min(low, high) into a rate, decide whether to believe it, and
- * program the divider — that is what the rest of this file does.
+ * The number this file decides on comes from the RMT span measurement in
+ * uart_rmt_span.c, not from the UART's own pulse detector any more. That
+ * detector's latches read a constant ~1.3 source-clock cycles short at every
+ * rate, and the low side latches glitch-short pulses while the divider is
+ * being rewritten — both measured on real hardware (see uart_rmt_span.h for
+ * the story and the numbers, and 改动/666666/autobaud-RMT探针-C方案-2026-10-17.md
+ * for the probe run that replaced it). What any detector hands back is still
+ * only a measurement: software has to turn it into a rate, decide whether to
+ * believe it, and program the divider — that is what the rest of this file
+ * does. The rules below outlived the latch; where a rule existed only for the
+ * latch's own error the paragraph says so, and the one that no longer has a
+ * reason to exist is gone.
  *
  * How it decides to look: it does not read the traffic at all. An earlier
  * version waited for a window of mostly non-printable bytes, because a rate
@@ -25,17 +32,18 @@
  * continuously and every window is judged on what the line actually did.
  *
  * The window is 400 ms rather than a few tens: the peer's traffic is bursty
- * (measured: a burst about every 200 ms) and the latches only fill while the
- * detector is armed, so a shorter window can come back empty and a window
- * shorter than the burst period would depend on luck. An empty window is not
- * a failure — it means the line has not toggled at all since the window
- * opened, which says nothing about the rate — so it costs nothing and never
- * blocks a later answer. (A stream of 0x00 or 0xFF is not empty — the start
+ * (measured: a burst about every 200 ms), a capture is only complete once a
+ * burst ends (or fills its 128 runs), and the receiver only starts again from
+ * the next burst's first edge — so a shorter window can come back empty and a
+ * window shorter than the burst period would depend on luck. A window without
+ * a capture is not a failure — it means the line produced no burst to
+ * measure since the last visit, which says nothing about the rate — so it
+ * costs nothing and never blocks a later answer. (A stream of 0x00 or 0xFF is not empty — the start
  * and stop bits keep toggling the line, so it also keeps resetting the silence
- * counter — but it does not measure either: the two polarities time runs of
- * nine and one bits, fail autobaud_apart() in every window, and are discarded
- * like any window that cannot be trusted. Nothing is taken from it, and
- * nothing needs to be.)
+ * counter — and it measures cleanly, too: its lone bit is a one-bit run, so
+ * the span estimate lands on the true rate. The latch used to throw these
+ * windows out — its two polarities timed runs of nine and one — and no longer
+ * being thrown out changes nothing: a match is a match.)
  *
  * Two windows must agree before the port is touched. A single window can be
  * wrong: a glitch that survives the filter, or a byte with no single-bit run
@@ -51,24 +59,19 @@
  * data.
  *
  * What 2% cannot catch is a line that reads *low* in every window forever.
- * A framed byte holds the line low for at most its start bit plus eight zero
- * data bits — the stop bit is always high and cuts it short — so a low run is
- * never longer than nine bit-times, and the two polarities only reach the
- * decision together when they timed the same run. A window with no
- * single-bit run anywhere in it therefore reports our own rate divided by
- * some k. That divisor is the shortest run the window left, and a byte with
- * no single-bit run can leave no run shorter than two: the start bit's own
- * low run is cut by the first data bit, so the low side is at least
- * start-plus-leading-zeros and the high side at least trailing-ones-plus-
- * stop, and the longest the two reach together is five bit-times (0xF0:
- * five low, five high). Two to five, then, is what a stream like this reads
- * as, with nothing to tell it from a peer that really slowed down. Measured: 0xCC at 115200 (runs of two and three bits) computes
- * 115200 x 11111 / (1389 x 16) = 57596, snaps to 57600, and agrees with
- * itself across windows — so "two windows agree" proves only that the pattern
- * is stable, not that the rate moved. Reconfiguring on it reaches 57600 by
- * *guessing*, and the line never said 57600: the pulse width belongs to RXD,
- * not to our divisor, so the port then reads 57600 forever and stays wrong.
- * That is a working link broken by a binary file.
+ * Every capture is classified against its own shortest run, so a capture whose
+ * runs never include a one-bit run reads as our own rate divided by whatever
+ * multiple that shortest run is: a byte whose runs are all even multiples of a
+ * bit time (0x9E leaves two, four, two, two) reads as current/2, and 0xF0 —
+ * five low, five high — as current/5. Those fits are self-consistent and
+ * stable across windows, so "two windows agree" proves only that the pattern
+ * is stable, not that the rate moved; the shapes that fit no whole multiple at
+ * all (0xCC is one: two and three disagree, and the span module rejects the
+ * fit instead of rounding it) are already refused by the consistency check.
+ * Following a stable one would reach a rate the line never carried — the run
+ * lengths belong to RXD, not to our divisor, so the port would then measure
+ * the same wrong number forever and stay wrong. That is a working link broken
+ * by a binary file.
  *
  * So the port keeps a memory of having been measured against the line, and it
  * starts out remembering: the rate in Kconfig is what both ends were set to,
@@ -84,29 +87,24 @@
  * turns out wrong can still be undone — the rollback the two-window rule
  * depends on.
  *
- * Measured on a real link, that rollback has one hole, and it is the small
- * delta. A 115200 line read 118342 — 2.7% high, because one window's shortest
+ * Measured on a real link, that rollback had one hole, and it was the small
+ * delta: a 115200 line read 118342 — 2.7% high, because one window's shortest
  * pulse was cut a little short — in window after window, and the two-window
  * rule followed the port there; the move cost a ring reset (33 bytes gone
- * mid-transfer) and mis-sampling at the new rate cost ~3.5% of every byte
- * after, and the mis-sampling is what kept re-measuring the port as itself,
- * so "the next windows measure the true rate again" never happened. The hole
- * is that a reading a few percent off our own is indistinguishable from our
- * own rate read badly, and the rule this file states — hold the port that
- * works — was never applied to it: only the divisor shape was refused. A
+ * mid-transfer) and mis-sampling at the new rate kept re-measuring the port as
+ * itself, so "the next windows measure the true rate again" never happened.
+ * The pulse that read high belonged to the latch, and the span measurement no
+ * longer makes it, but the lesson was never about that one pulse: a reading a
+ * few percent off our own is a reading UART does not need fixed, a move costs
+ * a ring reset, and only the divisor shape had been refused until then. A
  * reading within AUTOBAUD_HOLD_PCT of our own, taken while the port sits at a
- * rate worth trusting, is now held instead of chased.
- *
- * The hole is deeper than the percentage, though, because the detector's error
- * is a fixed number of *cycles* and not a fixed fraction of a bit-time.
- * Measured on hardware: a true 694-cycle pulse latched as 676, and a true
- * 699-cycle one as 675 — the same ~18 cycles short in both, at two different
- * port rates. A constant 18 cycles is 2.7% of a bit-time at 115200 but 5.3% at
- * 230400 and 21% at 921600, so a hold measured only in percent stops covering
- * the error exactly where the link gets fast. The hold therefore has two
- * mouths — the percentage band for the rate, and a cycle band for the raw
- * pulse count — and either one holds the port. See AUTOBAUD_HOLD_CYCLES for
- * the trade the second one makes.
+ * rate worth trusting, is held instead of chased — one band, in percent,
+ * because the span estimate's error scales with the span rather than being a
+ * fixed number of cycles: ~0.1 cycle per 128-run capture, under 0.2% of a bit
+ * time even at 1500000 where a bit is 53 cycles. (The latch needed a second,
+ * cycle-counted band: its error was a fixed ~18 cycles — 2.7% of a bit at
+ * 115200 but 21% at 921600 — so a percent-only hold lost its grip exactly
+ * where rates climb. That band retired with the latch.)
  *
  * The hold is a bound on the *gap*, not a list of blessed rates: nothing a
  * peer does lands inside it. Every other rate a console boots to is at least
@@ -123,22 +121,24 @@
  *
  * Silence is how the refusal reopens — but only for the divisors a stream
  * cannot fake. A peer that really did slow to a whole divisor of our own and
- * a stream with no single-bit run in it arrive as the same number (921600 ->
- * 115200 and 0xCC on a 115200 line are both "current / k"), so while the link
- * is carrying traffic no reading tells them apart, and holding the port that
- * works is the cheaper of the mistakes. A line quiet for long enough is a
- * link we no longer hold any evidence about, and a divisor of six or more —
- * one no byte stream can leave, since five bit-times is the longest run both
- * polarities of a framed byte can time together — is then believed, which is
- * what makes 921600 -> 115200 reachable. A divisor inside two to five is
- * refused in every state, silence or not: that is exactly what an idle line
- * followed by a binary file reads as, and following it would take the port to
- * a rate the line never carried with no later window left to undo it. The
- * refusal is a delay for the divisors only the line can produce, and a hold
- * for the ones a stream produces too.
+ * a stream whose runs are all whole multiples of one bit time (a repeated
+ * 0x9E leaves two, four, two, two) arrive as the same number — "current / k"
+ * — so while the link is carrying traffic no reading tells them apart, and
+ * holding the port that works is the cheaper of the mistakes. A line quiet
+ * for long enough is a link we no longer hold any evidence about, and a
+ * divisor of six or more — one no framed byte leaves on its own: ten bit
+ * times do not split into whole runs of six to nine, and the capture's own
+ * consistency check rejects the mixed shapes (see uart_rmt_span.c) — is then
+ * believed, which is what makes 921600 -> 115200 reachable. A divisor inside
+ * two to five is refused in every state, silence or not: that is exactly what
+ * an idle line followed by a binary file reads as, and following it would take
+ * the port to a rate the line never carried with no later window left to undo
+ * it. The refusal is a delay for the divisors only the line can produce, and
+ * a hold for the ones a stream produces too.
  */
 
 #include "uart_autobaud.h"
+#include "uart_rmt_span.h"
 
 #if LINKR_UART_AUTOBAUD
 
@@ -153,7 +153,7 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #define AUTOBAUD_WINDOW_MS	400 /* >= one peer burst period (measured 200) */
 #define AUTOBAUD_CONFIRM	2	  /* agreeing windows before touching it */
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
-#define AUTOBAUD_REFUSED_MAX	6	  /* disagreeing windows before saying so */
+#define AUTOBAUD_REFUSED_MAX	6	  /* badly measured windows before saying so */
 /*
  * Consecutive windows in which the line did not toggle at all, after which the
  * port stops being treated as measured against it: 8 x 400 ms = 3.2 s of
@@ -168,78 +168,35 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 /*
  * The refusal's bound while the link is trusted: every divisor from two to
  * nine is refused, whether or not a byte stream could have produced it. Only
- * the two-to-five half is a stream's doing (see AUTOBAUD_ARTIFACT_MAX_FACTOR
- * and the file header); the rest is refused because a busy line that suddenly
- * reads current/8 is a stutter, not a peer.
+ * the two-to-five half is a stream's doing (a whole-multiple fit lands on two
+ * or five — see the file header); the rest is refused because a busy line
+ * that suddenly reads current/8 is a stutter, not a peer.
  */
 #define AUTOBAUD_MAX_FACTOR	9
 /*
- * The longest shortest-run a window with no single-bit run in it can leave on
- * both polarities at once, and so the largest divisor a byte stream can fake:
- * five (0xF0 times five low and five high). A divisor at or below this is
- * refused in every state, silence included — see the file header.
+ * The largest divisor a byte stream can fit itself at — ten bit times per
+ * frame, split into whole runs, allow two or five and nothing else — and so
+ * the bound a divisor is refused by in every state, silence included. See the
+ * file header.
  */
 #define AUTOBAUD_ARTIFACT_MAX_FACTOR 5
-/*
- * lowpulse and highpulse both hold the shortest run of their own polarity, so
- * on any line carrying one-bit runs they land on the same number of source
- * cycles and differ only by rounding — measured as exactly equal (8319/8319,
- * 692/692, 4159/4159). Anything wider means one side is wrong and a single
- * window cannot say which, so it is not a measurement worth acting on. The
- * only way to get here with a peer holding mid-byte is stty changing the
- * divisor while its own bytes are still queued: the pulse is cut in half and
- * the two polarities land anywhere (measured: 461/692, 1776/4159).
- */
-#define AUTOBAUD_AGREE_PCT	5
-#define AUTOBAUD_GLITCH_FILT	16 /* cycles, ~200 ns at 80 MHz */
 #define AUTOBAUD_TOLERANCE_PCT	2 /* UART itself is good for ~2-3% */
 /*
  * How close to our own rate a reading may sit and still be treated as our own
- * rate measured badly rather than a rate worth chasing. Five percent: wide
- * enough to swallow the 2.7% a mis-measured window produced on real hardware,
- * narrow enough that every other rate a console boots to stays out of it —
- * the closest pair in the snap table is 921600 -> 1000000 at 8.5%, and every
- * divisor pair is further apart still. See the file header: this is a bound
- * on the gap, not a list of rates the port is allowed to move to.
+ * rate measured badly rather than a rate worth chasing. Five percent: far
+ * wider than any error the span measurement produces (0.54% was its worst on
+ * the bench, at 1500000 with merged edges), narrow enough that every other
+ * rate a console boots to stays out of it — the closest pair in the snap
+ * table is 921600 -> 1000000 at 8.5%, and every divisor pair is further apart
+ * still. See the file header: this is a bound on the gap, not a list of rates
+ * the port is allowed to move to.
  */
 #define AUTOBAUD_HOLD_PCT	5
-/*
- * The same hold expressed in the units the detector actually reports. Its error
- * is a fixed number of source-clock cycles rather than a fraction of a
- * bit-time — measured: 676 latched against a true 694 at 115200, and 675
- * against 699 at 118517, the same ~18 short in both. Eighteen cycles is 2.7% of
- * a bit-time at 115200 but 5.3% at 230400, 10.6% at 460800 and 21% at 921600,
- * so the percentage band above loses its grip on the error exactly where the
- * rate climbs. This band keeps it: a latched pulse within this many cycles of
- * the one the port is programmed for is the detector's own error, whatever rate
- * it happens to be wearing.
- *
- * Twenty-four cycles: comfortably wider than the 18-19 measured, and still far
- * narrower than every move between two rates a console boots to *below* ours —
- * the nearest of those, 115200 arriving on a 921600 port, is 607 cycles away.
- * The one thing it swallows is a small upward step at a high rate: 921600 ->
- * 1000000 is 7 cycles apart. That trade falls the same way the rest of this
- * file does. At 921600 the detector's own error is 18 cycles against a 7-cycle
- * step, so a port that followed that reading would land further from the peer
- * than one that held still did — the hold is not what makes that rate hard, the
- * detector is, and the hold is what keeps the port from chasing it.
- */
-#define AUTOBAUD_HOLD_CYCLES	24
 #define AUTOBAUD_MIN_BAUD	300	   /* mirrors Kconfig's range */
 #define AUTOBAUD_MAX_BAUD	3000000 /* mirrors Kconfig's range */
-/*
- * Both counters power up, and re-arm, at 0xFFFFF — their documented default,
- * meaning no pulse of that polarity has been timed since. An idle line reads
- * exactly that. It is the absence of a measurement rather than a measurement
- * of 13 ms, so it must be dropped silently instead of being divided into a
- * baud rate and reported as one (1048575 cycles/bit reads back as 76 baud,
- * which is what spammed the console until this was matched against the
- * register default).
- */
-#define AUTOBAUD_NO_PULSE	0xFFFFFu
 /* Implausible readings can repeat as fast as the windows do — a noise spike
- * that slips past the 16-cycle filter lands above MAX_BAUD, an all-constant
- * frame below MIN_BAUD — so they are reported at most this often. */
+ * that slips past the RMT filter lands above MAX_BAUD, an all-constant frame
+ * below MIN_BAUD — so they are reported at most this often. */
 #define AUTOBAUD_WARN_MS	5000
 
 static struct k_work_delayable autobaud_work;
@@ -272,18 +229,6 @@ static void autobaud_forget(void)
 {
 	autobaud_confirm = 0;
 	autobaud_candidate = 0;
-}
-
-/*
- * True when the two polarities did not time the same shortest run, which is
- * the only state in which one window cannot be trusted.
- */
-static bool autobaud_apart(uint32_t a, uint32_t b)
-{
-	uint32_t lo = MIN(a, b);
-	uint32_t hi = MAX(a, b);
-
-	return (hi - lo) * 100u > lo * AUTOBAUD_AGREE_PCT;
 }
 
 /*
@@ -340,23 +285,6 @@ static bool autobaud_within_pct(uint32_t rate, uint32_t base, uint32_t pct)
 }
 
 /*
- * True when `div_meas` — the shortest pulse the detector latched, in
- * source-clock cycles per bit — sits within `cycles` of the pulse the port is
- * programmed for. `div_cur` is the same quantity scaled by sixteen
- * (`div_int << 4 | div_frag`), so it is rounded back down here with the same
- * rounding the divider arithmetic itself uses, and the two numbers below are
- * directly comparable. See AUTOBAUD_HOLD_CYCLES.
- */
-static bool autobaud_pulse_within_cycles(uint32_t div_meas, uint32_t div_cur,
-					 uint32_t cycles)
-{
-	uint32_t expect = (div_cur + 8u) >> 4;
-	uint32_t delta = div_meas > expect ? div_meas - expect : expect - div_meas;
-
-	return delta <= cycles;
-}
-
-/*
  * True when `rate` is our own rate seen through a window whose shortest run
  * was not one bit long — that is, current / k for some k in 2..max_factor,
  * inside the tolerance the port itself is held to.
@@ -383,18 +311,15 @@ static bool autobaud_reads_like_a_missing_bit(uint32_t rate, uint32_t current,
 	return false;
 }
 
-static void autobaud_arm(uart_dev_t *hw)
+/*
+ * The fractional sixteenths of a Q4 cycle count, in hundredths — for logs
+ * ("694" printed beside ".44"). The span estimate is the only Q4 number this
+ * file handles, and printing it as a bare integer would hide the sub-cycle
+ * part that makes it worth printing at all.
+ */
+static uint32_t autobaud_hundredths(uint32_t q4)
 {
-	/*
-	 * Discard the last latched widths and start timing again. auto_baud.en
-	 * is the one thing no amount of polling can substitute for: without it
-	 * both pulse counters stay at zero and every window reports nothing
-	 * usable no matter what the peer does (which is exactly how this failed
-	 * the first time).
-	 */
-	hw->auto_baud.glitch_filt = AUTOBAUD_GLITCH_FILT;
-	hw->auto_baud.en = 0;
-	hw->auto_baud.en = 1;
+	return ((q4 & 15u) * 100u + 8u) / 16u;
 }
 
 /*
@@ -408,22 +333,21 @@ static void autobaud_tick(struct k_work *work)
 {
 	uart_dev_t *hw = autobaud_hw();
 	uint32_t now = k_uptime_get_32();
-	uint32_t low, high, old_baud, div_meas, div_cur, next, lo, hi;
+	uint32_t old_baud, div_meas4, div_cur, next, lo, hi;
+	struct linkr_uart_span span;
+	bool captured;
 	uint64_t measured;
 
 	ARG_UNUSED(work);
 
 	/*
-	 * Latch the widths BEFORE clearing AUTOBAUD_EN: disabling the detector
-	 * may reset the very counters being read, and a zero here would be
-	 * indistinguishable from "the line never toggled at all".
+	 * Take the capture that completed since the last visit and recommit to
+	 * listening. One burst per window is all the follower needs, and the
+	 * receiver only starts from the next burst's first edge anyway (see
+	 * uart_rmt_span.h), so a burst arriving while one is already being
+	 * measured costs nothing.
 	 */
-	low = hw->lowpulse.min_cnt;
-	high = hw->highpulse.min_cnt;
-
-	/* Close this window and open the next one back to back, so no burst
-	 * can fall in a gap between them. */
-	autobaud_arm(hw);
+	captured = linkr_uart_rmt_span_poll(&span);
 
 	k_work_reschedule(&autobaud_work, K_MSEC(AUTOBAUD_WINDOW_MS));
 
@@ -431,14 +355,14 @@ static void autobaud_tick(struct k_work *work)
 		return; /* a change of ours is still settling */
 	}
 
-	if (low == 0 || high == 0 || low >= AUTOBAUD_NO_PULSE ||
-	    high >= AUTOBAUD_NO_PULSE) {
-		/* Nothing to time, and nothing that says anything about the
-		 * rate — so it must not eat the refusal budget either. It does
-		 * say something about the *link*: a line this quiet is no
-		 * longer one we hold any evidence about, so the port's rate
-		 * stops being treated as measured against it and the next
-		 * reading is followed again. See AUTOBAUD_QUIET_UNVERIFY. */
+	if (!captured) {
+		/* Nothing was captured, and a window with no capture says
+		 * nothing about the rate — so it must not eat the refusal
+		 * budget either. It does say something about the *link*: a
+		 * line this quiet is no longer one we hold any evidence
+		 * about, so the port's rate stops being treated as measured
+		 * against it and the next reading is followed again. See
+		 * AUTOBAUD_QUIET_UNVERIFY. */
 		if (++autobaud_quiet >= AUTOBAUD_QUIET_UNVERIFY) {
 			autobaud_quiet = AUTOBAUD_QUIET_UNVERIFY;
 			if (autobaud_verified) {
@@ -453,34 +377,50 @@ static void autobaud_tick(struct k_work *work)
 	}
 	autobaud_quiet = 0;
 
-	if (autobaud_apart(low, high)) {
+	if (!span.trustworthy) {
+		/* The line said something and it was captured, but the runs
+		 * do not sit on whole multiples of their own estimate — too
+		 * short a train for a span, a rate that moved mid-capture, a
+		 * torn edge. Not a measurement: nothing here may move the
+		 * port or count as evidence about the rate. The latch this
+		 * replaced called the state "the two polarities disagreed"
+		 * and refused it the same way. */
 		autobaud_forget();
 		if (++autobaud_refused >= AUTOBAUD_REFUSED_MAX) {
 			autobaud_refused = 0;
-			LOG_WRN("UART autobaud: %u windows in a row disagreed "
-				"(low=%u, high=%u), not touching the rate",
-				AUTOBAUD_REFUSED_MAX, low, high);
+			LOG_WRN("UART autobaud: %u windows in a row measured "
+				"badly (runs=%u dmin=%u misfits=%u zeros=%u), "
+				"not touching the rate",
+				AUTOBAUD_REFUSED_MAX, span.runs, span.dmin,
+				span.misfits, span.zeros);
 		}
 		return;
 	}
 	autobaud_refused = 0;
 
-	div_meas = MIN(low, high);
+	div_meas4 = span.est_q4;
 	old_baud = linkr_uart_config_current();
 
-	/* Both divisors are "source-clock cycles per bit", so the source clock
-	 * cancels out: correct whether the UART runs off 80 MHz APB or 40 MHz
-	 * XTAL, and no clock-tree call is needed. */
+	/* Both numbers are APB cycles per bit in sixteenths: the estimator
+	 * measured the line in APB ticks, and the divider register holds the
+	 * port's own source clock over baud, the source clock being
+	 * UART_SCLK_DEFAULT = APB on this chip (see uart_esp32.c). The clock
+	 * cancels out of the ratio — no frequency constant is needed, and the
+	 * bench's +42 ppm between the two crystals cancels with it, because
+	 * this board programs its own divider from its own ticks. If the
+	 * bridge UART is ever moved off APB, this ratio and the RMT source
+	 * clock must move together. */
 	div_cur = (hw->clk_div.div_int << 4) | hw->clk_div.div_frag;
-	measured = ((uint64_t)old_baud * div_cur) / ((uint64_t)div_meas << 4);
+	measured = ((uint64_t)old_baud * div_cur) / div_meas4;
 
 	if (measured < AUTOBAUD_MIN_BAUD || measured > AUTOBAUD_MAX_BAUD) {
 		autobaud_forget();
 		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
 			autobaud_warned_at = now;
-			LOG_WRN("UART autobaud: implausible %u cycles/bit -> "
-				"%u, keeping %u",
-				div_meas, (uint32_t)measured, old_baud);
+			LOG_WRN("UART autobaud: implausible %u.%02u cycles/bit "
+				"over %u runs -> %u, keeping %u",
+				div_meas4 >> 4, autobaud_hundredths(div_meas4),
+				span.runs, (uint32_t)measured, old_baud);
 		}
 		return;
 	}
@@ -501,24 +441,23 @@ static void autobaud_tick(struct k_work *work)
 	}
 
 	/*
-	 * Close to our own rate, and the port is one worth trusting: this is
-	 * our own rate measured through a window whose shortest pulse was cut
-	 * a little short, not a rate worth chasing. Chasing it is what cost a
-	 * real board its data — the port was moved 2.7% for a reading that
-	 * said nothing, the move reset the ring (33 bytes gone mid-transfer)
-	 * and mis-sampling at the new rate cost ~3.5% of every byte after it.
+	 * Close to our own rate, and the port is one worth trusting: a rate
+	 * that close is not worth a move. The rule came from a real incident —
+	 * a 115200 port was moved 2.7% for a reading that said nothing, the
+	 * move reset the ring (33 bytes gone mid-transfer), and mis-sampling
+	 * at the new rate kept the port reading as itself. What made the
+	 * incident possible was the latch's own error and it is gone with the
+	 * latch, but the rule it taught stands on its own: below a few percent
+	 * the two rates work identically, so the move buys nothing and can
+	 * cost a ring. One band, in percent, because the span estimate's error
+	 * scales with the span and carries no fixed cycle count that a second
+	 * band would have to catch (the latch's ~18-cycle error needed one;
+	 * see the file header).
 	 *
 	 * Note what this is *not*: a list of rates the port may move to. A
 	 * peer set to an odd but real rate (150000, say) is outside the band
 	 * and is followed as it always was; the hold is a bound on how small a
-	 * move is worth making, and below a few percent the two rates work
-	 * identically anyway.
-	 *
-	 * Two ways in, because the detector's error is fixed in cycles while
-	 * the percentage band is fixed in percent, and the two only agree at
-	 * 115200: see AUTOBAUD_HOLD_CYCLES. The pulse comparison also puts the
-	 * numbers it decided on into the log, which is what the next person to
-	 * look at this will need.
+	 * move is worth making.
 	 *
 	 * The port has to be worth trusting for the hold to apply: measured
 	 * against the line already, or the standard rate both ends were
@@ -527,16 +466,15 @@ static void autobaud_tick(struct k_work *work)
 	 * real rate is then free to put it back.
 	 */
 	if ((autobaud_verified || autobaud_is_standard(old_baud)) &&
-	    (autobaud_within_pct(measured, old_baud, AUTOBAUD_HOLD_PCT) ||
-	     autobaud_pulse_within_cycles(div_meas, div_cur,
-					  AUTOBAUD_HOLD_CYCLES))) {
+	    autobaud_within_pct(measured, old_baud, AUTOBAUD_HOLD_PCT)) {
 		autobaud_forget();
 		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
 			autobaud_warned_at = now;
-			LOG_WRN("UART autobaud: line reads %u (min pulse %u "
-				"cycles, port programmed for %u) — our own "
-				"rate measured short, not a move; holding %u",
-				(uint32_t)measured, div_meas,
+			LOG_WRN("UART autobaud: line reads %u (%u.%02u "
+				"cycles/bit over %u runs, port programmed for "
+				"%u) — our own rate, not a move; holding %u",
+				(uint32_t)measured, div_meas4 >> 4,
+				autobaud_hundredths(div_meas4), span.runs,
 				(uint32_t)((div_cur + 8u) >> 4), old_baud);
 		}
 		return;
@@ -596,9 +534,10 @@ static void autobaud_tick(struct k_work *work)
 	/* Reading the divider back is what proves the change reached the
 	 * silicon: uart_configure() returning 0 only proves it was accepted.
 	 * 694+7/16 = 115200, 8333+5/16 = 9600 at 80 MHz. */
-	LOG_WRN("UART autobaud: line rate %u -> %u (min pulse %u cycles, "
-		"low=%u high=%u), divider now %u + %u/16",
-		old_baud, next, div_meas, low, high, hw->clk_div.div_int,
+	LOG_WRN("UART autobaud: line rate %u -> %u (%u.%02u cycles/bit over "
+		"%u runs, dmin %u cycles), divider now %u + %u/16",
+		old_baud, next, div_meas4 >> 4, autobaud_hundredths(div_meas4),
+		span.runs, span.dmin, hw->clk_div.div_int,
 		hw->clk_div.div_frag);
 }
 
@@ -628,9 +567,11 @@ void linkr_uart_autobaud_init(uintptr_t reg_addr)
 
 	k_work_init_delayable(&autobaud_work, autobaud_tick);
 
-	/* Arm immediately: the peer's rate is known one window after reset
-	 * rather than only after something has already gone wrong. */
-	autobaud_arm(autobaud_hw());
+	/* Start listening immediately: the peer's rate is known a window
+	 * after reset rather than only after something has already gone
+	 * wrong. The span module logs and stays out of the way if it cannot
+	 * find the line to watch. */
+	linkr_uart_rmt_span_init(reg_addr);
 	k_work_reschedule(&autobaud_work, K_MSEC(AUTOBAUD_WINDOW_MS));
 }
 

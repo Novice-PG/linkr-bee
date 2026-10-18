@@ -113,48 +113,56 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 	  Follow the peer's line rate instead of demanding it match us, so a
 	  swapped SBC never has to change a single stty to suit this board.
 
-	  Every 400 ms the ESP32's own hardware detector is re-armed
-	  (UART_AUTOBAUD_EN) and software reads back the shortest low/high
-	  pulse seen on RXD, in source-clock cycles, then turns that into a
-	  rate and reconfigures the port through the existing @u= path:
-	  baud = source clock / min(lowpulse, highpulse). The hardware only
-	  measures; programming the divisor, deciding when to try, and giving
-	  up are all software.
+	  Every 400 ms the RMT receiver hands back one burst it captured from
+	  RXD as a train of run durations, and software refines the bit time
+	  out of the train — (sum of runs) / (bit times they add up to) —
+	  then reconfigures the port through the existing @u= path. Measuring
+	  a whole span instead of the UART detector's single shortest pulse
+	  is what makes the number trustworthy: run durations are grid
+	  aligned, so edge quantisation cancels except at the two ends of the
+	  span (probe run and raw numbers: 改动/666666/autobaud-RMT探针-C方案-2026-10-17.md).
+	  Everything else — deciding when to try, believing the result,
+	  programming the divisor, giving up — is still software.
 
-	  It acts only when the line is measured three ways: both polarities
-	  must time the same run, two consecutive windows must agree on the
-	  same rate, and the result must fall outside 2% of the current rate
-	  (inside that, the UART already tolerates it and reconfiguring would
-	  only reset the ring and throw away good data).
+	  It acts only when the line is measured three ways: the capture must
+	  sit on whole multiples of its own estimate, two consecutive windows
+	  must agree on the same rate, and the result must fall outside 2% of
+	  the current rate (inside that, the UART already tolerates it and
+	  reconfiguring would only reset the ring and throw away good data).
+	  A capture that fits no whole multiple (a rate that moved
+	  mid-capture, noise, a torn edge) is refused as no measurement.
 
 	  Limits: it needs the peer to toggle bits, so an idle line is simply
-	  skipped, and traffic carrying no single-bit run anywhere in a window
-	  (only bytes 0x80-0xFE with a zero LSB throughout manage that) makes
-	  the window's shortest pulse k bit-times long instead of one, so it
-	  rates as our own rate divided by k for some k in 2..5. Five is the
-	  longest run such a stream can hold on both polarities at once, so
-	  6..9 cannot be faked at all. That reading cannot be corrected by
-	  waiting: the pulse width belongs to RXD and not to our divisor, so
-	  once the port moves there the same width matches at the new rate and
-	  every later window agrees with it.
+	  skipped, and a line slower than about 1.2 kHz produces no captures
+	  at all (the receiver's 819 us idle window closes between its bits),
+	  so a peer that slow has to be matched by hand. Traffic whose runs
+	  never include a one-bit run rates as our own rate divided by the
+	  multiple its shortest run is — two
+	  or five for whole framed bytes (a repeated 0x9E reads current/2,
+	  0xF0 reads current/5); 6..9 cannot be faked by whole frames at all,
+	  and mixed shapes fit no multiple and are refused outright. That
+	  reading cannot be corrected by waiting: the run lengths belong to
+	  RXD and not to our divisor, so once the port moves there the same
+	  lengths match at the new rate and every later window agrees.
 
 	  The refusal is two-tiered, to keep the port out of that. While the
 	  link is verified — any reading within 2% marks it so — a reading of
 	  our own rate over k is refused and logged for every k in 2..9.
-	  Eight empty windows (3.2 s of silence) drop the verified state and
-	  hand the larger divisors back: after the quiet, a real drop to a
-	  whole fraction of our rate with divisor 6..9 (921600 to 115200 is
-	  k = 8) is followed. The 2..5 shapes are refused in every state,
-	  silence included, because a quiet line that comes back carrying a
-	  binary file reads as exactly one of them. So a peer switching
-	  115200 to 57600 (k = 2) is never followed: not while it keeps
-	  sending, and not after any amount of silence — that band is what
-	  the guard gives up, on purpose.
+	  Eight windows without a capture (3.2 s of silence) drop the
+	  verified state and hand the larger divisors back: after the quiet,
+	  a real drop to a whole fraction of our rate with divisor 6..9
+	  (921600 to 115200 is k = 8) is followed. The 2..5 shapes are
+	  refused in every state, silence included, because a quiet line that
+	  comes back carrying a binary file reads as exactly one of them. So
+	  a peer switching 115200 to 57600 (k = 2) is never followed: not
+	  while it keeps sending, and not after any amount of silence — that
+	  band is what the guard gives up, on purpose.
 
-	  Restricted to the classic ESP32: this depends on
-	  <soc/uart_struct.h> and the auto-baud registers, which are only
-	  wired up and validated on esp32_devkitc. Widening it to C3/C5/S3
-	  needs a build and a real link test on those parts first.
+	  Restricted to the classic ESP32: this depends on the classic
+	  ESP32's UART divider and RMT receiver register definitions, wired
+	  up and validated on esp32_devkitc only. Widening it to C3/C5/S3
+	  needs the span measurement re-validated on those parts' RMT and a
+	  real link test first.
 
 config LINKR_BLE_BRIDGE_UART_BULK_TX
 	bool "Fill the UART FIFO in one write instead of one byte at a time"
