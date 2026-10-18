@@ -117,7 +117,16 @@ impl Failure {
                 crate::text::fill(s.asst_unreachable, std::slice::from_ref(why))
             }
             Failure::Rejected(status, body) => {
-                crate::text::fill(s.asst_rejected, &[status.to_string(), body.clone()])
+                // A refusal that came with no words is the one that leaves
+                // nothing to act on — a mistyped endpoint arrives as an empty
+                // 404 — so the sentence says what to check rather than ending
+                // in a colon.
+                let body = if body.trim().is_empty() {
+                    s.asst_rejected_blank.to_string()
+                } else {
+                    body.clone()
+                };
+                crate::text::fill(s.asst_rejected, &[status.to_string(), body])
             }
             Failure::Malformed => s.asst_malformed.to_string(),
         }
@@ -548,8 +557,17 @@ fn usage_of(event: &str) -> Option<Usage> {
 /// The chat-completions URL. A trailing slash is stripped rather than
 /// appended to, because `…/v1//chat/completions` is a 404 on some gateways and
 /// `…/v1/chat/completions` is right on all of them.
+///
+/// An endpoint that already names the path is left alone. Providers document
+/// the full URL as often as the base one, and a user who pastes what the docs
+/// said would otherwise be sent to `…/chat/completions/chat/completions` — a
+/// 404 with no body to explain it.
 fn chat_url(endpoint: &str) -> String {
-    format!("{}/chat/completions", endpoint.trim_end_matches('/').trim())
+    let base = endpoint.trim().trim_end_matches('/');
+    if base.ends_with("/chat/completions") {
+        return base.to_string();
+    }
+    format!("{base}/chat/completions")
 }
 
 /// The request body, written by hand.
@@ -572,8 +590,20 @@ fn request_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) ->
         out.push_str(&crate::agent::tasks::json_string(&message.content));
         out.push('}');
     }
+    // `max_tokens` is always sent, and a stored zero is the built-in default
+    // before it goes out rather than after: `0` is this program's spelling of
+    // "let the built-in default decide" (the upstream web build sends
+    // `maxTokens || 4096` here), but a provider reads the literal field, and
+    // the range it accepts starts at 1 — DeepSeek answers a zero with
+    // `Invalid max_tokens value, the valid range of max_tokens is [1, 393216]`
+    // and every question fails.
+    let max_tokens = if config.max_tokens > 0 {
+        config.max_tokens
+    } else {
+        crate::agent::config::AGENT_DEFAULT_MAX_TOKENS
+    };
     out.push_str("],\"max_tokens\":");
-    out.push_str(&config.max_tokens.to_string());
+    out.push_str(&max_tokens.to_string());
     if stream {
         // `stream` on its own is enough for the deltas; `stream_options` is what
         // asks for the token counts in a final event, because the default is
@@ -864,12 +894,22 @@ mod tests {
     }
 
     /// A trailing slash is the difference between a working endpoint and a 404,
-    /// and users type it without thinking.
+    /// and users type it without thinking. An endpoint that already carries
+    /// `/chat/completions` — which is how several providers document it — is
+    /// not asked for the path twice.
     #[test]
     fn the_url_survives_a_trailing_slash() {
         assert_eq!(chat_url("http://x/v1/"), "http://x/v1/chat/completions");
         assert_eq!(chat_url("http://x/v1"), "http://x/v1/chat/completions");
         assert_eq!(chat_url(" http://x/v1 "), "http://x/v1/chat/completions");
+        assert_eq!(
+            chat_url("http://x/v1/chat/completions"),
+            "http://x/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("http://x/chat/completions/"),
+            "http://x/chat/completions"
+        );
     }
 
     /// The body is valid JSON by construction and carries what a provider needs.
@@ -898,6 +938,60 @@ mod tests {
         // A newline in the content is escaped, not raw: raw is invalid JSON.
         assert!(body.contains("hi\\nthere"));
         assert!(!body.contains("hi\n\nthere"), "the newline was written raw");
+    }
+
+    /// A stored zero is this program's "the built-in default decides", and it
+    /// has to become that default before it leaves: a provider reads the
+    /// literal field, its range starts at 1, and DeepSeek answers a zero with
+    /// `Invalid max_tokens value` — every question, every time.
+    #[test]
+    fn a_zero_ceiling_becomes_the_built_in_default() {
+        let mut cfg = config("http://x/v1");
+        cfg.max_tokens = 0;
+        let body = request_body(
+            &cfg,
+            &[ChatMessage {
+                role: ChatRole::User,
+                content: "hi".to_string(),
+            }],
+            false,
+        );
+        assert!(
+            body.contains(&format!(
+                "\"max_tokens\":{}",
+                crate::agent::config::AGENT_DEFAULT_MAX_TOKENS
+            )),
+            "{body}"
+        );
+        assert!(!body.contains("\"max_tokens\":0"), "{body}");
+
+        // A ceiling the user set is sent as it stands.
+        let mut cfg = config("http://x/v1");
+        cfg.max_tokens = 512;
+        let body = request_body(
+            &cfg,
+            &[ChatMessage {
+                role: ChatRole::User,
+                content: "hi".to_string(),
+            }],
+            false,
+        );
+        assert!(body.contains("\"max_tokens\":512"), "{body}");
+    }
+
+    /// A refusal that came with no words says what to check — an empty 404 is
+    /// the shape a mistyped endpoint arrives in — and the provider's own words
+    /// are kept when there are any.
+    #[test]
+    fn an_empty_refusal_says_what_to_check() {
+        for lang in [Lang::Zh, Lang::En] {
+            let said = Failure::Rejected(404, String::new()).describe(lang);
+            assert!(said.contains("404"), "{said}");
+            assert!(said.contains(lang.strings().asst_rejected_blank), "{said}");
+            let said = Failure::Rejected(503, "upstream is down".into()).describe(lang);
+            assert!(said.contains("upstream is down"), "{said}");
+            assert!(!said.contains(lang.strings().asst_rejected_blank), "{said}");
+        }
     }
 
     /// A reply whose text contains the shape of another reply must not be read

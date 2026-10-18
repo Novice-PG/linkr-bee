@@ -8,12 +8,17 @@
 //!
 //! **One plan, every language.** The row plan is a function of the session
 //! state only: the same number of rows, in the same order, at the same indents,
-//! whatever language is in force. A row is never wrapped — it is fitted to the
-//! column, and the strings that go into it are held short enough by the tests
-//! here. Wrapping is what the design did with `Enter sends · reboot asks first`
-//! (31 columns in a 29-column column), and that extra row pushed `Watch` — and
-//! everything after it — one row down, so the English sidebar no longer lined
-//! up with the Chinese one.
+//! whatever language is in force. A row is fitted to the column and cut with an
+//! ellipsis when it does not fit — with one exception: the two rows whose value
+//! is a thing the user *checks*, the board's name and the network token, break
+//! onto the lines below instead. A value that is cut cannot be checked, and a
+//! name or a token is exactly what the eye reads to the end.
+//!
+//! Every other row stays one line, held short enough by the tests here. Wrapping
+//! is what the design did with `Enter sends · reboot asks first` (31 columns in
+//! a 29-column column), and that extra row pushed `Watch` — and everything
+//! after it — one row down, so the English sidebar no longer lined up with the
+//! Chinese one.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -21,8 +26,9 @@ use ratatui::text::{Line, Span};
 use crate::app::{App, Transport};
 use crate::dialogs::{self, ConfirmAction};
 use crate::event::View;
-use crate::text::clip_to;
+use crate::text::{clip_to, columns};
 use crate::theme::Theme;
+use crate::views::terminal::wrap_rows;
 
 /// How far a section header sits from the left edge. The hint under `Quick
 /// send` shares it: it belongs to the header, not to the list under it.
@@ -89,6 +95,11 @@ pub struct Row {
     /// A marker after the text, in the danger colour: `reboot !`. Only the
     /// shortcuts that ask before running carry it.
     pub marker: Option<&'static str>,
+    /// The column a wrapped continuation hangs under, when this row may wrap:
+    /// the value's own column, so the lines after the first read as the value
+    /// continued rather than as new rows. `None` — every row but the board's
+    /// name and the token — is fitted to the column and cut, as before.
+    pub wrap_indent: Option<u8>,
 }
 
 impl Row {
@@ -99,7 +110,17 @@ impl Row {
             indent,
             tail: None,
             marker: None,
+            wrap_indent: None,
         }
+    }
+
+    /// The same, allowed to wrap at `value_column`: a row whose whole value is
+    /// a thing the user checks against reality — the board's name, the token —
+    /// breaks onto the lines below rather than being cut, every line after the
+    /// first hung under the value it continues.
+    fn wrapping(mut self, value_column: u8) -> Row {
+        self.wrap_indent = Some(value_column);
+        self
     }
 
     /// The same, with a dimmed tail.
@@ -183,6 +204,38 @@ pub fn targets(app: &App) -> Vec<String> {
 /// `Transport: BLE` — a label, the language's separator, then the value.
 pub fn labelled(label: &str, value: &str, separator: &str) -> String {
     format!("{label}{separator}{value}")
+}
+
+/// The column a labelled row's value starts at: the row's own indent, the
+/// label and the separator. This is where a wrapped row hangs its continuation
+/// lines, so they read as the value carried on rather than as rows beside it.
+fn value_column(label: &str, separator: &str) -> u8 {
+    (ITEM_INDENT as usize + columns(&labelled(label, "", separator))) as u8
+}
+
+/// A row's text broken onto the lines it needs: the first at `room` columns,
+/// every one after it hung `hang` columns in. The break is at the column —
+/// what is wrapped here is a name or a token, and a token has no spaces to
+/// break at anyway, so a word-aware break would only make the two disagree.
+///
+/// `hang` gives up when what is left of the line would be a gutter too narrow
+/// to read, and the lines then take the full width.
+fn broken(text: &str, room: usize, hang: usize) -> Vec<String> {
+    let room = room.max(1);
+    if columns(text) <= room {
+        return vec![text.to_string()];
+    }
+    let hang = if hang + 4 <= room { hang } else { 0 };
+    let laid = wrap_rows(text, room);
+    if hang == 0 || laid.len() < 2 {
+        return laid;
+    }
+    let mut out = vec![laid[0].clone()];
+    let inner = (room - hang).max(1);
+    for chunk in wrap_rows(&laid[1..].join(""), inner) {
+        out.push(format!("{}{}", " ".repeat(hang), chunk));
+    }
+    out
 }
 
 /// What the row under the cursor does when it is activated.
@@ -333,19 +386,29 @@ pub fn rows(app: &App) -> Vec<Row> {
         }
         rows.push(host_row);
         let token = next_cursor();
-        rows.push(Row::at(
-            labelled(s.lan_token_label, &app.lan_token_text(), s.label_separator),
-            action_style(token),
-            ITEM_INDENT,
-        ));
+        rows.push(
+            Row::at(
+                labelled(s.lan_token_label, &app.lan_token_text(), s.label_separator),
+                action_style(token),
+                ITEM_INDENT,
+            )
+            // The token is a value the user checks by eye — the whole mask, so
+            // a paste that dropped half of it is visible — so it wraps rather
+            // than being cut.
+            .wrapping(value_column(s.lan_token_label, s.label_separator)),
+        );
     } else {
         // The device names the link once one is up; it is read, not chosen,
-        // which is why it takes no cursor index.
-        rows.push(Row::at(
-            labelled(s.device_label, &app.device_text(), s.label_separator),
-            RowStyle::Label,
-            ITEM_INDENT,
-        ));
+        // which is why it takes no cursor index. Its value wraps for the same
+        // reason the token's does: a board's name read halfway names nothing.
+        rows.push(
+            Row::at(
+                labelled(s.device_label, &app.device_text(), s.label_separator),
+                RowStyle::Label,
+                ITEM_INDENT,
+            )
+            .wrapping(value_column(s.device_label, s.label_separator)),
+        );
     }
     let connect = next_cursor();
     rows.push(Row::at(
@@ -445,50 +508,83 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let width = width as usize;
     rows(app)
         .into_iter()
-        .map(|row| match row.style {
-            RowStyle::Gap => Line::from(""),
-            RowStyle::State => {
-                let glyph = Span::styled(
-                    format!("{} ", app.state_glyph()),
-                    theme.state_dot(app.state),
-                );
-                let room = width.saturating_sub(2);
-                let mut spans = vec![glyph, Span::styled(clip_to(&row.text, room), theme.text())];
-                if let Some(tail) = row.tail {
-                    let used = crate::text::columns(&row.text);
-                    let left = room.saturating_sub(used);
-                    spans.push(Span::styled(clip_to(&tail, left), theme.muted()));
-                }
-                Line::from(spans)
-            }
-            RowStyle::Selected => {
-                // The chip hugs the whole row, marker included, so a selected
-                // dangerous shortcut stays one unbroken chip — which means the
-                // marker's columns are reserved *before* the text is fitted:
-                // clip first and append after and the clip eats exactly the
-                // warning that made the row worth selecting.
-                let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
-                let room = width.saturating_sub(crate::text::columns(&tail));
-                let mut chip = clip_to(&format!("{CURSOR_MARKER}{}", row.text), room);
-                chip.push_str(&tail);
-                Line::from(Span::styled(chip, theme.selected()))
-            }
-            other => {
-                // A marker is budgeted for before the text is fitted, so a row
-                // that runs long loses its tail rather than its warning.
-                let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
-                let room = width.saturating_sub(crate::text::columns(&tail));
-                let mut spans = vec![Span::styled(
-                    clip_to(&row.laid_out(), room),
-                    style_for(other, theme),
-                )];
-                if !tail.is_empty() {
-                    spans.push(Span::styled(tail, theme.danger()));
-                }
-                Line::from(spans)
-            }
-        })
+        .flat_map(|row| painted(row, app, theme, width))
         .collect()
+}
+
+/// One row painted: the single line it has always been, or — for a wrapping
+/// row whose value does not fit — the lines that value needs, the first ending
+/// at the column's edge and every one after it hung under the value.
+fn painted(row: Row, app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    match row.style {
+        RowStyle::Gap => vec![Line::from("")],
+        RowStyle::State => {
+            let glyph = Span::styled(
+                format!("{} ", app.state_glyph()),
+                theme.state_dot(app.state),
+            );
+            let room = width.saturating_sub(2);
+            let mut spans = vec![glyph, Span::styled(clip_to(&row.text, room), theme.text())];
+            if let Some(tail) = row.tail {
+                let used = columns(&row.text);
+                let left = room.saturating_sub(used);
+                spans.push(Span::styled(clip_to(&tail, left), theme.muted()));
+            }
+            vec![Line::from(spans)]
+        }
+        RowStyle::Selected => {
+            // The chip hugs the whole row, marker included, so a selected
+            // dangerous shortcut stays one unbroken chip — which means the
+            // marker's columns are reserved *before* the text is fitted:
+            // clip first and append after and the clip eats exactly the
+            // warning that made the row worth selecting.
+            let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
+            let room = width.saturating_sub(columns(&tail));
+            let text = format!("{CURSOR_MARKER}{}", row.text);
+            // A wrapping row under the cursor keeps the chip on its first line
+            // and carries the selection down its value. The marker holds the
+            // indent the row would have had — the two are the same width —
+            // so the hang needs no adjustment but the swap.
+            if row.marker.is_none() {
+                if let Some(hang) = row.wrap_indent {
+                    if columns(&text) > room {
+                        let hang = (hang.saturating_sub(ITEM_INDENT) as usize
+                            + columns(CURSOR_MARKER)) as u8;
+                        return broken(&text, room, hang as usize)
+                            .into_iter()
+                            .map(|line| Line::from(Span::styled(line, theme.selected())))
+                            .collect();
+                    }
+                }
+            }
+            let mut chip = clip_to(&text, room);
+            chip.push_str(&tail);
+            vec![Line::from(Span::styled(chip, theme.selected()))]
+        }
+        other => {
+            // A marker is budgeted for before the text is fitted, so a row
+            // that runs long loses its tail rather than its warning.
+            let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
+            let room = width.saturating_sub(columns(&tail));
+            let text = row.laid_out();
+            if row.marker.is_none() {
+                if let Some(hang) = row.wrap_indent {
+                    if columns(&text) > room {
+                        let style = style_for(other, theme);
+                        return broken(&text, room, hang as usize)
+                            .into_iter()
+                            .map(|line| Line::from(Span::styled(line, style)))
+                            .collect();
+                    }
+                }
+            }
+            let mut spans = vec![Span::styled(clip_to(&text, room), style_for(other, theme))];
+            if !tail.is_empty() {
+                spans.push(Span::styled(tail, theme.danger()));
+            }
+            vec![Line::from(spans)]
+        }
+    }
 }
 
 /// The colour a row type is painted in — the whole of the theme's say in the
@@ -954,24 +1050,122 @@ mod tests {
 
     /// A row too long for its column is cut, not wrapped and not spilled: the
     /// row count is what must not change, because a wrapped row would shift
-    /// every row below it.
+    /// every row below it. The device name and the token are the two rows that
+    /// wrap instead — values the user checks against reality — so this uses
+    /// one of the many that do not.
     #[test]
     fn an_overlong_row_is_cut_rather_than_wrapped() {
         let mut app = app_en();
-        app.device_name = "Linkr BLE UART with a very long advertised name".to_string();
+        app.watch =
+            vec!["a finding long enough to need more than the column it is printed in".to_string()];
         let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
         assert_eq!(
             painted.len(),
             rows(&app).len(),
             "a long row changed the row count"
         );
-        let device = painted
+        let finding = painted
             .iter()
             .map(text_of)
-            .find(|t| t.trim_start().starts_with("Device:"))
+            .find(|t| t.trim_start().starts_with("a finding"))
+            .expect("the watch finding");
+        assert!(finding.contains('…'), "{finding:?} was not marked as cut");
+        assert!(columns(&finding) <= SIDEBAR_TEXT_WIDTH as usize);
+    }
+
+    /// The board's name is a value the user checks, so it wraps under its own
+    /// value column rather than being cut — a name read halfway names nothing.
+    #[test]
+    fn a_long_device_name_wraps_under_its_value() {
+        let mut app = app_en();
+        app.device_name = "Linkr BLE UART with a very long advertised name".to_string();
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        let texts: Vec<String> = painted.iter().map(text_of).collect();
+        let start = texts
+            .iter()
+            .position(|t| t.trim_start().starts_with("Device:"))
             .expect("the device row");
-        assert!(device.contains('…'), "{device:?} was not marked as cut");
-        assert!(columns(&device) <= SIDEBAR_TEXT_WIDTH as usize);
+
+        // The first line carries the label and as much of the value as fits,
+        // and it is cut at the column rather than marked as cut.
+        assert!(
+            texts[start].starts_with("  Device: "),
+            "{:?} lost its label",
+            texts[start]
+        );
+        assert!(
+            !texts[start].contains('…'),
+            "{:?} was cut rather than wrapped",
+            texts[start]
+        );
+
+        // Every further line hangs under the value: ten columns in, which is
+        // where `  Device: ` ends, so the value reads as one value continued.
+        let hang = " ".repeat(10);
+        let mut value = texts[start][10..].to_string();
+        let mut wrapped = 0;
+        for line in &texts[start + 1..] {
+            if !line.starts_with(&hang) {
+                break;
+            }
+            value.push_str(&line[10..]);
+            wrapped += 1;
+            assert!(columns(line) <= SIDEBAR_TEXT_WIDTH as usize, "{line:?}");
+        }
+        assert!(wrapped >= 1, "the name did not wrap: {texts:?}");
+        assert_eq!(value, "Linkr BLE UART with a very long advertised name");
+    }
+
+    /// The token is the other value that wraps, and it is the one that reaches
+    /// the column's edge first: the mask is thirty-two stars, so a full token
+    /// never fits and half of it was all that could be read before.
+    #[test]
+    fn a_long_token_wraps_under_its_value() {
+        let mut app = app_in(Lang::Zh);
+        app.transport = Transport::Lan;
+        app.network.wifi = Some(crate::accessory::WifiStatus {
+            state: "connected".into(),
+            ssid: "Bench".into(),
+            ip: "192.168.0.100".into(),
+        });
+        app.lan_status.token = "0123456789abcdef0123456789abcdef".into();
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH);
+        let texts: Vec<String> = painted.iter().map(text_of).collect();
+        let label = app.strings().lan_token_label;
+        let start = texts
+            .iter()
+            .position(|t| t.contains(label))
+            .expect("the token row");
+
+        // `局域网令牌` and its separator make the value's own column; the first
+        // line carries the label and as much of the mask as fits, every line
+        // after it hangs under the value. All thirty-two stars are on screen,
+        // and none of them were cut.
+        let separator = app.strings().label_separator;
+        let hang = " ".repeat(value_column(label, separator) as usize);
+        assert!(
+            texts[start].starts_with(&format!("  {label}{separator}")),
+            "{:?}",
+            texts[start]
+        );
+        assert!(!texts[start].contains('…'), "{:?}", texts[start]);
+        assert!(columns(&texts[start]) <= SIDEBAR_TEXT_WIDTH as usize);
+        let mut stars = texts[start].matches('*').count();
+        let mut rest = &texts[start + 1..];
+        while let Some(line) = rest.first() {
+            if !line.starts_with(&hang) || !line.contains('*') {
+                break;
+            }
+            assert!(columns(line) <= SIDEBAR_TEXT_WIDTH as usize, "{line:?}");
+            stars += line.matches('*').count();
+            rest = &rest[1..];
+        }
+        assert_eq!(stars, 32, "the mask lost stars: {texts:?}");
+        assert_eq!(
+            rest.first().map(|l| l.trim_start()),
+            Some(app.strings().connect),
+            "the rows after the token are still there"
+        );
     }
 
     /// No row is empty except the gaps, in either language: a blank row in the

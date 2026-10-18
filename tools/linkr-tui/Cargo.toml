@@ -1,6 +1,6 @@
 [package]
 name = "linkr-tui"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Cross-platform host CLI and TUI for the Linkr Bee wireless serial bridge"
 license = "Apache-2.0"

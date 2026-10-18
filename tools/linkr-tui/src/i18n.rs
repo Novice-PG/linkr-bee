@@ -255,6 +255,10 @@ pub struct Strings {
     pub asst_unreachable: &'static str,
     /// A provider that answered and refused, with its status and its words.
     pub asst_rejected: &'static str,
+    /// Stands in for the words of a refusal whose body was empty — the shape a
+    /// 404 from a mistyped endpoint arrives in. A refusal with nothing to read
+    /// is the one a user cannot act on.
+    pub asst_rejected_blank: &'static str,
     /// A 200 whose body carried no completion at all.
     pub asst_malformed: &'static str,
 
@@ -489,6 +493,7 @@ const ZH: Strings = Strings {
     asst_awaiting: "等待确认",
     asst_unreachable: "模型没有应答：{}",
     asst_rejected: "服务商拒绝（HTTP {}）：{}",
+    asst_rejected_blank: "（服务商没有说明原因，请检查接口地址）",
     asst_malformed: "服务商返回了正文，但里面没有回答",
     link_opened: "链路已建立：",
     link_closed: "链路已断开：",
@@ -645,6 +650,7 @@ const EN: Strings = Strings {
     asst_awaiting: "awaiting approval",
     asst_unreachable: "the model did not answer: {}",
     asst_rejected: "the provider refused (HTTP {}): {}",
+    asst_rejected_blank: "(the provider gave no reason — check the endpoint URL)",
     asst_malformed: "the provider answered, but its body held no reply",
     link_opened: "link open: ",
     link_closed: "link closed: ",
@@ -984,6 +990,7 @@ mod tests {
                 s.asst_awaiting,
                 s.asst_unreachable,
                 s.asst_rejected,
+                s.asst_rejected_blank,
                 s.asst_malformed,
                 s.link_opened,
                 s.link_closed,
