@@ -143,7 +143,8 @@ linkr --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 而不是"命令说了 5"。只有一个 `--exec` 时才是透传：那是脚本包一条命令最常用的形状。
 
 `--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落
-（本 CLI 构建的 `operations` 里没有 `tui`——这里没有界面可开）。
+（本 CLI 构建的 `operations` 和 `subcommands` 里都没有 `tui`——这里没有界面可开；`linkr tui`
+仍会被认出，报"本构建没有界面"而不是被当成未知参数）。
 
 ## 七、常驻会话：`--serve`
 

@@ -378,10 +378,24 @@ pub fn subcommand_named(word: &str) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
+/// The subcommands the capability document lists.
+///
+/// The grammar knows `tui` in every build — a binary without the interface
+/// still answers `linkr tui`, with the sentence that it has no interface to
+/// open, which is why `usage` shows the whole table and the footnote beside
+/// it — but the document promises what *this* binary can be asked for, and
+/// opening the terminal is not something it can do. The same rule the
+/// operations list in `main.rs` follows, told from the one table so the two
+/// lists cannot disagree about the word.
+fn listed_subcommands() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    SUBCOMMANDS
+        .iter()
+        .filter(|(name, _)| *name != "tui" || cfg!(feature = "tui"))
+}
+
 /// The subcommand names as a JSON array, for the capability document.
 pub fn subcommands_json() -> String {
-    let names: Vec<String> = SUBCOMMANDS
-        .iter()
+    let names: Vec<String> = listed_subcommands()
         .map(|(name, _)| json_string(name))
         .collect();
     format!("[{}]", names.join(","))
@@ -389,8 +403,7 @@ pub fn subcommands_json() -> String {
 
 /// The subcommand names as a line of prose, for the capability document's text.
 pub fn subcommands_words() -> String {
-    SUBCOMMANDS
-        .iter()
+    listed_subcommands()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
         .join(", ")
@@ -2489,9 +2502,22 @@ mod tests {
                 );
             }
         }
+        // The document lists the aliases this build can be asked for: `tui`
+        // where there is an interface to open, and not where the run would
+        // only answer that there is none.
+        #[cfg(feature = "tui")]
         assert_eq!(
             subcommands_json(),
             r#"["scan","doctor","query","set","exec","send","loopback","tui","capabilities"]"#
         );
+        #[cfg(not(feature = "tui"))]
+        assert_eq!(
+            subcommands_json(),
+            r#"["scan","doctor","query","set","exec","send","loopback","capabilities"]"#
+        );
+        #[cfg(feature = "tui")]
+        assert!(subcommands_words().contains("tui"));
+        #[cfg(not(feature = "tui"))]
+        assert!(!subcommands_words().contains("tui"));
     }
 }

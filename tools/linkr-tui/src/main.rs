@@ -2777,7 +2777,9 @@ mod tests {
     /// The checkup and the send-only mode are actions like any other: named in
     /// the table a caller reads, parsed into the fields the one-shot run reads,
     /// and refused by the resident session — which answers what arrives on its
-    /// own input, and cannot have a second reader of it.
+    /// own input, and cannot have a second reader of it. The mode and the
+    /// refusal belong to the request path, so they are judged in the build
+    /// that has one; the flags themselves are every build's to name.
     #[test]
     fn the_checkup_and_send_flags_are_parsed_and_documented() {
         for flag in ["--doctor", "--send"] {
@@ -2799,14 +2801,17 @@ mod tests {
         );
         // Both are things to do, so a command line that names one is a run and
         // not a request to open the terminal.
-        assert_eq!(Mode::from(&args(&["--doctor"]), "linkr"), Mode::Cli);
-        assert_eq!(Mode::from(&args(&["--send", "line"]), "linkr"), Mode::Cli);
-        for refused in [
-            &["--serve", "--bridge", "-", "--doctor"][..],
-            &["--serve", "--bridge", "-", "--send", "line"],
-        ] {
-            let why = serve_refusal(&args(refused)).expect("the session refuses it");
-            assert!(why.contains("resident session"), "{refused:?}: {why}");
+        #[cfg(feature = "cli")]
+        {
+            assert_eq!(Mode::from(&args(&["--doctor"]), "linkr"), Mode::Cli);
+            assert_eq!(Mode::from(&args(&["--send", "line"]), "linkr"), Mode::Cli);
+            for refused in [
+                &["--serve", "--bridge", "-", "--doctor"][..],
+                &["--serve", "--bridge", "-", "--send", "line"],
+            ] {
+                let why = serve_refusal(&args(refused)).expect("the session refuses it");
+                assert!(why.contains("resident session"), "{refused:?}: {why}");
+            }
         }
     }
 
@@ -2816,10 +2821,7 @@ mod tests {
     #[test]
     fn the_wire_settings_parse_and_default_to_the_reference_clients() {
         assert_eq!(args(&[]).escape, 0x1d, "^] by default");
-        assert_eq!(args(&["--escape", "^]"]).escape, 0x1d);
-        assert_eq!(args(&["--escape", "0x02"]).escape, 0x02);
         assert!(!args(&[]).line_mode);
-        assert!(args(&["--line-mode"]).line_mode);
         assert!(!args(&[]).debug_io);
         assert!(args(&["--debug-io"]).debug_io);
         assert_eq!(
@@ -2827,12 +2829,24 @@ mod tests {
             None,
             "unnamed, so the settings file decides"
         );
-        assert_eq!(args(&["--enter", "lf"]).enter, Some(EnterMode::Lf));
-        assert_eq!(args(&["--enter", "CRLF"]).enter, Some(EnterMode::Crlf));
         assert_eq!(
             args(&["--log-file", "/tmp/rx.log"]).log_file.as_deref(),
             Some(std::path::Path::new("/tmp/rx.log"))
         );
+        // How the terminal sends what is typed — the escape byte, the line
+        // discipline, what ends a line — is the interface's to configure: the
+        // build without one refuses those flags rather than accepting a
+        // command line and dropping it, which `tests/usage.rs` says from
+        // outside. The defaults above are what every build starts from; the
+        // flags are parsed where there is a terminal to set.
+        #[cfg(feature = "tui")]
+        {
+            assert_eq!(args(&["--escape", "^]"]).escape, 0x1d);
+            assert_eq!(args(&["--escape", "0x02"]).escape, 0x02);
+            assert!(args(&["--line-mode"]).line_mode);
+            assert_eq!(args(&["--enter", "lf"]).enter, Some(EnterMode::Lf));
+            assert_eq!(args(&["--enter", "CRLF"]).enter, Some(EnterMode::Crlf));
+        }
     }
 
     /// `--loopback-test` takes its payload or falls back to `A`, and the next
