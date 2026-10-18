@@ -229,7 +229,10 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     showStatus("cleared");
     onChange?.();
   });
-  for (const input of Object.values(inputs)) input.addEventListener("input", () => {
+  // Headers and prices are part of the form too: without them, editing a rule
+  // line or a price showed no unsaved marker and the change could be lost
+  // without the user ever seeing "changes have not been saved".
+  for (const input of [...Object.values(inputs), headersInput, ...Object.values(priceInputs)]) input.addEventListener("input", () => {
     resetErrors();
     showStatus("dirty");
   });

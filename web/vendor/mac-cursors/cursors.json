@@ -1,0 +1,71 @@
+{
+  "left_ptr": {
+    "purpose": "arrow",
+    "sizes": [
+      {
+        "file": "left_ptr-32-black.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          7,
+          3
+        ],
+        "variant": "black"
+      },
+      {
+        "file": "left_ptr-32-white.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          7,
+          3
+        ],
+        "variant": "white"
+      }
+    ]
+  },
+  "xterm": {
+    "purpose": "text I-beam",
+    "sizes": [
+      {
+        "file": "xterm-32-black.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          12,
+          12
+        ],
+        "variant": "black"
+      },
+      {
+        "file": "xterm-32-white.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          12,
+          12
+        ],
+        "variant": "white"
+      }
+    ]
+  },
+  "hand2": {
+    "purpose": "pointing hand",
+    "sizes": [
+      {
+        "file": "hand2-32.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          8,
+          4
+        ]
+      }
+    ]
+  }
+}

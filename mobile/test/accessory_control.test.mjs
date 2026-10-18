@@ -46,6 +46,8 @@ test("WebDAV commands accept only plain HTTP endpoints", () => {
   assert.throws(() => webdavCommand({ url: "ftp://host/dav/" }), /http/);
   assert.throws(() => webdavCommand({ url: `http://host/${"x".repeat(250)}` }), /at most 256/);
   assert.throws(() => webdavCommand({ url: "http://host/a b" }), /whitespace/);
+  // The firmware splits @d= on commas into url, user, pass.
+  assert.throws(() => webdavCommand({ url: "http://host/a,b/c" }), /comma/);
 });
 
 test("credentials never survive into a display or a tool result", () => {
@@ -54,6 +56,10 @@ test("credentials never survive into a display or a tool result", () => {
   assert.equal(redactCommand("@w off"), "@w off");
   assert.equal(redactCommand("@d=http://user:pass@host/dav/"), "@d=http://<redacted>@host/dav/");
   assert.equal(redactCommand("@d=http://host/dav/"), "@d=http://host/dav/");
+  // A password may contain "@": redaction must reach the last one before the path.
+  assert.equal(redactCommand("@d=http://user:p@ss@host/dav/"), "@d=http://<redacted>@host/dav/");
+  // Firmware-style credential parts are hidden too, url untouched.
+  assert.equal(redactCommand("@d=http://host/dav/,user,pass"), "@d=http://host/dav/,<redacted>");
   assert.equal(redactCommand("@u=9600,8,n,1,none"), "@u=9600,8,n,1,none");
 
   const summary = accessoryChangeSummary("@w=Bench,secret", "en");

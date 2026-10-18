@@ -1,0 +1,1087 @@
+/* ============================================================================
+ * Liquid Glass theme layer
+ * ----------------------------------------------------------------------------
+ * Loaded after style.css and window.css so it can retune the whole UI without
+ * duplicating the layout rules that live in those files. The approach is
+ * token-first: most of the old stylesheet already paints from custom
+ * properties (--panel, --line, --radius ...), so redefining the tokens here
+ * turns every surface translucent in one place and the rules below only have
+ * to teach the few components that hardcoded paint how to behave.
+ *
+ * The look: Apple's "liquid glass" material -- frosted translucent layers
+ * over a slow aurora backdrop, a specular top hairline on every raised
+ * surface, generous concentric radii, and the semantic palette from the
+ * Linkr Bee concept board (green = state, blue = RX, orange = TX).
+ *
+ * Two themes ship: dark (default, matching the concept board) and light. Both
+ * are token swaps; no rule below is theme-specific except where a shadow or
+ * sheen genuinely differs.
+ *
+ * Performance notes, because this frontend is served from a 1.5 GHz host and
+ * often viewed from phones:
+ *  - backdrop-filter is limited to chrome-level surfaces (topbar, sidebar,
+ *    status bar, toasts, drawer, sticky headers). Cards and buttons use flat
+ *    translucent fills instead; nesting blur inside blur is what makes glass
+ *    UIs crawl on weak GPUs.
+ *  - the aurora and grain are plain fixed background layers, not animated
+ *    elements, so they cost nothing after first paint.
+ *  - when the platform cannot blur, or the user asks for reduced
+ *    transparency, the glass tokens collapse to opaque paints.
+ * ========================================================================= */
+
+/* --------------------------------------------------------------------------
+ * 1. Palette
+ * ------------------------------------------------------------------------ */
+
+:root {
+  /* Surfaces */
+  --bg: #070b12;
+  --aurora-1: rgba(61, 214, 140, 0.2);
+  --aurora-2: rgba(79, 156, 240, 0.17);
+  --aurora-3: rgba(146, 112, 255, 0.13);
+
+  --panel: rgba(14, 20, 30, 0.58);
+  --panel-2: rgba(19, 26, 38, 0.62);
+  /* Sticky toolbars (the settings head and the page tab strip) sit above
+   * content that scrolls beneath them. A backdrop-filter cannot blur the
+   * scrollport's own content -- the panel's own glass blur makes the toolbar
+   * a backdrop root -- so these need a fill that fully hides what slides
+   * past: the old 82% glass mix left scrolled text readable, and even a
+   * 0.94 alpha let ~6% through, which reads as a ghost on a dark surface. */
+  --toolbar-fill: #0d1320;
+  --panel-3: rgba(255, 255, 255, 0.07);
+  --input-bg: rgba(4, 8, 14, 0.45);
+  --btn-hover: rgba(255, 255, 255, 0.13);
+  --terminal: #05080d;
+
+  /* Ink */
+  --text: #e9eff8;
+  --muted: #94a3ba;
+  --placeholder: #7b8ba1;
+  --line: rgba(255, 255, 255, 0.1);
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(255, 255, 255, 0.2);
+
+  /* Semantic accents: green = state, blue = RX, orange = TX */
+  --accent: #3dd68c;
+  --accent-strong: #6fe0ab;
+  --accent-ink: #032218;
+  --rx: #58a6f5;
+  --tx: #e8934a;
+  --focus: #8ab4ff;
+  --danger: #ff7b81;
+
+  /* Glass material */
+  --glass-fill: rgba(13, 19, 29, 0.56);
+  --glass-sheen: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.09),
+    rgba(255, 255, 255, 0.02) 45%,
+    rgba(255, 255, 255, 0.05)
+  );
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-inner:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+  --glass-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.5),
+    0 3px 12px rgba(0, 0, 0, 0.32);
+
+  /* Flat translucent tiles (cards living inside a glass surface) */
+  --tile-bg: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.015)
+  );
+  --tile-border: rgba(255, 255, 255, 0.075);
+  --tile-inner: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+
+  /* Segmented controls */
+  --seg-bg: rgba(8, 12, 19, 0.5);
+  --seg-thumb: rgba(255, 255, 255, 0.14);
+  --seg-thumb-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+
+  /* Window chrome */
+  --head-grad: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.07),
+    rgba(255, 255, 255, 0.02)
+  );
+  --scroll-thumb: rgba(255, 255, 255, 0.18);
+  --drawer-fill: rgba(10, 15, 23, 0.8);
+  --backdrop-fill: rgba(4, 8, 15, 0.45);
+
+  /* Primary action */
+  --primary-grad:
+    radial-gradient(
+      130% 170% at 18% 0%,
+      rgba(255, 255, 255, 0.38),
+      rgba(255, 255, 255, 0) 45%
+    ),
+    linear-gradient(165deg, #57e3a5, #27ae72);
+  --primary-grad-hover:
+    radial-gradient(
+      130% 170% at 18% 0%,
+      rgba(255, 255, 255, 0.5),
+      rgba(255, 255, 255, 0) 48%
+    ),
+    linear-gradient(165deg, #63ecae, #2fbf7f);
+  --primary-shadow:
+    0 10px 26px rgba(40, 190, 130, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -3px 8px rgba(6, 80, 48, 0.3);
+  --primary-shadow-hover:
+    0 12px 30px rgba(40, 190, 130, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -3px 8px rgba(6, 80, 48, 0.3);
+
+  /* Pressed state: an inset well instead of a transform, because window.css
+   * deliberately flattened the old translateY press to keep touch scrolling
+   * smooth. */
+  --press-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
+
+  /* Radii: one step rounder than the pre-glass layout. */
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 20px;
+  --window-radius: 18px;
+  --control-radius: 11px;
+
+  /* Specular highlight on the brand tile. */
+  --logo-bg: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0.03)
+  );
+  --logo-shadow:
+    0 0 22px rgba(61, 214, 140, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #edf1f8;
+  --terminal: #f8fafc;
+  --aurora-1: rgba(47, 158, 99, 0.18);
+  --aurora-2: rgba(59, 130, 246, 0.15);
+  --aurora-3: rgba(150, 110, 255, 0.12);
+
+  --panel: rgba(255, 255, 255, 0.55);
+  --panel-2: rgba(255, 255, 255, 0.62);
+  --panel-3: rgba(255, 255, 255, 0.5);
+  --toolbar-fill: #f8fafc;
+  --input-bg: rgba(255, 255, 255, 0.68);
+  --btn-hover: #ffffff;
+
+  --text: #101b2d;
+  --muted: #5c6a82;
+  --placeholder: #5a6a80;
+  --line: rgba(21, 42, 80, 0.13);
+  --line-soft: rgba(21, 42, 80, 0.08);
+  --line-strong: rgba(21, 42, 80, 0.24);
+
+  --accent: #1f9d64;
+  --accent-strong: #157a4c;
+  --accent-ink: #ffffff;
+  --rx: #1f6fe0;
+  --tx: #c96b1f;
+  --focus: #2f6fe4;
+  --danger: #dc3434;
+
+  --glass-fill: rgba(255, 255, 255, 0.44);
+  --glass-sheen: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.92),
+    rgba(255, 255, 255, 0.45) 45%,
+    rgba(255, 255, 255, 0.7)
+  );
+  --glass-border: rgba(255, 255, 255, 0.72);
+  --glass-inner:
+    inset 0 1px 0 #ffffff,
+    inset 0 -1px 0 rgba(21, 42, 80, 0.05);
+  --glass-shadow:
+    0 18px 40px rgba(51, 80, 140, 0.16),
+    0 3px 10px rgba(51, 80, 140, 0.1),
+    0 0 0 0.5px rgba(21, 42, 80, 0.06);
+
+  --tile-bg: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.8),
+    rgba(255, 255, 255, 0.5)
+  );
+  --tile-border: rgba(21, 42, 80, 0.08);
+  --tile-inner: inset 0 1px 0 #ffffff;
+
+  --seg-bg: rgba(255, 255, 255, 0.5);
+  --seg-thumb: #ffffff;
+  --seg-thumb-shadow:
+    0 2px 8px rgba(51, 80, 140, 0.22),
+    inset 0 1px 0 #ffffff;
+
+  --head-grad: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.95),
+    rgba(244, 247, 251, 0.85)
+  );
+  --scroll-thumb: rgba(30, 50, 90, 0.25);
+  --drawer-fill: rgba(248, 250, 253, 0.85);
+  --backdrop-fill: rgba(23, 34, 54, 0.35);
+
+  --primary-grad:
+    radial-gradient(
+      130% 170% at 18% 0%,
+      rgba(255, 255, 255, 0.5),
+      rgba(255, 255, 255, 0) 50%
+    ),
+    linear-gradient(165deg, #3cc183, #1f9d64);
+  --primary-grad-hover:
+    radial-gradient(
+      130% 170% at 18% 0%,
+      rgba(255, 255, 255, 0.6),
+      rgba(255, 255, 255, 0) 52%
+    ),
+    linear-gradient(165deg, #45cf8d, #23a96d);
+  --primary-shadow:
+    0 10px 22px rgba(31, 157, 100, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -3px 8px rgba(9, 90, 55, 0.22);
+  --primary-shadow-hover:
+    0 12px 26px rgba(31, 157, 100, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.56),
+    inset 0 -3px 8px rgba(9, 90, 55, 0.22);
+
+  --press-shadow: inset 0 2px 6px rgba(21, 42, 80, 0.14);
+
+  --logo-bg: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0.55)
+  );
+  --logo-shadow:
+    0 0 20px rgba(61, 214, 140, 0.3),
+    inset 0 1px 0 #ffffff,
+    0 2px 8px rgba(51, 80, 140, 0.12);
+}
+
+/* --------------------------------------------------------------------------
+ * 2. Backdrop: aurora + film grain
+ * ------------------------------------------------------------------------ */
+
+/* The whole page paints its own background layers; every glass surface above
+ * simply blurs what shows through from here. attachment:fixed keeps the
+ * aurora steady while the terminal scrolls. */
+html {
+  background: var(--bg);
+}
+
+body {
+  background-color: var(--bg);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E"),
+    radial-gradient(52rem 34rem at 10% -6%, var(--aurora-1), transparent 60%),
+    radial-gradient(56rem 38rem at 96% 0%, var(--aurora-2), transparent 58%),
+    radial-gradient(48rem 36rem at 62% 108%, var(--aurora-3), transparent 62%);
+  background-repeat: repeat, no-repeat, no-repeat, no-repeat;
+  background-size: 140px 140px, auto, auto, auto;
+  background-attachment: fixed, fixed, fixed, fixed;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+[data-theme="light"] ::selection {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+ * 3. Scrollbars
+ * ------------------------------------------------------------------------ */
+
+.controls,
+.xterm-viewport {
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+/* The panel's pages are taller than the fold or shorter (Serial and AI have
+ * scrollbars, Connection and Network do not), so with a classic scrollbar the
+ * usable width would jump by ~10px on every tab switch -- resizing every card
+ * and the pill row, which reads as the layout twitching. A concealed scrollbar
+ * keeps the width constant -- and, unlike a reserved gutter, leaves the sticky
+ * header free to fill the full rounded panel width (the gutter showed as a
+ * bare strip beside the header at the top-right corner). Touch, wheel and
+ * trackpad scrolling are unaffected. */
+.controls {
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+
+.controls::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.controls::-webkit-scrollbar-thumb,
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+}
+
+.controls::-webkit-scrollbar-thumb:hover,
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--scroll-thumb) 70%, var(--text));
+}
+
+/* --------------------------------------------------------------------------
+ * 4. Chrome-level glass surfaces
+ * ------------------------------------------------------------------------ */
+
+.topbar,
+.controls.window-surface,
+.statusbar,
+.toast,
+.agent-mode-picker,
+.settings-tabs,
+.boot-notice {
+  background: var(--glass-sheen), var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-inner);
+  backdrop-filter: blur(22px) saturate(1.7);
+  -webkit-backdrop-filter: blur(22px) saturate(1.7);
+}
+
+/* The terminal card and the agent panel share .window-surface but must stay
+ * solid: text sits directly on them and translucency there would hurt
+ * legibility (and xterm's canvas paints its own opaque background anyway). */
+.terminal-card.window-surface,
+.agent-panel.window-surface {
+  background: var(--terminal);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow, var(--shadow)), var(--tile-inner);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.agent-messages {
+  background: var(--terminal);
+}
+
+/* Top bar --------------------------------------------------------------- */
+
+.topbar {
+  border-radius: var(--window-radius);
+}
+
+.logo {
+  border: 1px solid var(--glass-border);
+  border-radius: 13px;
+  background: var(--logo-bg);
+  box-shadow: var(--logo-shadow);
+}
+
+.logo img {
+  display: block;
+  width: 62%;
+  height: 62%;
+}
+
+h1 {
+  letter-spacing: 0.005em;
+}
+
+.status-pill {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+  backdrop-filter: none;
+}
+
+.status-pill:has(.status-dot.connected) {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--glass-border));
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--accent) 22%, transparent),
+    var(--tile-inner);
+}
+
+/* Icon buttons in the top bar ------------------------------------------- */
+
+.icon-btn {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.icon-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-border));
+  background: var(--btn-hover);
+}
+
+.icon-btn:active:not(:disabled) {
+  box-shadow: var(--press-shadow);
+}
+
+/* --------------------------------------------------------------------------
+ * 5. Sidebar / drawer
+ * ------------------------------------------------------------------------ */
+
+.controls.window-surface {
+  border-radius: var(--window-radius);
+}
+
+/* The head pins above content that keeps moving (Serial and AI pages scroll,
+ * the others do not), so its fill has to hide whatever slides past: the
+ * old 82% glass mix left scrolled text readable through the surface. A
+ * backdrop-filter cannot help -- the panel's own glass blur turns the toolbar
+ * into a backdrop root, so nested filters never see the scrollport's own
+ * content. The near-opaque --toolbar-fill carries the frosted look instead. */
+.controls .drawer-head.window-header,
+html.settings-drawer-layout .drawer-head.window-header {
+  background: var(--toolbar-fill);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Same for the tab strip stuck under the head. The has-agent-settings
+ * variant needs to be named too -- it re-declares the background with higher
+ * specificity when the assistant is available. */
+.controls .settings-tabs,
+.controls.has-agent-settings .settings-tabs {
+  background: var(--toolbar-fill);
+}
+
+.settings-tabs {
+  border-radius: 999px;
+  padding: 4px;
+  gap: 4px;
+}
+
+.settings-tab {
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.settings-tab.active {
+  background: var(--seg-thumb);
+  color: var(--text);
+  box-shadow: var(--seg-thumb-shadow);
+}
+
+/* Cards: flat translucent tiles. No blur -- they already sit on a blurred
+ * surface, and a second blur layer would cost a lot for no visible gain. */
+.card {
+  border: 1px solid var(--tile-border);
+  border-radius: var(--radius-lg);
+  background: var(--tile-bg);
+  box-shadow: var(--tile-inner);
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--tile-border));
+}
+
+.card-title .dot {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+
+.diagnostic-item,
+.wifi-connected-summary,
+.font-preview,
+.ref-cmd,
+.agent-message {
+  border: 1px solid var(--tile-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.diagnostics-summary:hover {
+  background: var(--panel-3);
+}
+
+/* --------------------------------------------------------------------------
+ * 6. Segmented controls (transport switch)
+ * ------------------------------------------------------------------------ */
+
+.transport-switch {
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: var(--seg-bg);
+  padding: 4px;
+  box-shadow: var(--tile-inner);
+}
+
+.ts-btn {
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.ts-btn.active,
+.ts-btn.active:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--seg-thumb);
+  color: var(--text);
+  box-shadow: var(--seg-thumb-shadow);
+}
+
+/* --------------------------------------------------------------------------
+ * 7. Buttons
+ * ------------------------------------------------------------------------ */
+
+.btn {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-border));
+  background: var(--btn-hover);
+}
+
+.btn:active:not(:disabled) {
+  box-shadow: var(--press-shadow);
+}
+
+.btn-soft {
+  background: var(--panel-2);
+}
+
+.btn-primary {
+  border-color: transparent;
+  background: var(--primary-grad);
+  color: var(--accent-ink);
+  box-shadow: var(--primary-shadow);
+}
+
+.btn-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--primary-grad-hover);
+  box-shadow: var(--primary-shadow-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  box-shadow: var(--press-shadow), var(--primary-shadow);
+}
+
+/* Keyboard-like tools (terminal head, accessory keys, quick-send chips) */
+
+.term-tool {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--control-radius);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.term-tool:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-border));
+  background: var(--btn-hover);
+}
+
+.term-tool.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--glass-border));
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-3));
+  color: var(--accent-strong);
+}
+
+.terminal-card .terminal-key,
+.terminal-card .terminal-keyboard {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--control-radius);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.terminal-card .terminal-key:active:not(:disabled),
+.terminal-card .terminal-keyboard:active:not(:disabled) {
+  box-shadow: var(--press-shadow);
+}
+
+.terminal-card .terminal-key[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--glass-border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel-3));
+  color: var(--accent-strong);
+}
+
+.preset-chip {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-2);
+  box-shadow: var(--tile-inner);
+}
+
+.preset-chip:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--glass-border));
+  background: var(--btn-hover);
+}
+
+.preset-chip:active:not(:disabled) {
+  box-shadow: var(--press-shadow);
+}
+
+/* --------------------------------------------------------------------------
+ * 8. Fields
+ * ------------------------------------------------------------------------ */
+
+input,
+select,
+textarea {
+  border: 1px solid var(--glass-border);
+  background: var(--input-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+input:hover,
+select:hover {
+  border-color: color-mix(in srgb, var(--text) 22%, var(--glass-border));
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 26%, transparent);
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.check input {
+  accent-color: var(--accent);
+}
+
+.wifi-network {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.wifi-network:hover,
+.wifi-network:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--glass-border));
+  background: var(--btn-hover);
+}
+
+/* --------------------------------------------------------------------------
+ * 9. Terminal frame
+ * ------------------------------------------------------------------------ */
+
+.terminal-card {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    var(--glass-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+[data-theme="light"] .terminal-card {
+  box-shadow:
+    var(--glass-shadow),
+    inset 0 1px 0 #ffffff;
+}
+
+.terminal-head {
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--head-grad);
+}
+
+[data-theme="light"] .terminal-head {
+  background: var(--head-grad);
+  border-bottom-color: var(--line-soft);
+}
+
+.terminal-input-bar {
+  border-top: 1px solid var(--line-soft);
+  background: var(--head-grad);
+}
+
+/* --------------------------------------------------------------------------
+ * 10. Quick send + status bar
+ * ------------------------------------------------------------------------ */
+
+.presets {
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.statusbar {
+  border-radius: var(--window-radius);
+}
+
+.statusbar .sb-item + .sb-item::before {
+  background: var(--line);
+}
+
+.statusbar .sb-item b {
+  color: var(--text);
+}
+
+/* RX is input (blue), TX is output (orange) -- the concept board's semantic
+ * pair, so a glance at the bar says who is talking. */
+#rxCount {
+  color: var(--rx);
+}
+
+#txCount {
+  color: var(--tx);
+}
+
+/* --------------------------------------------------------------------------
+ * 11. Toasts
+ * ------------------------------------------------------------------------ */
+
+.toast {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--glass-border));
+  border-radius: var(--radius);
+  background: var(--glass-sheen), var(--glass-fill);
+  box-shadow:
+    0 0 24px color-mix(in srgb, var(--accent) 18%, transparent),
+    var(--glass-shadow);
+}
+
+.toast-error {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--glass-border));
+  box-shadow:
+    0 0 24px color-mix(in srgb, var(--danger) 16%, transparent),
+    var(--glass-shadow);
+}
+
+/* --------------------------------------------------------------------------
+ * 12. Boot notice
+ * ------------------------------------------------------------------------ */
+
+.boot-notice {
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: var(--glass-fill);
+  box-shadow: var(--tile-inner);
+}
+
+/* --------------------------------------------------------------------------
+ * 13. Agent surfaces
+ * ------------------------------------------------------------------------ */
+
+.agent-panel.window-surface {
+  background: var(--terminal);
+}
+
+.agent-header {
+  border-bottom: 1px solid var(--line);
+  background: var(--head-grad);
+}
+
+.agent-form {
+  border-top: 1px solid var(--line-soft);
+  background: var(--head-grad);
+}
+
+.agent-question textarea {
+  border: 1px solid var(--glass-border);
+  background: var(--input-bg);
+}
+
+.agent-user {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--tile-border));
+  box-shadow:
+    0 0 18px color-mix(in srgb, var(--accent) 14%, transparent),
+    var(--tile-inner);
+}
+
+.agent-gear {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-3);
+  box-shadow: var(--tile-inner);
+}
+
+.agent-mode-option {
+  border-radius: 11px;
+}
+
+.agent-mode-options input:checked + .agent-mode-option {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--tile-border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+  box-shadow: var(--tile-inner);
+}
+
+.agent-mode-gear {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-2);
+}
+
+.agent-terminal-peek {
+  border: 1px solid var(--glass-border);
+  background: var(--panel-2);
+  box-shadow: var(--tile-inner);
+}
+
+/* Markdown blocks inside messages sit on solid terminal paint already; keep
+ * their code surfaces flat rather than glass. */
+.agent-markdown pre,
+.agent-markdown th {
+  background: var(--panel);
+}
+
+/* --------------------------------------------------------------------------
+ * 14. Mobile toolbar: keep the tool row on one line
+ * ------------------------------------------------------------------------ */
+
+/* On compact phones the head tools used to wrap onto three rows, because each
+ * button is 34-40px and the title shares the row. The concept board asks for
+ * one strip of controls instead, so the row scrolls sideways and the
+ * "xterm.js" caption -- pure decoration -- steps aside. */
+@media (max-width: 520px) {
+  .terminal-head {
+    flex-wrap: nowrap;
+  }
+
+  .term-tools {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .term-tools::-webkit-scrollbar {
+    display: none;
+  }
+
+  .term-tool {
+    flex: 0 0 auto;
+  }
+
+  .term-hint {
+    display: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 15. Mobile drawer
+ * ------------------------------------------------------------------------ */
+
+@media (max-width: 900px) {
+  .app-shell .controls.window-surface {
+    background: var(--drawer-fill);
+    border-right: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: blur(28px) saturate(1.7);
+    -webkit-backdrop-filter: blur(28px) saturate(1.7);
+  }
+
+  .drawer-backdrop {
+    background: var(--backdrop-fill);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+}
+
+html.settings-drawer-layout .controls.window-surface {
+  background: var(--drawer-fill);
+  backdrop-filter: blur(28px) saturate(1.7);
+  -webkit-backdrop-filter: blur(28px) saturate(1.7);
+}
+
+/* The mobile sheet goes edge to edge; keep its hairlines but drop the blur on
+ * the sheet itself when the OS asked for solid surfaces (handled below). */
+
+@media (max-width: 600px) {
+  html.settings-drawer-layout .controls.window-surface {
+    border: 0;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 16. Fallbacks: no blur, or the user asked for less transparency
+ * ------------------------------------------------------------------------ */
+
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --glass-fill: #10151f;
+    --panel: #121826;
+    --panel-2: #151c2a;
+    --panel-3: #1b2333;
+    --input-bg: #0d131d;
+    --btn-hover: #232d40;
+    --seg-bg: #0d131d;
+    --drawer-fill: #0c111a;
+  }
+
+  [data-theme="light"] {
+    --glass-fill: #ffffff;
+    --panel: #ffffff;
+    --panel-2: #f7f9fc;
+    --panel-3: #eef2f8;
+    --input-bg: #ffffff;
+    --btn-hover: #eef2f8;
+    --seg-bg: #eef2f8;
+    --drawer-fill: #ffffff;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .topbar,
+  .controls.window-surface,
+  .statusbar,
+  .toast,
+  .agent-mode-picker,
+  .settings-tabs,
+  .boot-notice,
+  .controls .drawer-head.window-header,
+  .drawer-backdrop,
+  html.settings-drawer-layout .controls.window-surface {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  :root {
+    --glass-fill: #10151f;
+    --panel: #121826;
+    --panel-2: #151c2a;
+    --panel-3: #1b2333;
+    --input-bg: #0d131d;
+    --drawer-fill: #0c111a;
+  }
+
+  [data-theme="light"] {
+    --glass-fill: #ffffff;
+    --panel: #ffffff;
+    --panel-2: #f7f9fc;
+    --panel-3: #eef2f8;
+    --input-bg: #ffffff;
+    --drawer-fill: #ffffff;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 17. Pre-paint state, mirroring the inline bootstrap in index.html
+ *
+ * The bootstrap can only reach <html> -- it runs before <body> exists -- so
+ * it parks the sidebar state in html[data-sidebar]. These rules render that
+ * attribute exactly like app.js renders .app-shell.controls-hidden, so the
+ * first paint already shows the settled layout instead of correcting itself
+ * once the modules load. app.js overwrites the attribute on every toggle
+ * (syncSidebarAccessibility), so it never goes stale.
+ *
+ * Scope notes:
+ *  - The drawer hosts (coarse pointer, narrow windows, HarmonyOS) lay the
+ *    panel out as a fixed sheet; .controls-hidden does not apply there, hence
+ *    the :not(.settings-drawer-layout) guard and the fine-pointer media.
+ *  - width 901-1100px flips the shell around (sidebar right), so its
+ *    collapsed grid must be mirrored separately, like style.css does.
+ * ------------------------------------------------------------------------ */
+
+@media (min-width: 901px) and (pointer: fine) {
+  html:not(.settings-drawer-layout)[data-sidebar="collapsed"] .app-shell {
+    grid-template-columns: 0 1fr;
+  }
+
+  html:not(.settings-drawer-layout)[data-sidebar="collapsed"] .controls.window-surface {
+    visibility: hidden;
+    overflow: hidden;
+    padding-right: 0;
+    opacity: 0;
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1100px) and (pointer: fine) {
+  html:not(.settings-drawer-layout)[data-sidebar="collapsed"] .app-shell {
+    grid-template-columns: minmax(0, 1fr) 0;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * 18. Motion: iOS-flavoured view and sheet transitions
+ *
+ * UIKit's sheet curve (static cubic-bezier(.32, .72, 0, 1)) replaces the
+ * linear-ish 0.25s ease for the panels, and content that appears as a unit
+ * fades in with a short rise instead of popping.
+ * ------------------------------------------------------------------------ */
+
+@keyframes glass-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.997);
+  }
+}
+
+/* Settings pages (tabs) and the two collapsible reference lists. display:none
+ * -> shown regenerates the box, so each switch replays the entrance. */
+[data-settings-page] {
+  animation: glass-view-in 0.34s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+details[open] > .diagnostics-content,
+details.ref[open] > .ref-body {
+  animation: glass-view-in 0.3s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Desktop sidebar: spring width, cross-fade the panel. */
+@media (min-width: 901px) {
+  .app-shell {
+    transition: grid-template-columns 0.46s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .app-shell .controls.window-surface {
+    opacity: 1;
+    transition: opacity 0.34s cubic-bezier(0.22, 0.61, 0.36, 1) 0.08s,
+      background-color 0.25s ease, border-color 0.25s ease;
+  }
+
+  .app-shell.controls-hidden .controls.window-surface {
+    visibility: hidden;
+    overflow: hidden;
+    padding-right: 0;
+    opacity: 0;
+    transition: opacity 0.22s ease, visibility 0s 0.46s,
+      background-color 0.25s ease, border-color 0.25s ease;
+  }
+}
+
+/* Phone drawer: same spring for the sheet. */
+@media (max-width: 900px) {
+  .app-shell .controls {
+    transition: transform 0.46s cubic-bezier(0.32, 0.72, 0, 1),
+      visibility 0s 0.46s, background-color 0.25s ease,
+      border-color 0.25s ease;
+  }
+}
+
+/* Settings sheet (touch hosts and narrow windows at every size). */
+html.settings-drawer-layout .controls {
+  transition: transform 0.46s cubic-bezier(0.32, 0.72, 0, 1),
+    background-color 0.25s ease, border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+/* Backdrop: fade both ways instead of appearing mid-gesture. */
+@media (max-width: 900px) {
+  .app-shell .drawer-backdrop {
+    display: block;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.32s ease, visibility 0s 0.32s;
+  }
+
+  .app-shell.sidebar-open .drawer-backdrop {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity 0.4s ease 0.05s, visibility 0s;
+  }
+}
+
+html.settings-drawer-layout .drawer-backdrop {
+  display: block;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.32s ease, visibility 0s 0.32s;
+}
+
+html.settings-drawer-layout .app-shell.sidebar-open .drawer-backdrop {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.4s ease 0.05s, visibility 0s;
+}

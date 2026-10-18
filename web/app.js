@@ -140,6 +140,11 @@ const state = {
   scanTimer: null,
   wifiRefreshTimers: [],
   wifiStatus: { connected: false, ssid: "", ip: "down" },
+  /* Last live Wi-Fi feedback (translation key + replacements). null means the
+   * static hint is still in place; a language switch re-renders the live
+   * message from this instead of resetting it to the hint. */
+  wifiFeedbackKey: null,
+  wifiFeedbackReplacements: null,
   /* Accepted @w= provisioning operation: { id, ssid }. Cleared once the bridge
    * reports a FINAL phase, or when the fallback poll takes over. */
   wifiOperation: null,
@@ -254,7 +259,35 @@ const FONT_FAMILY_KEY = "linkr-font-family";
 const LAST_DEVICE_ID_KEY = "linkr-last-device-id";
 const TRANSPORT_KEY = "linkr-transport";
 const WS_HOST_KEY = "linkr-ws-host";
-const lanTokens = createLanTokenStore(localStorage);
+/* Storage can be unavailable outright -- private windows, "block all
+ * cookies", embedded frames -- and there the bare localStorage property
+ * access throws. At module scope that would take the whole app down before a
+ * single listener is bound, so every read and write goes through here. */
+const storage = (() => {
+  try {
+    return window.localStorage;
+  } catch (_error) {
+    return null;
+  }
+})();
+
+function readSetting(key) {
+  try {
+    return storage ? storage.getItem(key) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function removeSetting(key) {
+  try {
+    storage?.removeItem(key);
+  } catch (_error) {
+    // Storage may be unavailable; ignore.
+  }
+}
+
+const lanTokens = createLanTokenStore(storage);
 /* LAN access handshake. The bridge announces whether a token is required, so
  * the client never has to guess; UART data always arrives as binary frames, so
  * these text frames are unambiguous. See src/ws_bridge.c. */
@@ -634,14 +667,14 @@ const I18N = {
 };
 
 let theme =
-  localStorage.getItem(THEME_KEY) ||
+  readSetting(THEME_KEY) ||
   (window.matchMedia &&
   window.matchMedia("(prefers-color-scheme: light)").matches
     ? "light"
     : "dark");
 
 let lang =
-  localStorage.getItem(LANG_KEY) ||
+  readSetting(LANG_KEY) ||
   (navigator.language &&
   navigator.language.toLowerCase().startsWith("zh")
     ? "zh"
@@ -744,20 +777,22 @@ function updateToggleLabels() {
 
 function toggleTheme() {
   theme = theme === "dark" ? "light" : "dark";
-  localStorage.setItem(THEME_KEY, theme);
+  saveSetting(THEME_KEY, theme);
   applyTheme();
 }
 
 function toggleLanguage() {
   lang = lang === "zh" ? "en" : "zh";
-  localStorage.setItem(LANG_KEY, lang);
+  saveSetting(LANG_KEY, lang);
   applyLang();
 }
 
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", theme);
   if (elements.themeColorMeta) {
-    elements.themeColorMeta.content = theme === "dark" ? "#090d14" : "#eef2f7";
+    // The glass surfaces sit on #070b12 / #edf1f8; keep the static meta in
+    // index.html and this pair in step.
+    elements.themeColorMeta.content = theme === "dark" ? "#070b12" : "#edf1f8";
   }
   Promise.resolve(window.LinkrNativeUi?.setTheme?.(theme)).catch(() => {
     // Web and Capacitor hosts do not expose native system-bar controls.
@@ -967,6 +1002,14 @@ function applyLang() {
   document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
     el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
   });
+  /* The pass above reset the Wi-Fi feedback to its static hint; put whatever
+   * the panel was actually showing back, in the new language. */
+  if (state.wifiFeedbackKey !== null) {
+    setWifiFeedback(
+      state.wifiFeedbackKey,
+      state.wifiFeedbackReplacements,
+    );
+  }
   const wsErrorKey = elements.wsHostError.dataset.i18nKey;
   if (!elements.wsHostError.hidden && wsErrorKey) {
     setWsHostError(t(wsErrorKey), false, wsErrorKey);
@@ -1468,6 +1511,14 @@ function clearWifiRefreshTimers() {
     clearTimeout(timer);
   }
   state.wifiRefreshTimers = [];
+}
+
+/* Finishing an operation takes its fallback timer with it. Keeping this out of
+ * clearWifiRefreshTimers matters: the refresh polling also runs while an
+ * operation is pending ("ready" without an address yet), and cancelling the
+ * operation's guard there would leave it pending forever. */
+function endWifiOperation() {
+  state.wifiOperation = null;
   clearTimeout(state.wifiOperationTimer);
   state.wifiOperationTimer = null;
 }
@@ -1488,6 +1539,11 @@ const WIFI_PHASE_KEYS = {
 };
 
 function setWifiFeedback(key, replacements) {
+  /* Remember what the panel is actually showing so applyLang() can re-render
+   * it in the new language (empty string is a real state: the success path
+   * clears the hint on purpose). */
+  state.wifiFeedbackKey = key || "";
+  state.wifiFeedbackReplacements = replacements || null;
   let message = key ? t(key) : "";
   for (const [name, value] of Object.entries(replacements || {})) {
     message = message.replace(`{${name}}`, String(value));
@@ -1507,7 +1563,7 @@ function applyWifiEvent(event) {
       }
       return;
     }
-    state.wifiOperation = null;
+    endWifiOperation();
     clearWifiRefreshTimers();
     state.wifiStatus = { connected: true, ssid, ip: event.ip };
     updateWifiConnectionView();
@@ -1517,7 +1573,7 @@ function applyWifiEvent(event) {
   }
 
   if (event.phase === "failed") {
-    state.wifiOperation = null;
+    endWifiOperation();
     state.wifiStatus = { connected: false, ssid: "", ip: "down" };
     updateWifiConnectionView();
     setWifiFeedback("wifiConnectFailed", { code: event.result });
@@ -1527,7 +1583,7 @@ function applyWifiEvent(event) {
   }
 
   if (event.phase === "off") {
-    state.wifiOperation = null;
+    endWifiOperation();
     clearWifiRefreshTimers();
     state.wifiStatus = { connected: false, ssid: "", ip: "down" };
     updateWifiConnectionView();
@@ -1568,7 +1624,7 @@ function scheduleWifiOperationFallback() {
     }
     // The bridge never finished the documented event sequence. Fall back to
     // polling so the user still sees the outcome.
-    state.wifiOperation = null;
+    endWifiOperation();
     appendLine("[warn] no WiFi completion event; falling back to status polling");
     setWifiFeedback("wifiEventTimeout");
     scheduleWifiStateRefresh();
@@ -1845,7 +1901,7 @@ function handleRxLine(line) {
   }
 }
 
-async function scanWifi() {
+async function scanWifi({ signal } = {}) {
   if (
     !state.connected ||
     !hasManagementCapability(MGMT_CAP_WIFI) ||
@@ -1853,24 +1909,40 @@ async function scanWifi() {
   ) {
     return { networks: [], failed: true, unavailable: true };
   }
+  signal?.throwIfAborted();
   state.scanning = true;
   state.scanResults = [];
   updateWifiDatalist();
-  elements.wifiFeedback.textContent = t("scanning");
+  setWifiFeedback("scanning");
   elements.wifiScanButton.disabled = true;
   clearTimeout(state.scanTimer);
-  state.scanTimer = setTimeout(finishScan, WIFI_SCAN_TIMEOUT_MS);
+  /* A scan that never hears "@scan done" is a failure, not a scan that found
+   * nothing: the assistant must not receive the partial list as a success. */
+  state.scanTimer = setTimeout(finishScan, WIFI_SCAN_TIMEOUT_MS, true);
   /* Resolve when the device reports completion, so the assistant can cite the
    * networks instead of assuming the scan worked. */
   const outcome = new Promise((resolve) => scanWaiters.push(resolve));
+  /* A stopped task must not leave the waiter hanging on a device that may
+   * never answer: the abort ends the scan like any other failure. */
+  const onAbort = () => finishScan(true);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     await sendControl(WIFI_SCAN_CMD);
-    toast(t("scanning"));
+    /* The device may have answered in the same round trip -- an ERR or the
+     * whole scan can be over by now, and a "Scanning…" toast after the result
+     * would claim the opposite of what the panel says. */
+    if (state.scanning) {
+      toast(t("scanning"));
+    }
   } catch (error) {
     appendLine("[error] " + error.message);
     finishScan(true);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
-  return outcome;
+  const result = await outcome;
+  signal?.throwIfAborted();
+  return result;
 }
 
 function finishScan(failed = false) {
@@ -1889,29 +1961,46 @@ function finishScan(failed = false) {
     hasManagementCapability(MGMT_CAP_ASYNC_EVENTS)
   );
   if (failed) {
-    elements.wifiFeedback.textContent = t("scanFailed");
+    setWifiFeedback("scanFailed");
     toast(t("scanFailed"), "error");
     return;
   }
   if (state.scanResults.length) {
-    elements.wifiFeedback.textContent = t("wifiSelectHint");
+    setWifiFeedback("wifiSelectHint");
     toast(t("foundN").replace("{n}", String(state.scanResults.length)));
   } else {
-    elements.wifiFeedback.textContent = t("noNetworks");
+    setWifiFeedback("noNetworks");
     toast(t("noNetworks"));
   }
 }
 
 function setAutoScroll(value, scroll) {
-  if (state.autoScroll !== value) {
+  const changed = state.autoScroll !== value;
+  if (changed) {
     state.autoScroll = value;
     if (elements.autoscrollBtn) {
       elements.autoscrollBtn.setAttribute("aria-pressed", String(value));
       elements.autoscrollBtn.classList.toggle("active", value);
     }
   }
-  if (value && scroll && state.term) {
+  if (!state.term) {
+    return;
+  }
+  if (value && scroll) {
     state.term.scrollToBottom();
+    return;
+  }
+  /* Turning following off from the bottom has to move the viewport away from
+   * the end: while it sits exactly at the bottom xterm keeps pinning it there,
+   * so the flag alone does nothing visible and the next scroll event flips the
+   * toggle straight back on. */
+  if (!value && changed) {
+    const vp = elements.terminalOutput.querySelector(".xterm-viewport");
+    const atBottom =
+      vp && vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 2;
+    if (atBottom) {
+      state.term.scrollLines(-1);
+    }
   }
 }
 
@@ -2076,7 +2165,7 @@ async function restoreAuthorizedDevice() {
     return;
   }
   try {
-    const lastDeviceId = localStorage.getItem(LAST_DEVICE_ID_KEY);
+    const lastDeviceId = readSetting(LAST_DEVICE_ID_KEY);
     const devices = await bleTransport.getDevices(
       lastDeviceId ? [lastDeviceId] : [],
     );
@@ -2593,8 +2682,13 @@ function onDisconnected() {
   state.diagnostics = {};
   rxDecoder = new TextDecoder();
   clearWifiRefreshTimers();
-  state.wifiOperation = null;
+  endWifiOperation();
   clearTimeout(state.scanTimer);
+  /* A scan cut off by the disconnect must still settle: the assistant waits on
+   * the promise, and an unresolved one would hang its tool call forever. */
+  for (const resolve of scanWaiters.splice(0)) {
+    resolve({ networks: [], failed: true, disconnected: true });
+  }
   state.scanResults = [];
   updateWifiDatalist();
   renderDiagnostics();
@@ -2915,7 +3009,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
       }
     }
     if (restoredAttempt) {
-      localStorage.removeItem(LAST_DEVICE_ID_KEY);
+      removeSetting(LAST_DEVICE_ID_KEY);
       state.device = null;
       state.deviceRestored = false;
       appendLine(`[restore] ${t("authorizedDeviceFailed")}`);
@@ -3006,33 +3100,33 @@ function saveLog() {
 }
 
 function loadPersisted() {
-  const uart = localStorage.getItem("linkr-uart");
+  const uart = readSetting("linkr-uart");
   if (uart) {
     elements.uartInput.value = uart;
   }
-  const enter = localStorage.getItem("linkr-enter");
+  const enter = readSetting("linkr-enter");
   if (enter) {
     elements.enterSelect.value = enter;
   }
-  const chunk = localStorage.getItem("linkr-chunk");
+  const chunk = readSetting("linkr-chunk");
   if (chunk) {
     elements.chunkInput.value = chunk;
   }
-  if (localStorage.getItem("linkr-echo") === "1") {
+  if (readSetting("linkr-echo") === "1") {
     elements.localEchoInput.checked = true;
   }
-  if (localStorage.getItem("linkr-debug") === "1") {
+  if (readSetting("linkr-debug") === "1") {
     elements.debugInput.checked = true;
   }
-  const fs = parseInt(localStorage.getItem("linkr-font"), 10);
+  const fs = parseInt(readSetting("linkr-font"), 10);
   if (Number.isFinite(fs)) {
     state.fontSize = fs;
   }
-  const fontFamily = localStorage.getItem(FONT_FAMILY_KEY);
+  const fontFamily = readSetting(FONT_FAMILY_KEY);
   state.fontFamily = TERMINAL_FONTS[fontFamily] ? fontFamily : "system";
   applyTerminalFont(state.fontFamily);
-  state.sidebarCollapsed = localStorage.getItem("linkr-sidebar") !== "open";
-  const savedHost = localStorage.getItem(WS_HOST_KEY);
+  state.sidebarCollapsed = readSetting("linkr-sidebar") !== "open";
+  const savedHost = readSetting(WS_HOST_KEY);
   if (savedHost && elements.wsHostInput) {
     elements.wsHostInput.value = savedHost;
   }
@@ -3049,7 +3143,7 @@ function updateBaudLabel() {
 
 function saveSetting(key, value) {
   try {
-    localStorage.setItem(key, value);
+    storage?.setItem(key, value);
   } catch (_error) {
     // Storage may be unavailable; ignore.
   }
@@ -3190,6 +3284,14 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   const sidebarHidden = drawerLayout
     ? !drawerOpen
     : elements.appShell.classList.contains("controls-hidden");
+  // Mirrors the state the inline bootstrap in index.html parks on <html>
+  // before the first paint. Keep this the only writer after load, so the
+  // attribute cannot outlive the class it snapshots (glass.css §17 renders
+  // it; without this line an opened sidebar would stay hidden on reload-less
+  // toggles).
+  document.documentElement.dataset.sidebar = sidebarHidden
+    ? "collapsed"
+    : "open";
 
   if (!drawerOpen) {
     setInert(elements.topbar, false);
@@ -3438,13 +3540,30 @@ function bind() {
     }
   });
 
-  elements.focusTerminalButton.addEventListener("click", () => {
+  /* Focusing xterm's textarea raises the soft keyboard on Android and iOS. On
+   * Windows the shell does not treat a programmatic focus as a request for its
+   * touch keyboard: the page has to ask through the VirtualKeyboard API (Edge
+   * 94+). Windows only honours it for touch/pen input, and a desktop with a
+   * hardware keyboard simply ignores it -- there is nothing to raise there. */
+  function focusTerminalSoftKeyboard() {
     state.term?.focus();
+    try {
+      navigator.virtualKeyboard?.show?.();
+    } catch (_error) {
+      /* No virtual keyboard, or the platform refused this input type. */
+    }
+  }
+
+  elements.focusTerminalButton.addEventListener("click", () => {
+    focusTerminalSoftKeyboard();
   });
 
+  /* Focus inside the pointerdown itself: iOS only opens its soft keyboard
+   * when focus() runs within the user gesture, and a focus deferred to the
+   * next frame is ignored -- the keyboard never comes up. */
   elements.terminalOutput.addEventListener("pointerdown", () => {
     if (state.connected) {
-      window.requestAnimationFrame(() => state.term?.focus());
+      focusTerminalSoftKeyboard();
     }
   });
 
@@ -3453,7 +3572,7 @@ function bind() {
     const password = elements.wifiPasswordInput.value;
 
     if (!ssid) {
-      elements.wifiFeedback.textContent = t("wifiMissingSsid");
+      setWifiFeedback("wifiMissingSsid");
       elements.wifiSsidInput.focus();
       return;
     }
@@ -3742,12 +3861,12 @@ function init() {
     getLang: () => lang, onChange: () => agentPanel?.settingsChanged(),
     bindingAction: (action) => agentPanel.targetBinding(action),
   });
-  setSettingsPage(localStorage.getItem("linkr-settings-page") || "connection");
+  setSettingsPage(readSetting("linkr-settings-page") || "connection");
   initTerminal();
   applyTheme();
   applyLang();
   applySidebar();
-  if (localStorage.getItem(TRANSPORT_KEY) === "ws") {
+  if (readSetting(TRANSPORT_KEY) === "ws") {
     setTransportMode("ws");
   }
   setConnected(false);

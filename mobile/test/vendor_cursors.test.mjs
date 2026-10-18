@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 const webDir = fileURLToPath(new URL('../../web', import.meta.url));
-const cursorDir = join(webDir, 'vendor', 'macaron-cursors');
+const cursorDir = join(webDir, 'vendor', 'mac-cursors');
 const manifest = JSON.parse(readFileSync(join(cursorDir, 'cursors.json'), 'utf8'));
 const stylesheet = readFileSync(join(webDir, 'style.css'), 'utf8');
 
@@ -20,9 +20,18 @@ function pngSize(file) {
 const entries = Object.entries(manifest).flatMap(([shape, { purpose, sizes }]) =>
   sizes.map((entry) => ({ shape, purpose, ...entry })));
 
+test('every cursor shape ships a file per variant it declares', () => {
+  assert.deepEqual(Object.keys(manifest).sort(), ['hand2', 'left_ptr', 'xterm'],
+    'the manifest should list the arrow, the I-beam and the hand');
+  for (const [shape, { sizes }] of Object.entries(manifest)) {
+    assert.ok(sizes.length >= 1, `${shape} must list at least one file`);
+    const variants = sizes.map((entry) => entry.variant ?? null);
+    assert.equal(new Set(variants).size, variants.length, `${shape} lists a variant twice`);
+  }
+  assert.ok(entries.length >= 3, 'the manifest should list at least three files');
+});
+
 test('every vendored cursor is a PNG of the size it claims', () => {
-  assert.equal(entries.length, Object.keys(manifest).length, 'each shape should contribute one file');
-  assert.ok(entries.length >= 3, 'the manifest should list the arrow, the I-beam and the hand');
   for (const entry of entries) {
     const actual = pngSize(entry.file);
     assert.deepEqual(actual, { width: entry.width, height: entry.height }, `${entry.file} dimensions`);
@@ -49,12 +58,20 @@ function hotspotInDeclaration(text, usageIndex) {
   return match && `${match[1]} ${match[2]}`;
 }
 
+/* The rule that carries the usage: everything between the brace that opens its
+ * body and the brace or rule end before it. */
+function ruleSelectorAt(text, usageIndex) {
+  const brace = text.lastIndexOf("{", usageIndex);
+  const previous = Math.max(text.lastIndexOf("}", brace - 1), text.lastIndexOf("{", brace - 1));
+  return text.slice(previous + 1, brace).replace(/\s+/g, " ").trim();
+}
+
 /* The stylesheet carries the hotspots as plain numbers, so the two can drift
  * apart silently: a cursor whose hotspot is off by a few pixels still shows the
  * right picture and only makes every click land in the wrong place. */
 test('the stylesheet uses each cursor with the hotspot recorded for it', () => {
   for (const entry of entries) {
-    const usage = `url("./vendor/macaron-cursors/${entry.file}")`;
+    const usage = `url("./vendor/mac-cursors/${entry.file}")`;
     const hotspots = [];
     for (let index = stylesheet.indexOf(usage); index !== -1; index = stylesheet.indexOf(usage, index + 1)) {
       hotspots.push(hotspotInDeclaration(stylesheet, index));
@@ -63,6 +80,31 @@ test('the stylesheet uses each cursor with the hotspot recorded for it', () => {
     const [x, y] = entry.hotspot;
     assert.ok(hotspots.every((value) => value === `${x} ${y}`),
       `${entry.file} is used with hotspot(s) ${hotspots.join(" / ")} in web/style.css, but its file records ${x} ${y}`);
+  }
+});
+
+/* The whole point of shipping two contrast variants: the black artwork belongs
+ * to the light theme, the white one to the default (dark) theme, and the shared
+ * hand to both. A black cursor on the dark theme's near-black surfaces is
+ * invisible, and nothing at runtime would say so. */
+test('each variant is used by the theme it was derived for', () => {
+  for (const entry of entries) {
+    const usage = `url("./vendor/mac-cursors/${entry.file}")`;
+    for (let index = stylesheet.indexOf(usage); index !== -1; index = stylesheet.indexOf(usage, index + 1)) {
+      const selector = ruleSelectorAt(stylesheet, index);
+      if (entry.variant === 'black') {
+        assert.match(selector, /\[data-theme="light"\]/,
+          `${entry.file} is the black artwork and belongs to the light theme, found in: ${selector}`);
+      } else if (entry.variant === 'white') {
+        assert.doesNotMatch(selector, /\[data-theme=/,
+          `${entry.file} is the white artwork and must not sit under a themed override, found in: ${selector}`);
+        assert.match(selector, /:root/,
+          `${entry.file} is the white artwork and should be the default pointer, found in: ${selector}`);
+      } else {
+        assert.match(selector, /:root/,
+          `${entry.file} is shared by both themes and should hang off :root, found in: ${selector}`);
+      }
+    }
   }
 });
 
@@ -85,14 +127,14 @@ test('the cursors are the size the platform recommends', () => {
   }
 });
 
-/* CC-BY-4.0 requires attribution next to the images, and an obligation that is
- * only in a commit message is one nobody can check. */
+/* MIT requires the licence and copyright notice next to the images, and an
+ * obligation that is only in a commit message is one nobody can check. */
 test('the licence and attribution travel with the images', () => {
   assert.ok(existsSync(join(cursorDir, 'README.md')), 'the vendored cursors need their attribution README');
-  assert.ok(existsSync(join(cursorDir, 'LICENSE-CC-BY-4.0.txt')), 'the vendored cursors need their licence text');
+  assert.ok(existsSync(join(cursorDir, 'LICENSE-MIT.txt')), 'the vendored cursors need their licence text');
   const readme = readFileSync(join(cursorDir, 'README.md'), 'utf8');
-  assert.match(readme, /CC-BY-4\.0/);
-  assert.match(readme, /UnionTech Software Technology Co\., Ltd\./);
-  assert.match(readme, /linuxdeepin\/deepin-desktop-theme/);
-  assert.match(readme, /a0c79e31467ab602d96605475dca69eb835c5d90/, 'the source revision must be recorded');
+  assert.match(readme, /MIT/);
+  assert.match(readme, /Bogdan Koch/);
+  assert.match(readme, /aw3r1se\/macOS-cursors/);
+  assert.match(readme, /macos-cursors@1\.1\.0/, 'the pinned package version must be recorded');
 });

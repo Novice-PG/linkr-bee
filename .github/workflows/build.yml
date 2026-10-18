@@ -48,7 +48,7 @@ jobs:
           sh -n tools/flash_firmware.sh
           sh -n tools/build_terminal_binary.sh
           sh -n tools/verify.sh
-          node --check tools/extract_macaron_cursors.mjs
+          node --check tools/extract_mac_cursors.mjs
 
   mobile:
     name: Web and mobile

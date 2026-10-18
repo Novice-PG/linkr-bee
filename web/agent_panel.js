@@ -367,7 +367,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (taskTimer !== null) return;
     taskTimer = setTimeout(() => { taskTimer = null; persistTask(); }, 500);
   }
-  const editingPolicy = () => ["agentPolicyAsk", "agentPolicyAllow"].includes(document.activeElement?.id);
+  /* An unsaved policy draft has to survive the panel's status refreshes: they
+   * fire on every log burst and task update, and previously the textareas were
+   * reset to the stored policy as soon as they lost focus -- silently dropping
+   * a half-edited rule list. The draft never follows the user to another
+   * device, though: another board must show its own stored policy. */
+  let policyDirty = false;
+  let policyKey = null;
   function refreshHistory() {
     const status = device.getStatus(), profile = status.profile;
     $("agentProfile").textContent = profile ? [profile.stale && text("staleProfile"), profile.model || profile.system, profile.os, profile.storage, profile.tools.join(", ")].filter(Boolean).join("\n") : text("noProfile");
@@ -380,7 +386,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     const signature = JSON.stringify([key,busy,tasks,notes,getLang()]);
     if (signature === historySignature) return;
     historySignature = signature;
-    if (!editingPolicy()) refreshPolicy();
+    refreshPolicy();
     syncSession();
     const notesList = $("agentNotes");
     notesList.replaceChildren();
@@ -636,6 +642,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     }
     if(event.type==='queued_input_consumed') {
       addMessage('user',event.item.text);
+      // The saved session mirrors the visible transcript; a steered message
+      // that only lived on screen disappeared on reload.
+      displayTranscript.push({ role: "user", text: event.item.text });
+      scheduleSessionSave();
       if(currentTask){currentTask.goal=(currentTask.goal+'\n'+event.item.text).slice(0,4000);persistTask();}
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
@@ -720,13 +730,27 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
    * another device must not keep showing it either. */
   let policyNotice = { key: null, text: "" };
   function renderPolicyNotice() {
-    $("agentPolicyStatus").textContent = policyNotice.key === deviceKeyOf() ? policyNotice.text : "";
+    const notice = policyNotice.key === deviceKeyOf() && policyNotice.text ? policyNotice.text : "";
+    // A device-specific result (saved, error) wins over the plain hint.
+    $("agentPolicyStatus").textContent = notice || (policyDirty ? text("dirty") : "");
   }
   function refreshPolicy() {
-    const policy = policyStore.get(deviceKeyOf());
+    const key = deviceKeyOf();
+    /* A draft stays on screen while it is unsaved and the device has not
+     * changed; anything else repaints the stored policy. */
+    if (policyDirty && key === policyKey) {
+      renderPolicyNotice();
+      return;
+    }
+    const policy = policyStore.get(key);
     $("agentPolicyAsk").value = formatPolicyList(policy.alwaysAsk);
     $("agentPolicyAllow").value = formatPolicyList(policy.allow);
+    policyKey = key;
+    policyDirty = false;
     renderPolicyNotice();
+  }
+  for (const id of ["agentPolicyAsk", "agentPolicyAllow"]) {
+    $(id).addEventListener("input", () => { policyDirty = true; renderPolicyNotice(); });
   }
   $("agentPolicySave").addEventListener("click", () => {
     try {
@@ -735,6 +759,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         allow: parsePolicyList($("agentPolicyAllow").value),
       });
       policyNotice = { key: deviceKeyOf(), text: text("policySaved") };
+      policyDirty = false;
     } catch (error) {
       policyNotice = { key: deviceKeyOf(), text: error.message };
       renderPolicyNotice();
@@ -779,6 +804,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       // Only explicitly saved configuration is used for model requests.
       const nextFingerprint = JSON.stringify(config);
       if (!runner || fingerprint !== nextFingerprint) {
+        /* The previous runner may still be awaiting a model response: abandon
+         * it before the replacement takes over, so a late event from the old
+         * session cannot land in the new one. */
+        runner?.abort();
         runner = await createSerialAgent({ config, device,
           /* Accessory changes go through the same tool row: the card asks for
            * one explicit approval and the executed command is then shown as
@@ -823,7 +852,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (currentTask?.status === "running") currentTask.status = outcome.limitReached || currentTask.plan?.some(s=>s.status!=='completed') ? "interrupted" : "answered";
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
     } catch (error) {
-      if (currentTask) currentTask.status = "failed";
+      // A stop sets "interrupted" before the aborted run rejects; the catch
+      // must not overwrite that verdict with "failed".
+      if (currentTask?.status === "running") currentTask.status = "failed";
       if (version === runVersion) {
         addMessage("assistant", `${text("error")}${error.message}`);
         // A browser-side failure has a different fix from a model-side error.
@@ -1048,8 +1079,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       const session = initial.sessionId;
       let identityRevision = null;
       const check = () => { bindingController?.signal.throwIfAborted(); if (getStatus().sessionId !== session || !getStatus().connected) throw new Error("Connection changed; verify binding again."); if (identityRevision !== null && getStatus().inputRevision !== identityRevision) throw new Error("Terminal input changed; verify target identity again."); };
-      stop(undefined, {preserveConversation:false});
-      currentTask = null; device.forgetProfile();
+      /* An automatic verification runs at the first shell prompt of a session:
+       * it only reads the binding, so it must keep the conversation and the
+       * task the way they are. An explicit user action may drop both, because
+       * the target behind them may be about to change. */
+      stop(undefined, {preserveConversation: automatic});
+      if (!automatic) { currentTask = null; device.forgetProfile(); }
       const controller = bindingController = new AbortController();
       bindingAutomatic = automatic;
       const timer = setTimeout(() => controller.abort(), 35000);

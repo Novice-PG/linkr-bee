@@ -16,13 +16,18 @@ export async function waitForSerialOutput({ readLog, after, timeoutMs = 5000, se
   const started = now();
   let changed = started;
   let cursor;
+  /* Without a caller-supplied cursor the baseline is the log's end on the first
+   * read: an undefined `after` would turn every comparison into NaN, so the
+   * wait would always report "no output" and run to the deadline. */
+  let baseline = Number.isFinite(after) ? after : null;
   while (true) {
     signal?.throwIfAborted();
     check();
     const output = readLog({ after });
     const time = now();
     if (cursor !== output.latestCursor) { cursor = output.latestCursor; changed = time; }
-    const hasNewOutput = cursor > after;
+    if (baseline === null) baseline = output.latestCursor;
+    const hasNewOutput = cursor > baseline;
     const quietForMs = Math.max(0, Math.floor(time - changed));
     if ((hasNewOutput && quietForMs >= settleMs) || time - started >= timeoutMs) {
       return { ...output, hasMore: output.cursor < output.latestCursor, hasNewOutput, quietForMs,

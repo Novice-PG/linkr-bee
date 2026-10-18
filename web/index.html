@@ -4,23 +4,77 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Linkr Bee Terminal</title>
-    <meta name="theme-color" id="themeColorMeta" content="#090d14" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
-    />
+    <meta name="theme-color" id="themeColorMeta" content="#070b12" />
+    <script>
+      /* State before the first paint: theme, sidebar and the touch drawer.
+       *
+       * index.html is static, so without this the shell paints once in its
+       * default shape (dark, sidebar expanded) and only corrects itself when
+       * app.js boots -- up to thirty module fetches later. On a refresh that
+       * reads as a flash: the sidebar slides closed (or, on a touch host,
+       * jumps from the left column to the right-hand sheet) an instant after
+       * the page looks settled.
+       *
+       * This is an inline, dependency-free classic script on purpose: it has
+       * to run before the stylesheets even come into play, and whatever else
+       * fails to load, it still runs. The keys and defaults mirror the ones
+       * app.js uses; keep the two in step.
+       *
+       * app.js remains the single writer afterwards: its
+       * syncSidebarAccessibility() rewrites data-sidebar on every toggle, so
+       * the attribute never goes stale after the user opens the panel. */
+      (function () {
+        var root = document.documentElement;
+        function read(key) {
+          try {
+            return localStorage.getItem(key);
+          } catch (error) {
+            return null; // Privacy mode and storage-blocked WebViews.
+          }
+        }
+
+        var theme = read("linkr-theme");
+        if (theme !== "light" && theme !== "dark") {
+          theme =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+        }
+        root.setAttribute("data-theme", theme);
+        var meta = document.getElementById("themeColorMeta");
+        if (meta) {
+          meta.setAttribute("content", theme === "light" ? "#edf1f8" : "#070b12");
+        }
+
+        /* app.js: state.sidebarCollapsed = localStorage.getItem(...) !== "open" */
+        if (read("linkr-sidebar") !== "open") {
+          root.setAttribute("data-sidebar", "collapsed");
+        }
+
+        /* app.js: usesSettingsDrawer() = narrow window || linkrBle harmony || coarse pointer */
+        var coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        var narrow = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+        var harmony =
+          (window.LinkrNativeBle && window.LinkrNativeBle.platform === "harmonyos") ||
+          root.dataset.platform === "harmonyos";
+        if (coarse || narrow || harmony) {
+          root.classList.add("settings-drawer-layout");
+        }
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="./linkr-bee-icon.svg" />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260928-connect-entry" />
+    <link rel="stylesheet" href="./style.css?v=20261018-keyboard2" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
+    <link rel="stylesheet" href="./glass.css?v=20261018-liquid7" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div class="brand">
           <span class="logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7 7l10 10-4 4V3l4 4L7 17"></path>
-            </svg>
+            <img src="./linkr-bee-icon.svg" width="24" height="24" alt="" />
           </span>
           <div>
             <h1 data-i18n="title">Linkr Bee Terminal</h1>
@@ -513,7 +567,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260910-agent-task-plan"></script>
+    <script type="module" src="./app.js?v=20261018-bugfixes2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a
        * dropped connection, a proxy, a stale cache -- leaves this page blank
