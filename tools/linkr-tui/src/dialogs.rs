@@ -180,6 +180,10 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
     ("F2–F5", ["Switch the view", "切换视图"]),
+    (
+        "F6",
+        ["Hide or show the assistant panel", "显示或隐藏助手面板"],
+    ),
     ("Ctrl+B", ["Hide or show the sidebar", "显示或隐藏侧栏"]),
     (
         "Ctrl+←/→",
@@ -1885,6 +1889,7 @@ mod tests {
             "Ctrl+P",
             "F1",
             "F2–F5",
+            "F6",
             "Ctrl+B",
             "Ctrl+←/→",
             "Ctrl+Up",

@@ -259,12 +259,10 @@ fn agent_report(app: &mut App) {
 ///
 /// The panel is a layout state rather than a view: it narrows the terminal
 /// instead of replacing it, which is why toggling it needs no notice — the
-/// screen says which way it went. Opening it from another view brings the
-/// terminal back for the same reason: without it the screen would say nothing.
+/// screen says which way it went. The one thing the screen cannot say is a
+/// column with no room to appear, and [`App::toggle_assistant_panel`] answers
+/// that case itself.
 fn toggle_agent_panel(app: &mut App) {
-    if !app.assistant_panel {
-        app.set_view(View::Terminal);
-    }
     app.toggle_assistant_panel();
 }
 
@@ -576,7 +574,7 @@ pub const ACTIONS: &[Action] = &[
         id: "agent.panel",
         title: T_AGENT_PANEL,
         category: CAT_AGENT,
-        shortcut: "",
+        shortcut: "F6",
         run: toggle_agent_panel,
     },
     Action {

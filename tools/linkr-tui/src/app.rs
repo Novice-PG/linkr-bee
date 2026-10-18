@@ -1021,14 +1021,36 @@ impl App {
     ///
     /// Closing it while the keyboard is in the panel would leave the keys
     /// typing into a column the user cannot see, so focus follows it back to
-    /// the terminal — the same bargain [`Self::toggle_sidebar`] makes. There is
-    /// no notice: the column appears and disappears, and the screen is the
-    /// announcement.
+    /// the terminal — the same bargain [`Self::toggle_sidebar`] makes.
+    ///
+    /// Opening goes two ways beyond the plain flip. From another view it
+    /// brings the terminal back, because the column belongs to that view and
+    /// opening it anywhere else would put the screen in a state that says
+    /// nothing. On a window with no room for the column it opens nothing and
+    /// says why: the painter would drop what the key just opened, and a key
+    /// that answers with an unchanged screen looks broken. A window that *has*
+    /// the room still needs no notice — the column appears, and the screen is
+    /// the announcement.
     pub fn toggle_assistant_panel(&mut self) {
-        self.assistant_panel = !self.assistant_panel;
-        if !self.assistant_panel && self.focus == Focus::Assistant {
-            self.focus = Focus::Terminal;
+        if self.assistant_panel {
+            self.assistant_panel = false;
+            if self.focus == Focus::Assistant {
+                self.focus = Focus::Terminal;
+            }
+            return;
         }
+        if !self.panel_fits() {
+            let text = self.strings().asst_panel_narrow.to_string();
+            self.push_notice(Notice {
+                text,
+                level: NoticeLevel::Info,
+            });
+            return;
+        }
+        if self.view != View::Terminal {
+            self.set_view(View::Terminal);
+        }
+        self.assistant_panel = true;
     }
 
     /// Whether the keyboard is in the docked panel.

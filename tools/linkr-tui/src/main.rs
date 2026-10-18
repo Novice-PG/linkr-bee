@@ -2369,6 +2369,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             dialogs::open_help(app);
             return false;
         }
+        // F6 is the assistant's column, the other edge's `Ctrl+B`: the panel
+        // costs a third of the window, and a user reading a wide trace needs
+        // the columns back without a trip through the palette. A function key
+        // rather than the chord family's `Ctrl+Shift+letter`, because a
+        // console that predates the enhanced keyboard protocol folds that
+        // spelling into the control code — `Ctrl+Shift+B` arrives as the
+        // rail's `Ctrl+B` there and would toggle the wrong column. The rail's
+        // toggle announces the *state*; this column announces itself by
+        // appearing, so it only speaks when there is no room to appear at all.
+        (KeyCode::F(6), _) => {
+            app.toggle_assistant_panel();
+            return false;
+        }
         // Tab is deliberately not a chord here. It is the most-used key a
         // shell has — completion — so it belongs to the device whenever the
         // pane holds the keyboard, and the forms that want it (the assistant's
@@ -3269,7 +3282,8 @@ mod tests {
         }
     }
 
-    /// F2–F5 select the views; any other function key changes nothing.
+    /// F2–F5 select the views; F6 is the assistant panel's toggle and leaves
+    /// the view be; any other function key changes nothing.
     #[test]
     fn the_view_keys_select_views() {
         let mut app = App::default();
@@ -3278,10 +3292,18 @@ mod tests {
             KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)
         ));
         assert_eq!(app.view, View::Network);
-        // F5 is the last view, so F6 and F7 are unbound and must leave it be.
+        // F5 is the last view. F6 toggles the assistant's column instead of
+        // moving the view, and F7 is still unbound and must leave it be.
         handle_key(&mut app, KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
         assert_eq!(app.view, View::Assistant);
         handle_key(&mut app, KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
+        assert_eq!(
+            app.view,
+            View::Assistant,
+            "the panel's key must not move the view"
+        );
+        assert!(!app.assistant_panel, "F6 did not toggle the panel");
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
         assert_eq!(
             app.view,
             View::Assistant,
@@ -3527,6 +3549,53 @@ mod tests {
         );
         assert_eq!(app.focus, Focus::Terminal, "the keyboard left the pane");
         assert!(!app.notices.is_empty(), "the refusal was silent");
+    }
+
+    /// F6 is the assistant column's key, and it makes the same bargain
+    /// `Ctrl+B` makes for the rail: it works wherever the keyboard is,
+    /// closing hands the keyboard back, opening from another view brings the
+    /// terminal with it — and a window with no room says so rather than
+    /// flipping a state nothing paints.
+    #[test]
+    fn f6_toggles_the_assistant_panel() {
+        let mut app = App {
+            screen: Rect::new(0, 0, 140, 30),
+            ..App::default()
+        };
+        assert!(app.assistant_panel, "the panel starts open");
+        let chord = KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE);
+
+        handle_key(&mut app, chord);
+        assert!(!app.assistant_panel, "F6 did not put it away");
+
+        handle_key(&mut app, chord);
+        assert!(app.assistant_panel, "the key did not bring it back");
+
+        // Hiding it while the keyboard is on it hands the keyboard back, the
+        // rule the rail's toggle follows too.
+        app.focus = Focus::Assistant;
+        handle_key(&mut app, chord);
+        assert_eq!(app.focus, Focus::Terminal, "the keys stayed in the column");
+        assert!(!app.assistant_panel);
+
+        // The column belongs to the terminal view, so asking for it from the
+        // full-width view brings the terminal back rather than opening it
+        // where nothing paints it.
+        app.set_view(View::Assistant);
+        handle_key(&mut app, chord);
+        assert_eq!(app.view, View::Terminal, "the view did not come back");
+        assert!(app.assistant_panel, "the panel did not open with it");
+
+        // A window with no room cannot show what was asked for: the toggle
+        // refuses and says why, the same words the focus walk uses.
+        app.screen = Rect::new(0, 0, 80, 24);
+        assert!(!app.panel_fits(), "the narrow window still fits the panel");
+        handle_key(&mut app, chord);
+        assert!(!app.assistant_panel, "the panel closed, not opened");
+        let noticed = app.notices.len();
+        handle_key(&mut app, chord);
+        assert!(!app.assistant_panel, "a column with no room was opened");
+        assert!(app.notices.len() > noticed, "the refusal was silent");
     }
 
     /// The panel's keys are the panel's: a letter goes to the composer and not
