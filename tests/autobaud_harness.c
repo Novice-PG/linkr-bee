@@ -1,8 +1,14 @@
 /* Host-only fakes around the production autobaud block, sliced in by
  * tests/test_autobaud.py. No Zephyr workqueue, no Espressif silicon: the
- * scenario writes the pulse counters the hardware would have latched and the
+ * scenario hands the follower the span a capture would have reported and the
  * divider is computed the way src/main.c programs it, so every number the
- * decision sees has been through the real arithmetic. */
+ * decision sees has been through the real arithmetic.
+ *
+ * The measurement is faked at the span's output (struct linkr_uart_span),
+ * the same seam the latch era faked the pulse counters at: the span
+ * classifier itself (src/uart_rmt_span.c) reads RMTMEM and is validated on
+ * the bench, while everything the follower decides — verify, hold, refuse,
+ * confirm, cooldown — is arithmetic a host can drive. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -12,7 +18,15 @@
 
 #define ARG_UNUSED(x) (void)(x)
 #define K_MSEC(x) (x)
-#define LOG_WRN(...) ((void)0)
+
+/* Zephyr's LOG_WRN evaluates its arguments (it is a real logging macro); the
+ * harness discards them, but still evaluates them so a helper used only
+ * inside a log line is not an unused function under -Werror. */
+static void log_discard(const char *fmt, ...)
+{
+	(void)fmt;
+}
+#define LOG_WRN(...) log_discard(__VA_ARGS__)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -20,7 +34,7 @@
 /*
  * 80 MHz — the source clock the divider arithmetic assumes. The clock
  * cancels out of the production formula, but a simulation still needs one to
- * turn a bit-time into cycles the way the detector would count them.
+ * turn a bit-time into cycles the way the receiver would count them.
  */
 #define SOURCE_HZ 80000000ull
 
@@ -32,17 +46,18 @@ struct k_work_delayable {
 	int unused;
 };
 
+/* The span the follower reads, as the RMT receiver would have filled it. */
+struct linkr_uart_span {
+	uint32_t est_q8;
+	uint32_t dmin;
+	uint32_t runs;
+	uint32_t bits;
+	uint32_t misfits;
+	uint32_t zeros;
+	bool trustworthy;
+};
+
 typedef struct {
-	struct {
-		uint32_t glitch_filt;
-		uint32_t en;
-	} auto_baud;
-	struct {
-		uint32_t min_cnt;
-	} lowpulse;
-	struct {
-		uint32_t min_cnt;
-	} highpulse;
 	struct {
 		uint32_t div_int;
 		uint32_t div_frag;
@@ -54,6 +69,11 @@ static uint32_t fake_now_ms;
 static uint32_t configured_baud = 115200;
 static int reconfigure_calls;
 static uint32_t reconfigured_to;
+
+/* The faked capture and pin level for the window about to run. */
+static struct linkr_uart_span fake_span;
+static bool fake_captured = true;
+static int fake_line_level = 1;
 
 static void k_work_reschedule(struct k_work_delayable *work, int32_t ms)
 {
@@ -84,29 +104,56 @@ static void set_divider(uint32_t baud)
 	fake_uart.clk_div.div_frag = div & 0xFu;
 }
 
-/* The shortest run the line would latch for `bits` bit-times at `baud`. */
-static uint32_t pulse(uint32_t baud, uint32_t bits)
+/* The span a line at `baud` reports: every run one bit time, on the grid,
+ * enough of them to measure. est_q8 is the bit time in APB cycles, Q8. */
+static struct linkr_uart_span span_line(uint32_t baud, uint32_t runs)
 {
-	return (uint32_t)(SOURCE_HZ * bits / baud);
+	struct linkr_uart_span s = {0};
+
+	s.est_q8 = (uint32_t)(SOURCE_HZ * 256u / baud);
+	s.dmin = (uint32_t)(SOURCE_HZ / baud);
+	s.runs = runs;
+	s.bits = runs;
+	s.misfits = 0;
+	s.zeros = 0;
+	s.trustworthy = runs >= 4;
+	return s;
 }
 
-/*
- * What the detector latches when it under-counts every pulse by a fixed number
- * of cycles, which is what the real silicon does: 676 against a true 694 at
- * 115200, and 675 against 699 at 118517 — the same 18 cycles short at both. The
- * figure is constant in cycles, so its size as a fraction of a bit-time grows
- * with the rate, which is the whole reason the hold needs a band in cycles and
- * not only one in percent.
- */
-#define PULSE_SHORT_CYCLES 18
-
-static uint32_t pulse_short(uint32_t baud, uint32_t bits)
+/* A capture whose runs do not sit on whole multiples of their own estimate —
+ * 0xCC, a rate that moved mid-capture, a torn edge. Not a measurement. */
+static struct linkr_uart_span span_bad(uint32_t runs)
 {
-	return pulse(baud, bits) - PULSE_SHORT_CYCLES;
+	struct linkr_uart_span s = {0};
+
+	s.runs = runs;
+	s.misfits = runs;
+	s.trustworthy = false;
+	return s;
+}
+
+/* A burst's own tail closed by the re-arm: too few runs to measure, and not
+ * a refusal either — the line said something, just not enough. */
+static struct linkr_uart_span span_tail(uint32_t runs)
+{
+	struct linkr_uart_span s = {0};
+
+	s.runs = runs;
+	s.trustworthy = false;
+	return s;
 }
 
 uint32_t linkr_uart_config_current(void);
 int linkr_uart_config_reconfigure(uint32_t baudrate);
+
+/* The span module's interface, forward-declared so the extracted block below
+ * sees them; the definitions follow the block. */
+void linkr_uart_rmt_span_init(uintptr_t uart_reg_addr);
+bool linkr_uart_rmt_span_poll(struct linkr_uart_span *span);
+int linkr_uart_rmt_span_line_level(void);
+
+/* From uart_rmt_span.h; the block's burst-tail test uses it. */
+#define LINKR_UART_SPAN_MIN_RUNS 4u
 
 #include "autobaud_functions.inc"
 
@@ -125,27 +172,54 @@ int linkr_uart_config_reconfigure(uint32_t baudrate)
 	return 0;
 }
 
-/* Close one window: hand the tick the pulse widths the detector latched and
- * let the real decision read them. */
-static void window(uint32_t low, uint32_t high)
+void linkr_uart_rmt_span_init(uintptr_t uart_reg_addr)
+{
+	(void)uart_reg_addr;
+}
+
+bool linkr_uart_rmt_span_poll(struct linkr_uart_span *span)
+{
+	if (!fake_captured) {
+		return false;
+	}
+	*span = fake_span;
+	return true;
+}
+
+int linkr_uart_rmt_span_line_level(void)
+{
+	return fake_line_level;
+}
+
+/* One window: hand the follower the span a capture reported (or none, with
+ * the pin's level as the witness) and let the real decision read them. */
+static void window_span(struct linkr_uart_span s, int level)
 {
 	fake_now_ms += 400; /* one AUTOBAUD_WINDOW_MS */
-	fake_uart.lowpulse.min_cnt = low;
-	fake_uart.highpulse.min_cnt = high;
+	fake_span = s;
+	fake_captured = true;
+	fake_line_level = level;
+	autobaud_tick(NULL);
+}
+
+static void window_quiet(int level)
+{
+	fake_now_ms += 400; /* one AUTOBAUD_WINDOW_MS */
+	fake_captured = false;
+	fake_line_level = level;
 	autobaud_tick(NULL);
 }
 
 /* A link that has been measured against the port, followed by a stream with
  * no single-bit run in it anywhere — 0xCC carries runs of two and three bits,
- * both polarities timing the same one, so it reads 57600 in every window
- * while the port sits at 115200. Reaching 57600 would be a guess, and the
- * line never said it. */
+ * which classify to a non-integer fit, so the capture is not a measurement
+ * and the port must not move. */
 static void scenario_verified_then_binary(void)
 {
-	window(pulse(115200, 1), pulse(115200, 1));
+	window_span(span_line(115200, 8), 1);
 
 	for (int i = 0; i < 6; i++) {
-		window(pulse(115200, 2), pulse(115200, 2));
+		window_span(span_bad(8), 1);
 	}
 }
 
@@ -153,8 +227,8 @@ static void scenario_verified_then_binary(void)
  * followed — the reason the feature exists. */
 static void scenario_startup_follows_a_slower_peer(void)
 {
-	window(pulse(9600, 1), pulse(9600, 1));
-	window(pulse(9600, 1), pulse(9600, 1));
+	window_span(span_line(9600, 8), 1);
+	window_span(span_line(9600, 8), 1);
 }
 
 /* A verified link whose peer speeds up: no absent single-bit run can read
@@ -162,9 +236,9 @@ static void scenario_startup_follows_a_slower_peer(void)
  * 921600 / 1000000 consoles come from. */
 static void scenario_verified_step_up(void)
 {
-	window(pulse(115200, 1), pulse(115200, 1));
-	window(pulse(921600, 1), pulse(921600, 1));
-	window(pulse(921600, 1), pulse(921600, 1));
+	window_span(span_line(115200, 8), 1);
+	window_span(span_line(921600, 8), 1);
+	window_span(span_line(921600, 8), 1);
 }
 
 /* Verified, then a peer that slowed to a rate our own is *not* divided by:
@@ -174,32 +248,20 @@ static void scenario_verified_other_rate(void)
 	configured_baud = 1500000;
 	set_divider(configured_baud);
 
-	window(pulse(1500000, 1), pulse(1500000, 1));
-	window(pulse(115200, 1), pulse(115200, 1));
-	window(pulse(115200, 1), pulse(115200, 1));
-}
-
-/* A window in which the line never toggled: both counters still hold the
- * power-up default the register has. This is what an idle link looks like to
- * the detector, and the only thing it can be read as. */
-static void quiet_window(void)
-{
-	fake_now_ms += 400; /* one AUTOBAUD_WINDOW_MS */
-	fake_uart.lowpulse.min_cnt = 0xFFFFFu; /* AUTOBAUD_NO_PULSE */
-	fake_uart.highpulse.min_cnt = 0xFFFFFu;
-	autobaud_tick(NULL);
+	window_span(span_line(1500000, 8), 1);
+	window_span(span_line(115200, 8), 1);
+	window_span(span_line(115200, 8), 1);
 }
 
 /* Straight out of reset, before the line has ever been measured: a stream with
- * no single-bit run arrives. 0xCC on a true 115200 line latches two bit-times
- * on both polarities, which computes 57600 from a port configured for 115200.
- * Moving there would be a guess, and the same pulse then reads as a match at
- * the rate the port just moved to — so nothing afterwards ever disagrees with
- * it. The port has to hold. */
+ * no single-bit run arrives. 0xCC on a true 115200 line classifies to a
+ * non-integer fit, which is refused. Moving there would be a guess, and the
+ * same capture would then read as a match at the rate the port just moved to,
+ * so no later window would ever disagree with it. The port has to hold. */
 static void scenario_startup_binary(void)
 {
 	for (int i = 0; i < 20; i++) {
-		window(pulse(115200, 2), pulse(115200, 2));
+		window_span(span_bad(8), 1);
 	}
 }
 
@@ -209,30 +271,30 @@ static void scenario_startup_binary(void)
  * run, which still has to be refused. */
 static void scenario_one_gap_does_not_reopen(void)
 {
-	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
-	quiet_window();
+	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_quiet(1);
 	for (int i = 0; i < 6; i++) {
-		window(pulse(115200, 2), pulse(115200, 2));
+		window_span(span_bad(8), 1);
 	}
 }
 
 /* The refusal must be a delay, not a lock. 921600 -> 115200 is a whole
  * divisor of our own (/8), which is exactly the shape of a missing single-bit
  * run and so refused while the link is busy — but after the line has been
- * quiet long enough that it is no longer the link we measured, it is followed.
- * This is the number the reviewer's own scenario produced as still refused. */
+ * quiet long enough that it is no longer the link we measured, it is
+ * followed. */
 static void scenario_quiet_then_an_integer_slowdown(void)
 {
 	configured_baud = 921600;
 	set_divider(configured_baud);
 
-	window(pulse(921600, 1), pulse(921600, 1)); /* measured, agreed */
+	window_span(span_line(921600, 8), 1); /* measured, agreed */
 
 	for (int i = 0; i < 10; i++) {
-		quiet_window();
+		window_quiet(1);
 	}
 	for (int i = 0; i < 20; i++) {
-		window(pulse(115200, 1), pulse(115200, 1));
+		window_span(span_line(115200, 8), 1);
 	}
 }
 
@@ -240,104 +302,103 @@ static void scenario_quiet_then_an_integer_slowdown(void)
  * evidence back, and *then* a stream with no single-bit run arrives — an idle
  * prompt followed by a binary file. 0xCC on a true 115200 line reads our own
  * rate over two bit-times in every window, which is inside the two-to-five a
- * byte stream can reach, so it is still refused after the silence. Reading
- * "the next reading is followed whether it moved or not" would take the port
- * to 57600 — a rate the line never carried — and no later window would ever
- * disagree with it again. */
+ * byte stream can reach, so it is still refused after the silence. */
 static void scenario_quiet_then_a_short_binary(void)
 {
-	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* measured, agreed */
 
 	for (int i = 0; i < 10; i++) {
-		quiet_window();
+		window_quiet(1);
 	}
 	for (int i = 0; i < 20; i++) {
-		window(pulse(115200, 2), pulse(115200, 2));
+		window_span(span_bad(8), 1);
 	}
 }
 
-/* The reading this link actually produced: a verified 115200 link whose
- * windows all latch a shortest pulse a whisker short of one bit-time
- * (measured on hardware: 676 cycles against the true 694 — a sampling
- * artifact, not a rate). That computes 118342, 2.7% high: close enough that
- * the port should be held rather than moved, because chasing it cost a real
- * board its data — the move reset the ring (33 bytes gone mid-transfer) and
- * mis-sampling at the new rate cost ~3.5% of every byte after it, and the
- * wrong port kept re-measuring as itself so nothing ever put it back. */
-static void scenario_artifact_high_is_refused(void)
-{
-	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
-
-	for (int i = 0; i < 6; i++) {
-		window(676, 676);
-	}
-}
-
-/* The other side of the same rule, and the reason it is a bound on the gap
- * rather than a list of blessed rates: a peer that really is at a rate the
- * snap table does not know must still be followed. 150000 is 30% above our
+/* The other side of the hold, and the reason it is a bound on the gap rather
+ * than a list of blessed rates: a peer that really is at a rate the snap
+ * table does not know must still be followed. 150000 is 30% above our
  * 115200 — a real move, far outside any band we hold — and it is not a
  * divisor of ours, so two agreeing windows take the port there exactly as
- * they always did. Same for a console that boots any other odd rate: the
- * hold is about how *small* a change is worth acting on, never about which
- * rates are allowed. */
+ * they always did. */
 static void scenario_odd_rate_peer_is_followed(void)
 {
-	window(pulse(115200, 1), pulse(115200, 1)); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* measured, agreed */
 
 	for (int i = 0; i < 4; i++) {
-		window(pulse(150000, 1), pulse(150000, 1));
+		window_span(span_line(150000, 8), 1);
 	}
 }
 
 /* The way out if a port is ever found at a wrong rate anyway — what the real
  * board looked like after the bug moved it: nothing has measured the port at
- * 118342, so it keeps no claim to be trusted, the hold does not apply, and
- * the first clean windows read the true rate (694 cycles -> 115200), which is
- * neither within the band of a trustworthy port nor a divisor shape, so two
- * of them put the port back. This is the rollback the two-window rule always
- * promised. */
+ * the wrong rate, so it keeps no claim to be trusted, the hold does not apply,
+ * and the first clean windows read the true rate, which is neither within
+ * the band of a trustworthy port nor a divisor shape, so two of them put the
+ * port back. */
 static void scenario_stuck_port_recovers(void)
 {
-	/* Drop the link's measured state the way the move that mis-set it
-	 * would: a reconfiguration clears verification, and so does sustained
-	 * silence. */
 	for (int i = 0; i < 10; i++) {
-		quiet_window();
+		window_quiet(1);
 	}
 	configured_baud = 118342;
 	set_divider(configured_baud);
 
 	for (int i = 0; i < 8; i++) {
-		window(pulse(115200, 1), pulse(115200, 1)); /* clean */
+		window_span(span_line(115200, 8), 1); /* clean */
 	}
 }
 
-/* The reading a hold measured only in percent cannot reach: a port at 230400
- * whose detector is short by the same 18 cycles it is short by at 115200.
- * Eighteen cycles is 5.3% of the 347 the port is programmed for, so a 5%
- * hold-by-rate misses it by a hair and the port would move — to 243143, a rate
- * nothing is at. Only the band in cycles holds it. At 921600 the same defect
- * is 21% and the percentage band is not even close. */
-static void scenario_short_pulse_at_high_rate_is_held(void)
+/* A burst's own tail closed by the re-arm is not a verdict: too few runs to
+ * measure, and not a refusal either. The follower leaves the state alone —
+ * no forget, no refusal count — so a candidate still waiting for its second
+ * window is not lost. */
+static void scenario_a_burst_tail_is_not_a_refusal(void)
 {
-	configured_baud = 230400;
+	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(9600, 8), 1);   /* candidate: 9600 */
+	window_span(span_tail(2), 1);	   /* tail: not a verdict */
+	window_span(span_line(9600, 8), 1);   /* confirmed, followed */
+}
+
+/* The shortest run is the second opinion the estimate cannot be trusted
+ * alone. A byte-gapped stream stretches every run of one polarity, so the
+ * fitted estimate walks outside its band while the shortest run — which a
+ * gap between bytes does not touch — still sits on the grid and reports our
+ * own rate over a run longer than one bit. The estimate alone would confirm
+ * a move to a rate the line never carried; the shortest run refuses it. */
+static void scenario_the_shortest_run_refuses_what_the_estimate_cannot(void)
+{
+	configured_baud = 1500000;
 	set_divider(configured_baud);
 
+	window_span(span_line(1500000, 8), 1); /* measured, agreed */
+
+	/* est_q8 reads 1500000/5.5 (off-band, not a divisor), but the shortest
+	 * run still reads 1500000/2 — a missing single-bit run. */
 	for (int i = 0; i < 6; i++) {
-		window(pulse_short(230400, 1), pulse_short(230400, 1));
+		struct linkr_uart_span s = {0};
+
+		s.est_q8 = (uint32_t)(SOURCE_HZ * 256u / 272727);
+		s.dmin = (uint32_t)(SOURCE_HZ / 750000);
+		s.runs = 8;
+		s.bits = 44;
+		s.misfits = 0;
+		s.zeros = 0;
+		s.trustworthy = true;
+		window_span(s, 1);
 	}
 }
 
-/* The other side of the cycle band: a real move is hundreds of cycles away,
- * never eighteen, so the band never holds a peer that actually changed rate.
- * 150000 arriving on a 115200 port is 161 cycles from what the port is
- * programmed for — six times the band's width — so it is followed exactly as
- * it always was, detector error and all. */
-static void scenario_a_short_pulse_does_not_hold_a_real_move(void)
+/* A line in space (low) is proof of activity, so a gap-free stream can no
+ * longer log "line silent" while it is talking: the pin sample is the witness
+ * that tells a silent line from a busy one when no capture came back. */
+static void scenario_a_busy_line_is_not_silent(void)
 {
-	for (int i = 0; i < 6; i++) {
-		window(pulse_short(150000, 1), pulse_short(150000, 1));
+	window_span(span_line(115200, 8), 1); /* measured, agreed */
+
+	for (int i = 0; i < 10; i++) {
+		window_quiet(0); /* line in space: busy, not silent */
 	}
 }
 
@@ -345,7 +406,7 @@ int main(int argc, char **argv)
 {
 	const char *scenario = argc > 1 ? argv[1] : "";
 
-	/* The production init itself, not a stand-in: it arms the detector,
+	/* The production init itself, not a stand-in: it arms the follower,
 	 * starts the window, and holds the cooldown and warning clocks. */
 	set_divider(configured_baud);
 	linkr_uart_autobaud_init((uintptr_t)&fake_uart);
@@ -366,17 +427,17 @@ int main(int argc, char **argv)
 		scenario_quiet_then_an_integer_slowdown();
 	} else if (strcmp(scenario, "quiet_then_a_short_binary") == 0) {
 		scenario_quiet_then_a_short_binary();
-	} else if (strcmp(scenario, "artifact_high_is_refused") == 0) {
-		scenario_artifact_high_is_refused();
 	} else if (strcmp(scenario, "odd_rate_peer_is_followed") == 0) {
 		scenario_odd_rate_peer_is_followed();
 	} else if (strcmp(scenario, "stuck_port_recovers") == 0) {
 		scenario_stuck_port_recovers();
-	} else if (strcmp(scenario, "short_pulse_at_high_rate_is_held") == 0) {
-		scenario_short_pulse_at_high_rate_is_held();
+	} else if (strcmp(scenario, "a_burst_tail_is_not_a_refusal") == 0) {
+		scenario_a_burst_tail_is_not_a_refusal();
 	} else if (strcmp(scenario,
-			  "a_short_pulse_does_not_hold_a_real_move") == 0) {
-		scenario_a_short_pulse_does_not_hold_a_real_move();
+			  "the_shortest_run_refuses_what_the_estimate_cannot") == 0) {
+		scenario_the_shortest_run_refuses_what_the_estimate_cannot();
+	} else if (strcmp(scenario, "a_busy_line_is_not_silent") == 0) {
+		scenario_a_busy_line_is_not_silent();
 	} else {
 		fprintf(stderr, "unknown scenario: %s\n", scenario);
 		return 2;

@@ -1,9 +1,12 @@
 """Run with python3 -m unittest discover -s tests -v (Python + host C compiler).
 
-The pulse widths a window reports are the *only* thing the autobaud decision
-gets to look at, so they are the only thing a host test has to supply: the
-harness runs the production tick against counts computed from a chosen line
-rate, and asks what the port ended up configured to.
+The span a capture reports is the *only* thing the autobaud decision gets to
+look at, so it is the only thing a host test has to supply: the harness runs
+the production tick against a span computed from a chosen line rate, and asks
+what the port ended up configured to. The span classifier itself
+(src/uart_rmt_span.c) reads RMTMEM and is validated on the bench; everything
+the follower decides — verify, hold, refuse, confirm, cooldown — is arithmetic
+a host can drive.
 """
 
 import os
@@ -44,8 +47,8 @@ class AutobaudTests(unittest.TestCase):
             "#define AUTOBAUD_WINDOW_MS",
             "\n#endif /* LINKR_UART_AUTOBAUD */",
             ["autobaud_tick", "autobaud_reads_like_a_missing_bit",
-             "autobaud_snap", "autobaud_forget", "autobaud_apart",
-             "autobaud_pulse_within_cycles", "linkr_uart_autobaud_init"],
+             "autobaud_snap", "autobaud_forget", "autobaud_within_pct",
+             "linkr_uart_autobaud_init"],
         )
         (directory / "autobaud_functions.inc").write_text(block)
         cls.binary = directory / "autobaud-tests"
@@ -66,10 +69,9 @@ class AutobaudTests(unittest.TestCase):
 
         The link has been measured against the port at 115200, then a stream
         whose shortest runs are two bit-times arrives in every window. That
-        reads as 57600 — our own rate over two — and it reads as 57600 in
-        every window afterwards too, because the width belongs to the line and
-        not to our divisor, so a reconfiguration would have no later window
-        left to undo it with. Six such windows: the port must not move.
+        classifies to a non-integer fit, so the capture is not a measurement
+        and the port must not move. Reaching 57600 would be a guess, and the
+        line never said it. Six such windows: the port must not move.
         """
         result = self.run_scenario("verified_then_binary")
         self.assertEqual(result["rate"], "115200")
@@ -80,7 +82,7 @@ class AutobaudTests(unittest.TestCase):
 
         The link starts out verified — Kconfig's rate is what both ends were
         set to — but verification only refuses readings *below* ours that are
-        our own rate over 2..9 bit-times, the shape a missing single-bit run
+        our own rate over 2..5 bit-times, the shape a missing single-bit run
         leaves. 9600 against a 115200 port is not that shape (/12), so two
         agreeing windows move the port. Refusing *this* would have meant
         refusing the reason autobaud exists.
@@ -105,7 +107,7 @@ class AutobaudTests(unittest.TestCase):
         """The refusal is the shape of a missing run, not "slower" in general.
 
         1500000 down to 115200 is not our own rate divided by anything from 2
-        to 9, so nothing about it is explainable by the longest run a framed
+        to 5, so nothing about it is explainable by the longest run a framed
         byte can leave, and the reading is believed.
         """
         result = self.run_scenario("verified_other_rate")
@@ -117,14 +119,13 @@ class AutobaudTests(unittest.TestCase):
     def test_a_binary_stream_from_reset_does_not_move_the_port(self):
         """The entry the existing tests never covered: nothing matched yet.
 
-        0xCC arriving on a line that really is 115200 latches two bit-times on
-        both polarities, which computes 57600 from a port configured for
-        115200. Moving there is a guess — and the same pulse then reads as a
-        match at the rate the port just moved to, so no later window ever
-        disagrees with it and the link stays broken. Twenty windows of it: the
-        configured rate is the working assumption until the line says
-        otherwise, so the port holds and `verified` stays set (which is what
-        keeps the refusal armed for every one of those windows).
+        0xCC arriving on a line that really is 115200 classifies to a
+        non-integer fit, which is refused. Moving there would be a guess — and
+        the same capture would then read as a match at the rate the port just
+        moved to, so no later window would ever disagree with it and the link
+        stays broken. The configured rate is the working assumption until the
+        line says otherwise, so the port holds and `verified` stays set (which
+        is what keeps the refusal armed for every one of those windows).
         """
         result = self.run_scenario("startup_binary")
         self.assertEqual(result["rate"], "115200")
@@ -151,7 +152,7 @@ class AutobaudTests(unittest.TestCase):
         is no reading that tells it apart from one and it is refused. After
         the line has been quiet for longer than a burst gap it is no longer
         the link that was measured, and the next reading is believed: the
-        silence, not the pulse width, is what reopens it. Without that this
+        silence, not the capture, is what reopens it. Without that this
         direction was unreachable — 921600 and 115200 stayed as they were
         forever.
         """
@@ -168,28 +169,12 @@ class AutobaudTests(unittest.TestCase):
         must not follow is a stream with no single-bit run in it: 0xCC on a
         true 115200 line reads our own rate over two bit-times, and two is
         inside the two-to-five a byte stream can leave, so it is refused even
-        here. Following it would take the port to 57600, and the same pulse
+        here. Following it would take the port to 57600, and the same capture
         would then read as a match at the rate it just moved to, so nothing
         later could ever put it back. This is the case an idle line followed
-        by a file dump produces; before the two-to-five bound it reached 57600
-        and stayed there.
+        by a file dump produces.
         """
         result = self.run_scenario("quiet_then_a_short_binary")
-        self.assertEqual(result["rate"], "115200")
-        self.assertEqual(result["reconfigs"], "0")
-
-    def test_an_artifact_reading_above_our_rate_is_refused(self):
-        """The reading this link really produced: 2.7% high, held not chased.
-
-        A 115200 line that was being mis-sampled latched a shortest pulse of
-        676 cycles against the true 694 in window after window, which
-        computes 118342 — and the two-window rule moved a real board there.
-        The move cost the ring reset (33 bytes gone mid-transfer) and ~3.5%
-        of every byte after, and the wrong port then kept re-measuring as
-        itself, so nothing ever put it back. A reading this close to our own
-        rate says nothing worth acting on: it is our own rate measured short.
-        """
-        result = self.run_scenario("artifact_high_is_refused")
         self.assertEqual(result["rate"], "115200")
         self.assertEqual(result["reconfigs"], "0")
 
@@ -203,10 +188,9 @@ class AutobaudTests(unittest.TestCase):
         refuses a reading.
         """
         result = self.run_scenario("odd_rate_peer_is_followed")
-        # pulse() truncates 80e6/150000 to 533 cycles, so the harness computes
-        # 150092 from it — a tenth of a percent off in the harness's own
-        # arithmetic. What matters here is the property, not the digit: the
-        # port left 115200 for a far, non-standard rate and stayed there.
+        # span_line() truncates 80e6/150000 to 533 cycles, so the harness
+        # computes 150092 from it — a tenth of a percent off in the harness's
+        # own arithmetic. What matters here is the property, not the digit.
         self.assertEqual(result["reconfigs"], "1")
         self.assertNotEqual(result["rate"], "115200")
         self.assertEqual(result["rate"], result["last"])
@@ -217,10 +201,10 @@ class AutobaudTests(unittest.TestCase):
 
         A port at 118342 that nothing has measured keeps no claim to be
         trusted, so the hold does not protect it: the first clean windows read
-        the true rate (694 cycles -> 115200), which two agreeing windows
-        follow, and the port comes back with `verified` re-armed. This is the
-        rollback the two-window rule always promised, and the reason the hold
-        is conditioned on a trustworthy port rather than applied blindly.
+        the true rate, which two agreeing windows follow, and the port comes
+        back with `verified` re-armed. This is the rollback the two-window
+        rule always promised, and the reason the hold is conditioned on a
+        trustworthy port rather than applied blindly.
         """
         result = self.run_scenario("stuck_port_recovers")
         self.assertEqual(result["rate"], "115200")
@@ -228,36 +212,50 @@ class AutobaudTests(unittest.TestCase):
         self.assertEqual(result["last"], "115200")
         self.assertEqual(result["verified"], "1")
 
-    def test_a_short_pulse_at_a_high_rate_is_held_without_a_percentage_band(self):
-        """The detector's error is fixed in cycles, so percent alone loses it.
+    def test_a_burst_tail_is_not_a_refusal(self):
+        """A capture with too few runs is a burst's tail, not a verdict.
 
-        A 230400 port whose detector latches 329 cycles where the true pulse is
-        347 — the same 18 cycles short it is short by at 115200. Eighteen
-        cycles is 5.3% of a bit-time here, so a hold of five percent by rate
-        misses it by a hair; at 921600 the same defect is 21% and the rate band
-        is not even close. The band in cycles is what covers the difference: a
-        port that moved would go to 243143, a rate no peer is at, and the same
-        short pulse would then read as a match at the rate it just moved to, so
-        nothing would ever put it back.
+        The re-arm closes a burst's own tail, which reads as one or two runs.
+        That is not a measurement, but it is not a refusal either: the
+        follower leaves the state alone, so a candidate still waiting for its
+        second window is not lost to it. Without this the tail would forget
+        the candidate and the next burst would have to start the two-window
+        confirm over.
         """
-        result = self.run_scenario("short_pulse_at_high_rate_is_held")
-        self.assertEqual(result["rate"], "230400")
+        result = self.run_scenario("a_burst_tail_is_not_a_refusal")
+        self.assertEqual(result["rate"], "9600")
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertEqual(result["last"], "9600")
+
+    def test_the_shortest_run_refuses_what_the_estimate_cannot(self):
+        """The second opinion the bench asked for, on a shape it caught.
+
+        A byte-gapped stream stretches every run of one polarity, so the
+        fitted estimate walks outside its band while the shortest run — which
+        a gap between bytes does not touch — still sits on the grid. The
+        estimate alone would confirm a move to a rate the line never carried
+        (the bench's 0xF0 at 1500000 read 1.5/5.5); the shortest run reports
+        our own rate over a run longer than one bit and refuses it. The port
+        must hold.
+        """
+        result = self.run_scenario("the_shortest_run_refuses_what_the_estimate_cannot")
+        self.assertEqual(result["rate"], "1500000")
         self.assertEqual(result["reconfigs"], "0")
 
-    def test_a_short_pulse_never_holds_a_real_move(self):
-        """The cycle band is a bound on the gap, exactly like the percentage one.
+    def test_a_busy_line_is_not_silent(self):
+        """A line in space is proof of activity, not silence.
 
-        150000 arriving on a 115200 port moves the pulse 161 cycles from what
-        the port is programmed for — six times the band's width — so the port
-        is still taken to the peer's rate as it always was, detector error and
-        all. If this ever fails, the band has grown wide enough to make the
-        bridge deaf to a peer that really did change rate, which is the failure
-        autobaud exists to prevent.
+        With no capture to read, the pin sample is the witness: a line caught
+        mid-bit (low) is busy, so it neither ages the quiet count nor drops the
+        port's claim of being measured against the line. A gap-free stream can
+        therefore not log "line silent" while it is talking — the failure the
+        latch era had, where a stream that never idled kept the port claiming
+        a measurement it did not have.
         """
-        result = self.run_scenario("a_short_pulse_does_not_hold_a_real_move")
-        self.assertEqual(result["reconfigs"], "1")
-        self.assertNotEqual(result["rate"], "115200")
-        self.assertEqual(result["rate"], result["last"])
+        result = self.run_scenario("a_busy_line_is_not_silent")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["verified"], "1")
 
 
 if __name__ == "__main__":
