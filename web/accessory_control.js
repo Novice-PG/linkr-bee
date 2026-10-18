@@ -73,17 +73,11 @@ export function webdavCommand({ action = "on", url } = {}) {
   if (target.length > ACCESSORY_LIMITS.webdavUrlMax) invalid(`url must be at most ${ACCESSORY_LIMITS.webdavUrlMax} characters`);
   if (!/^https?:\/\//i.test(target)) invalid("url must start with http:// or https://");
   if (/[\s\x00-\x1f\x7f]/.test(target)) invalid("url must not contain whitespace or control characters");
-  /* Like the WiFi command's comma rule: the firmware splits the value on ","
-   * into url, user and pass, so a comma here would silently move the rest of
-   * the URL into the credential fields. */
-  if (target.includes(",")) invalid("url must not contain a comma");
   return `@d=${target}`;
 }
 
 /* The WiFi password travels in the command, so anything shown to the user or
- * returned to the model is redacted. A WebDAV command carries credentials
- * either embedded in the URL (user:pass@host) or as the firmware's extra
- * comma-separated parts (url,user,pass); both forms are covered. */
+ * returned to the model is redacted. A WebDAV URL may embed credentials too. */
 export function redactCommand(command) {
   const text = String(command ?? "");
   if (text.startsWith("@w=")) {
@@ -91,15 +85,7 @@ export function redactCommand(command) {
     return comma === -1 ? text : `${text.slice(0, comma)},<redacted>`;
   }
   if (text.startsWith("@d=")) {
-    const value = text.slice(3);
-    const comma = value.indexOf(",");
-    const url = comma === -1 ? value : value.slice(0, comma);
-    /* Greedy up to the last "@" before the path: a password may itself contain
-     * "@", and stopping at the first one would leave its tail in the transcript.
-     * The character class cannot cross "/", "?" or "#", so a URL without
-     * credentials is returned unchanged even when its path contains "@". */
-    const safeUrl = url.replace(/^([a-z]+:\/\/)[^/?#\s]*@/i, "$1<redacted>@");
-    return `@d=${safeUrl}${comma === -1 ? "" : ",<redacted>"}`;
+    return text.replace(/^(@d=[a-z]+:\/\/)[^/@\s]*@/i, "$1<redacted>@");
   }
   return text;
 }
@@ -196,12 +182,7 @@ export function accessoryChangeSummary(command, lang = "en") {
     return zh ? `连接 WiFi「${ssid}」（密码不显示）` : `Join WiFi "${ssid}" (password hidden)`;
   }
   if (text === "@w off") return zh ? "断开 WiFi 并清除当前配置" : "Disconnect WiFi and clear the current configuration";
-  if (text.startsWith("@d=")) {
-    // Credential parts never reach the sentence, even if a caller built the
-    // command by hand instead of through webdavCommand().
-    const target = text.slice(3).split(",")[0];
-    return zh ? `启用日志上传到 ${target}` : `Enable log upload to ${target}`;
-  }
+  if (text.startsWith("@d=")) return zh ? `启用日志上传到 ${text.slice(3)}` : `Enable log upload to ${text.slice(3)}`;
   if (text === "@d off") return zh ? "关闭 WebDAV 日志上传" : "Disable WebDAV log upload";
   return text;
 }
@@ -225,7 +206,7 @@ export function requestAccessoryApproval({ container, command, lang = "en", sign
     note.textContent = zh
       ? "这会修改 Linkr Bee 自身（不是目标机），通过加密的蓝牙管理通道发送："
       : "This changes Linkr Bee itself (not the target), sent over the encrypted Bluetooth management channel:";
-    status.textContent = accessoryChangeSummary(redacted, lang);
+    status.textContent = accessoryChangeSummary(command, lang);
     container.append(status, note, approveButton, rejectButton);
 
     let settled = false;

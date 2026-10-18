@@ -12,9 +12,6 @@ export async function fetchDownload({ url, sha256, signal, onProgress = () => {}
     try { await response.body?.cancel(); } catch { /* nothing to release */ }
     throw new Error("Browser download limit is 128 MiB; use target download for larger files.");
   }
-  // Some 2xx responses carry no body at all (204/205, some proxies); reading
-  // one would fail as an unrelated TypeError instead of naming the problem.
-  if (!response.body) throw new Error("The response carried no body to save; retry the download.");
   const reader = response.body.getReader(), chunks = [];
   let bytes = 0;
   try {
@@ -51,7 +48,7 @@ export function requestComputerDownload({ container, args, signal, lang = "en" }
     progress.hidden = true;
     container.append(status, progress, button);
     let handle, objectUrl;
-    const abort = () => { button.disabled = true; if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; } status.textContent += zh ? "\n已取消" : "\nCancelled"; reject(signal.reason); };
+    const abort = () => { button.disabled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); status.textContent += zh ? "\n已取消" : "\nCancelled"; reject(signal.reason); };
     signal?.throwIfAborted();
     signal?.addEventListener("abort", abort, {once:true});
     button.onclick = async () => {

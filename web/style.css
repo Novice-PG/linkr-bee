@@ -137,20 +137,21 @@
   background: var(--terminal) !important;
 }
 
-/* The mouse pointer should follow the theme's contrast, which is exactly what
- * macOS does with its own cursors: black artwork with a white outline over the
- * light theme's near-white surfaces, and the same artwork inverted (white with
- * a dark outline) for the dark theme's near-black ones. The set is the
- * macos-cursors package (MIT, Bogdan Koch; see vendor/mac-cursors/README.md,
- * which the licence requires to stay), converted from its .cur files by
- * tools/extract_mac_cursors.mjs.
+/* The mouse pointer belongs to the operating system, and the light theme is
+ * nearly all white surfaces -- the terminal body is #f8fafc, the header is a
+ * white gradient. A white pointer (the Windows default, and every white cursor
+ * scheme) all but disappears there; the dark theme has no such problem, and it
+ * keeps the system pointer. Windows is also where this shows up first, because
+ * the theme follows the system preference and Windows defaults to light.
  *
- * The hand is one file for both themes on purpose: it is a white glove with a
- * dark outline, which reads on either background; inverting it would hollow it
- * out.
+ * So the light theme supplies its own pointers, taken from the deepin macaron
+ * cursor theme (CC-BY-4.0, UnionTech Software Technology Co., Ltd; see
+ * vendor/macaron-cursors/README.md, which the licence requires to stay). They
+ * are teal with a dark outline and a pale halo, which is what makes them
+ * readable on white regardless of the system cursor scheme.
  *
- * The hotspots come from the .cur files and are recorded in
- * vendor/mac-cursors/cursors.json; a test keeps the two in step, because a
+ * The hotspots come from the theme and are recorded in
+ * vendor/macaron-cursors/cursors.json; a test keeps the two in step, because a
  * wrong hotspot points the click a few pixels off the arrow's tip and nothing
  * else would notice.
  *
@@ -160,30 +161,20 @@
  * these rules not applying at all. 32px is also the size MDN recommends:
  * Chromium and Firefox cap cursors at 128x128, but anything above 32x32 tends to
  * be refused or downscaled on a high-DPI screen. */
-:root,
-:root .terminal-output .xterm-viewport {
-  cursor: url("./vendor/mac-cursors/left_ptr-32-white.png") 7 3, default;
+[data-theme="light"],
+[data-theme="light"] .terminal-output .xterm-viewport {
+  cursor: url("./vendor/macaron-cursors/left_ptr-32.png") 3 2, default;
 }
 
 /* Over the terminal, where xterm already asks for cursor: text. */
-:root .terminal-output .xterm {
-  cursor: url("./vendor/mac-cursors/xterm-32-white.png") 12 12, text;
-}
-
-/* And the hand, on the controls that ask for it. Shared by both themes. */
-:root :is(button, summary, a[href], select,
-  input[type="checkbox"], input[type="radio"], [role="button"]):not(:disabled) {
-  cursor: url("./vendor/mac-cursors/hand2-32.png") 8 4, pointer;
-}
-
-/* Light theme: the black artwork; later in the sheet, so it wins over :root. */
-[data-theme="light"],
-[data-theme="light"] .terminal-output .xterm-viewport {
-  cursor: url("./vendor/mac-cursors/left_ptr-32-black.png") 7 3, default;
-}
-
 [data-theme="light"] .terminal-output .xterm {
-  cursor: url("./vendor/mac-cursors/xterm-32-black.png") 12 12, text;
+  cursor: url("./vendor/macaron-cursors/xterm-32.png") 15 15, text;
+}
+
+/* And the hand, on the controls that ask for it. */
+[data-theme="light"] :is(button, summary, a[href], select,
+  input[type="checkbox"], input[type="radio"], [role="button"]):not(:disabled) {
+  cursor: url("./vendor/macaron-cursors/hand2-32.png") 12 2, pointer;
 }
 
 * {
@@ -599,13 +590,6 @@ input[aria-invalid="true"] {
   min-height: 48px;
   align-items: center;
   justify-content: space-between;
-  /* The hover fill and the focus ring are painted on the summary itself, so its
-   * corners must follow the card's radius: a square fill pokes past the rounded
-   * border, and a square outline around a rounded card reads as a styling bug.
-   * (`border-radius: inherit` would be the natural spelling, but Chromium
-   * computes it to 0px on <summary> inside <details>, so the card's values are
-   * repeated here and in the 600px rule below.) */
-  border-radius: var(--radius-lg);
   padding: 14px;
   cursor: pointer;
   list-style: none;
@@ -1073,25 +1057,6 @@ body.terminal-fullscreen-fallback {
   padding: 10px;
 }
 
-/* xterm parks the textarea that actually receives typing at the cursor so the
- * IME window anchors to it, and hides it with opacity: 0. Some systems treat a
- * fully transparent control as not editable and refuse to act on it -- the
- * Windows touch keyboard never comes up, and iOS skips its paste callout --
- * so hide it by colour instead. Font-size 16px keeps mobile Safari from
- * zooming the page when the textarea (and thus the soft keyboard) opens; the
- * box stays the cell-sized rect xterm sets. */
-.terminal-output .xterm .xterm-helper-textarea {
-  opacity: 1;
-  color: transparent;
-  background: transparent;
-  caret-color: transparent;
-  border: 0;
-  outline: none;
-  resize: none;
-  box-shadow: none;
-  font-size: 16px;
-}
-
 .terminal-output .xterm-viewport {
   background: var(--terminal) !important;
 }
@@ -1273,24 +1238,12 @@ body.terminal-fullscreen-fallback {
 
   .term-tools {
     width: 100%;
-    /* flex-end would pack the row right and spill the excess to the LEFT,
-     * clipping the first tool (the AI button) under the title's box -- the
-     * title's inline-flex span then swallows taps aimed at the button. */
     justify-content: flex-start;
     flex-wrap: nowrap;
   }
 
   .term-hint {
     margin-left: auto;
-  }
-
-  /* The title shares the row with seven tools; let it shrink (and ellipsise)
-   * instead of forcing the tools to overflow. */
-  .term-title {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .terminal-output .xterm {
@@ -1950,18 +1903,6 @@ body,
       max(6px, env(safe-area-inset-left, 0px));
   }
 
-  /* Seven tools plus the title cannot share one row at this width: the row
-   * packs right (flex-end) and spills left, clipping the first tool -- the
-   * AI button -- under the title's span, which then swallows its taps.
-   * Keep only the status LED on the title and let the tools use the row. */
-  .term-title {
-    flex: 0 0 auto;
-  }
-
-  .term-title span[data-i18n="serialOutput"] {
-    display: none;
-  }
-
   .topbar {
     flex-direction: row;
     align-items: center;
@@ -2138,16 +2079,6 @@ body,
   font-size: 12px;
 }
 
-/* The soft-keyboard button needs to be reachable wherever a virtual keyboard
- * can exist: narrow windows keep it (touch panels and phone-width browsers),
- * and so does every coarse-pointer host -- a tablet is wider than 1100px and
- * still has no physical keyboard. */
-@media (max-width: 1100px), (pointer: coarse) {
-  .terminal-keyboard {
-    display: inline-flex;
-  }
-}
-
 @media (max-width: 1100px) {
   .settings-tabs {
     position: sticky;
@@ -2168,6 +2099,10 @@ body,
   .controls[data-settings-active="terminal"] [data-settings-page]:not([data-settings-page="terminal"]),
   .controls[data-settings-active="network"] [data-settings-page]:not([data-settings-page="network"]) {
     display: none;
+  }
+
+  .terminal-keyboard {
+    display: inline-flex;
   }
 }
 
@@ -2280,11 +2215,6 @@ body,
     padding: 13px;
     border-radius: 8px;
     box-shadow: none;
-  }
-
-  /* Mirrors .controls .card's radius (see .diagnostics-summary above). */
-  .controls .diagnostics-summary {
-    border-radius: 8px;
   }
 
   .controls [data-settings-page="connection"] .btn-grid {

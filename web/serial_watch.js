@@ -339,25 +339,11 @@ function feedText(state, text, at) {
   const produced = [];
   const stamped = typeof at === "number" && Number.isFinite(at) ? at : null;
   let start = 0;
-  let index = 0;
-  // The previous chunk ended in CR. A lone CR still ends a line, but when this
-  // chunk opens with LF the pair is one CRLF terminator: consuming the LF here
-  // keeps it from counting a second, empty line.
-  if (state.pendingCr) {
-    state.pendingCr = false;
-    if (text[0] === "\n") {
-      start = 1;
-      index = 1;
-    }
-  }
-  for (; index < text.length; index++) {
+  for (let index = 0; index < text.length; index++) {
     const char = text[index];
     if (char !== "\n" && char !== "\r") continue;
     // Treat CRLF as one terminator; a lone CR still ends a line.
     if (char === "\r" && text[index + 1] === "\n") continue;
-    // A CR at the very end of the chunk is known to terminate this line now,
-    // but its LF half (if any) only arrives with the next chunk.
-    if (char === "\r" && index === text.length - 1) state.pendingCr = true;
     const line = (state.line + text.slice(start, index)).slice(-MAX_LINE_CHARS);
     state.line = "";
     start = index + 1;
@@ -390,7 +376,6 @@ function createState(options, now) {
     bootLoopWindowMs: windowMs,
     findings: [],
     line: "",
-    pendingCr: false,
     lines: 0,
     dropped: 0,
     bootCount: 0,
@@ -404,10 +389,7 @@ export function createSerialWatch({ patterns = [], now = () => Date.now(), bootL
   maxFindings = 20 } = {}) {
   const clock = typeof now === "function" ? now : () => Date.now();
   let state = createState({ patterns, bootLoop, maxFindings }, clock);
-  // Rebuilt with the state: a streamed decode may hold half of a multi-byte
-  // character, and carrying it across clear()/reset() would corrupt the first
-  // bytes of the next session.
-  let decoder = new TextDecoder();
+  const decoder = new TextDecoder();
 
   return {
     // Feed decoded text. Incomplete lines are buffered across calls; only
@@ -436,9 +418,7 @@ export function createSerialWatch({ patterns = [], now = () => Date.now(), bootL
     clear() {
       state.findings.length = 0;
       state.line = "";
-      state.pendingCr = false;
       state.dropped = 0;
-      decoder = new TextDecoder();
       state.bootLoop = createBootLoop();
       return this.snapshot();
     },
@@ -446,7 +426,6 @@ export function createSerialWatch({ patterns = [], now = () => Date.now(), bootL
     // Full engine reset: findings, counters and buffered input.
     reset() {
       state = createState({ patterns, bootLoop, maxFindings }, clock);
-      decoder = new TextDecoder();
       return this.snapshot();
     },
 

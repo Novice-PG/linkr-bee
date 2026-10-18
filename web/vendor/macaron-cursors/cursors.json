@@ -1,0 +1,47 @@
+{
+  "left_ptr": {
+    "purpose": "arrow",
+    "sizes": [
+      {
+        "file": "left_ptr-32.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          3,
+          2
+        ]
+      }
+    ]
+  },
+  "xterm": {
+    "purpose": "text I-beam",
+    "sizes": [
+      {
+        "file": "xterm-32.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          15,
+          15
+        ]
+      }
+    ]
+  },
+  "hand2": {
+    "purpose": "pointing hand",
+    "sizes": [
+      {
+        "file": "hand2-32.png",
+        "size": 32,
+        "width": 32,
+        "height": 32,
+        "hotspot": [
+          12,
+          2
+        ]
+      }
+    ]
+  }
+}
