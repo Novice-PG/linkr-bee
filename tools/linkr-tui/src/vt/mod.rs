@@ -104,6 +104,16 @@ impl Vt {
         &self.title
     }
 
+    /// `ESC [ ? 1 h` — whether the program on the screen asked for the `SS3`
+    /// arrow keys.
+    ///
+    /// The one screen mode the *input* side reads: whoever spells a keystroke
+    /// for the device asks this first, because a program that turned it on
+    /// (`vim`, `less`) reads `ESC [ A` as three literal characters.
+    pub fn application_cursor_keys(&self) -> bool {
+        self.screen.application_cursor_keys
+    }
+
     /// The cursor's line counted from the oldest retained line, so it can be
     /// compared with [`Vt::line`] indices.
     pub fn cursor_line(&self) -> usize {

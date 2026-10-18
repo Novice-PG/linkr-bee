@@ -166,6 +166,10 @@ impl std::fmt::Debug for AgentClient {
     }
 }
 
+/// The first-use constructor: a thread and a runtime are what starting a
+/// transport costs, which is why `App` holds `None` rather than `default()`
+/// and only the send path calls this. A test suite that builds hundreds of
+/// frames starts no transport at all.
 impl Default for AgentClient {
     fn default() -> Self {
         AgentClient::spawn()
@@ -1573,19 +1577,38 @@ mod tests {
     }
 
     /// The timeout is what the user feels, and it is a real bound: a worker
-    /// that never answers must not wedge the interface for ever.
+    /// that never answers — the sender still in hand, the answer simply not
+    /// coming — must not wedge the interface for ever.
     #[test]
-    fn a_dropped_job_times_out_rather_than_hanging() {
+    fn a_silent_job_times_out_rather_than_hanging() {
         let (tx, rx) = mpsc::channel::<Result<Completion, Failure>>();
-        drop(tx);
+        let started = std::time::Instant::now();
         let outcome = rx.recv_timeout(Duration::from_millis(20));
-        assert!(outcome.is_err(), "a closed channel blocked for ever");
+        assert_eq!(
+            outcome,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "a channel whose sender is alive must wait, not answer"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "the wait was cut short: {:?}",
+            started.elapsed()
+        );
+        drop(tx);
     }
 
-    /// Constructing an `AgentClient` costs a thread and a runtime, which is
-    /// exactly what a `Default` for a field in `App` must not do inside a test
-    /// suite that builds hundreds of frames — so `App` holds `None` and the
-    /// transport is started explicitly.
+    /// A worker whose thread has ended answers at once rather than waiting the
+    /// timeout out: the closed channel *is* the answer.
+    #[test]
+    fn a_dropped_job_is_answered_at_once() {
+        let (tx, rx) = mpsc::channel::<Result<Completion, Failure>>();
+        drop(tx);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
     /// A stream event is only complete when its blank line has arrived, and a
     /// chunk can split one — cutting the buffer at the chunk boundary would
     /// lose the event.

@@ -41,13 +41,27 @@ pub fn endpoint_security(endpoint: &str) -> EndpointSecurity {
     let loopback = host == "localhost"
         || host == "::1"
         || host.ends_with(".localhost")
-        || host.starts_with("127.");
+        || is_loopback_v4(&host);
     let plaintext = protocol == "http";
     EndpointSecurity {
         plaintext,
         loopback,
         exposes_key: plaintext && !loopback,
     }
+}
+
+/// Whether a lower-case host is an IPv4 address in `127.0.0.0/8`.
+///
+/// A bare `127.` prefix is not enough: `127.evil.com` is a name that merely
+/// starts with the same digits, and a name can resolve anywhere — which is the
+/// one thing a loopback endpoint cannot do. The all-numeric spellings a
+/// resolver reads as `127.0.0.1` (`127.1`, `127.0.0.1`) are all accepted.
+fn is_loopback_v4(host: &str) -> bool {
+    let Some(rest) = host.strip_prefix("127.") else {
+        return false;
+    };
+    rest.split('.')
+        .all(|octet| !octet.is_empty() && octet.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Split a URL into `(protocol, hostname)` without pulling in a URL parser.
@@ -434,6 +448,26 @@ mod tests {
         ] {
             let s = endpoint_security(host);
             assert!(s.plaintext, "{host}");
+            assert!(s.loopback, "{host}");
+            assert!(!s.exposes_key, "{host}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_only_starts_with_127_is_not_loopback() {
+        // `127.evil.com` is a name a resolver can point anywhere; only an
+        // address that never leaves the machine counts as loopback.
+        for host in ["http://127.evil.com:8080", "http://127.0.0.1.evil.com"] {
+            let s = endpoint_security(host);
+            assert!(!s.loopback, "{host}");
+            assert!(s.exposes_key, "{host}");
+        }
+        for host in [
+            "http://127.0.0.1:11434",
+            "http://127.1:8080",
+            "http://127.0.0.2/",
+        ] {
+            let s = endpoint_security(host);
             assert!(s.loopback, "{host}");
             assert!(!s.exposes_key, "{host}");
         }

@@ -139,13 +139,6 @@ impl Selection {
         let last = if line == end.0 { end.1 } else { usize::MAX };
         Some((first, last))
     }
-
-    /// Whether a cell is inside the run. Inclusive at both ends, the way a
-    /// terminal's selection always is.
-    pub fn covers(&self, line: usize, col: usize) -> bool {
-        self.columns_on(line)
-            .is_some_and(|(first, last)| col >= first && col <= last)
-    }
 }
 
 /// Two presses on the same cell inside this window are a double-click.

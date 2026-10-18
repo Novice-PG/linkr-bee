@@ -390,7 +390,7 @@ impl SerialWatch {
     /// Evaluate one complete line and return any new findings.
     fn evaluate_line(&mut self, line: &str, at: i64) -> Vec<Finding> {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let evidence = clip(line);
+        let evidence = crate::text::tail_chars(line, MAX_EVIDENCE);
         let lower = line.to_lowercase();
         let mut found = Vec::new();
         let mut reported = false;
@@ -414,9 +414,13 @@ impl SerialWatch {
                 }
                 continue;
             }
-            // A panic line between banners breaks the boot burst.
+            // A finding other than a boot banner — a panic, or a caller
+            // pattern — breaks the boot burst: the device got somewhere it
+            // should not have, which is not a loop through its boots.
             self.boot_loop.failed = true;
             if reported {
+                // One line answers once: the first rule that speaks for the
+                // line does, and a second match is the same event told twice.
                 continue;
             }
             let kind = if self.caller_rules.iter().any(|r| r.id == rule.id) {
@@ -525,7 +529,7 @@ impl SerialWatch {
             existing.count += 1;
             existing.at = at;
             if evidence_text != existing.evidence {
-                existing.evidence = clip(&evidence_text);
+                existing.evidence = crate::text::tail_chars(&evidence_text, MAX_EVIDENCE);
             }
             self.boot_loop.bursts.insert(rule.id.to_string(), true);
             return None;
@@ -537,7 +541,7 @@ impl SerialWatch {
             line: line_number,
             at,
             count: self.boot_loop.times.len(),
-            evidence: clip(&evidence_text),
+            evidence: crate::text::tail_chars(&evidence_text, MAX_EVIDENCE),
         };
         self.remember(finding.clone(), key);
         self.boot_loop.bursts.insert(rule.id.to_string(), true);
@@ -568,19 +572,6 @@ fn push_banner(loop_state: &mut BootLoop, at: i64, text: &str, window_ms: i64) -
         dropped = true;
     }
     dropped
-}
-
-fn clip(text: &str) -> String {
-    if text.chars().count() <= MAX_EVIDENCE {
-        return text.to_string();
-    }
-    text.chars()
-        .rev()
-        .take(MAX_EVIDENCE)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 /// A short status-line sentence per finding, in English or Chinese.

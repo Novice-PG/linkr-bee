@@ -414,15 +414,6 @@ impl Theme {
         Style::default().bg(self.panel_2)
     }
 
-    /// A place to type into: the ground of a dialog's input field.
-    ///
-    /// The raised panel surface, which every palette keeps a visible step away
-    /// from the card a window is drawn on — so a field reads as a field even
-    /// when it is empty, which is the state every prompt opens in.
-    pub fn input(&self) -> Style {
-        Style::default().bg(self.panel_3)
-    }
-
     /// The selected row of a list: accent fill with the ink the web puts on
     /// primary buttons. Used for the sidebar selection, list cursors and the
     /// command palette's highlighted action.
@@ -789,8 +780,6 @@ mod tests {
         assert_eq!(Theme::LIGHT.text().fg, Some(Theme::LIGHT.text));
         assert_eq!(Theme::DARK.card().bg, Some(Theme::DARK.panel_2));
         assert_eq!(Theme::LIGHT.card().bg, Some(Theme::LIGHT.panel_2));
-        assert_eq!(Theme::DARK.input().bg, Some(Theme::DARK.panel_3));
-        assert_eq!(Theme::LIGHT.input().bg, Some(Theme::LIGHT.panel_3));
         assert_eq!(Theme::DARK.selected().bg, Some(Theme::DARK.accent));
         assert_eq!(Theme::DARK.selected().fg, Some(Theme::DARK.accent_ink));
         assert_eq!(Theme::LIGHT.selected().bg, Some(Theme::LIGHT.accent));

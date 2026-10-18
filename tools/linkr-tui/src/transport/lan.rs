@@ -112,10 +112,20 @@ const _: () = assert!(
     "the burst has to fit the firmware's inbound queue"
 );
 
-/// How many buffered bytes are held before the sender stops taking more. Bounded
-/// for the same reason the BLE write backlog is: an unbounded one lets the
-/// interface queue a megabyte towards a bridge that has stopped listening.
+/// How many buffered bytes are held back from the socket before the sender
+/// stops taking more. Bounded for the same reason the BLE write backlog is: an
+/// unbounded one lets the interface queue a megabyte towards a bridge that has
+/// stopped listening.
+///
+/// Bytes, not messages: one message from the interface can be a paste of any
+/// size, so the cap is enforced where bytes wait — `pending` in [`carry`] — and
+/// not on the channel between the writer thread and the reactor.
 const UPLINK_BACKLOG: usize = 64 * 1024;
+
+/// How many messages the hand-off channel between the writer thread and the
+/// reactor holds. Small on purpose: the hand-off is a thread boundary, while
+/// the backlog that matters is measured in bytes — see [`UPLINK_BACKLOG`].
+const UPLINK_MESSAGES: usize = 64;
 
 /// The waits between attempts at a dial that could succeed if tried again.
 ///
@@ -151,6 +161,8 @@ pub fn normalize_url(host: &str) -> String {
 /// different bridge.
 pub fn host_key(host: &str) -> String {
     let url = normalize_url(host);
+    // `normalize_url` writes the scheme, so the fallback is a shape the types
+    // ask for rather than a case a caller can reach.
     let (scheme, rest) = url.split_once("://").unwrap_or(("ws", url.as_str()));
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
@@ -379,7 +391,7 @@ impl Link for LanLink {
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
         let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
-        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(UPLINK_BACKLOG);
+        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(UPLINK_MESSAGES);
 
         let url = normalize_url(&host);
         let token = self.token.clone();
@@ -522,7 +534,7 @@ fn serve(
             // the connection, instead of carrying a link whose reader has gone.
             return;
         }
-        carry(socket, token.is_some(), &inbound, outbound).await;
+        carry(socket, &inbound, outbound).await;
     });
     drop(runtime);
 }
@@ -633,11 +645,9 @@ fn classify(why: tokio_tungstenite::tungstenite::Error, url: &str) -> Failure {
 /// Move bytes both ways until one end stops, metering the uplink as it goes.
 async fn carry(
     mut socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    sent_token: bool,
     inbound: &Sender<Inbound>,
     mut outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
-    let _ = sent_token;
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut pacer = Pacer::uplink();
 
@@ -658,14 +668,16 @@ async fn carry(
                 continue;
             }
             // Not yet: wait for whichever comes first — the pacer's time, more
-            // bytes, or a frame from the bridge.
+            // bytes, or a frame from the bridge. More bytes only while there is
+            // room under the cap; with the queue full they stay in their own
+            // channel, which is the backpressure the cap exists for.
             tokio::select! {
                 frame = socket.next() => {
                     if !absorb(frame, inbound) {
                         return;
                     }
                 }
-                bytes = outbound.recv() => {
+                bytes = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
                     if !queue(bytes, &mut pending, inbound) {
                         return;
                     }
@@ -675,13 +687,16 @@ async fn carry(
             continue;
         }
 
+        // Nothing is held back here — `chunk_len` was zero — so there is room
+        // by definition, and the paced branch above is the only place
+        // `pending` grows where the cap has to be consulted.
         tokio::select! {
             frame = socket.next() => {
                 if !absorb(frame, inbound) {
                     return;
                 }
             }
-            bytes = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
+            bytes = outbound.recv() => {
                 if !queue(bytes, &mut pending, inbound) {
                     return;
                 }

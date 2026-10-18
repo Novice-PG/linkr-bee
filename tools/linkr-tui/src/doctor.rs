@@ -304,8 +304,9 @@ fn probe_check(app: &mut App, format: Format) -> Check {
         1 => Check::new(
             "target",
             State::Indeterminate,
-            "the probe did not finish — the console is waiting for input, or it \
-             timed out; the event above says which",
+            "the probe did not report a status a live shell would have — the \
+             console is waiting for input, the run timed out, or the probe was \
+             killed by a signal; the event above says which",
         ),
         // The exec module's own failure: nothing went out, or the link went
         // away holding the answer. That contradicts the link check, which

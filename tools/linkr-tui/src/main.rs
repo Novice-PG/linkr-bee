@@ -1872,6 +1872,10 @@ fn load_agent_state(app: &mut App) {
     if let Some(store) = app.agent_store.as_mut() {
         app.assistant.tasks = linkr_tui::agent::tasks::TaskStore::new(&mut *store).list(&key);
     }
+    // The ids that came back are the store's, not this run's: the counter has
+    // to start past them or the first question of the session inherits an id
+    // the shelf already holds.
+    linkr_tui::views::assistant::seed_task_counter(&mut app.assistant);
     let saved = app
         .agent_store
         .as_ref()
@@ -2183,7 +2187,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // does from anywhere.
         (KeyCode::Char('c'), true) => {
             if app.pane_has_the_keyboard() && app.session.is_live() {
-                if let Some(bytes) = key_bytes(key, app.enter) {
+                if let Some(bytes) =
+                    key_bytes(key, app.enter, app.terminal.vt().application_cursor_keys())
+                {
                     app.type_bytes(false, &bytes);
                 }
                 return false;
@@ -2505,7 +2511,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::End => app.scroll_terminal_to_bottom(),
         _ => {
             let key = latch_key(app, key);
-            if let Some(bytes) = key_bytes(key, app.enter) {
+            if let Some(bytes) =
+                key_bytes(key, app.enter, app.terminal.vt().application_cursor_keys())
+            {
                 // The escape byte is the wire's way out, and it is checked
                 // before the keystroke is sent: sending it and *then* leaving
                 // would put a stray control character into the device's input,
@@ -2683,16 +2691,18 @@ fn toggle_latch(
 /// has no use for. The named keys go through the ported `terminal_keys.js`
 /// table, so the two clients cannot drift apart on what `F5` or `ArrowUp`
 /// means.
+///
+/// `application_cursor_keys` is the mode the program on the device turned on
+/// (`ESC [ ? 1 h`), read from the pane's screen: an arrow is then `ESC O A`
+/// rather than `ESC [ A`, and a program that asked for the first reads the
+/// second as three literal characters.
 #[cfg(any(feature = "tui", test))]
-fn key_bytes(key: KeyEvent, enter: EnterMode) -> Option<String> {
+fn key_bytes(key: KeyEvent, enter: EnterMode, application_cursor_keys: bool) -> Option<String> {
     let modifiers = TerminalModifiers {
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
         ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
         alt: key.modifiers.contains(KeyModifiers::ALT),
     };
-    // Application cursor keys are a mode the device turns on; until the VT
-    // screen tracks it, the normal form is what is sent.
-    let application_cursor_keys = false;
     let named = |name: &str| keys::terminal_key_sequence(name, application_cursor_keys, &modifiers);
     let bytes = match key.code {
         KeyCode::Char(c) => keys::apply_input_modifiers(&c.to_string(), &modifiers),
@@ -4172,49 +4182,56 @@ mod tests {
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("a".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\r".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{7f}".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\t".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{1b}".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{1b}[A".into())
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{1b}[3~".into())
         );
@@ -4223,7 +4240,8 @@ mod tests {
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{3}".into())
         );
@@ -4231,7 +4249,8 @@ mod tests {
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             Some("\u{1b}[Z".into())
         );
@@ -4239,16 +4258,60 @@ mod tests {
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             None
         );
         assert_eq!(
             key_bytes(
                 KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
-                EnterMode::Raw
+                EnterMode::Raw,
+                false,
             ),
             None
+        );
+    }
+
+    /// A program that turned application cursor keys on gets the `SS3` form:
+    /// `vim` and `less` read `ESC O A` as an arrow and `ESC [ A` as three
+    /// literal characters. The mode is the device's own, read from the pane's
+    /// screen — see [`crate::vt::Vt::application_cursor_keys`].
+    #[test]
+    fn the_application_cursor_mode_reaches_the_keys() {
+        assert_eq!(
+            key_bytes(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                EnterMode::Raw,
+                true
+            ),
+            Some("\u{1b}OA".into())
+        );
+        assert_eq!(
+            key_bytes(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                EnterMode::Raw,
+                false
+            ),
+            Some("\u{1b}[A".into())
+        );
+        // Home is spelled the same two ways; a key the mode does not reach is
+        // unchanged.
+        assert_eq!(
+            key_bytes(
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                EnterMode::Raw,
+                true
+            ),
+            Some("\u{1b}OH".into())
+        );
+        assert_eq!(
+            key_bytes(
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+                EnterMode::Raw,
+                true
+            ),
+            Some("\u{1b}[3~".into())
         );
     }
 

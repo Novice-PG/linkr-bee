@@ -63,6 +63,49 @@ pub fn restrict(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Replace `path` with `bytes` in one atomic rename, both files owner-only.
+///
+/// The temp file is written beside the real one and renamed over it, so a
+/// reader never sees a half-written store: a partial JSON object read back as
+/// an empty map is a bridge that will not authenticate, or a task list that
+/// has lost its history. The parent directory is created first, because the
+/// stores that use this are the first thing a fresh machine writes.
+///
+/// The temp name carries the writing process's id, because two `linkr`
+/// instances on one bench are normal and a fixed `.tmp` name is a file they
+/// would take turns truncating — one instance's rename would then move the
+/// other's half-written copy into place. A name that is somehow taken is
+/// retried under the next one, and the temp is removed rather than left behind
+/// holding a secret.
+pub fn write_private_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut tmp = path.to_path_buf();
+    let mut stamp = std::process::id();
+    loop {
+        tmp.set_extension(format!("tmp{stamp:08x}"));
+        if write_private(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+            // Again after the rename, not before: a file that was already
+            // there keeps whatever mode it had until this moment, and this one
+            // holds a secret.
+            let _ = restrict(path);
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&tmp);
+        // A collision on the temp name is the only recoverable failure; a full
+        // disk or a read-only directory is reported rather than spun on.
+        if stamp > u32::MAX - 1024 {
+            return Err(std::io::Error::other(format!(
+                "could not write {}: every temporary name was taken or the \
+                 directory refused the write",
+                path.display()
+            )));
+        }
+        stamp += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

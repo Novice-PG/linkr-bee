@@ -145,12 +145,16 @@ fn command_positions(text: &str) -> Vec<usize> {
         }
     }
     // `sh -c '…'` / `bash -c "…"` open a command position after the quote.
-    let lower = text.to_lowercase();
+    //
+    // Searched in `text` itself, case-insensitively and one character at a
+    // time: folding the whole string first (`to_lowercase`) moves every byte
+    // after a character whose lowercase is longer than it is — `İ` is two
+    // bytes and folds to three — so an offset found in the folded copy is not
+    // an offset in the text, and slicing with it can cut a character in half.
     for sh in ["sh", "bash", "dash", "ash", "zsh"] {
         let needle = format!("{sh} -c");
         let mut start = 0;
-        while let Some(pos) = lower[start..].find(&needle) {
-            let abs = start + pos;
+        while let Some(abs) = find_ignore_case(text, &needle, start) {
             let after = &text[abs + needle.len()..];
             // Skip whitespace, then a single/double quote.
             let after_trim = after.trim_start();
@@ -167,6 +171,30 @@ fn command_positions(text: &str) -> Vec<usize> {
         }
     }
     positions
+}
+
+/// Find `needle` in `haystack` from `from`, ignoring ASCII case, and return a
+/// byte index *of the haystack*.
+///
+/// The needle is always a shell's own name spelled with ASCII characters, so
+/// an ASCII comparison is the whole of what is needed — and it is what keeps
+/// every offset an offset in the text rather than in a folded copy of it.
+fn find_ignore_case(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let width = needle.len();
+    if width == 0 || from >= bytes.len() {
+        return None;
+    }
+    let mut at = from;
+    while at + width <= bytes.len() {
+        if bytes[at..at + width].eq_ignore_ascii_case(needle.as_bytes()) {
+            return Some(at);
+        }
+        // A match can only start on a character boundary, so the walk steps by
+        // whole characters rather than by bytes.
+        at += haystack[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    None
 }
 
 /// Whether the text at a command position names a guarded command.
@@ -594,6 +622,28 @@ mod tests {
         assert!(is_guarded_command("rm -rf /"));
         assert!(is_guarded_command("cd /tmp; rm -rf /"));
         assert!(is_guarded_command("sh -c 'rm -rf /'"));
+    }
+
+    /// The wrapper is found whatever case it was typed in, and the search
+    /// never cuts a character in half to do it.
+    ///
+    /// The offsets used to come from a `to_lowercase` copy of the text, and a
+    /// character whose lowercase is longer than itself — `İ`, two bytes
+    /// folded to three — moved every offset after it, so a command the guard
+    /// was asked about could panic it instead of answering.
+    #[test]
+    fn the_sh_c_wrapper_is_found_in_any_case_and_whole() {
+        assert!(is_guarded_command("SH -c 'rm -rf /'"));
+        assert!(is_guarded_command("Bash -C \"rm -rf /\""));
+        assert!(
+            !is_guarded_command("İsh -c"),
+            "a command that only looks like a wrapper is not one"
+        );
+        assert!(!is_guarded_command("İİİİİİ sh -c x"));
+        assert!(
+            !is_guarded_command("echo ㄱsh -c x"),
+            "a wide letter is not an s"
+        );
     }
 
     #[test]

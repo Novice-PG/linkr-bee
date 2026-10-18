@@ -92,42 +92,10 @@ impl JsonFile {
             out.push('"');
         }
         out.push('}');
-        let path = &self.path;
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Write beside it and rename, so an interrupted write leaves the old
-        // file rather than a half-written one. The temp is created owner-only:
-        // it holds the same API key the real file does, and it exists under a
-        // name the umask — not this program — chooses the mode of.
-        let mut tmp = path.clone();
-        let mut stamp = std::process::id();
-        tmp.set_extension(format!("tmp{stamp:08x}"));
-        loop {
-            if crate::private_file::write_private(&tmp, out.as_bytes()).is_ok()
-                && std::fs::rename(&tmp, path).is_ok()
-            {
-                // Again after the rename, not before. The file that stays is
-                // the one the umask made — 0664 on a group-friendly default —
-                // and this file holds the model's API key, so restricting it is
-                // the whole point. Doing it earlier restricts a path nothing has
-                // written yet, and the renamed file keeps whatever the umask
-                // gave it.
-                let _ = crate::private_file::restrict(path);
-                return;
-            }
-            // A failed rename leaves a file holding the key behind; it is
-            // removed rather than abandoned.
-            let _ = std::fs::remove_file(&tmp);
-            // A collision on the temp name is the only recoverable failure; a
-            // full disk or a read-only directory is reported rather than spun
-            // on, and the in-memory copy is still correct either way.
-            if stamp > u32::MAX - 1024 {
-                return;
-            }
-            stamp += 1;
-            tmp.set_extension(format!("tmp{stamp:08x}"));
-        }
+        // Beside the real file and renamed over it, so a process that dies
+        // mid-write leaves the previous copy rather than a truncated one — and
+        // written owner-only, because this file holds the model's API key.
+        let _ = crate::private_file::write_private_atomically(&self.path, out.as_bytes());
     }
 
     /// Where the file lives, for a test that wants to clean up after itself.
@@ -153,19 +121,55 @@ impl Storage for &mut JsonFile {
     }
 }
 
+impl JsonFile {
+    /// Change the file in one go: take up what is on disk now, apply `edit`,
+    /// and write it back once.
+    ///
+    /// This is the only way to mutate the file, and the reason is that more
+    /// than one door opens onto it: this program keeps the settings store and
+    /// the agent's store over the same JSON — see [`crate::settings`] — and a
+    /// second `linkr` on the bench is a third writer. Each door holds its copy
+    /// of the whole object, so a write that flushed the copy it read at
+    /// startup would put the file back to that moment and drop everything the
+    /// other doors have written since: change the theme and the model's key is
+    /// gone, ask a question and the language choice is. Reading again before
+    /// each write turns that overwrite into a merge, for the price of one
+    /// small read per user action.
+    pub fn update(&mut self, edit: impl FnOnce(&mut BTreeMap<String, String>)) {
+        self.reread();
+        edit(&mut self.data);
+        self.flush();
+    }
+
+    /// Take up whatever another writer has put in the file since this handle
+    /// read it. A file that has gone missing or been made unreadable keeps the
+    /// copy in hand rather than emptying the map: the next write is the thing
+    /// that has to succeed, and it will write what this handle holds.
+    fn reread(&mut self) {
+        if let Some(data) = std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| parse_object(&text))
+        {
+            self.data = data;
+        }
+    }
+}
+
 impl Storage for JsonFile {
     fn get(&self, key: &str) -> Option<String> {
         self.data.get(key).cloned()
     }
 
     fn set(&mut self, key: &str, value: &str) {
-        self.data.insert(key.to_string(), value.to_string());
-        self.flush();
+        self.update(|data| {
+            data.insert(key.to_string(), value.to_string());
+        });
     }
 
     fn remove(&mut self, key: &str) {
-        self.data.remove(key);
-        self.flush();
+        self.update(|data| {
+            data.remove(key);
+        });
     }
 }
 
@@ -334,6 +338,35 @@ mod tests {
         }
         let store = JsonFile::at(&path);
         assert_eq!(store.get("k").as_deref(), Some("v"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two doors onto one file — the settings store and the agent's store are
+    /// exactly that — and each keeps what the other has just written: the copy
+    /// in hand is taken up from disk before every write, so the second door's
+    /// keys survive the first door's save.
+    #[test]
+    fn a_second_door_does_not_lose_the_first_doors_keys() {
+        const NAME: &str = "a_second_door_does_not_lose_the_first_doors_keys";
+        let path = temp(NAME);
+        let _ = std::fs::remove_file(&path);
+        // Both handles open at once, as the program does at startup, each
+        // holding the copy it read then.
+        let mut settings = JsonFile::at(&path);
+        let mut agent = JsonFile::at(&path);
+        agent.set("model:key", "sk-secret");
+        settings.set("tui.theme", "light");
+        assert_eq!(
+            JsonFile::at(&path).get("model:key").as_deref(),
+            Some("sk-secret"),
+            "the settings write dropped the key the agent's door had written"
+        );
+        agent.set("task:1", "a goal");
+        assert_eq!(
+            JsonFile::at(&path).get("tui.theme").as_deref(),
+            Some("light"),
+            "the agent write dropped the setting the other door had written"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

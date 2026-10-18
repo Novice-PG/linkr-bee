@@ -148,6 +148,8 @@ impl TokenStore {
     /// Written beside the real file and renamed over it: the store is never on
     /// disk wearing the umask's permissions, and never half written — a partial
     /// store read back as an empty map is a bridge that will not authenticate.
+    /// A second instance saving at the same moment writes its own temp rather
+    /// than sharing one — see [`crate::private_file::write_private_atomically`].
     pub fn save(&self) -> io::Result<()> {
         let Some(path) = &self.path else {
             return Err(io::Error::new(
@@ -155,19 +157,7 @@ impl TokenStore {
                 "there is nowhere to save LAN tokens on this machine",
             ));
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut tmp = path.clone();
-        tmp.set_extension("tmp");
-        crate::private_file::write_private(&tmp, render(&self.entries).as_bytes())?;
-        if let Err(err) = std::fs::rename(&tmp, path) {
-            // A failed rename leaves the temp behind: it holds the same secret
-            // the real file does, so it is removed rather than abandoned.
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        crate::private_file::write_private_atomically(path, render(&self.entries).as_bytes())
     }
 }
 
@@ -270,7 +260,23 @@ fn default_path() -> Option<PathBuf> {
             return Some(Path::new(&dir).join(DEFAULT_FILE));
         }
     }
-    let home = std::env::var("HOME").ok()?;
+    // `APPDATA` is the Windows configuration directory, and it is checked
+    // before `HOME` because Windows does not define `HOME` and a `.config`
+    // directory under `%USERPROFILE%` is a place nothing else on the machine
+    // looks. The agent store resolves its own file the same way, so the two
+    // files stay in one directory.
+    #[cfg(windows)]
+    if let Ok(dir) = std::env::var("APPDATA") {
+        if !dir.trim().is_empty() {
+            return Some(Path::new(&dir).join(DEFAULT_FILE));
+        }
+    }
+    // `USERPROFILE` is the fallback for the same reason: it is the variable a
+    // Windows environment sets, and without it a token saved on Windows would
+    // never be found again.
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())?;
     if home.trim().is_empty() {
         return None;
     }

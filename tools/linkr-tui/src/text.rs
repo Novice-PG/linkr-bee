@@ -56,6 +56,22 @@ pub fn clip_to(text: &str, width: usize) -> String {
     out
 }
 
+/// The last `chars` characters of `text`, whole — the tail of a long line, with
+/// nothing added to say it was cut.
+///
+/// A log line's *end* is the part that carries the finding, and the columns a
+/// cut mark would take are columns the evidence needs — which is why this is
+/// not [`clip_to`] with another argument. Both are counts of characters rather
+/// than columns on purpose: this trims the tail of something that is about to
+/// be shown as text rather than laid out in a field.
+pub fn tail_chars(text: &str, chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= chars {
+        return text.to_string();
+    }
+    text.chars().skip(count - chars).collect()
+}
+
 /// Substitute `{}` placeholders in order.
 ///
 /// The templates are `&'static str` from the string table and the arguments are
@@ -220,6 +236,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A tail is the answer to a line whose *end* is the evidence: the last
+    /// characters, unmarked, and a line short enough comes back whole.
+    #[test]
+    fn a_tail_keeps_the_end_of_a_long_line() {
+        assert_eq!(tail_chars("short", 10), "short");
+        assert_eq!(tail_chars("exactly ten", 11), "exactly ten");
+        assert_eq!(tail_chars("abcdefghij", 4), "ghij");
+        assert_eq!(tail_chars("", 3), "");
+        assert_eq!(tail_chars("keys", 0), "");
+        // The tail of a line the device typed is the end the finding is on,
+        // wide glyphs and all: character counts, so a Chinese line comes back
+        // as whole glyphs.
+        assert_eq!(tail_chars("触发了内核崩溃", 4), "内核崩溃");
     }
 
     /// A clip is the answer to a row that is too long — and it is a *cut*, not a

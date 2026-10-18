@@ -308,6 +308,16 @@ pub struct AssistantState {
     /// Prompts already handed to a task, newest first. They are goals the agent
     /// has not run a model against yet, and this is what the composer becomes.
     pub inbox: Vec<String>,
+    /// The number the next task's id is built from, and the reason it is a
+    /// counter rather than the length of the task list.
+    ///
+    /// Both lists are capped at twenty, so a length stops growing while
+    /// questions keep being asked: the twenty-first prompt and the fortieth
+    /// would carry the same id. An id is how a reply finds its task and its
+    /// conversation — [`AssistantState::task_chat`] — so a shared one is an
+    /// answer that lands on the wrong row, and a store that keeps one of the
+    /// two records.
+    pub next_task: u64,
     /// The character of the key that is still in the clear, as its index among
     /// the key's characters, and when it goes back under its star.
     ///
@@ -349,6 +359,7 @@ impl Default for AssistantState {
             note_cursor: 0,
             note_input: String::new(),
             inbox: Vec::new(),
+            next_task: 1,
             key_reveal: None,
             select: None,
         }
@@ -760,8 +771,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             export_report(app);
         }
         // A control character is not text. `handle_key` in `main.rs` has
-        // already taken the chords that are the interface's own, so what
-        // reaches here without a CONTROL or ALT modifier is printable.
+        // already taken the chords the interface keeps for itself, the
+        // Alt+arrows included, so an ALT that reaches here belongs to the user:
+        // AltGr composes a character on some layouts and arrives as ALT on
+        // others, and refusing it would swallow what they typed rather than a
+        // chord. Only CONTROL is turned away.
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(text) = field_text_mut(app) {
                 text.push(ch);
@@ -1009,6 +1023,23 @@ pub fn persist_session(app: &mut App) {
     app.assistant.adopt(saved);
 }
 
+/// Point the task counter past every id the store has carried in.
+///
+/// A restored task's id came from the counter of the run that made it, and this
+/// run's counter starts at one: without this, the first question after a
+/// restart would be given an id the shelf already holds — the same collision
+/// the counter exists to prevent, one restart away.
+pub fn seed_task_counter(state: &mut AssistantState) {
+    let highest = state
+        .tasks
+        .iter()
+        .filter_map(|task| task.id.strip_prefix('t'))
+        .filter_map(|n| n.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    state.next_task = state.next_task.max(highest + 1);
+}
+
 /// Add the note being typed, with the newest task's answer as its evidence.
 ///
 /// The evidence is not decoration: a note saying "the UART is at 115200" is worth
@@ -1017,11 +1048,41 @@ pub fn persist_session(app: &mut App) {
 /// gets empty evidence rather than a guess at one.
 fn add_note(app: &mut App) {
     let text = std::mem::take(&mut app.assistant.note_input);
-    let trimmed = text.trim();
+    let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return;
     }
     let key = app.agent_device_key();
+    // The refusals are made here, in the interface's own words, rather than
+    // left to the store's English ones: a note that disappeared without a word
+    // is a note the user will type again. The rules are the store's own — see
+    // `NoteStore::add`.
+    if key.is_empty() {
+        app.push_notice(crate::app::Notice {
+            text: app.strings().asst_note_no_identity.to_string(),
+            level: crate::event::NoticeLevel::Warn,
+        });
+        return;
+    }
+    let limit = crate::agent::notes::NOTE_MAX_CHARS;
+    if trimmed.chars().count() > limit {
+        let text = crate::text::fill(app.strings().asst_note_too_long, &[limit.to_string()]);
+        app.push_notice(crate::app::Notice {
+            text,
+            level: crate::event::NoticeLevel::Warn,
+        });
+        return;
+    }
+    if crate::agent::redact::redact_task_text(&trimmed)
+        .trim()
+        .is_empty()
+    {
+        app.push_notice(crate::app::Notice {
+            text: app.strings().asst_note_empty.to_string(),
+            level: crate::event::NoticeLevel::Warn,
+        });
+        return;
+    }
     let evidence = app
         .assistant
         .tasks
@@ -1030,9 +1091,16 @@ fn add_note(app: &mut App) {
         .unwrap_or_default();
     let now = app.environment_stamp() * 1000;
     if let Some(store) = app.agent_store.as_mut() {
-        // A duplicate or a rejected note is left as it was: the user has typed
-        // the same thing twice and has already been told.
-        let _ = crate::agent::notes::NoteStore::new(&mut *store).add(&key, trimmed, &evidence, now);
+        // A duplicate is not an error: the note is already there, and the row
+        // the user is looking at is it.
+        if let Err(why) =
+            crate::agent::notes::NoteStore::new(&mut *store).add(&key, &trimmed, &evidence, now)
+        {
+            app.push_notice(crate::app::Notice {
+                text: why,
+                level: crate::event::NoticeLevel::Warn,
+            });
+        }
     }
     refresh_notes(app);
 }
@@ -1197,7 +1265,11 @@ fn submit_prompt(app: &mut App) {
     app.assistant.chat_mut().name_after(&goal);
     app.assistant.chat_mut().updated_at = app.environment_stamp() * 1000;
     let chat_id = app.assistant.chat().id;
-    let id = format!("t{}", app.assistant.tasks.len() + app.assistant.inbox.len());
+    // An id nothing has used before, from a counter that only ever goes up:
+    // the id is how the reply finds its task and its conversation. See
+    // [`AssistantState::next_task`].
+    let id = format!("t{}", app.assistant.next_task);
+    app.assistant.next_task += 1;
     let record = crate::agent::tasks::TaskRecord {
         id,
         device_key: app.agent_device_key(),
@@ -1287,19 +1359,15 @@ fn submit_prompt(app: &mut App) {
     if app.agent_client.is_none() {
         app.agent_client = Some(crate::agent::runtime::AgentClient::default());
     }
-    if let (Some(client), Some(receiver)) = (
-        app.agent_client.as_ref(),
-        app.agent_client
-            .as_ref()
-            .and_then(|c| c.submit(&record.id, config, messages)),
-    ) {
-        // One in flight at a time: two prompts answering out of order is a
-        // harder problem than it looks, and a queue that answers them in order
-        // is the honest first version.
-        // One channel per question in flight, not one slot: a second prompt
-        // must not drop the reply the first one is waiting for.
+    // One channel per question in flight, not one slot: a second prompt must
+    // not drop the reply the first one is waiting for. The transport was just
+    // started above, so a receiver is the proof the job went out.
+    if let Some(receiver) = app
+        .agent_client
+        .as_ref()
+        .and_then(|client| client.submit(&record.id, config, messages))
+    {
         app.agent_replies.push(receiver);
-        let _ = client;
     }
 }
 
@@ -1510,7 +1578,12 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             // own source is the one place a reader would rather see the text —
             // the renderer gives it back as source when it does not understand
             // a construct, so nothing is lost either way.
-            if index == 0 && !task.summary.is_empty() {
+            //
+            // Not when the thread above is already showing it: the newest task
+            // is usually the one the conversation just printed, and the same
+            // paragraph twice on one screen — at two indents — is not a longer
+            // record, it is a page to read twice.
+            if index == 0 && !task.summary.is_empty() && !the_thread_ends_with(state, task) {
                 // Two columns of indent, and the renderer is given the width
                 // that is left — so the row's total is never more than the
                 // pane's, which is the invariant the painting tests enforce.
@@ -1524,6 +1597,23 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Whether the conversation above already ends in this task's own words.
+///
+/// It does while the answer is still arriving — the thread paints the newest
+/// task's summary as it streams — and it does once the answer has landed as the
+/// conversation's last turn. The task list below is the durable record, and a
+/// record does not repeat what the page above it has just said.
+fn the_thread_ends_with(state: &AssistantState, task: &TaskRecord) -> bool {
+    if task.status == "asking" || task.status == "typing" {
+        return true;
+    }
+    state
+        .chat()
+        .display
+        .last()
+        .is_some_and(|turn| turn.role == "assistant" && turn.text.trim() == task.summary.trim())
 }
 
 /// What the header calls a conversation: its place in the list and the name
@@ -1667,8 +1757,10 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
         theme.muted(),
     ));
 
-    // The fixed rows yield from the ends: the status first, then the blank,
-    // then the title — what must survive is the composer and the key hint.
+    // The fixed rows yield from the ends: the status first, then the blank. The
+    // title stays however short the room — a panel with no name is a panel the
+    // user cannot place — and the composer and the key hint are the two rows
+    // that must survive at the bottom.
     let mut head = vec![head_title, head_status];
     let mut blanks = 1usize;
     let tail = vec![composer, hint];
@@ -1679,10 +1771,10 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
         }
         if head.len() > 1 {
             head.pop();
-        } else if blanks > 0 {
-            blanks = 0;
         } else {
-            break;
+            // All that is left to give is the blank between the title and the
+            // thread, and the guard above makes this the last round.
+            blanks = 0;
         }
     }
     let body_room = (height as usize).saturating_sub(head.len() + blanks + tail.len());

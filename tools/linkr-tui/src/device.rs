@@ -105,10 +105,9 @@ impl Query {
                         .is_empty()
             }
             Query::Uart | Query::Wifi | Query::Lan => {
-                crate::accessory::reply_status(&lines.join("\n")).ok
-                    || !crate::accessory::reply_status(&lines.join("\n"))
-                        .error
-                        .is_empty()
+                // One parse: either half of the verdict ends the question.
+                let status = crate::accessory::reply_status(&lines.join("\n"));
+                status.ok || !status.error.is_empty()
             }
         }
     }

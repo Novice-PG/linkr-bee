@@ -236,6 +236,12 @@ pub struct Strings {
     pub asst_notes_section: &'static str,
     /// Shown when the device has no durable notes.
     pub asst_no_notes: &'static str,
+    /// Shown when a note is longer than the store keeps. Takes the limit.
+    pub asst_note_too_long: &'static str,
+    /// Shown when a note is nothing but secrets, so nothing would be kept.
+    pub asst_note_empty: &'static str,
+    /// Shown when the target has no identity to file a note under.
+    pub asst_note_no_identity: &'static str,
     /// The execution-mode row label.
     pub asst_mode_label: &'static str,
     /// The three mode names.
@@ -524,6 +530,9 @@ const ZH: Strings = Strings {
     asst_not_configured: "未配置模型端点（Ctrl+P 打开面板设置）。",
     asst_notes_section: "设备笔记",
     asst_no_notes: "暂无笔记。",
+    asst_note_too_long: "笔记最多 {} 个字符。",
+    asst_note_empty: "笔记在去掉密钥后是空的，没有可保存的内容。",
+    asst_note_no_identity: "该目标还没有身份，笔记无法保存（先连接一次）。",
     asst_mode_label: "执行模式",
     asst_mode_auto: "自动（仅白名单命令免确认）",
     asst_mode_manual: "手动（每次都确认）",
@@ -695,6 +704,9 @@ const EN: Strings = Strings {
     asst_not_configured: "No model endpoint configured (Ctrl+P opens the palette).",
     asst_notes_section: "Device notes",
     asst_no_notes: "no notes",
+    asst_note_too_long: "A note is limited to {} characters.",
+    asst_note_empty: "The note is nothing but secrets once they are taken out.",
+    asst_note_no_identity: "This target has no identity yet, so a note cannot be stored (connect once).",
     asst_mode_label: "Execution mode",
     asst_mode_auto: "auto (only allowlisted commands run unattended)",
     asst_mode_manual: "manual (every send is confirmed)",
@@ -1049,6 +1061,9 @@ mod tests {
                 s.asst_not_configured,
                 s.asst_notes_section,
                 s.asst_no_notes,
+                s.asst_note_too_long,
+                s.asst_note_empty,
+                s.asst_note_no_identity,
                 s.asst_mode_label,
                 s.asst_mode_auto,
                 s.asst_mode_manual,

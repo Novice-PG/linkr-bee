@@ -65,12 +65,12 @@ pub fn inspect_serial_console(text: &str, latest_cursor: usize) -> ConsoleState 
             .iter()
             .rev()
             .find(|l| l.contains("Kernel panic - not syncing:"))
-            .map(|l| clip(l, EVIDENCE_CHARS))
+            .map(|l| crate::text::tail_chars(l, EVIDENCE_CHARS))
             .unwrap_or_default()
     } else if kind == ConsoleKind::Unknown {
         String::new()
     } else {
-        clip(last, EVIDENCE_CHARS)
+        crate::text::tail_chars(last, EVIDENCE_CHARS)
     };
 
     ConsoleState {
@@ -83,19 +83,6 @@ pub fn inspect_serial_console(text: &str, latest_cursor: usize) -> ConsoleState 
 /// Convenience: inspect with no cursor tracking.
 pub fn inspect(text: &str) -> ConsoleState {
     inspect_serial_console(text, text.chars().count())
-}
-
-fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars()
-        .rev()
-        .take(max)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 fn classify(last: &str, lines: &[&str]) -> ConsoleKind {

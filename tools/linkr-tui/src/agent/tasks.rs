@@ -9,6 +9,11 @@ use super::redact::redact_task_text;
 
 pub const TASKS_KEY: &str = "linkr-agent-tasks-v1";
 
+/// How many tasks one device keeps: the newest this many, oldest dropped
+/// first. Counted per device rather than across the shelf, because the shelf
+/// is shared by every board the program has been pointed at.
+pub const TASKS_PER_DEVICE: usize = 20;
+
 /// The identity a task is stored under: the verified target id when bound,
 /// otherwise the transport/device/uart triple.
 pub fn device_identity(
@@ -144,8 +149,20 @@ impl<S: Storage> TaskStore<S> {
         let mut data = self.read();
         data.retain(|t| t.id != item.id);
         data.push(item);
-        let tail = data.len().saturating_sub(20);
-        let kept: Vec<RawTask> = data.into_iter().skip(tail).collect();
+        // The cap is per device. One shelf holds every board's history, so a
+        // cap on the shelf would let the twentieth task on the board in hand
+        // push the oldest task of a board that is not even connected off the
+        // end — history the user never asked to lose.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut kept: Vec<RawTask> = Vec::new();
+        for task in data.into_iter().rev() {
+            let count = seen.entry(task.device_key.clone()).or_default();
+            if *count < TASKS_PER_DEVICE {
+                *count += 1;
+                kept.push(task);
+            }
+        }
+        kept.reverse();
         self.storage.set(TASKS_KEY, &serde_json_like_tasks(&kept));
     }
 
@@ -455,6 +472,49 @@ mod tests {
             status: "running".to_string(),
         });
         assert_eq!(store.list("k")[0].status, "interrupted");
+    }
+
+    /// The cap counts each board's tasks, not the shelf's: filling one board's
+    /// history must not push another board's tasks off the end.
+    #[test]
+    fn the_cap_is_per_device() {
+        let mut store = TaskStore::new(MemStorage::default());
+        for i in 0..(TASKS_PER_DEVICE + 5) {
+            store.save(&TaskRecord {
+                id: format!("a{i}"),
+                device_key: "board-a".to_string(),
+                updated_at: i as u64,
+                goal: format!("goal {i}"),
+                summary: String::new(),
+                status: "done".to_string(),
+            });
+        }
+        store.save(&TaskRecord {
+            id: "b1".to_string(),
+            device_key: "board-b".to_string(),
+            updated_at: 1,
+            goal: "the other board's only task".to_string(),
+            summary: String::new(),
+            status: "done".to_string(),
+        });
+        let a = store.list("board-a");
+        let b = store.list("board-b");
+        assert_eq!(a.len(), TASKS_PER_DEVICE, "board a keeps its own cap");
+        assert_eq!(
+            a[0].id,
+            format!("a{}", TASKS_PER_DEVICE + 4),
+            "the newest of board a is first"
+        );
+        assert_eq!(
+            a.last().map(|t| t.id.as_str()),
+            Some("a5"),
+            "oldest dropped"
+        );
+        assert_eq!(
+            b.len(),
+            1,
+            "board b's task survived board a being filled: {b:?}"
+        );
     }
 
     #[test]

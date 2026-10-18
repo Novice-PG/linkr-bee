@@ -497,7 +497,7 @@ fn unsupported(segment: &str) -> Option<&'static str> {
             '<' => return Some("<"),
             '`' => return Some("`"),
             '*' => return Some("*"),
-            '~' => return Some("~"),
+            '~' if word_start => return Some("~"),
             '(' => return Some("("),
             ')' => return Some(")"),
             '#' if word_start => return Some("#"),
@@ -1127,5 +1127,24 @@ mod tests {
         device.reply("echo a#b");
         let text = outbox(&device);
         assert!(text.contains("a#b"), "{text:?}");
+    }
+
+    /// A `~` is an expansion only where a shell reads one: at the start of a
+    /// word. `a~b` is three characters, and refusing it would refuse a filename
+    /// that merely contains a tilde.
+    #[test]
+    fn a_tilde_only_expands_at_the_start_of_a_word() {
+        let device = LoopbackDevice::default();
+        device.reply("echo a~b");
+        let text = outbox(&device);
+        assert!(text.contains("a~b"), "{text:?}");
+        // At a word start it is the expansion this shell cannot do.
+        let device = LoopbackDevice::default();
+        device.reply("echo ~/x");
+        let text = outbox(&device);
+        assert!(
+            text.contains("simple commands only"),
+            "a home path was accepted: {text:?}"
+        );
     }
 }

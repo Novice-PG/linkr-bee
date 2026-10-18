@@ -709,11 +709,15 @@ impl Prompt {
     /// its moment, the way the assistant's key field shows a character it was
     /// given. Called by both doors text can come through — a keystroke and a
     /// paste.
+    ///
+    /// An edit leaves the caret after what it put there, so the character that
+    /// just arrived is the one before the caret — *not* the last character of
+    /// the answer, which is a different character whenever the caret is in the
+    /// middle of it. The second reading of an index is what a reveal on the end
+    /// of the line would show: someone else's character, in the clear.
     pub fn show_last_char(&mut self) {
-        self.reveal = Some((
-            self.field.text.chars().count().saturating_sub(1),
-            Instant::now() + PROMPT_REVEAL,
-        ));
+        let typed = self.field.text[..self.field.cursor].chars().count();
+        self.reveal = Some((typed.saturating_sub(1), Instant::now() + PROMPT_REVEAL));
     }
 
     /// Text just left the field: the reveal goes out, because the index it
@@ -2991,6 +2995,41 @@ mod tests {
         assert!(
             painted.contains("***"),
             "nothing is left in the clear:\n{painted}"
+        );
+    }
+
+    /// A keystroke in the middle of an answer unveils *its* character, not the
+    /// last character of the line: the caret is where the edit left it, and the
+    /// character just put there is the one before the caret.
+    #[test]
+    fn a_masked_field_reveals_the_character_just_typed() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.lan_token = String::new();
+        prompt_lan_token(&mut app);
+        for ch in "abcd".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
+        }
+        // The caret walks back to sit before the `d`, and `x` lands there.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        let theme = app.theme();
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(
+            painted.contains("***x*"),
+            "the character just typed is in the clear:\n{painted}"
+        );
+        assert!(
+            !painted.contains("***d"),
+            "the last character of the line is not the one that was typed:\n{painted}"
         );
     }
 

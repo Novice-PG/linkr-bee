@@ -232,11 +232,16 @@ fn action_row(
         // The marker is added inside the clip rather than outside it: a chip
         // built first and clipped after would lose the action's own name at a
         // narrow width and keep the marker, which is the wrong thing to lose.
+        // The chip itself is clipped to the pane in turn, because two columns
+        // of marker in a one-column pane are a row wider than its column.
         let chip = format!(
             "▸ {}",
             text::clip_to(&row, width.saturating_sub(2) as usize)
         );
-        return Line::from(Span::styled(chip, theme.selected()));
+        return Line::from(Span::styled(
+            text::clip_to(&chip, width as usize),
+            theme.selected(),
+        ));
     }
     Line::from(Span::styled(
         text::clip_to(&row, width as usize),
@@ -263,7 +268,9 @@ fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
 /// One scan row, split where the colour changes.
 struct ScanRow {
     /// The reading, when the firmware gave one. `None` means no dots are
-    /// invented and the name simply starts where the others' names do.
+    /// invented, and the name pulls two columns left of the ones below it —
+    /// behind a meter that was not there, a gap between nothing and the name
+    /// would read as a reading that failed to arrive.
     dbm: Option<i32>,
     /// The dots and the reading, or the blank the name lines up behind.
     meter: String,

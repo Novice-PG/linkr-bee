@@ -138,11 +138,12 @@ pub fn save_chats(
     // Oldest first for the reader: the order the panel lists and walks them in.
     kept.sort_by(|a, b| a.updated_at.cmp(&b.updated_at).then(a.id.cmp(&b.id)));
     // The panel's cursor must point at something: when the thread the user was
-    // reading was the one forgotten, it falls to the newest that survived.
+    // reading was the one forgotten, it falls to the newest that survived —
+    // the last of the oldest-first order this list is kept in.
     let active = if kept.iter().any(|c| c.id == active) {
         active
     } else {
-        kept.first().map(|c| c.id).unwrap_or(active)
+        kept.last().map(|c| c.id).unwrap_or(active)
     };
 
     let mut data = load_all(storage);
@@ -221,7 +222,10 @@ pub fn load_chats(storage: &dyn Storage, device_key: &str) -> Option<DeviceChats
     let active = if chats.iter().any(|c| c.id == stored.active) {
         stored.active
     } else {
-        chats.first().map(|c| c.id).unwrap_or(0)
+        // The thread the cursor stood on is not in the file — a hand edit, or
+        // a shelf written before a cap existed. Where the user left off is the
+        // newest thread there is, and the order here is oldest first.
+        chats.last().map(|c| c.id).unwrap_or(0)
     };
     Some(DeviceChats { active, chats })
 }

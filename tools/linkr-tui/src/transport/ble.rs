@@ -27,7 +27,9 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -142,12 +144,24 @@ const SCAN_POLL: Duration = Duration::from_millis(250);
 /// waiting for an answer that was never coming.
 ///
 /// Sized to cover the worst dial the reactor will attempt — a scan that runs
-/// out its window, one connect that runs out its own, and the handshake on top
-/// — because a window shorter than the work turns a slow board into a missing
-/// one. A caller that would rather wait less says `--connect-timeout`, and
-/// [`Link::open`]'s late-success path hangs the link up again rather than
-/// leaving a radio nobody is reading.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// out its window, one connect at its floor, and the moment the wiring needs
+/// on top — written as the sum of those parts rather than as a number beside
+/// them, so that a part which grows takes the window with it instead of
+/// leaving a slow board looking like a missing one. A caller that would rather
+/// wait less says `--connect-timeout`; a dial that outlives the window it was
+/// given is hung up again rather than left on the radio.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(
+    SCAN_TIMEOUT.as_secs() + DIAL_ATTEMPT.as_secs() + HANDSHAKE_ALLOWANCE.as_secs(),
+);
+
+/// The moment the wiring after a dial needs: discovering the characteristics
+/// and turning the notifications on, once the link is up.
+///
+/// Reserved out of the caller's window before an attempt is given its own, so
+/// that a connect which uses every second of its attempt still has this much
+/// left to finish in — the difference between a link that comes up and a
+/// caller that has already stopped waiting for it.
+const HANDSHAKE_ALLOWANCE: Duration = Duration::from_secs(5);
 
 /// How long one dial attempt may take before it counts as failed.
 ///
@@ -457,6 +471,10 @@ impl Link for BleLink {
         let (management_tx, management_rx) = mpsc::channel::<Vec<u8>>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
         let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Frame>(WRITE_BACKLOG);
+        // What the board carries, shared between the reactor that finds out
+        // and the writer that has to answer for it. See [`BleWriter`].
+        let carries_management = Arc::new(AtomicBool::new(false));
+        let found_by_the_reactor = Arc::clone(&carries_management);
 
         let selection = self.selection.clone();
         // Read before the thread starts, because the reactor needs it too: one
@@ -472,6 +490,7 @@ impl Link for BleLink {
                 inbound_tx,
                 to_radio_rx,
                 management_tx,
+                found_by_the_reactor,
             );
         });
         // The bytes this interface writes out are handed across to the reactor
@@ -508,6 +527,7 @@ impl Link for BleLink {
                 }),
                 Box::new(BleWriter {
                     outbound: outbound_tx,
+                    carries_management,
                 }),
             )),
         }
@@ -526,9 +546,9 @@ impl Link for BleLink {
 /// something ends.
 ///
 /// `window` is the caller's patience — the same one `open` waits on — and it
-/// bounds one dial attempt as well as the whole reaction: an attempt that gave
-/// up at fifteen seconds while its caller was still due forty has answered a
-/// question nobody asked.
+/// bounds the whole reaction rather than one piece of it: the scan is charged
+/// against it, and the dial gets what is left rather than a fresh window of its
+/// own. See [`dial_attempt`].
 ///
 /// A format string rather than an error value, because the interesting
 /// failures here are all of the "nothing like that on the air" shape and the
@@ -540,12 +560,11 @@ fn radio(
     inbound: Sender<Option<Vec<u8>>>,
     outbound: tokio::sync::mpsc::Receiver<Frame>,
     management: Sender<Vec<u8>>,
+    carries_management: Arc<AtomicBool>,
 ) {
-    // Whichever is longer: the floor every dial needs on a cold adapter, or the
-    // window the caller named. Shorter windows stay shorter — `open` gives up
-    // on its own timer, and this one is only what the attempt inside it may
-    // take.
-    let attempt = dial_attempt(window);
+    // No attempt is worked out here: the window is the caller's, the clock on
+    // it starts with the work below, and each dial asks for what is left of it
+    // when it is about to run. See [`dial_attempt`].
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         // Every timer and every BlueZ socket the link uses wants one of these,
         // and there is nothing else on this runtime to fight with.
@@ -563,13 +582,17 @@ fn radio(
     };
 
     runtime.block_on(async move {
+        // The caller's window, timed from here: every phase below is charged
+        // against it, so that a scan and an attempt which each look within
+        // their own rights add up to something the caller is still waiting for.
+        let started = tokio::time::Instant::now();
         // Every failing path reports through `ready`: `open` is waiting on
         // exactly this channel, and a caller told "it took too long" when the
         // answer was "there is no board on the air" has been told nothing.
         let refuse = |why: String| {
             let _ = ready.send(Err(io::Error::other(why)));
         };
-        let (peripheral, dialled_here) = match find(selection, attempt).await {
+        let (peripheral, dialled_here) = match find(selection, window, started).await {
             Ok(found) => found,
             Err(why) => {
                 refuse(why);
@@ -603,7 +626,7 @@ fn radio(
         if wired.is_err() && !dialled_here {
             let _ = peripheral.disconnect().await;
             wait_until_down(&peripheral).await;
-            match dial(&peripheral, attempt).await {
+            match dial(&peripheral, dial_attempt(window, started.elapsed())).await {
                 Ok(made) => {
                     dialled_here = made;
                     wired = wire(&peripheral).await;
@@ -627,6 +650,19 @@ fn radio(
             ));
             return;
         }
+        // What the board carries, told to the writer before the caller can use
+        // the link: a management frame queued for a board with no management
+        // characteristic is a request nothing will ever answer, and the caller
+        // is owed "this link has no management channel" rather than silence.
+        // The wiring above has already discovered the characteristics, so this
+        // is a lookup rather than a second round trip.
+        carries_management.store(
+            peripheral
+                .characteristics()
+                .iter()
+                .any(|characteristic| characteristic.uuid == MGMT_COMMAND),
+            Ordering::Release,
+        );
         // Reported only once the subscription is live. A read that succeeds
         // and a notify that never arrives looks exactly like a dead target,
         // so "connected" means bytes can already flow both ways.
@@ -756,15 +792,21 @@ fn dial_error(text: &str) -> String {
     }
 }
 
-/// How long one dial attempt gets, given the window its caller named.
+/// How long one dial attempt gets: what is left of the caller's window, less
+/// the moment the wiring needs — never less than [`DIAL_ATTEMPT`], because a
+/// cold adapter needs its own moment whatever was asked for.
 ///
-/// The longer of the two, so that `--connect-timeout 40` really is forty
-/// seconds of dialling rather than fifteen and a lying sentence, and a caller
-/// that asked for five still gets an attempt that a cold adapter can finish —
-/// the short case is `open`'s own timer, which fires while this one is still
-/// going.
-fn dial_attempt(window: Duration) -> Duration {
-    window.max(DIAL_ATTEMPT)
+/// A floor above what is left is deliberate: the caller's timer is the
+/// caller's, and a link that comes up to nobody is hung up again rather than
+/// left on the radio. What the floor must not do is *add* a fresh window to
+/// the one the caller named, which is why the scanner's own time is passed in
+/// and charged against it — a scan that ate ten seconds of a thirty-second
+/// window leaves twenty for the dial, not thirty.
+fn dial_attempt(window: Duration, spent: Duration) -> Duration {
+    window
+        .saturating_sub(spent)
+        .saturating_sub(HANDSHAKE_ALLOWANCE)
+        .max(DIAL_ATTEMPT)
 }
 
 /// Whether the dial gave up waiting rather than being refused.
@@ -971,7 +1013,15 @@ mod linux {
 
 /// Scan for `selection` and connect to it, reporting whether the dial was
 /// this session's own — see [`dial`].
-async fn find(selection: &Selection, attempt: Duration) -> Result<(Peripheral, bool), String> {
+///
+/// `started` is when the caller's window began: the scan is charged against
+/// that window, and the attempt gets what is left of it rather than a fresh
+/// window of its own. See [`dial_attempt`].
+async fn find(
+    selection: &Selection,
+    window: Duration,
+    started: tokio::time::Instant,
+) -> Result<(Peripheral, bool), String> {
     let manager = Manager::new()
         .await
         .map_err(|why| format!("no Bluetooth manager could be opened: {why}"))?;
@@ -1017,7 +1067,7 @@ async fn find(selection: &Selection, attempt: Duration) -> Result<(Peripheral, b
         }
     })?;
 
-    let dialled_here = dial(&chosen, attempt).await?;
+    let dialled_here = dial(&chosen, dial_attempt(window, started.elapsed())).await?;
     Ok((chosen, dialled_here))
 }
 
@@ -1302,6 +1352,11 @@ impl LinkReader for BleReader {
 /// Bytes towards the device.
 struct BleWriter {
     outbound: Sender<Frame>,
+    /// Whether the board carries the management characteristic, as the reactor
+    /// found it. The queue cannot know what the board has, so the fact is
+    /// written down where the reactor looked and read by the writer that has to
+    /// answer for it — see [`LinkWriter::write_management`].
+    carries_management: Arc<AtomicBool>,
 }
 
 impl LinkWriter for BleWriter {
@@ -1326,6 +1381,14 @@ impl LinkWriter for BleWriter {
     /// characteristic the bytes go to, which is the one piece of the answer a
     /// bearer cannot get from anywhere else.
     fn write_management(&mut self, frame: &[u8]) -> io::Result<()> {
+        // A board without the characteristic would take the frame into the
+        // queue and drop it in the reactor, which reads to the caller as a
+        // bridge that never answered. The link does not carry it, and that is
+        // the answer — the same one a bearer with no management channel at all
+        // gives.
+        if !self.carries_management.load(Ordering::Acquire) {
+            return Err(io::Error::other("this link has no management channel"));
+        }
         self.outbound
             .send(Frame::Management(frame.to_vec()))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the BLE link is no longer up"))
@@ -1686,22 +1749,95 @@ mod tests {
     /// A caller that named a long window gets a long attempt: the flag is the
     /// promise, and a dial that gave up at fifteen seconds while its caller was
     /// still due forty would answer a question nobody asked.
+    ///
+    /// What the attempt may not be is a *second* window on top of the one the
+    /// caller named: the scan's own time is charged against it, and the wiring
+    /// after it keeps its own moment — a scan and an attempt that each looked
+    /// generous is how a board that was still connecting got reported as one
+    /// that never answered.
     #[test]
     fn a_dial_attempt_follows_the_window_the_caller_named() {
         assert_eq!(
-            dial_attempt(Duration::from_secs(40)),
-            Duration::from_secs(40),
-            "`--connect-timeout 40` governs the segment it was asked about"
+            dial_attempt(Duration::from_secs(40), Duration::ZERO),
+            Duration::from_secs(35),
+            "`--connect-timeout 40` governs the dial and leaves the wiring its moment"
         );
         assert_eq!(
-            dial_attempt(Duration::from_secs(5)),
+            dial_attempt(Duration::from_secs(40), Duration::from_secs(12)),
+            Duration::from_secs(23),
+            "the scan's time is the caller's time too"
+        );
+        assert_eq!(
+            dial_attempt(Duration::from_secs(5), Duration::ZERO),
             DIAL_ATTEMPT,
             "a window shorter than a cold dial is `open`'s timer, not this one"
         );
         assert_eq!(
-            dial_attempt(DIAL_ATTEMPT),
+            dial_attempt(CONNECT_TIMEOUT, SCAN_TIMEOUT),
+            DIAL_ATTEMPT,
+            "the default window less a scan that ran out is exactly one floor"
+        );
+        assert_eq!(
+            dial_attempt(DIAL_ATTEMPT, DIAL_ATTEMPT),
             DIAL_ATTEMPT,
             "the floor is the floor"
+        );
+    }
+
+    /// The window `open` waits covers every part the reactor may spend inside
+    /// it: a scan that runs out its window, one connect at its floor, and the
+    /// moment the wiring needs on top.
+    #[test]
+    fn the_default_window_covers_the_work_it_pays_for() {
+        assert_eq!(
+            CONNECT_TIMEOUT,
+            SCAN_TIMEOUT + DIAL_ATTEMPT + HANDSHAKE_ALLOWANCE,
+            "the window is written as the sum of what it has to cover"
+        );
+        // A default dial that scans its whole window and then hits the floor
+        // still leaves the wiring its moment.
+        assert_eq!(
+            SCAN_TIMEOUT + dial_attempt(CONNECT_TIMEOUT, SCAN_TIMEOUT) + HANDSHAKE_ALLOWANCE,
+            CONNECT_TIMEOUT,
+        );
+    }
+
+    /// A board without the management characteristic answers for it: the frame
+    /// is refused at the door rather than queued for a reactor that would drop
+    /// it. Dropped there, it reads to the caller as a bridge that never
+    /// answered.
+    #[test]
+    fn a_link_without_the_management_characteristic_says_so() {
+        let (outbound, queue) = mpsc::channel::<Frame>();
+        let mut writer = BleWriter {
+            outbound,
+            carries_management: Arc::new(AtomicBool::new(false)),
+        };
+        let refused = writer
+            .write_management(b"ping")
+            .expect_err("a board with no management characteristic");
+        assert!(
+            refused.to_string().contains("no management channel"),
+            "the refusal names what is missing: {refused}"
+        );
+        assert!(
+            queue.try_recv().is_err(),
+            "nothing was queued for the reactor to drop"
+        );
+
+        // And a board that carries it takes the frame, as before.
+        let (outbound, queue) = mpsc::channel::<Frame>();
+        let mut writer = BleWriter {
+            outbound,
+            carries_management: Arc::new(AtomicBool::new(true)),
+        };
+        writer.write_management(b"ping").expect("accepted");
+        let sent = queue
+            .try_recv()
+            .expect("the frame is on its way to the radio");
+        assert!(
+            matches!(sent, Frame::Management(frame) if frame == b"ping".as_slice()),
+            "the management frame is what went to the radio"
         );
     }
 

@@ -118,6 +118,10 @@ impl SettingsStore {
     }
 
     /// Write every field back, in one file.
+    ///
+    /// One pass over the file rather than one per key: the settings and the
+    /// agent's own state share this JSON, and each pass is a chance to drop a
+    /// key the other door has just written — see [`JsonFile::update`].
     pub fn write(&mut self, settings: &Settings) {
         // The transport is the one field with a third state: writing `stdio`
         // would pin the next run to a link only a command line can build, so
@@ -127,26 +131,28 @@ impl SettingsStore {
             .filter(|kind| *kind != Transport::Stdio)
             .map(Transport::as_str)
             .unwrap_or_default();
-        self.file.set(TRANSPORT, transport);
-        self.file.set(LAN_HOST, settings.lan_host.trim());
-        self.file.set(ADDRESS, settings.address.trim());
-        self.file.set(DEVICE_NAME, settings.device_name.trim());
-        self.file
-            .set(VIEW, settings.view.map(View::as_str).unwrap_or_default());
-        self.file.set(
-            THEME,
-            settings.theme.map(ThemeChoice::as_str).unwrap_or_default(),
-        );
-        self.file
-            .set(LANG, settings.lang.map(Lang::as_str).unwrap_or_default());
-        self.file.set(
-            ENTER,
-            settings.enter.map(EnterMode::as_name).unwrap_or_default(),
-        );
-        // The one boolean, spelled the one way: anything else, a hand edit
-        // included, reads as off rather than as an error.
-        self.file
-            .set(DEBUG_IO, if settings.debug_io { "true" } else { "" });
+        self.file.update(|data| {
+            let mut put = |key: &str, value: &str| {
+                data.insert(key.to_string(), value.to_string());
+            };
+            put(TRANSPORT, transport);
+            put(LAN_HOST, settings.lan_host.trim());
+            put(ADDRESS, settings.address.trim());
+            put(DEVICE_NAME, settings.device_name.trim());
+            put(VIEW, settings.view.map(View::as_str).unwrap_or_default());
+            put(
+                THEME,
+                settings.theme.map(ThemeChoice::as_str).unwrap_or_default(),
+            );
+            put(LANG, settings.lang.map(Lang::as_str).unwrap_or_default());
+            put(
+                ENTER,
+                settings.enter.map(EnterMode::as_name).unwrap_or_default(),
+            );
+            // The one boolean, spelled the one way: anything else, a hand edit
+            // included, reads as off rather than as an error.
+            put(DEBUG_IO, if settings.debug_io { "true" } else { "" });
+        });
     }
 }
 

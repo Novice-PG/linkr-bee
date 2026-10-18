@@ -1149,57 +1149,11 @@ fn listen(
         forget_the_memory(&mut events).await;
         let listening = crate::transport::ble::Listening::begin(&adapter).await?;
 
-        let deadline = Instant::now() + timeout;
-        // What has been heard since discovery started: each device's freshest
-        // reading, or `None` when the event that said it was there carried no
-        // reading. A device the daemon remembers and this map does not is one
-        // that was not on the air.
-        let mut heard: HashMap<String, Option<i16>> = HashMap::new();
-        let mut found: Vec<FoundDevice>;
-        // The addresses already posted, so an unchanged list is not posted
-        // again every quarter of a second: what a caller is watching for is a
-        // new device appearing, not the same five devices on a timer. A device
-        // that goes out of range changes the set too, and the list it is
-        // missing from is as true as the one it was on.
-        let mut posted: Vec<String> = Vec::new();
-        loop {
-            // Listen until the next look at the list, or until the window
-            // closes — whichever comes first.
-            let look = (Instant::now() + SCAN_POLL).min(deadline);
-            let tick = tokio::time::sleep_until(look.into());
-            tokio::pin!(tick);
-            loop {
-                tokio::select! {
-                    _ = &mut tick => break,
-                    event = events.next() => match event {
-                        Some(event) => {
-                            if let Some((address, rssi)) = heard_in(&event) {
-                                let slot = heard.entry(address).or_insert(rssi);
-                                if rssi.is_some() {
-                                    *slot = rssi;
-                                }
-                            }
-                        }
-                        // The stream ended — the adapter went away, or the
-                        // session it was read through: the list is what was
-                        // heard up to here.
-                        None => break,
-                    },
-                }
-            }
-            found = heard_now(&adapter, &heard).await?;
-            sort_found(&mut found);
-            let addresses: Vec<String> =
-                found.iter().map(|device| device.address.clone()).collect();
-            if addresses != posted {
-                posted = addresses;
-                let _ = tx.send(ScanEvent::Seen(found.clone()));
-            }
-            let answered = found.iter().any(|device| device.board);
-            if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
-                break;
-            }
-        }
+        // The listening itself — and then, whatever it returned, the packing up
+        // below. The order the scan lets go of the daemon in matters more than
+        // the reason it stopped, and a scan that dies of a D-Bus error leaves
+        // the same announcements in flight as one that ran its window out.
+        let outcome = the_window(&adapter, &mut events, timeout, until, tx).await;
         listening.stop().await;
         // Stopping discovery is itself heard: the daemon announces a last
         // round of bookkeeping — a signal reading going back to zero for every
@@ -1219,8 +1173,81 @@ fn listen(
         drop(adapter);
         drop(manager);
         tokio::time::sleep(THE_LAST_MOMENT).await;
-        Ok(found)
+        outcome
     })
+}
+
+/// The listening half of a scan: everything until the window closes, until a
+/// board answers, or until the stream gives up — the last of which ends the
+/// window without answering it, because the list is then what was heard up to
+/// there.
+///
+/// Split out of [`listen`] so that the packing up after it happens on the way
+/// out of an error as well: a scan that dies halfway still has to read the
+/// announcements on their way to a stream that is about to be dropped. See the
+/// end of [`listen`].
+async fn the_window<S>(
+    adapter: &btleplug::platform::Adapter,
+    events: &mut S,
+    timeout: Duration,
+    until: Until,
+    tx: &std::sync::mpsc::Sender<ScanEvent>,
+) -> Result<Vec<FoundDevice>, String>
+where
+    S: futures::Stream<Item = btleplug::api::CentralEvent> + Unpin,
+{
+    let deadline = Instant::now() + timeout;
+    // What has been heard since discovery started: each device's freshest
+    // reading, or `None` when the event that said it was there carried no
+    // reading. A device the daemon remembers and this map does not is one
+    // that was not on the air.
+    let mut heard: HashMap<String, Option<i16>> = HashMap::new();
+    let mut found: Vec<FoundDevice>;
+    // The addresses already posted, so an unchanged list is not posted
+    // again every quarter of a second: what a caller is watching for is a
+    // new device appearing, not the same five devices on a timer. A device
+    // that goes out of range changes the set too, and the list it is
+    // missing from is as true as the one it was on.
+    let mut posted: Vec<String> = Vec::new();
+    loop {
+        // Listen until the next look at the list, or until the window
+        // closes — whichever comes first.
+        let look = (Instant::now() + SCAN_POLL).min(deadline);
+        let tick = tokio::time::sleep_until(look.into());
+        tokio::pin!(tick);
+        loop {
+            tokio::select! {
+                _ = &mut tick => break,
+                event = events.next() => match event {
+                    Some(event) => {
+                        if let Some((address, rssi)) = heard_in(&event) {
+                            let slot = heard.entry(address).or_insert(rssi);
+                            if rssi.is_some() {
+                                *slot = rssi;
+                            }
+                        }
+                    }
+                    // The stream ended — the adapter went away, or the
+                    // session it was read through: the list is what was
+                    // heard up to here.
+                    None => break,
+                },
+            }
+        }
+        found = heard_now(adapter, &heard).await?;
+        sort_found(&mut found);
+        let addresses: Vec<String> = found.iter().map(|device| device.address.clone()).collect();
+        if addresses != posted {
+            posted = addresses;
+            let _ = tx.send(ScanEvent::Seen(found.clone()));
+        }
+        if (until == Until::ABoardAnswers && found.iter().any(|device| device.board))
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+    }
+    Ok(found)
 }
 
 /// Most useful first: boards before strangers, then by name, then by signal.

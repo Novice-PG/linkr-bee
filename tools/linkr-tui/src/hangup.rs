@@ -92,11 +92,9 @@ pub fn catch_console_close() {
     use std::os::raw::{c_int, c_ulong};
     use std::sync::Once;
 
-    // The event codes this cares about, from `wincon.h`: the three that mean
-    // "leave now" rather than "a key was pressed". Ctrl+C and Ctrl+Break are
-    // deliberately absent — the terminal runs raw, so those arrive as keys,
-    // and taking them here would turn the console's own interrupt key into a
-    // quit for a program that was reading them as input.
+    // The three that mean "leave now", from `wincon.h`. The interrupt keys —
+    // `CTRL_C_EVENT` and `CTRL_BREAK_EVENT`, 0 and 1 — are deliberately not in
+    // this list: see the handler below.
     const CTRL_CLOSE_EVENT: c_ulong = 2;
     const CTRL_LOGOFF_EVENT: c_ulong = 5;
     const CTRL_SHUTDOWN_EVENT: c_ulong = 6;
@@ -110,18 +108,25 @@ pub fn catch_console_close() {
     }
 
     unsafe extern "system" fn handler(event: c_ulong) -> c_int {
+        // The goodbye is owed on every way out, this one included, so it is
+        // asked for before the question of whose event this is.
+        hang_up(EXIT_GRACE);
         if matches!(
             event,
             CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
         ) {
-            // The hang-up, waited out: Windows kills the process when this
-            // returns, so the goodbye has to leave inside the handler.
-            hang_up(EXIT_GRACE);
+            // `TRUE`: the process has nothing more to say. Windows kills it
+            // when this returns, which is why the hang-up above had to happen
+            // inside the handler rather than after it.
+            return 1;
         }
-        // `TRUE` either way: this handler has said everything the process had
-        // to say, and letting the default handler run would only repeat it.
-        // The events that reach here end the process regardless.
-        1
+        // The interrupt keys are handed on rather than claimed. Ctrl+C and
+        // Ctrl+Break are the console's own way of ending a program that is not
+        // reading input raw — a `scan`, an `exec` — and a handler that answered
+        // `TRUE` for them would swallow the only key that can end such a run.
+        // In raw mode the terminal delivers them as input and this never runs;
+        // `FALSE` says exactly that: not mine.
+        0
     }
 
     static INSTALLED: Once = Once::new();
