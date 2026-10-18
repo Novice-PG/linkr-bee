@@ -1,9 +1,10 @@
-# Linkr Bee logo assets
+# Linkr Bee brand assets
 
 | File | Use |
 | --- | --- |
 | `linkr-bee-logo.svg` | Primary horizontal logo for README, web and documents |
-| `linkr-bee-mark.svg` | Icon-only mark for repository avatars, favicons and hardware labels |
+| `linkr-bee-icon.svg` | Master app icon: the green terminal mark on a transparent ground |
+| `linkr-bee-mark.svg` | The same drawing under the icon-only name: repository avatars, favicons, hardware labels |
 | `linkr-bee-logo-mono.svg` | Single-color printing, laser marking and silkscreen reference |
 | `linkr-bee-logo-concept.png` | White-background visual concept sheet |
 | `screenshots/linkr-bee-terminal-desktop.jpg` | Desktop terminal-first layout |
@@ -14,10 +15,19 @@
 
 - Deep navy: `#101722` (primary)
 - Honey amber: `#F6B73C` (accent)
+- Terminal green: `#3DD68C` (the app icon)
 - White: `#FFFFFF`
 
-The mark combines a lowercase `b`, a honeycomb cell, and a linked circuit node.
-Keep clear space around it equal to at least half the width of the inner
-honeycomb. Use the icon-only mark at 20 px and above. For PCB silkscreen or laser
-marking, use the monochrome artwork and omit the inner accent below 6 mm total
-mark height.
+The icon is a honeycomb cell drawn as a rounded hexagon with a `>` prompt chevron
+and a cursor bar inside: a terminal prompt in a cell. The master is 200×200 with
+a 13-unit hexagon stroke and 15-unit marks, and every raster or platform-shaped
+copy is generated from it:
+
+    python3 assets/make-icons.py    # from the repository root; needs Pillow and numpy
+
+That script writes the Windows `.ico` (16–256 px), the iOS app icon and splashes,
+the Android launcher tiles, adaptive foregrounds and splashes, the Android vector
+foreground, the HarmonyOS app icons and the web favicon. Keep clear space around
+the icon equal to at least one stroke width. For PCB silkscreen or laser marking,
+use the monochrome logo artwork and omit inner detail below 6 mm total mark
+height.

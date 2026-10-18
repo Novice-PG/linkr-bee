@@ -1,14 +1,12 @@
 # This crate's assets
 
-`icon.ico` — the Linkr Bee mark, as the Windows executable wears it.
+`icon.ico` — the Linkr Bee app icon, as the Windows executable wears it: the
+seven sizes Windows asks for (16/24/32/48/64/128/256), each frame drawn from
+`assets/linkr-bee-icon.svg` at the repository root.
 
-It is cut from `assets/linkr-bee-mark.svg` at the repository root: rasterize
-that at 512×512 with alpha, then write the seven sizes Windows asks for
-(16/24/32/48/64/128/256). Pillow does the second half in one call:
+Regenerate it together with the other platform icons rather than by hand:
 
-    python3 -c "from PIL import Image; im = Image.open('mark.png').convert('RGBA'); \
-        im.resize((256, 256), Image.LANCZOS).save('icon.ico', \
-        sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])"
+    python3 assets/make-icons.py    # from the repository root
 
 `build.rs` embeds it on Windows targets only; see that file for why the check
 is a target one rather than `#[cfg(windows)]`.
