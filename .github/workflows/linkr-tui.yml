@@ -442,8 +442,12 @@ jobs:
             echo "release $GITHUB_REF_NAME already exists"
           else
             echo "creating release $GITHUB_REF_NAME"
+            # The tag is already namespaced (`linkr-tui-v0.2.0`), so the title
+            # is the program and the version — `linkr-tui v0.2.0`. Interpolating
+            # the whole ref here produced `linkr-tui linkr-tui-v0.2.0`, which is
+            # the tag's own prefix said twice.
             gh release create "$GITHUB_REF_NAME" \
-              --title "linkr-tui $GITHUB_REF_NAME" --generate-notes
+              --title "linkr-tui ${GITHUB_REF_NAME#linkr-tui-}" --generate-notes
           fi
 
       # A draft is invisible to everyone without the token, so from outside it
