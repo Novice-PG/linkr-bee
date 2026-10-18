@@ -16,7 +16,9 @@
 //! opinions about where the keys go.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
 use crate::agent::tasks::TaskRecord;
 use crate::app::App;
@@ -109,6 +111,122 @@ impl From<crate::agent::session::Chat> for ChatState {
     }
 }
 
+/// Which of the assistant's two paints a run was drawn on.
+///
+/// The docked column and the view's own page show the same conversation under
+/// two layouts — the dock trims its rows to a column and carries the panel's
+/// header, the view lays the whole document out — so a run has to say which
+/// rows it named. A highlight resolved against the other paint would cover
+/// text the user never dragged across.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectRegion {
+    /// The docked column beside the terminal.
+    Panel,
+    /// The assistant view's own body.
+    View,
+}
+
+/// A run of the assistant's painted rows the pointer dragged over.
+///
+/// The pane's selection names the emulator's own lines; the assistant has no
+/// buffer behind the paint — its rows are recomputed from the conversation on
+/// every frame — so the run keeps the rows it was drawn on, taken as the
+/// press landed. What the drag covered is what the release copies, even when
+/// an answer arrives between the two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    /// Which paint the run is on.
+    pub region: SelectRegion,
+    /// The press and the pointer, as `(row, column)` within that paint's text
+    /// area — the pane's own order, so the two selections read the same way.
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+    /// The rows as painted when the press landed. Private: a row is what the
+    /// frame wrote, and `text()` is the only reading of it that means
+    /// anything.
+    rows: Vec<String>,
+}
+
+impl Selection {
+    /// A run that has not moved yet: the press may stay a tap.
+    pub fn new(region: SelectRegion, rows: Vec<String>, cell: (u16, u16)) -> Selection {
+        Selection {
+            region,
+            anchor: cell,
+            head: cell,
+            rows,
+        }
+    }
+
+    /// The two ends in reading order, so no consumer has to care which way the
+    /// drag went.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// Whether the pointer moved at all. A bare click is not a run: it clears
+    /// instead of copying one cell, the way a click on the pane's text does.
+    pub fn is_run(&self) -> bool {
+        self.anchor != self.head
+    }
+
+    /// The columns the run claims on one row, ends inclusive, with the whole
+    /// of a middle row claimed — the pane's arithmetic, so a drag picks up
+    /// the same shape in both places.
+    pub fn columns_on(&self, row: u16) -> Option<(u16, u16)> {
+        let (start, end) = self.ordered();
+        if row < start.0 || row > end.0 {
+            return None;
+        }
+        let first = if row == start.0 { start.1 } else { 0 };
+        let last = if row == end.0 { end.1 } else { u16::MAX };
+        Some((first, last))
+    }
+
+    /// The text the run covers: rows joined with `\n`, the first from the
+    /// anchor's column and the last to the head's, both inclusive.
+    pub fn text(&self) -> String {
+        let (start, end) = self.ordered();
+        let mut out = String::new();
+        for row in start.0..=end.0 {
+            if let Some(line) = self.rows.get(row as usize) {
+                let (first, last) = self.columns_on(row).unwrap_or((0, u16::MAX));
+                out.push_str(&slice_columns(line, first, last));
+            }
+            if row != end.0 {
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
+/// The run of `line` between columns `first` and `last`, both inclusive.
+///
+/// Columns, not characters: a row can hold a wide glyph, and a run that ends
+/// inside one takes it whole rather than handing back half a glyph the frame
+/// never drew as half.
+fn slice_columns(line: &str, first: u16, last: u16) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for ch in line.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let covers = col + width.saturating_sub(1);
+        if col <= last as usize && covers >= first as usize {
+            out.push(ch);
+        }
+        col += width;
+        if col > last as usize {
+            break;
+        }
+    }
+    out
+}
+
 /// Everything the assistant view knows.
 #[derive(Debug, Clone)]
 pub struct AssistantState {
@@ -196,6 +314,9 @@ pub struct AssistantState {
     /// Only ever the character a keystroke or a paste just put there. See
     /// [`KEY_REVEAL`].
     pub key_reveal: Option<(usize, Instant)>,
+    /// The run of text the pointer last dragged over, kept on screen so a
+    /// user can see what a copy took. [`Selection`].
+    pub select: Option<Selection>,
 }
 
 impl Default for AssistantState {
@@ -229,6 +350,7 @@ impl Default for AssistantState {
             note_input: String::new(),
             inbox: Vec::new(),
             key_reveal: None,
+            select: None,
         }
     }
 }
@@ -844,6 +966,10 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
 /// not — the thread is the record of what happened, and the messages are what
 /// the assistant is asked to continue.
 fn push_turn(app: &mut App, role: &str, text: &str, remember: bool) {
+    // The thread is about to gain a row: a run drawn over the old rows would
+    // no longer name them, and a highlight over the wrong text is worse than
+    // no highlight.
+    app.assistant.select = None;
     let line = crate::agent::session::DisplayLine {
         role: role.to_string(),
         text: text.to_string(),
@@ -1581,6 +1707,54 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
     lines
 }
 
+// --- the pointer's side of the assistant --------------------------------------
+
+/// The rows one of the assistant's paints is showing, as plain text — what a
+/// run begun on that paint reads from.
+///
+/// `area` is the paint's own text area, the rectangle the painter is given;
+/// the rows come from the same two builders the painter calls, so a selection
+/// cannot copy text the frame did not paint.
+pub fn painted_rows(app: &App, region: SelectRegion, area: Rect) -> Vec<String> {
+    let theme = app.theme();
+    let lines = match region {
+        SelectRegion::Panel => panel_lines(app, &theme, area.width, area.height),
+        SelectRegion::View => lines(app, &theme, area.width),
+    };
+    lines.iter().map(row_text).collect()
+}
+
+/// One painted row as its characters: the spans' contents, concatenated.
+fn row_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+/// Begin a run at `cell` — `(row, column)` within `area` of `region`'s paint.
+pub fn begin_selection(app: &mut App, region: SelectRegion, cell: (u16, u16), area: Rect) {
+    let rows = painted_rows(app, region, area);
+    app.assistant.select = Some(Selection::new(region, rows, cell));
+}
+
+/// Follow the pointer. Only a pointer still over the run's own paint moves it;
+/// a drag that left the paint — or crossed to the other one — leaves the run
+/// where it was, the way the pane's drag does.
+pub fn drag_selection(app: &mut App, region: SelectRegion, cell: (u16, u16)) {
+    if let Some(selection) = app.assistant.select.as_mut() {
+        if selection.region == region {
+            selection.head = cell;
+        }
+    }
+}
+
+/// Forget the run: the rows it was drawn on are changing, or the paint that
+/// held it is leaving the screen.
+pub fn clear_selection(app: &mut App) {
+    app.assistant.select = None;
+}
+
 /// The settings window's body: the fields, the warning a too-small window
 /// earns, the save's answer, and the notes the last field files.
 ///
@@ -2097,6 +2271,119 @@ mod tests {
                 "alpha"
             );
         }
+    }
+
+    // --- the pointer's runs --------------------------------------------
+
+    /// A run covers the columns it crossed: the first row from the anchor's
+    /// column, the last to the head's, both ends inclusive, and every row
+    /// between whole — the pane's own arithmetic.
+    #[test]
+    fn a_run_reads_the_rows_it_crossed() {
+        let rows = vec![
+            "alpha beta".to_string(),
+            "gamma".to_string(),
+            "delta epsilon".to_string(),
+        ];
+        let region = SelectRegion::View;
+
+        // One row, mid-string, dragged backwards: the same run as forwards.
+        let mut run = Selection::new(region, rows.clone(), (0, 9));
+        run.head = (0, 6);
+        assert!(run.is_run());
+        assert_eq!(run.text(), "beta");
+
+        // Down and across: first row from the anchor, the middle whole, the
+        // last to the head.
+        let mut run = Selection::new(region, rows.clone(), (0, 6));
+        run.head = (2, 4);
+        assert_eq!(run.text(), "beta\ngamma\ndelta");
+
+        // Upwards names the same run.
+        let mut run = Selection::new(region, rows.clone(), (2, 4));
+        run.head = (0, 6);
+        assert_eq!(run.text(), "beta\ngamma\ndelta");
+
+        // A tap is not a run.
+        let tap = Selection::new(region, rows, (1, 2));
+        assert!(!tap.is_run());
+        assert_eq!(tap.text(), "m");
+    }
+
+    /// Columns are cells, not characters: a run that ends inside a wide glyph
+    /// takes it whole, and one past the end of a row takes what is there.
+    #[test]
+    fn a_run_ending_inside_a_wide_glyph_takes_it_whole() {
+        let rows = vec!["中文abc".to_string()];
+        let mut run = Selection::new(SelectRegion::Panel, rows.clone(), (0, 0));
+        run.head = (0, 1);
+        assert_eq!(run.text(), "中", "half a glyph is not a copy");
+        let mut run = Selection::new(SelectRegion::Panel, rows.clone(), (0, 2));
+        run.head = (0, 3);
+        assert_eq!(run.text(), "文");
+        let mut run = Selection::new(SelectRegion::Panel, rows.clone(), (0, 2));
+        run.head = (0, 6);
+        assert_eq!(run.text(), "文abc");
+        // A row past the end of the snapshot contributes nothing rather than
+        // panicking: the paint can shrink under a run.
+        let mut run = Selection::new(SelectRegion::Panel, rows, (0, 0));
+        run.head = (9, 3);
+        assert!(run.text().starts_with("中文abc"), "{}", run.text());
+    }
+
+    /// The rows a run is begun on come from the same builders the painter
+    /// calls, so both paints can be dragged over — the view's page and the
+    /// docked column.
+    #[test]
+    fn a_run_reads_the_rows_the_paints_wrote() {
+        let mut a = app(Lang::En);
+        a.assistant
+            .chat_mut()
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "user".into(),
+                text: "what is the uptime".into(),
+            });
+
+        let view = Rect::new(0, 0, 80, 20);
+        let rows = painted_rows(&a, SelectRegion::View, view);
+        assert!(
+            rows.iter().any(|row| row.contains("what is the uptime")),
+            "the view's rows do not hold the thread: {rows:?}"
+        );
+
+        let panel = Rect::new(0, 0, 40, 20);
+        let rows = painted_rows(&a, SelectRegion::Panel, panel);
+        assert!(
+            rows.iter().any(|row| row.contains("what is the uptime")),
+            "the panel's rows do not hold the thread: {rows:?}"
+        );
+    }
+
+    /// A turn arriving, and the panel moving to another conversation, drop
+    /// the run: its rows no longer name what it highlighted.
+    #[test]
+    fn a_turn_or_a_switch_forgets_the_run() {
+        let mut a = app(Lang::En);
+        let run = |a: &mut App| {
+            a.assistant.select = Some(Selection::new(
+                SelectRegion::Panel,
+                vec!["x".to_string()],
+                (0, 0),
+            ));
+        };
+
+        run(&mut a);
+        push_turn(&mut a, "user", "hello", true);
+        assert!(a.assistant.select.is_none(), "the run outlived the turn");
+
+        run(&mut a);
+        new_conversation(&mut a);
+        assert!(a.assistant.select.is_none());
+
+        run(&mut a);
+        delete_conversation_at(&mut a, 0);
+        assert!(a.assistant.select.is_none());
     }
 }
 
@@ -2706,6 +2993,7 @@ pub fn new_conversation(app: &mut App) {
     });
     app.assistant.active = app.assistant.chats.len() - 1;
     app.assistant.focus = AgentField::Composer;
+    app.assistant.select = None;
     persist_session(app);
     let s = app.strings();
     app.push_notice(crate::app::Notice {
@@ -2727,6 +3015,7 @@ pub fn switch_conversation(app: &mut App, delta: isize) {
     let at = app.assistant.active.min(len - 1) as isize;
     app.assistant.active = (at + delta).rem_euclid(len as isize) as usize;
     app.assistant.focus = AgentField::Composer;
+    app.assistant.select = None;
     persist_session(app);
     let text = format!(
         "{} {}",
@@ -2749,8 +3038,22 @@ pub fn delete_conversation(app: &mut App) {
         .assistant
         .active
         .min(app.assistant.chats.len().saturating_sub(1));
+    delete_conversation_at(app, index);
+}
+
+/// Forget one conversation by its place in the list — what the picker's Enter
+/// does.
+pub fn delete_conversation_at(app: &mut App, index: usize) {
+    let index = index.min(app.assistant.chats.len().saturating_sub(1));
+    app.assistant.select = None;
     if app.assistant.chats.len() > 1 {
         app.assistant.chats.remove(index);
+        // The panel keeps the thread it was showing: forgetting one *before*
+        // it in the list moves it back by one, and forgetting the one on
+        // screen hands the panel its neighbour.
+        if index < app.assistant.active {
+            app.assistant.active -= 1;
+        }
     } else {
         let id = app.assistant.next_chat_id();
         app.assistant.chats[0] = ChatState {

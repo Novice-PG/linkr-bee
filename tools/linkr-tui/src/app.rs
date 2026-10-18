@@ -696,10 +696,6 @@ pub struct App {
     pub agent_replies: Vec<std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
-    /// The size the target has been told its console is, and the gate that
-    /// decides when it may be told: `stty` is typed into a live shell, so it
-    /// goes out only at an idle prompt. See [`crate::geometry`].
-    pub geometry: crate::geometry::GeometrySync,
     /// Whether the pane's first undecodable byte has already been announced.
     ///
     /// Said once, not once per read: a device that speaks something that is
@@ -844,7 +840,6 @@ impl Default for App {
             agent_client: None,
             agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
-            geometry: crate::geometry::GeometrySync::default(),
             decode_loss_noticed: false,
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -1032,6 +1027,10 @@ impl App {
     /// the room still needs no notice — the column appears, and the screen is
     /// the announcement.
     pub fn toggle_assistant_panel(&mut self) {
+        // A run of text the pointer drew belongs to a paint; the panel
+        // appearing or going changes which paints are on screen, so the run
+        // goes with it.
+        crate::views::assistant::clear_selection(self);
         if self.assistant_panel {
             self.assistant_panel = false;
             if self.focus == Focus::Assistant {
@@ -1307,6 +1306,11 @@ impl App {
 
     /// Select a view.
     pub fn set_view(&mut self, view: View) {
+        // A run the pointer drew is a claim about the rows this view painted;
+        // the next view paints different ones, so the run goes.
+        if view != self.view {
+            crate::views::assistant::clear_selection(self);
+        }
         self.view = view;
         // The panel lives in the terminal view; a focus left in it would be a
         // caret the next keystroke lands in with nothing on screen to show it.
@@ -1367,7 +1371,7 @@ impl App {
             Some(Dial::Ble(crate::transport::ble::Selection::Address(address), _)) => {
                 let name = match &self.advertised_name {
                     Some(name) => name.clone(),
-                    None if stored.address.eq_ignore_ascii_case(address) => {
+                    None if crate::transport::ble::same_device(&stored.address, address) => {
                         stored.device_name.clone()
                     }
                     None => String::new(),
@@ -1606,7 +1610,7 @@ impl App {
         };
         let Some(name) = devices
             .iter()
-            .find(|device| device.id.eq_ignore_ascii_case(address))
+            .find(|device| crate::transport::ble::same_device(&device.address, address))
             .and_then(|device| device.name.clone())
         else {
             return;
@@ -2112,6 +2116,10 @@ impl App {
                 .iter_mut()
                 .find(|task| task.id == task_id)
             {
+                // The delta rewrites the answer the dock is showing, and the
+                // dock trims its rows to what is newest — every row moves. A
+                // run drawn over them no longer names what it highlighted.
+                self.assistant.select = None;
                 slot.summary.push_str(delta);
                 // Not "answered" yet: a partial reply is not a reply, and `Done`
                 // is what says the model finished.
@@ -2132,6 +2140,9 @@ impl App {
         found: &crate::agent::tasks::TaskRecord,
         step: crate::agent::runtime::Progress,
     ) {
+        // The task list and the thread are about to change; a run drawn over
+        // either no longer names its rows.
+        app.assistant.select = None;
         let (summary, status, usage) = match &step {
             crate::agent::runtime::Progress::Done(reported) => {
                 (found.summary.clone(), "answered", *reported)
@@ -2249,11 +2260,6 @@ impl App {
             match event {
                 LinkEvent::Data(bytes) => {
                     self.terminal.push(&bytes);
-                    // The same bytes are the only evidence about whether an
-                    // idle shell prompt is on the line, which is what decides
-                    // when the target can be told its console size. See
-                    // [`crate::geometry`].
-                    self.geometry.observe(&String::from_utf8_lossy(&bytes));
                     self.note_decode_loss();
                     self.trace.rx(&bytes);
                     if self.collect_output {
@@ -2335,15 +2341,12 @@ impl App {
                         }
                     }
                 }
-                // A link coming up or going down is a new console: whatever
-                // the last one had been told about its size died with it, and
-                // the target is owed the current one at its first prompt.
-                // A write still waiting on the board is dropped with the link
+                // A link coming up or going down is a new console. A write
+                // still waiting on the board is dropped with the link
                 // it belonged to — the record holds a password, and a board
                 // that is gone is not owed the retry. A scan owed one goes the
                 // same way: the next link is not the one that was busy.
                 LinkEvent::Opened | LinkEvent::Closed(_) => {
-                    self.geometry.reset();
                     self.wifi_write = None;
                     self.scan_retry = None;
                 }
@@ -2379,17 +2382,6 @@ impl App {
         // already given up and moved on.
         for reply in self.terminal.take_replies() {
             self.session.send(&reply);
-        }
-        // The target's console size, typed in at the one moment typing is
-        // safe: an idle shell prompt. A `stty` line sent while a command owned
-        // the console would be read by that command, which is why the gate
-        // exists — see [`crate::geometry`].
-        if let Some(command) = self.geometry.take_pending_command() {
-            if self.send_bytes(command.as_bytes()) {
-                self.geometry.confirm_sent();
-            } else {
-                self.geometry.abort_sent();
-            }
         }
         let now_live = self.session.is_live();
         if self.dialing.is_some() {
@@ -2679,10 +2671,14 @@ impl App {
         devices.retain(|device| device.board);
         self.name_the_remembered_board(&devices);
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
-            let selected = pick.selected().map(|device| device.id.clone());
+            let selected = pick.selected().map(|device| device.address.clone());
             pick.devices = devices;
-            if let Some(id) = selected {
-                if let Some(index) = pick.devices.iter().position(|device| device.id == id) {
+            if let Some(address) = selected {
+                if let Some(index) = pick
+                    .devices
+                    .iter()
+                    .position(|device| device.address == address)
+                {
                     pick.cursor = index;
                 }
             }
@@ -2729,9 +2725,9 @@ impl App {
                     // The link coming up is announced by the pump, which sees
                     // every dial's Connected edge — except a quiet one, which
                     // is what this is: nobody asked for this dial aloud.
-                    let id = board.id.clone();
+                    let address = board.address.clone();
                     let name = board.name.clone();
-                    self.connect_to_board(&id, name.as_deref(), board.rssi, true);
+                    self.connect_to_board(&address, name.as_deref(), board.rssi, true);
                 }
                 [] => {}
                 _ => {
@@ -3593,9 +3589,6 @@ impl App {
             return false;
         }
         self.trace.tx(bytes);
-        // A keystroke took the line: whatever prompt the target had printed is
-        // no longer idle ground for a size command to land on.
-        self.geometry.mark_busy();
         // The counter is part of the *frame*, so it moves here rather than at
         // the next pump: a keystroke's byte should show in the top bar on the
         // same repaint as the character it produced.
@@ -4459,9 +4452,7 @@ mod tests {
         );
 
         // A keystroke goes out and the device's answer comes back. The count is
-        // taken as a delta: a shell that has gone idle is a shell the geometry
-        // sync may have typed a size into, and that is not this assertion's
-        // business — what it is here for is the carriage return.
+        // taken as a delta: what it is here for is the carriage return.
         let before = app.tx;
         assert!(app.send_command("uname -a"));
         assert_eq!(
@@ -4581,11 +4572,15 @@ mod tests {
         assert!(app.terminal.vt().is_blank(), "a question is not text");
     }
 
-    /// The console size is typed into the target once an idle shell prompt is
-    /// on the line — and never while a command owns it, because the line would
-    /// be read by that command.
+    /// The console is the user's: the interface never types a size command
+    /// into it.
+    ///
+    /// A shell sitting at an idle prompt is the one moment a line would be
+    /// safe — and the moment the user may be about to type their own. Hiding
+    /// the panel or resizing the window must not put a line on the line they
+    /// are on, so an idle prompt stays untouched.
     #[test]
-    fn the_target_is_told_its_console_size_at_an_idle_prompt() {
+    fn the_interface_never_types_a_size_command_into_the_console() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
@@ -4593,40 +4588,18 @@ mod tests {
         let wire = crate::transport::testing::MemoryLink::new();
         app.connect(wire.link()).expect("the memory link opens");
         assert!(pump_until(&mut app, |app| app.connected()));
-        app.geometry.set_size(255, 30);
 
-        // A command is running: the line is not a place to type.
+        // A command running, then the shell back at its prompt: neither is a
+        // place the interface writes down.
         wire.feed(b"apt update\r\nReading package lists...\r\n");
         app.pump();
         assert!(wire.take_sent().is_empty(), "the line is busy");
-
-        // The prompt comes back, and the size goes out with it — once.
         wire.feed(b"root@linkr:~# ");
-        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
-        assert_eq!(
-            wire.take_sent(),
-            b"stty rows 30 cols 255 >/dev/null 2>&1\r".to_vec()
-        );
         app.pump();
-        assert!(wire.take_sent().is_empty(), "once, not once per frame");
-
-        // A keystroke takes the line, so the reprinted prompt is not an idle
-        // one to land on.
-        app.type_bytes(false, "x");
         app.pump();
-        assert!(pump_until(&mut app, |_| wire.sent_len() >= 1));
-        assert_eq!(wire.take_sent(), b"x".to_vec());
-
-        // A resize is owed again, but waits for the next idle prompt.
-        app.geometry.set_size(120, 40);
-        wire.feed(b"\r\n");
-        app.pump();
-        assert!(wire.take_sent().is_empty(), "half a line is not a prompt");
-        wire.feed(b"$ ");
-        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
-        assert_eq!(
-            wire.take_sent(),
-            b"stty rows 40 cols 120 >/dev/null 2>&1\r".to_vec()
+        assert!(
+            wire.take_sent().is_empty(),
+            "an idle prompt is not a place to type"
         );
     }
 
@@ -4906,10 +4879,10 @@ mod tests {
     fn a_scan_lists_serial_boards_and_dials_a_lone_one() {
         use crate::cli::FoundDevice;
 
-        fn board(name: &str, id: &str, board: bool) -> FoundDevice {
+        fn board(name: &str, address: &str, board: bool) -> FoundDevice {
             FoundDevice {
                 name: Some(name.to_string()),
-                id: id.to_string(),
+                address: address.to_string(),
                 board,
                 // Signal is the picker's business; the scan's own tests are
                 // about which boards get dialled, not how loudly they were
@@ -6875,9 +6848,9 @@ mod tests {
         ));
         assert_eq!(app.device_text(), "FB:F6:91:14:33:3A");
 
-        let heard = |name: Option<&str>, id: &str| FoundDevice {
+        let heard = |name: Option<&str>, address: &str| FoundDevice {
             name: name.map(str::to_string),
-            id: id.to_string(),
+            address: address.to_string(),
             board: true,
             rssi: Some(-60),
         };

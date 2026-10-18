@@ -1309,10 +1309,10 @@ fn main() -> io::Result<()> {
                 }
             };
             for device in &devices {
-                if posted.iter().any(|id| id == &device.id) {
+                if posted.iter().any(|seen| seen == &device.address) {
                     continue;
                 }
-                posted.push(device.id.clone());
+                posted.push(device.address.clone());
                 if args.json {
                     // `board` is the same distinction the text row's mark
                     // makes: the one device here this program could dial, as
@@ -1332,7 +1332,7 @@ fn main() -> io::Result<()> {
                                     .map(cli::Json::Text)
                                     .unwrap_or(cli::Json::Null)
                             ),
-                            ("id", cli::Json::Text(&device.id)),
+                            ("address", cli::Json::Text(&device.address)),
                             (
                                 "rssi",
                                 device
@@ -1349,7 +1349,7 @@ fn main() -> io::Result<()> {
                     // one is ready to connect to, the other is somebody else's
                     // device that happened to be on the air.
                     let kind = if device.board { "bee" } else { "-" };
-                    println!("{kind:>3}  {name}  {}", device.id);
+                    println!("{kind:>3}  {name}  {}", device.address);
                 }
             }
             if done {
@@ -1454,12 +1454,17 @@ fn main() -> io::Result<()> {
     }
     app.seed_lan_token_from_store();
     if !stored.address.is_empty() {
+        // A shelf written before addresses were kept as MACs holds BlueZ's
+        // path for the board (`hci0/dev_FB_…`). The address is read back in
+        // the one spelling that names the board everywhere; the next save
+        // writes that spelling down.
+        let address = linkr_tui::transport::ble::written_address(&stored.address);
         app.last_dial = Some(Dial::Ble(
-            Selection::Address(stored.address.clone()),
+            Selection::Address(address.clone()),
             args.connect_timeout,
         ));
         if !stored.device_name.is_empty() {
-            app.remember_device_name(&stored.address, &stored.device_name);
+            app.remember_device_name(&address, &stored.device_name);
         }
     }
     if storing {
@@ -1995,9 +2000,12 @@ fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
     let painted = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console).width;
     let pane = pane_area(painted, rows);
     app.terminal.set_size(pane.width, pane.height);
-    // The console the target sees is this pane, so this pane is the size it is
-    // told — on the next idle prompt, and again whenever the window changes.
-    app.geometry.set_size(pane.width, pane.height);
+    // A run the pointer drew names cells of the frame it was drawn on; a
+    // window that moved those cells under it is a frame the run no longer
+    // names, so the run goes with the size.
+    if app.screen != Rect::new(0, 0, cols, rows) {
+        views::assistant::clear_selection(app);
+    }
     // The frame itself, kept where a key handler can read it: keys are handled
     // between two paints, and the settings window keeps its caret inside a
     // body whose height comes from these numbers.
@@ -2601,6 +2609,10 @@ fn paste_into_shown_field(app: &mut App, text: &str) -> bool {
         prompt
             .field
             .insert_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
+        // A paste is typing that arrived at once, and the field shows it the
+        // way it shows a keystroke: the last character in the clear until its
+        // moment passes.
+        prompt.show_last_char();
         return true;
     }
     // A dialog with no field has no caret of its own, and a paste must not
@@ -2742,6 +2754,15 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
         return;
     }
 
+    // The assistant's text comes first: a press on the panel or on the view's
+    // thread begins a run there rather than reaching the pane behind it — and
+    // a drag or a release that belongs to a run in flight is answered here
+    // wherever the pointer has wandered, because the gesture has to end with
+    // the button that started it.
+    if assistant_mouse(app, &mouse, cols, rows) {
+        return;
+    }
+
     match mouse.kind {
         // Away from the user: the rail walks up, the pane reads back into its
         // history.
@@ -2761,12 +2782,13 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
                 app.scroll_terminal_down(3);
             }
         }
-        // The drag. The pane is the one thing in the interface with text in it
-        // to select: every other view is a document the interface laid out, and
-        // its rows exist as a paint and nowhere else — there is no buffer a
-        // selection could name, so a drag there would be a drag on nothing.
-        // Which is why the guard is the *view* and not the focus: with the rail
-        // focused, the pane is still text under the pointer.
+        // The drag. Two paints hold text a run can name: the pane, whose
+        // lines are the emulator's own, and the assistant, whose thread the
+        // two assistant paints lay out row by row — [`assistant_mouse`]
+        // answers for that one before this is reached. Every other view is a
+        // form whose rows exist as a paint and nowhere else. Which is why the
+        // guard is the *view* and not the focus: with the rail focused, the
+        // pane is still text under the pointer.
         MouseEventKind::Down(MouseButton::Left) if app.view == View::Terminal => {
             match pane_cell_at(app, cols, rows, mouse.column, mouse.row) {
                 Some((line, col)) => app.terminal.press(line, col),
@@ -2798,6 +2820,116 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
             }
         }
         _ => {}
+    }
+}
+
+/// The assistant's side of the mouse: a press on its text begins a run, a drag
+/// follows, and the release copies what the run covered — the pane's own
+/// gesture, over the rows the two assistant paints lay out.
+///
+/// Returns whether the event was the assistant's to answer. A press is only
+/// the assistant's when the pointer is over one of its paints; anywhere else
+/// it belongs to the pane, or to nobody. A drag or a release with a run in
+/// flight is the assistant's wherever the pointer is, because the gesture has
+/// to end with the button that started it.
+#[cfg(any(feature = "tui", test))]
+fn assistant_mouse(
+    app: &mut App,
+    mouse: &crossterm::event::MouseEvent,
+    cols: u16,
+    rows: u16,
+) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some((region, cell, area)) =
+                assistant_cell(app, cols, rows, mouse.column, mouse.row)
+            else {
+                return false;
+            };
+            views::assistant::begin_selection(app, region, cell, area);
+            true
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if app.assistant.select.is_none() {
+                return false;
+            }
+            // A pointer that left the paint (or crossed to the other one)
+            // leaves the run where it was: the pane's drag behaves the same
+            // way, and a run that jumped to the pointer's new column would
+            // copy text the drag never visited.
+            if let Some((region, cell, _)) =
+                assistant_cell(app, cols, rows, mouse.column, mouse.row)
+            {
+                views::assistant::drag_selection(app, region, cell);
+            }
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(selection) = app.assistant.select.as_ref() else {
+                return false;
+            };
+            let (run, text) = (selection.is_run(), selection.text());
+            if !run {
+                // A click, not a drag: it clears, the way a bare click on the
+                // pane's text does, and copies nothing.
+                views::assistant::clear_selection(app);
+                return true;
+            }
+            // The run is kept on screen after the copy, the way the pane keeps
+            // its own, so the user can see what was taken.
+            if !text.trim().is_empty() {
+                let notice = app.copy_text(&text);
+                app.push_notice(notice);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Where the pointer is in the assistant, when it is over it at all: which
+/// paint, the cell within that paint's text area, and the area itself.
+///
+/// The areas are the painter's own — [`ui::panel_text_area`] and
+/// [`ui::body_text_area`] are the arithmetic `draw_assistant` and
+/// `draw_centre` run — so the cell a run names is the cell the frame painted
+/// there.
+#[cfg(any(feature = "tui", test))]
+fn assistant_cell(
+    app: &App,
+    cols: u16,
+    rows: u16,
+    x: u16,
+    y: u16,
+) -> Option<(views::assistant::SelectRegion, (u16, u16), Rect)> {
+    let area = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console);
+    let regions = ui::regions_for(area, app.sidebar_visible, app.panel_wanted());
+    // The dock first: it sits beside the centre, so a point can be in one
+    // paint or the other and never both.
+    if regions.assistant.width > 0 {
+        let area = ui::panel_text_area(regions.assistant);
+        if let Some(cell) = cell_within(area, x, y) {
+            return Some((views::assistant::SelectRegion::Panel, cell, area));
+        }
+    }
+    if app.view == View::Assistant {
+        let area = ui::body_text_area(app, regions.centre);
+        if let Some(cell) = cell_within(area, x, y) {
+            return Some((views::assistant::SelectRegion::View, cell, area));
+        }
+    }
+    None
+}
+
+/// A screen point, as a cell of `area` — `(row, column)`, the pane's own
+/// order.
+#[cfg(any(feature = "tui", test))]
+fn cell_within(area: Rect, x: u16, y: u16) -> Option<(u16, u16)> {
+    if area.contains(Position::new(x, y)) {
+        Some((y - area.y, x - area.x))
+    } else {
+        None
     }
 }
 
@@ -4885,6 +5017,196 @@ mod tests {
             rows,
         );
         assert_eq!(app.terminal.selected_text(), None);
+    }
+
+    /// The assistant's text is selectable too: a drag over the view's thread
+    /// copies the run it crossed, a bare click clears, and a new turn — or
+    /// another view — drops the run rather than leaving it over rows it no
+    /// longer names.
+    #[test]
+    fn a_drag_over_the_assistant_view_copies_the_run() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let (cols, rows) = (100u16, 30u16);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.set_view(View::Assistant);
+        app.assistant
+            .chat_mut()
+            .display
+            .push(linkr_tui::agent::session::DisplayLine {
+                role: "user".into(),
+                text: "hello world".into(),
+            });
+
+        // Where the painter wrote the question: the run is drawn over the
+        // rows the paint is showing, asked for through the painter's own
+        // builders.
+        let centre = assistant_centre(&app, cols, rows);
+        let text_area = ui::body_text_area(&app, centre);
+        let painted =
+            views::assistant::painted_rows(&app, views::assistant::SelectRegion::View, text_area);
+        let row = painted
+            .iter()
+            .position(|row| row.contains("hello world"))
+            .expect("the thread is painted");
+        let col = painted[row].find("hello world").expect("the question") as u16;
+        let (x, y) = (text_area.x + col, text_area.y + row as u16);
+
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), x, y),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+            cols,
+            rows,
+        );
+        let run = app
+            .assistant
+            .select
+            .as_ref()
+            .expect("the run stays on screen");
+        assert_eq!(run.text(), "hello");
+        assert!(
+            app.notices
+                .last()
+                .is_some_and(|notice| notice.text.contains('5')),
+            "the copy announced how much went: {:?}",
+            app.notices.last().map(|notice| &notice.text)
+        );
+
+        // The frame paints the run over the rows it names, without tripping
+        // over the cells at its edges.
+        let painted = linkr_tui::ui::render_to_text(&app, cols, rows);
+        assert!(painted.contains("hello world"), "the thread is painted");
+
+        // A click on the text, no drag: it clears and copies nothing.
+        let notices = app.notices.len();
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), x, y),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Up(MouseButton::Left), x, y),
+            cols,
+            rows,
+        );
+        assert!(app.assistant.select.is_none(), "the click did not clear");
+        assert_eq!(app.notices.len(), notices, "a click copied something");
+
+        // Another view paints different rows, so the run cannot survive the
+        // trip — and a turn rewrites the ones it named.
+        app.assistant.select = Some(views::assistant::Selection::new(
+            views::assistant::SelectRegion::View,
+            vec!["hello".into()],
+            (0, 0),
+        ));
+        app.set_view(View::Network);
+        assert!(app.assistant.select.is_none(), "the run outlived the view");
+    }
+
+    /// The docked panel is the same conversation in a column, and it is just
+    /// as draggable: the run comes back through the panel's own rows.
+    #[test]
+    fn a_drag_over_the_docked_panel_copies_the_run() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let (cols, rows) = (110u16, 30u16);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.assistant_panel = true;
+        app.assistant
+            .chat_mut()
+            .display
+            .push(linkr_tui::agent::session::DisplayLine {
+                role: "user".into(),
+                text: "hello world".into(),
+            });
+
+        let area = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console);
+        let regions = ui::regions_for(area, app.sidebar_visible, app.panel_wanted());
+        assert!(regions.assistant.width > 0, "the panel does not fit");
+        let text_area = ui::panel_text_area(regions.assistant);
+        let painted =
+            views::assistant::painted_rows(&app, views::assistant::SelectRegion::Panel, text_area);
+        let row = painted
+            .iter()
+            .position(|row| row.contains("hello world"))
+            .expect("the thread is painted");
+        let col = painted[row].find("hello world").expect("the question") as u16;
+        let (x, y) = (text_area.x + col, text_area.y + row as u16);
+
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Down(MouseButton::Left), x, y),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+            cols,
+            rows,
+        );
+        handle_mouse(
+            &mut app,
+            at(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+            cols,
+            rows,
+        );
+        let run = app
+            .assistant
+            .select
+            .as_ref()
+            .expect("the run stays on screen");
+        assert_eq!(run.text(), "hello");
+        assert_eq!(run.region, views::assistant::SelectRegion::Panel);
+
+        // Hiding the panel takes the paint away with the run.
+        app.toggle_assistant_panel();
+        assert!(app.assistant.select.is_none(), "the run outlived the panel");
+    }
+
+    /// The centre region for the assistant view's own body, asked the way the
+    /// mouse handler asks it.
+    fn assistant_centre(app: &App, cols: u16, rows: u16) -> Rect {
+        let area = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console);
+        ui::regions_for(area, app.sidebar_visible, app.panel_wanted()).centre
     }
 
     /// A press on the blank ground under the pane's text is a press on

@@ -11,11 +11,13 @@
 //! the same kind of table, so `linkr --print-completion zsh` can be dropped
 //! next to `linkr_ble_terminal.py --print-completion zsh` and behave.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use btleplug::api::{Central, Manager as _, Peripheral as _};
+use futures::StreamExt as _;
 
 use crate::app::App;
 use btleplug::platform::Manager;
@@ -970,10 +972,18 @@ pub fn parse_escape(value: &str) -> Result<u8, String> {
 pub struct FoundDevice {
     /// The advertised name, when it advertised one.
     pub name: Option<String>,
-    /// How this platform identifies it: a MAC on BlueZ, a UUID on
-    /// CoreBluetooth. Either is accepted by `--ble-address`, which is why both
-    /// are shown.
-    pub id: String,
+    /// Where the device is, as the platform spells an address — a MAC on
+    /// BlueZ, as in `FB:F6:91:14:33:3A`. This is the one spelling that names
+    /// the device everywhere: what the rows show, what `--ble-address` takes,
+    /// what the shelf remembers, and what a dial is matched against, because
+    /// it is the address a dial matches — see
+    /// `transport::ble::Selection::accepts`.
+    ///
+    /// It is deliberately *not* the platform's internal identifier: BlueZ
+    /// identifies a device by the path it keeps it under (`hci0/dev_FB_…`),
+    /// and a path shown where an address belongs is a device name nobody can
+    /// match against anything.
+    pub address: String,
     /// Whether it looks like a board this program can dial — it advertises
     /// the UART or the management service, or carries the firmware's name.
     /// See [`crate::transport::ble::is_board`] for why one signal is not
@@ -1079,6 +1089,23 @@ fn drain_scan(rx: std::sync::mpsc::Receiver<ScanEvent>) -> Result<Vec<FoundDevic
 /// second is invisible to the user and kind to the radio.
 const SCAN_POLL: Duration = Duration::from_millis(250);
 
+/// How long the listener's stream must be quiet before the replay of devices
+/// the daemon already knows can be called over.
+///
+/// The replay is handed over the moment the stream is first read, so this is
+/// not a wait so much as a full stop: it is the silence between the memory and
+/// the air that starts the scan. See [`forget_the_memory`].
+const A_QUIET_MOMENT: Duration = Duration::from_millis(250);
+
+/// How long a finished scan spends letting its D-Bus housekeeping run before
+/// the reactor it ran on goes away. See the end of [`listen`].
+const THE_LAST_MOMENT: Duration = Duration::from_millis(50);
+
+/// How long the drain at the end of a scan may go on at most, quiet or not:
+/// the adapter is shared, and another program's discovery keeps this stream
+/// talking. One scan's packing up may not wait out another's radio.
+const A_LONGER_MOMENT: Duration = Duration::from_secs(1);
+
 /// The body both scans share: one reactor of its own on its own thread, for the
 /// same reason the BLE link builds one — this program is synchronous and the
 /// radio library is not.
@@ -1110,39 +1137,88 @@ fn listen(
                     .to_string(),
             );
         };
-        // A second client holding the adapter answers `In Progress`; the
-        // retry gives it a moment to let go instead of failing a scan the
-        // user just asked for.
-        crate::transport::ble::retry_busy(|| async {
-            adapter
-                .start_scan(btleplug::api::ScanFilter::default())
-                .await
-        })
-        .await
-        .map_err(|why| format!("the scan would not start: {why}"))?;
+        // A scan is evidence, not memory. The adapter's event stream opens
+        // with a replay of every device the daemon already knows — boards
+        // switched off days ago included — so the replay is drained before
+        // discovery starts: from that moment on, every event really was heard
+        // on the air just now.
+        let mut events = adapter
+            .events()
+            .await
+            .map_err(|why| format!("the scan could not be listened to: {why}"))?;
+        forget_the_memory(&mut events).await;
+        let listening = crate::transport::ble::Listening::begin(&adapter).await?;
+
         let deadline = Instant::now() + timeout;
+        // What has been heard since discovery started: each device's freshest
+        // reading, or `None` when the event that said it was there carried no
+        // reading. A device the daemon remembers and this map does not is one
+        // that was not on the air.
+        let mut heard: HashMap<String, Option<i16>> = HashMap::new();
         let mut found: Vec<FoundDevice>;
-        // The ids already posted, so an unchanged list is not posted again
-        // every quarter of a second: what a caller is watching for is a new
-        // device appearing, not the same five devices on a timer. A device
+        // The addresses already posted, so an unchanged list is not posted
+        // again every quarter of a second: what a caller is watching for is a
+        // new device appearing, not the same five devices on a timer. A device
         // that goes out of range changes the set too, and the list it is
         // missing from is as true as the one it was on.
         let mut posted: Vec<String> = Vec::new();
         loop {
-            found = heard(&adapter).await?;
+            // Listen until the next look at the list, or until the window
+            // closes — whichever comes first.
+            let look = (Instant::now() + SCAN_POLL).min(deadline);
+            let tick = tokio::time::sleep_until(look.into());
+            tokio::pin!(tick);
+            loop {
+                tokio::select! {
+                    _ = &mut tick => break,
+                    event = events.next() => match event {
+                        Some(event) => {
+                            if let Some((address, rssi)) = heard_in(&event) {
+                                let slot = heard.entry(address).or_insert(rssi);
+                                if rssi.is_some() {
+                                    *slot = rssi;
+                                }
+                            }
+                        }
+                        // The stream ended — the adapter went away, or the
+                        // session it was read through: the list is what was
+                        // heard up to here.
+                        None => break,
+                    },
+                }
+            }
+            found = heard_now(&adapter, &heard).await?;
             sort_found(&mut found);
-            let ids: Vec<String> = found.iter().map(|device| device.id.clone()).collect();
-            if ids != posted {
-                posted = ids;
+            let addresses: Vec<String> =
+                found.iter().map(|device| device.address.clone()).collect();
+            if addresses != posted {
+                posted = addresses;
                 let _ = tx.send(ScanEvent::Seen(found.clone()));
             }
             let answered = found.iter().any(|device| device.board);
             if (until == Until::ABoardAnswers && answered) || Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(SCAN_POLL).await;
         }
-        let _ = adapter.stop_scan().await;
+        listening.stop().await;
+        // Stopping discovery is itself heard: the daemon announces a last
+        // round of bookkeeping — a signal reading going back to zero for every
+        // device it found — and that round lands right as the scan packs up.
+        // It is read out here, while the stream still has an ear, because a
+        // message that arrives for a stream already dropped takes the D-Bus
+        // match rule down with it, and the task `bluez-async` sends to remove
+        // that rule then looks it up and finds it gone — which the library
+        // reports by panicking on a worker thread, in red, over the user's
+        // terminal.
+        hear_the_last_words(&mut events).await;
+        // Now let go of everything that talks to the daemon while the daemon
+        // is still there to be talked to. The last moment is spent letting
+        // the removal each of these asks for run.
+        drop(events);
+        drop(listening);
+        drop(adapter);
+        drop(manager);
+        tokio::time::sleep(THE_LAST_MOMENT).await;
         Ok(found)
     })
 }
@@ -1161,9 +1237,64 @@ fn sort_found(devices: &mut [FoundDevice]) {
     });
 }
 
-/// What the adapter has heard so far, as the rows the list shows.
-async fn heard(adapter: &btleplug::platform::Adapter) -> Result<Vec<FoundDevice>, String> {
-    let mut found = Vec::new();
+/// Read and throw away the stream's opening replay of every device the daemon
+/// already knows.
+///
+/// The replay is one event for each remembered device and is handed over the
+/// moment the stream is first read — a board that has been switched off for a
+/// week replays exactly like one standing on the bench. The quiet moment is
+/// what says the replay is over, and the scan can start counting what it hears.
+async fn forget_the_memory<S>(events: &mut S)
+where
+    S: futures::Stream + Unpin,
+{
+    while let Ok(Some(_)) = tokio::time::timeout(A_QUIET_MOMENT, events.next()).await {}
+}
+
+/// Read the announcements still on their way when a scan stops, before the
+/// stream that would receive them is let go.
+///
+/// The same loop as [`forget_the_memory`] with an end in sight: an adapter that
+/// another program is scanning keeps producing events, so the drain gives up
+/// after [`A_LONGER_MOMENT`] rather than sit through a stranger's radio
+/// traffic. Not reading them is not an option — see the end of [`listen`].
+async fn hear_the_last_words<S>(events: &mut S)
+where
+    S: futures::Stream + Unpin,
+{
+    let end = Instant::now() + A_LONGER_MOMENT;
+    while Instant::now() < end {
+        let quiet_left = A_QUIET_MOMENT.min(end.saturating_duration_since(Instant::now()));
+        match tokio::time::timeout(quiet_left, events.next()).await {
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+}
+
+/// What one event hears: the device that spoke, and the signal reading it
+/// carried when it carried one. `None` for everything that is not a device
+/// being heard just now — the adapter's own state, links coming and going, a
+/// device that was merely remembered.
+fn heard_in(event: &btleplug::api::CentralEvent) -> Option<(String, Option<i16>)> {
+    use btleplug::api::CentralEvent;
+    let (id, rssi) = match event {
+        CentralEvent::DeviceDiscovered(id) => (id, None),
+        CentralEvent::RssiUpdate { id, rssi } => (id, Some(*rssi)),
+        CentralEvent::ManufacturerDataAdvertisement { id, .. }
+        | CentralEvent::ServiceDataAdvertisement { id, .. }
+        | CentralEvent::ServicesAdvertisement { id, .. } => (id, None),
+        _ => return None,
+    };
+    Some((id.to_string(), rssi))
+}
+
+/// The rows for the devices heard since discovery started.
+async fn heard_now(
+    adapter: &btleplug::platform::Adapter,
+    heard: &HashMap<String, Option<i16>>,
+) -> Result<Vec<FoundDevice>, String> {
+    let mut known = Vec::new();
     for candidate in adapter
         .peripherals()
         .await
@@ -1174,16 +1305,36 @@ async fn heard(adapter: &btleplug::platform::Adapter) -> Result<Vec<FoundDevice>
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
+        known.push((candidate.id().to_string(), properties));
+    }
+    Ok(rows_of_heard(heard, known))
+}
+
+/// The rule the scan exists for, on its own so it can be asserted without a
+/// radio: a remembered device is listed when it was heard, and left out when
+/// it was only remembered.
+fn rows_of_heard(
+    heard: &HashMap<String, Option<i16>>,
+    known: Vec<(String, btleplug::api::PeripheralProperties)>,
+) -> Vec<FoundDevice> {
+    let mut found = Vec::new();
+    for (id, properties) in known {
+        let Some(reading) = heard.get(&id) else {
+            continue;
+        };
         let board =
             crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref());
         found.push(FoundDevice {
             name: properties.local_name,
-            id: candidate.id().to_string(),
+            address: properties.address.to_string(),
             board,
-            rssi: properties.rssi,
+            // The reading the advertisement that was just heard carried, or
+            // the last one the daemon has on file when that event carried
+            // none — an advertisement that only changed a service list, say.
+            rssi: reading.or(properties.rssi),
         });
     }
-    Ok(found)
+    found
 }
 
 /// What the command line asked the bridge to do instead of opening a terminal.
@@ -2519,5 +2670,96 @@ mod tests {
         assert!(subcommands_words().contains("tui"));
         #[cfg(not(feature = "tui"))]
         assert!(!subcommands_words().contains("tui"));
+    }
+
+    /// A device as the daemon lists it: its address, its name, and the last
+    /// reading the daemon has for it.
+    fn seen(address: &str, name: &str, rssi: Option<i16>) -> btleplug::api::PeripheralProperties {
+        btleplug::api::PeripheralProperties {
+            address: address.parse().expect("an address"),
+            local_name: Some(name.to_string()),
+            rssi,
+            ..Default::default()
+        }
+    }
+
+    /// A scan is a question about the air, not about the daemon's memory: a
+    /// board switched off yesterday is still remembered, and listing it is what
+    /// sends a user to dial a board that is not there.
+    #[test]
+    fn only_a_device_that_was_heard_is_listed() {
+        let known = vec![
+            (
+                "/org/bluez/hci0/dev_DA_EB_CC_48_40_1A".to_string(),
+                seen("DA:EB:CC:48:40:1A", "Linkr BLE UART-1", Some(-88)),
+            ),
+            (
+                "/org/bluez/hci0/dev_FB_F6_91_14_33_3A".to_string(),
+                seen("FB:F6:91:14:33:3A", "Linkr BLE UART-3", Some(-40)),
+            ),
+        ];
+        let heard = HashMap::from([(
+            "/org/bluez/hci0/dev_FB_F6_91_14_33_3A".to_string(),
+            Some(-61),
+        )]);
+        let rows = rows_of_heard(&heard, known);
+        assert_eq!(rows.len(), 1, "the board that was not heard is not there");
+        assert_eq!(
+            rows[0].address, "FB:F6:91:14:33:3A",
+            "the row shows the board's address, not the daemon's path for it"
+        );
+        assert!(rows[0].board);
+        assert_eq!(
+            rows[0].rssi,
+            Some(-61),
+            "the reading just heard beats the one the daemon has been keeping"
+        );
+    }
+
+    /// An event that says a device is there without saying how loud it is — a
+    /// service list changing, say — still means it is there; the row shows the
+    /// last reading the daemon has instead of nothing.
+    #[test]
+    fn a_hearing_without_a_reading_still_lists_the_device() {
+        let known = vec![(
+            "/org/bluez/hci0/dev_FB_F6_91_14_33_3A".to_string(),
+            seen("FB:F6:91:14:33:3A", "Linkr BLE UART-3", Some(-40)),
+        )];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_FB_F6_91_14_33_3A".to_string(), None)]);
+        let rows = rows_of_heard(&heard, known);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rssi, Some(-40));
+    }
+
+    /// The replay of remembered devices is over when the stream has been quiet
+    /// for a moment — however much the replay carried — and a stream that says
+    /// nothing at all must not hold the scan up for ever.
+    #[test]
+    fn the_replay_is_drained_and_a_silent_stream_ends_it() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a reactor");
+        runtime.block_on(async {
+            let drained = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = drained.clone();
+            let mut remembered = futures::stream::iter(["a remembered board"])
+                .map(move |event| {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    event
+                })
+                .chain(futures::stream::pending());
+            forget_the_memory(&mut remembered).await;
+            assert_eq!(
+                drained.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the replay is read and thrown away"
+            );
+
+            let mut silent = futures::stream::pending::<&str>();
+            tokio::time::timeout(Duration::from_secs(5), forget_the_memory(&mut silent))
+                .await
+                .expect("a quiet stream still lets the scan start");
+        });
     }
 }

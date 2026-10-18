@@ -1,5 +1,6 @@
 //! The command palette (`Ctrl+P`): everything the interface can do, in one
-//! searchable list.
+//! searchable list — opened on the handful of rows the user reaches for all
+//! day, with the rest one row and one keystroke behind them.
 //!
 //! The registry is a plain `&'static [Action]`, so a test can assert its
 //! completeness and its order without building an `App`. An action is a
@@ -28,6 +29,11 @@ const KEYS: Entry = [
     "↑↓ choose · Enter run · Esc close",
     "↑↓ 选择 · Enter 执行 · Esc 关闭",
 ];
+/// The legend one level down, where Esc steps back up rather than out.
+const KEYS_BACK: Entry = [
+    "↑↓ choose · Enter run · Esc back",
+    "↑↓ 选择 · Enter 执行 · Esc 返回",
+];
 const MSG_SAVED_LOG: Entry = ["Saved {} bytes to {}", "已保存 {} 字节到 {}"];
 const MSG_SAVE_FAILED: Entry = ["Save failed: {}", "保存失败：{}"];
 
@@ -39,6 +45,7 @@ const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
 const CAT_AGENT: Entry = ["Assistant", "助手"];
 const CAT_NETWORK: Entry = ["Network", "网络"];
+const CAT_PALETTE: Entry = ["Palette", "面板"];
 
 const T_WIFI_CONFIG: Entry = ["Set the WiFi network", "设置无线网络"];
 const T_WIFI_SCAN: Entry = ["Scan for WiFi networks", "扫描无线网络"];
@@ -58,6 +65,7 @@ const T_AGENT_DELETE: Entry = ["Delete the conversation", "删除对话"];
 const T_AGENT_COPY: Entry = ["Copy the conversation", "复制对话"];
 const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
 const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
+const T_MORE: Entry = ["More actions…", "更多动作…"];
 
 // Titles.
 const T_VIEW_TERMINAL: Entry = ["Open terminal view", "打开终端视图"];
@@ -279,7 +287,7 @@ fn agent_next_chat(app: &mut App) {
 }
 
 fn agent_delete_chat(app: &mut App) {
-    crate::views::assistant::delete_conversation(app);
+    crate::dialogs::open_chat_pick(app);
 }
 
 fn agent_copy_chat(app: &mut App) {
@@ -635,6 +643,43 @@ pub const ACTIONS: &[Action] = &[
     },
 ];
 
+/// How deep the palette's list is.
+///
+/// The registry is forty-odd rows and a user opens the palette to reach one of
+/// six of them. The rest are one row away rather than gone, and a query
+/// searches every level: these are depths of the *list*, not of the search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Level {
+    /// What the palette opens on: the window commands the design leads with,
+    /// and the row that opens the rest.
+    #[default]
+    Quick,
+    /// Every action the registry holds.
+    All,
+}
+
+/// One row of the list a level shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// An index into [`ACTIONS`].
+    Action(usize),
+    /// The palette's own row: it opens [`Level::All`] rather than doing
+    /// something and closing the overlay.
+    More,
+}
+
+/// The rows [`Level::Quick`] opens with: the window commands, in the
+/// registry's own order. Everything else waits a keystroke down — and typing
+/// searches it all anyway.
+const QUICK: &[&str] = &[
+    "view.terminal",
+    "view.diagnostics",
+    "view.network",
+    "view.assistant",
+    "focus.sidebar",
+    "focus.terminal",
+];
+
 /// The open state of the palette.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PaletteState {
@@ -647,12 +692,26 @@ pub struct PaletteState {
     /// an edge, and the same selection means different windows depending on
     /// which edge it came from.
     pub window: usize,
+    /// Which list the palette is showing.
+    pub level: Level,
 }
 
 impl PaletteState {
     /// A fresh overlay on an empty query.
     pub fn new() -> PaletteState {
         PaletteState::default()
+    }
+
+    /// Step to a level, starting its list over.
+    ///
+    /// The rows under the cursor are not the rows it was on, and a query typed
+    /// for one list means nothing to the other, so the query and the cursor
+    /// both go back to the head.
+    pub fn set_level(&mut self, level: Level) {
+        self.level = level;
+        self.query.clear();
+        self.selected = 0;
+        self.window = 0;
     }
 
     /// Move the window so the selection is inside it, and no further.
@@ -720,6 +779,27 @@ pub fn matches(query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// The rows a level shows for a query.
+///
+/// A query is a search of *everything*, whichever level it is typed at: the
+/// quick list is how the palette opens, not a fence around the registry, and
+/// typing is how an action nobody keeps on the first screen is reached. With
+/// nothing typed, the quick level shows its own rows and one row that opens
+/// the rest; the full level shows the whole registry.
+pub fn rows_in(level: Level, query: &str) -> Vec<Row> {
+    let found = matches(query);
+    if level == Level::All || !query.trim().is_empty() {
+        return found.into_iter().map(Row::Action).collect();
+    }
+    let mut rows: Vec<Row> = found
+        .into_iter()
+        .filter(|index| QUICK.contains(&ACTIONS[*index].id))
+        .map(Row::Action)
+        .collect();
+    rows.push(Row::More);
+    rows
+}
+
 /// How many rows the overlay paints at once.
 pub const MAX_VISIBLE: usize = 14;
 
@@ -767,8 +847,8 @@ pub fn lines_in(
         ),
     ])];
     out.push(Line::from(Span::styled("─".repeat(56), theme.muted())));
-    let found = matches(&state.query);
-    if found.is_empty() {
+    let rows = rows_in(state.level, &state.query);
+    if rows.is_empty() {
         out.push(Line::from(Span::styled(
             entry(NO_MATCH, lang),
             theme.muted(),
@@ -776,9 +856,8 @@ pub fn lines_in(
         return out;
     }
     let visible = visible.clamp(1, MAX_VISIBLE);
-    let start = window_start(state, found.len(), visible);
-    for (row, index) in found.iter().skip(start).take(visible).enumerate() {
-        let action = &ACTIONS[*index];
+    let start = window_start(state, rows.len(), visible);
+    for (row, slot) in rows.iter().skip(start).take(visible).enumerate() {
         let here = start + row == state.selected;
         // The highlighted row is one chip: the ground and the ink that sits on
         // it, padding included, so the fill spans the whole line.
@@ -788,10 +867,24 @@ pub fn lines_in(
         } else {
             (theme.text(), theme.focus(), theme.focus(), theme.accent())
         };
-        let shortcut = if action.shortcut.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", action.shortcut)
+        let (label, group, shortcut) = match slot {
+            Row::Action(index) => {
+                let action = &ACTIONS[*index];
+                let shortcut = if action.shortcut.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", action.shortcut)
+                };
+                (
+                    entry(action.title, lang),
+                    entry(action.category, lang),
+                    shortcut,
+                )
+            }
+            // The row that opens the rest belongs to the palette rather than
+            // to any one feature, and it carries no chord: Enter is how it is
+            // run, and Enter always is.
+            Row::More => (entry(T_MORE, lang), entry(CAT_PALETTE, lang), String::new()),
         };
         // The id is the *search key*, not a column: the centre column of a
         // real terminal is about fifty columns, and a title, a category, a
@@ -799,11 +892,8 @@ pub fn lines_in(
         // shortcut are what a user reads; the id is what they can type.
         out.push(Line::from(vec![
             Span::styled(if here { "▸ " } else { "  " }, marker),
-            Span::styled(text::pad_to(entry(action.title, lang), TITLE_WIDTH), title),
-            Span::styled(
-                text::pad_to(entry(action.category, lang), CATEGORY_WIDTH),
-                category,
-            ),
+            Span::styled(text::pad_to(label, TITLE_WIDTH), title),
+            Span::styled(text::pad_to(group, CATEGORY_WIDTH), category),
             Span::styled(shortcut, key),
         ]));
     }
@@ -811,10 +901,15 @@ pub fn lines_in(
 }
 
 /// The key legend under the window, so the overlay is operable without the help
-/// overlay to explain it.
-pub fn legend(lang: Lang, theme: &crate::theme::Theme) -> Line<'static> {
+/// overlay to explain it. The legend names what Esc does *here*: it closes the
+/// first level and steps back from the second.
+pub fn legend(lang: Lang, theme: &crate::theme::Theme, level: Level) -> Line<'static> {
+    let keys = match level {
+        Level::Quick => KEYS,
+        Level::All => KEYS_BACK,
+    };
     Line::from(Span::styled(
-        format!("{} · {}", entry(SHORTCUT_HINT, lang), entry(KEYS, lang)),
+        format!("{} · {}", entry(SHORTCUT_HINT, lang), entry(keys, lang)),
         theme.muted(),
     ))
 }
@@ -842,16 +937,28 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     let Some(state) = app.palette.as_mut() else {
         return false;
     };
-    let total = matches(&state.query).len();
+    let rows = rows_in(state.level, &state.query);
+    let total = rows.len();
     match key.code {
-        KeyCode::Esc => app.palette = None,
-        KeyCode::Enter => {
-            let picked = matches(&state.query).get(state.selected).copied();
-            app.palette = None;
-            if let Some(index) = picked {
-                (ACTIONS[index].run)(app);
+        // The way out is the first level's: from the full list, Esc steps back
+        // up to the quick one, which is where the palette was opened from.
+        KeyCode::Esc => {
+            if state.level == Level::All {
+                state.set_level(Level::Quick);
+            } else {
+                app.palette = None;
             }
         }
+        KeyCode::Enter => match rows.get(state.selected).copied() {
+            Some(Row::Action(index)) => {
+                app.palette = None;
+                (ACTIONS[index].run)(app);
+            }
+            // The palette's own row: it opens the full list from its head
+            // rather than doing something and closing the overlay.
+            Some(Row::More) => state.set_level(Level::All),
+            None => app.palette = None,
+        },
         KeyCode::Up | KeyCode::BackTab => state.step_up(total),
         KeyCode::Down | KeyCode::Tab => state.step_down(total),
         KeyCode::Home => state.selected = 0,
@@ -877,7 +984,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     // a step, Home/End, a query that rewrote the list — holds or scrolls by the
     // same rule.
     if let Some(state) = app.palette.as_mut() {
-        let total = matches(&state.query).len();
+        let total = rows_in(state.level, &state.query).len();
         state.clamp_to(total);
         state.follow(total, MAX_VISIBLE);
     }
@@ -903,7 +1010,7 @@ pub fn paste(app: &mut App, text: &str) {
         .query
         .push_str(&text.replace("\r\n", " ").replace(['\r', '\n'], " "));
     state.selected = 0;
-    let total = matches(&state.query).len();
+    let total = rows_in(state.level, &state.query).len();
     state.clamp_to(total);
     state.follow(total, MAX_VISIBLE);
 }
@@ -1189,8 +1296,16 @@ mod tests {
         );
 
         // Deleting the open (empty) page leaves the saved thread, on screen
-        // and on disk.
+        // and on disk. The palette's entry opens the picker rather than
+        // deleting something the user was not shown: the cursor starts on the
+        // conversation the panel is showing, and Enter is the delete.
         agent_delete_chat(&mut app);
+        assert!(
+            matches!(app.dialog, Some(crate::dialogs::Dialog::ChatPick(_))),
+            "the delete asks which conversation: {:?}",
+            app.dialog
+        );
+        crate::dialogs::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.assistant.chats.len(), 1);
         assert_eq!(app.assistant.chats[0].display[0].text, "hello");
         assert_eq!(
@@ -1206,6 +1321,11 @@ mod tests {
         // Deleting the last one leaves a fresh blank page rather than none,
         // and the store forgets the thread for good.
         agent_delete_chat(&mut app);
+        assert!(matches!(
+            app.dialog,
+            Some(crate::dialogs::Dialog::ChatPick(_))
+        ));
+        crate::dialogs::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.assistant.chats.len(), 1, "a blank page takes its place");
         assert!(app.assistant.chats[0].display.is_empty());
         assert!(
@@ -1240,6 +1360,7 @@ mod tests {
             NO_MATCH,
             SHORTCUT_HINT,
             KEYS,
+            KEYS_BACK,
             MSG_SAVED_LOG,
             MSG_SAVE_FAILED,
             CAT_VIEW,
@@ -1247,6 +1368,8 @@ mod tests {
             CAT_CONNECTION,
             CAT_TERMINAL,
             CAT_APP,
+            CAT_PALETTE,
+            T_MORE,
         ]);
     }
 
@@ -1368,7 +1491,10 @@ mod tests {
     /// one marked row, and the same height at the top, middle and bottom.
     #[test]
     fn the_body_keeps_its_shape_and_marks_exactly_one_row() {
-        let mut state = PaletteState::new();
+        let mut state = PaletteState {
+            level: Level::All,
+            ..PaletteState::new()
+        };
         let top = lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK);
         state.selected = ACTIONS.len() / 2;
         let middle = lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK);
@@ -1384,6 +1510,158 @@ mod tests {
             let marked = body.iter().filter(|l| l.spans[0].content == "▸ ").count();
             assert_eq!(marked, 1, "one row is the selection");
         }
+    }
+
+    /// The list the palette opens on is the window commands and the row that
+    /// opens the rest: the forty rows behind them are what the second level is
+    /// for, and the first screen fits without a scroll.
+    #[test]
+    fn the_palette_opens_on_the_window_commands() {
+        let state = PaletteState::new();
+        let rows = rows_in(state.level, &state.query);
+        assert_eq!(rows.len(), QUICK.len() + 1);
+        let ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Action(index) => Some(ACTIONS[*index].id),
+                Row::More => None,
+            })
+            .collect();
+        assert_eq!(ids, QUICK.to_vec());
+        assert_eq!(
+            rows.last(),
+            Some(&Row::More),
+            "the way down is the last row"
+        );
+
+        let zh = text_of(&lines_in(&state, Lang::Zh, MAX_VISIBLE, &Theme::DARK));
+        assert!(zh.contains("打开终端视图"), "{zh}");
+        assert!(zh.contains("更多动作…"), "{zh}");
+        assert!(
+            !zh.contains("保存终端日志"),
+            "the second level leaked onto the first screen: {zh}"
+        );
+        let en = text_of(&lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK));
+        assert!(en.contains("More actions…"), "{en}");
+        assert!(
+            legend(Lang::En, &Theme::DARK, Level::Quick)
+                .spans
+                .first()
+                .map(|span| span.content.as_ref())
+                .unwrap_or_default()
+                .contains("Esc close"),
+            "the way out is named"
+        );
+    }
+
+    /// The row that opens the full list does that and nothing else, Esc steps
+    /// back up from it, and the first level's Esc still closes the palette.
+    #[test]
+    fn the_row_that_opens_the_rest_and_the_way_back() {
+        let mut app = App::default();
+        let view = app.view;
+        open(&mut app);
+        let quick = rows_in(Level::Quick, "").len();
+        for _ in 0..quick - 1 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.palette.as_ref().map(|s| s.selected),
+            Some(quick - 1),
+            "the cursor sits on the last row"
+        );
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let state = app.palette.as_ref().expect("the palette is still up");
+        assert_eq!(state.level, Level::All);
+        assert!(state.query.is_empty(), "a new list starts unsearched");
+        assert_eq!(state.selected, 0);
+        assert!(state.window == 0);
+        assert_eq!(app.view, view, "nothing ran on the way down");
+
+        let en = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
+        assert!(
+            en.contains("Connect"),
+            "the full list is not the registry: {en}"
+        );
+        assert_eq!(
+            rows_in(state.level, &state.query).len(),
+            ACTIONS.len(),
+            "the second level is not the whole registry"
+        );
+        let back = legend(Lang::En, &Theme::DARK, Level::All);
+        let back = back
+            .spans
+            .first()
+            .map(|span| span.content.to_string())
+            .unwrap_or_default();
+        assert!(back.contains("Esc back"), "the way up is named: {back}");
+
+        // Esc goes back up, and the palette is closed by the level it opened on.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.palette.as_ref().map(|s| s.level),
+            Some(Level::Quick),
+            "Esc did not step back up"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.palette.is_none(), "the first level's Esc closes");
+    }
+
+    /// A query is a search of everything at either level — the quick list is
+    /// how the palette opens, not a fence around the registry — and it does
+    /// not change what Esc does.
+    #[test]
+    fn a_query_searches_everything_from_the_first_level() {
+        let mut app = App::default();
+        open(&mut app);
+        for c in "wifi".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        let state = app.palette.as_ref().expect("the palette is up");
+        assert_eq!(state.level, Level::Quick);
+        assert_eq!(
+            rows_in(state.level, &state.query).len(),
+            matches("wifi").len()
+        );
+        let text = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
+        assert!(text.contains("Scan for WiFi networks"), "{text}");
+        assert!(
+            !text.contains("More actions"),
+            "the rows are the query's own: {text}"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            app.palette.is_none(),
+            "a query does not change what Esc does"
+        );
+    }
+
+    /// Enter on the second level runs the row and closes the whole palette,
+    /// rather than leaving the user a level down with nothing to run.
+    #[test]
+    fn enter_on_the_second_level_runs_and_closes() {
+        let mut app = App::default();
+        open(&mut app);
+        let state = app.palette.as_mut().expect("the palette is up");
+        state.set_level(Level::All);
+        for c in "Keyboard help".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(
+            app.palette.as_ref().map(|s| s.level),
+            Some(Level::All),
+            "a query does not step back up"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.palette.is_none(), "the palette stayed open");
+        assert!(app.dialog.is_some(), "the row under the cursor did not run");
     }
 
     /// Chinese reaches the rows and the categories; the key hints stay literal.

@@ -281,17 +281,77 @@ impl Selection {
     }
 }
 
-/// An address reduced to what identifies it: hexadecimal digits, one case.
+/// An address reduced to what identifies it: the last twelve hexadecimal
+/// digits, one case.
 ///
 /// Kept as a function rather than done inline because it has to behave the
 /// same on both sides of the comparison, and "the same" is easy to get wrong
 /// once there are four call sites guessing about colons.
+///
+/// The *last* twelve and not all of them, because BlueZ names a device by the
+/// path it keeps it under — `hci0/dev_FB_F6_91_14_33_3A` — and such a path
+/// carries four digits of its own before the address (the `c0` in `hci0`, the
+/// `de` in `dev_`). Reading from the end is what makes a path, a MAC, and a
+/// shelf entry remembered from an older version all name the same board.
 fn normalise_address(address: &str) -> String {
-    address
+    let digits: String = address
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
         .map(|c| c.to_ascii_uppercase())
-        .collect()
+        .collect();
+    let start = digits.len().saturating_sub(ADDRESS_DIGITS);
+    digits[start..].to_string()
+}
+
+/// Whether two ways of writing a device's address name the same device.
+///
+/// A device is written several ways — a MAC by the user, a path by BlueZ, a
+/// UUID by CoreBluetooth — and one written down by an older version of this
+/// program is a path where a MAC is expected now. Comparing what identifies
+/// them is what lets the old spelling be recognised rather than quietly
+/// dropped on the floor.
+pub fn same_device(left: &str, right: &str) -> bool {
+    let left = normalise_address(left);
+    !left.is_empty() && left == normalise_address(right)
+}
+
+/// A device's address written the way people write MAC addresses:
+/// `FB:F6:91:14:33:3A`.
+///
+/// BlueZ keeps a device under a path that ends in its address, and a shelf
+/// written before this program kept addresses as MACs still holds one; a path
+/// read out in the Device row names a device nobody can match against
+/// anything. Anything that is not such a path — a MAC already, a UUID, a name
+/// — keeps its own spelling, upper-cased like the rows are.
+pub fn written_address(address: &str) -> String {
+    match bluez_path_address(address) {
+        Some(mac) => mac,
+        None => address.to_ascii_uppercase(),
+    }
+}
+
+/// `hci0/dev_FB_F6_91_14_33_3A` as `FB:F6:91:14:33:3A`. `None` for anything
+/// that is not a BlueZ device path.
+fn bluez_path_address(address: &str) -> Option<String> {
+    let digits: String = address
+        .rsplit('/')
+        .next()?
+        .strip_prefix("dev_")?
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if digits.len() != ADDRESS_DIGITS {
+        return None;
+    }
+    Some(
+        digits
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| String::from_utf8_lossy(pair).into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+    )
 }
 
 /// Split a payload into writes the bearer will accept.
@@ -777,6 +837,138 @@ where
     }
 }
 
+/// The radio's attention: discovery is running, and everything the adapter's
+/// event stream says until [`stop`](Self::stop) was heard on the air just now.
+///
+/// BlueZ remembers every device it has ever met, and a board switched off a
+/// week ago is still in that memory; reading the memory back is what a scan
+/// must not mistake for a board being there. Hearing is the evidence — an
+/// advertisement reported while discovery runs — and two things make that
+/// evidence trustworthy, both settled here.
+///
+/// The stream itself opens with a replay of everything the daemon already
+/// knows. That is the caller's to drain before discovery starts; the scan in
+/// `cli::listen` is the one place the two halves meet.
+///
+/// And on Linux the scan is started by [`linux`] rather than by `btleplug`:
+/// `btleplug` asks for a discovery with no RSSI field in its filter, and under
+/// such a filter the daemon reports a device's signal only once it has moved
+/// by 8 dBm. A board sitting on the bench says nothing for as long as it stays
+/// put, which is indistinguishable from a board that is switched off. A filter
+/// with the weakest reading in it turns every advertisement into a signal
+/// update — the only per-advertisement signal the D-Bus API offers — and that
+/// is what is asked for.
+pub struct Listening {
+    adapter: btleplug::platform::Adapter,
+    /// Discovery started in a session of this program's own, when the daemon
+    /// took the filter — see [`linux`].
+    #[cfg(target_os = "linux")]
+    own: Option<linux::Started>,
+}
+
+impl Listening {
+    /// Start listening. The radio keeps listening until [`stop`](Self::stop).
+    pub async fn begin(adapter: &btleplug::platform::Adapter) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        if let Some(own) = linux::start(adapter).await {
+            return Ok(Self {
+                adapter: adapter.clone(),
+                own: Some(own),
+            });
+        }
+        // A second client holding the adapter answers `In Progress`; the
+        // retry gives it a moment to let go instead of failing a scan the
+        // user just asked for.
+        retry_busy(|| async { adapter.start_scan(ScanFilter::default()).await })
+            .await
+            .map_err(|why| format!("the scan would not start: {why}"))?;
+        Ok(Self {
+            adapter: adapter.clone(),
+            #[cfg(target_os = "linux")]
+            own: None,
+        })
+    }
+
+    /// Stop listening; nothing more will be heard.
+    pub async fn stop(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(own) = &self.own {
+            own.stop().await;
+            return;
+        }
+        let _ = self.adapter.stop_scan().await;
+    }
+}
+
+/// A scan started through `bluetoothd` itself, for the one thing `btleplug`
+/// does not ask for.
+///
+/// Everything here is about one field of one D-Bus call: the RSSI reading in
+/// the discovery filter. It is what makes the daemon report every
+/// advertisement (see [`Listening`]), and it is set from a session of this
+/// program's own because a discovery filter belongs to the client that starts
+/// the discovery — `btleplug` only ever sets its own.
+#[cfg(target_os = "linux")]
+mod linux {
+    use bluez_async::{AdapterId, BluetoothSession, DiscoveryFilter, Transport};
+    use btleplug::api::Central as _;
+
+    /// The weakest reading the daemon accepts in a filter — it takes -127 to
+    /// +20 — so a reading that filters nothing out and is still a reading.
+    const EVERYTHING: i16 = -127;
+
+    /// A discovery this program started, and the session keeping it alive.
+    pub(super) struct Started {
+        session: BluetoothSession,
+        adapter: AdapterId,
+    }
+
+    /// Start discovery with every advertisement reported, or `None` when the
+    /// daemon would not take the filter — the caller then falls back to
+    /// `btleplug`'s own scan, which hears less but hears.
+    pub(super) async fn start(adapter: &btleplug::platform::Adapter) -> Option<Started> {
+        // The adapter `btleplug` is on, found again by address: two clients
+        // list adapters the same way, but the address is the one thing that
+        // cannot be argued with.
+        let address = adapter.adapter_address().await.ok().flatten()?;
+        let (_, session) = BluetoothSession::new().await.ok()?;
+        let found = session
+            .get_adapters()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|info| {
+                info.mac_address
+                    .to_string()
+                    .eq_ignore_ascii_case(&address.to_string())
+            })?;
+        let filter = DiscoveryFilter {
+            rssi_threshold: Some(EVERYTHING),
+            duplicate_data: Some(true),
+            transport: Some(Transport::Auto),
+            ..Default::default()
+        };
+        session
+            .start_discovery_on_adapter_with_filter(&found.id, &filter)
+            .await
+            .ok()?;
+        Some(Started {
+            session,
+            adapter: found.id,
+        })
+    }
+
+    impl Started {
+        /// Stop the discovery this session started. Dropping the session
+        /// without this would end it too — the daemon cleans up after a client
+        /// that hangs up — but a scan that ends when it said it would is
+        /// easier to reason about.
+        pub(super) async fn stop(&self) {
+            let _ = self.session.stop_discovery_on_adapter(&self.adapter).await;
+        }
+    }
+}
+
 /// Scan for `selection` and connect to it, reporting whether the dial was
 /// this session's own — see [`dial`].
 async fn find(selection: &Selection, attempt: Duration) -> Result<(Peripheral, bool), String> {
@@ -1225,6 +1417,58 @@ mod tests {
         let empty = Selection::Address("::".to_string());
         assert!(!empty.accepts(Some("Linkr BLE UART-3"), "EE:C7:42:34:48:CF", None));
         assert!(!empty.accepts(Some("Anything"), "", None));
+    }
+
+    /// A board is written several ways — a MAC by the user, a path by BlueZ —
+    /// and the two name the same board, because a shelf written before this
+    /// program kept addresses as MACs still holds the path. Without this the
+    /// remembered board would look like a board that is not there.
+    #[test]
+    fn a_path_and_a_mac_name_the_same_board() {
+        assert!(same_device(
+            "hci0/dev_FB_F6_91_14_33_3A",
+            "fb:f6:91:14:33:3a"
+        ));
+        assert!(same_device(
+            "/org/bluez/hci0/dev_FB_F6_91_14_33_3A",
+            "FB:F6:91:14:33:3A"
+        ));
+        assert!(!same_device(
+            "hci0/dev_FB_F6_91_14_33_3A",
+            "AA:BB:CC:DD:EE:FF"
+        ));
+        // Nothing at all is not another name for nothing.
+        assert!(!same_device("", ""));
+        assert!(!same_device("::", "EE:C7:42:34:48:CF"));
+
+        // And the dial that matters: a shelf address from an older version is
+        // a path, while a fresh scan knows the board by its address property.
+        let remembered = Selection::Address("hci0/dev_FB_F6_91_14_33_3A".to_string());
+        assert!(remembered.accepts(
+            Some("Linkr BLE UART-3"),
+            "hci0/dev_FB_F6_91_14_33_3A",
+            Some("FB:F6:91:14:33:3A")
+        ));
+    }
+
+    /// A path is read back as the address it carries: a path shown where an
+    /// address belongs is a device name nobody can match against anything.
+    #[test]
+    fn a_path_is_written_out_as_the_address_it_carries() {
+        assert_eq!(
+            written_address("hci0/dev_FB_F6_91_14_33_3A"),
+            "FB:F6:91:14:33:3A"
+        );
+        assert_eq!(
+            written_address("/org/bluez/hci0/dev_FB_F6_91_14_33_3A"),
+            "FB:F6:91:14:33:3A"
+        );
+        assert_eq!(written_address("fb:f6:91:14:33:3a"), "FB:F6:91:14:33:3A");
+        // A UUID is not a MAC and must not be read out as one.
+        assert_eq!(
+            written_address("5c3a1b2e-0000-1000-8000-00805f9b34fb"),
+            "5C3A1B2E-0000-1000-8000-00805F9B34FB"
+        );
     }
 
     /// The firmware's own advertisement is the Windows case: it carries the

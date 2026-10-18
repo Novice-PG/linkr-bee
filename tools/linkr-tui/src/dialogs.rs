@@ -21,6 +21,8 @@
 //! looking them up in the shared table, so a dialog's words stay next to the
 //! dialog.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -158,6 +160,14 @@ const PROMPT_KEYS: Entry = [
     "type the path · ←→ move · Enter start · Esc cancel",
     "输入路径 · ←→ 移动 · Enter 开始 · Esc 取消",
 ];
+
+/// How long a character typed into a masked field stays in the clear before
+/// its star takes it back.
+///
+/// The moment the assistant's key field gives its own characters: one
+/// keystroke's worth of proof that the keyboard is reaching the field, and no
+/// more — a password read off the screen is a password that has to be changed.
+const PROMPT_REVEAL: Duration = Duration::from_millis(1500);
 // --- the network prompts ----------------------------------------------------
 
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
@@ -279,6 +289,8 @@ pub enum Dialog {
     Settings(usize),
     /// The themes the interface ships, with the keyboard's cursor on one.
     ThemePick(ThemePick),
+    /// The conversations this device remembers, waiting for a pick to delete.
+    ChatPick(ChatPick),
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
@@ -302,6 +314,18 @@ const PICK_KEYS: Entry = [
     "↑↓ move · Enter connect · Esc close",
     "↑↓ 选择 · 回车连接 · Esc 关闭",
 ];
+const CHAT_PICK_TITLE: Entry = ["Delete a conversation", "删除对话"];
+/// The picker's keys: move, delete, back out. "Delete" rather than "forget":
+/// the row goes for good, and the legend is where that is said once.
+const CHAT_PICK_KEYS: Entry = [
+    "↑↓ move · Enter delete · Esc cancel",
+    "↑↓ 选择 · 回车删除 · Esc 取消",
+];
+/// A conversation with no question yet has no name; the picker still has to
+/// paint a row for it.
+const CHAT_UNTITLED: Entry = ["(no messages)", "(空对话)"];
+/// The mark beside the conversation the panel is showing.
+const CHAT_SHOWN: Entry = [" · shown", " · 正在显示"];
 
 /// The boards a Bluetooth scan heard, and which one the keyboard is on.
 ///
@@ -407,6 +431,30 @@ pub struct ThemePick {
     pub cursor: usize,
     /// The theme that was live when the window opened — Escape restores it.
     pub original: crate::theme::ThemeChoice,
+}
+
+/// The conversations the panel is holding, and which one Enter forgets.
+///
+/// The panel keeps a list of threads, a conversation that is deleted is
+/// deleted for good, and the palette's delete used to mean "the one on
+/// screen" — a choice nobody was shown. This is the list: a row per
+/// conversation, the one the panel is showing marked, and the cursor is where
+/// a delete lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatPick {
+    /// Which row the keyboard is on.
+    pub cursor: usize,
+}
+
+impl ChatPick {
+    /// Move the cursor, clamped to the list.
+    pub fn move_cursor(&mut self, down: bool, last: usize) {
+        if down {
+            self.cursor = (self.cursor + 1).min(last);
+        } else {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+    }
 }
 
 /// The cheat sheet: the commands the web's chips send, in four groups, with a
@@ -590,10 +638,15 @@ pub struct Prompt {
     /// What has been typed, and where the caret is.
     pub field: Field,
     /// Whether the field shows stars instead of what was typed. Starts on for
-    /// an answer that is a secret — a token that reached a screenshot has to be
-    /// rotated — and Ctrl+R flips it either way, for as long as it takes to
-    /// check one character.
+    /// an answer that is a secret — a password, or a token that reached a
+    /// screenshot has to be rotated — and Ctrl+R flips it either way, for as
+    /// long as it takes to check one character.
     pub masked: bool,
+    /// The character of a masked field that is still in the clear, as its index
+    /// among the field's characters, and when its star takes it back.
+    ///
+    /// Only ever the character an edit just put there. See [`PROMPT_REVEAL`].
+    pub reveal: Option<(usize, Instant)>,
     /// What agreeing to it does.
     pub action: PromptAction,
 }
@@ -615,6 +668,18 @@ pub enum PromptAction {
     LanToken,
 }
 
+impl PromptAction {
+    /// Whether the answer is a secret — the password to a network, the token a
+    /// dial signs with.
+    ///
+    /// A secret is painted as stars, with one character in the clear for a
+    /// moment after an edit put it there, and Ctrl+R shows the whole of it for
+    /// as long as it takes to check. See [`PROMPT_REVEAL`].
+    fn asks_for_a_secret(self) -> bool {
+        matches!(self, PromptAction::WifiPassword | PromptAction::LanToken)
+    }
+}
+
 impl Prompt {
     /// An empty prompt.
     pub fn new(title: Entry, action: PromptAction) -> Prompt {
@@ -623,7 +688,8 @@ impl Prompt {
             label: Self::label(action),
             placeholder: Self::placeholder(action),
             field: Field::default(),
-            masked: action == PromptAction::LanToken,
+            masked: action.asks_for_a_secret(),
+            reveal: None,
             action,
         }
     }
@@ -639,11 +705,40 @@ impl Prompt {
         prompt
     }
 
+    /// Text just landed in the field: its last character stays in the clear for
+    /// its moment, the way the assistant's key field shows a character it was
+    /// given. Called by both doors text can come through — a keystroke and a
+    /// paste.
+    pub fn show_last_char(&mut self) {
+        self.reveal = Some((
+            self.field.text.chars().count().saturating_sub(1),
+            Instant::now() + PROMPT_REVEAL,
+        ));
+    }
+
+    /// Text just left the field: the reveal goes out, because the index it
+    /// holds is a place in the text and the edit moved the characters left
+    /// into it.
+    fn hide_the_char(&mut self) {
+        self.reveal = None;
+    }
+
+    /// The character still in the clear, if its moment has not passed.
+    fn revealed(&self) -> Option<usize> {
+        match self.reveal {
+            Some((at, until)) if Instant::now() < until => Some(at),
+            _ => None,
+        }
+    }
+
     /// The question this action's field asks, in the interface language.
     fn label(action: PromptAction) -> Entry {
         match action {
             PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
-            PromptAction::WifiPassword => ["Its password (may be empty)", "该网络的密码（可留空）"],
+            PromptAction::WifiPassword => [
+                "Its password (may be empty; Ctrl+R shows it)",
+                "该网络的密码（可留空；Ctrl+R 显示）",
+            ],
             PromptAction::LanHost => [
                 "The bridge's LAN address (the board's WiFi IP)",
                 "桥接的局域网地址（板子的 WiFi IP）",
@@ -681,7 +776,11 @@ impl Dialog {
             // the scroll keeps up with it, which a dialog-wide offset has no
             // way to know.
             Dialog::DevicePick(pick) => pick.scroll(),
-            Dialog::Confirm(_) | Dialog::Prompt(_) | Dialog::Uart(_) | Dialog::ThemePick(_) => 0,
+            Dialog::Confirm(_)
+            | Dialog::Prompt(_)
+            | Dialog::Uart(_)
+            | Dialog::ThemePick(_)
+            | Dialog::ChatPick(_) => 0,
         }
     }
 }
@@ -698,6 +797,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Uart(_) => entry(UART_TITLE, lang),
         Dialog::Settings(_) => entry(SETTINGS_TITLE, lang),
         Dialog::ThemePick(_) => entry(THEME_TITLE, lang),
+        Dialog::ChatPick(_) => entry(CHAT_PICK_TITLE, lang),
     }
 }
 
@@ -721,6 +821,7 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         }
         Dialog::Settings(_) => entry(SETTINGS_KEYS, lang),
         Dialog::ThemePick(_) => entry(THEME_KEYS, lang),
+        Dialog::ChatPick(_) => entry(CHAT_PICK_KEYS, lang),
     };
     Line::from(Span::styled(text, theme.muted()))
 }
@@ -788,6 +889,21 @@ pub fn open_settings(app: &mut App) {
 }
 
 /// Raise the theme picker, on the theme that is live right now.
+/// Ask which conversation to forget.
+///
+/// The list the panel holds, the thread it is showing marked, and Enter
+/// deletes the row under the cursor. The label the row carries is the one the
+/// conversation earned from its first question
+/// ([`crate::views::assistant::ChatState`] names it), so a delete can say
+/// *which* thread it lands on.
+pub fn open_chat_pick(app: &mut App) {
+    let cursor = app
+        .assistant
+        .active
+        .min(app.assistant.chats.len().saturating_sub(1));
+    raise(app, Dialog::ChatPick(ChatPick { cursor }));
+}
+
 pub fn open_theme_pick(app: &mut App) {
     let cursor = crate::theme::THEMES
         .iter()
@@ -942,64 +1058,106 @@ fn prompt_field(prompt: &Prompt, lang: Lang, theme: &Theme, width: usize) -> Vec
     } else if !prompt.masked {
         field_spans(&prompt.field, theme)
     } else {
-        // A masked field shows one star per character, so revealing it does not
-        // move the caret — and the character under the caret stays exactly one
-        // cell (the split hands back a space at the end of the line, which stays
-        // a space).
-        let (before, under, after) = prompt.field.split();
-        let stars = |text: &str| "*".repeat(text.chars().count());
-        vec![
-            Span::styled(stars(before), theme.text()),
-            Span::styled(
-                if under == " " {
-                    " ".to_string()
-                } else {
-                    "*".to_string()
-                },
-                theme.selected(),
-            ),
-            Span::styled(stars(after), theme.text()),
-        ]
+        masked_spans(prompt, theme)
     };
-    field_rows(spans, theme, width)
+    field_box(spans, theme, width)
 }
 
-/// The two rows an input field occupies: what it holds, and the rule under it.
+/// A masked field's spans: one star per character, except the character a
+/// keystroke or a paste just put there, which stays in the clear until its
+/// moment passes. See [`PROMPT_REVEAL`].
+///
+/// The stars keep the caret where the text puts it — one cell per character —
+/// so revealing a character does not move it, and neither does the character
+/// the reveal is on: a character under the caret is one cell whatever it is,
+/// and the split hands back a space at the end of the line.
+fn masked_spans(prompt: &Prompt, theme: &Theme) -> Vec<Span<'static>> {
+    let revealed = prompt.revealed();
+    let (before, under, after) = prompt.field.split();
+    let stars = |text: &str, from: usize| -> String {
+        text.chars()
+            .enumerate()
+            .map(|(at, ch)| if revealed == Some(from + at) { ch } else { '*' })
+            .collect()
+    };
+    let at = before.chars().count();
+    vec![
+        Span::styled(stars(before, 0), theme.text()),
+        Span::styled(
+            if under == " " {
+                " ".to_string()
+            } else {
+                stars(under, at)
+            },
+            theme.selected(),
+        ),
+        Span::styled(stars(after, at + 1), theme.text()),
+    ]
+}
+
+/// The three rows a dialog's field occupies: its top edge, what it holds, and
+/// its bottom edge.
 ///
 /// A field that is only its own text is a field nobody can see — on a dark
 /// terminal the space between two labels and the place to type into look the
-/// same — so the box is drawn: a filled row and a rule under it, which is the
-/// web client's input (a background and a bottom border) in a terminal's
-/// vocabulary. It is also what makes an *empty* field a place rather than a
-/// gap, which is the state every prompt opens in.
-fn field_rows(spans: Vec<Span<'static>>, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+/// same — so the box is drawn: the dialog frame's own furniture one size down.
+/// It is also what makes an *empty* field a place rather than a gap, which is
+/// the state every prompt opens in, and a box is a place without the filled row
+/// a highlight would paint — a background colour run edge to edge reads as a
+/// line the user has *selected*, which is not what a field is saying.
+fn field_box(spans: Vec<Span<'static>>, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     const INDENT: &str = "  ";
-    let used = text::columns(INDENT)
-        + spans
-            .iter()
-            .map(|span| text::columns(&span.content))
-            .sum::<usize>();
-    let mut row = vec![Span::styled(INDENT.to_string(), theme.input())];
-    row.extend(spans);
-    // Filled to the edge the rule below runs to, so the two rows read as one
-    // box rather than as a highlight that stops mid-air.
-    let fill = width.saturating_sub(used);
-    if fill > 0 {
-        row.push(Span::styled(" ".repeat(fill), theme.input()));
+    // What the box's own sides leave for text: the indent, the vertical, and
+    // the vertical that closes it.
+    let interior = width.saturating_sub(text::columns(INDENT) + 2);
+    let mut row = vec![
+        Span::styled(INDENT.to_string(), theme.card()),
+        Span::styled("│".to_string(), field_line(theme)),
+    ];
+    let mut room = interior;
+    for span in spans {
+        if room == 0 {
+            break;
+        }
+        // Clipped to what is left of the interior: a line longer than the box
+        // runs out through its own right side, and a box with an open side is
+        // not a box.
+        let taken = text::clip_to(&span.content, room);
+        room -= text::columns(&taken);
+        row.push(Span::styled(taken, span.style));
     }
-    vec![Line::from(row), field_rule(theme, width)]
+    // Filled to the edge the box's own right side runs down, so the interior
+    // reads as one surface rather than as a field that stops mid-air.
+    if room > 0 {
+        row.push(Span::styled(" ".repeat(room), theme.card()));
+    }
+    row.push(Span::styled("│".to_string(), field_line(theme)));
+    vec![
+        field_edge(theme, width, '╭', '╮'),
+        Line::from(row),
+        field_edge(theme, width, '╰', '╯'),
+    ]
 }
 
-/// The rule under a field: one span of `─`, in the colour of a border the
-/// keyboard is on. Its indent is the card's own ground, so the rule does not
-/// sit on two columns of another surface.
-fn field_rule(theme: &Theme, width: usize) -> Line<'static> {
+/// One of a field box's horizontal edges: a corner, the rule between, a corner.
+/// Its indent is the card's own ground, so the edge does not sit on two columns
+/// of another surface.
+fn field_edge(theme: &Theme, width: usize, left: char, right: char) -> Line<'static> {
     const INDENT: &str = "  ";
-    let rule = "─".repeat(width.saturating_sub(text::columns(INDENT)));
+    let rule = width.saturating_sub(text::columns(INDENT) + 2);
     Line::from(vec![
         Span::styled(INDENT.to_string(), theme.card()),
-        Span::styled(rule, Style::default().fg(theme.line_strong)),
+        Span::styled(
+            format!("{left}{}{right}", "─".repeat(rule)),
+            field_line(theme),
+        ),
     ])
+}
+
+/// The ink of a field box's own lines: the strong border, the colour the
+/// dialog's frame is drawn in, so the two read as the same furniture.
+fn field_line(theme: &Theme) -> Style {
+    Style::default().fg(theme.line_strong)
 }
 
 /// A field's own spans: what has been typed, with a chip under the caret.
@@ -1078,14 +1236,14 @@ fn device_rows(device: &crate::cli::FoundDevice, width: usize) -> Vec<String> {
     let laid_out = format!(
         "{board:>3} {signal} {} {}",
         text::pad_to(name, 24),
-        device.id
+        device.address
     );
     if text::columns(&laid_out) <= width {
         return vec![laid_out];
     }
     // Without the padding when only the padding is what does not fit: the
     // addresses go ragged rather than the row going onto two lines for air.
-    let compact = format!("{board:>3} {signal} {name} {}", device.id);
+    let compact = format!("{board:>3} {signal} {name} {}", device.address);
     if text::columns(&compact) <= width {
         return vec![compact];
     }
@@ -1094,13 +1252,13 @@ fn device_rows(device: &crate::cli::FoundDevice, width: usize) -> Vec<String> {
     let head = format!("{board:>3} {signal} {name}");
     let mut rows = wrap_rows(&head, width);
     let name_column = text::columns(&format!("{board:>3} {signal} "));
-    let indent = if name_column + text::columns(&device.id) <= width {
+    let indent = if name_column + text::columns(&device.address) <= width {
         name_column
     } else {
         0
     };
     rows.extend(wrap_rows(
-        &format!("{}{}", " ".repeat(indent), device.id),
+        &format!("{}{}", " ".repeat(indent), device.address),
         width,
     ));
     rows
@@ -1185,6 +1343,37 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 Line::from(Span::styled(app.theme_name(*choice), style))
             })
             .collect(),
+        Dialog::ChatPick(pick) => app
+            .assistant
+            .chats
+            .iter()
+            .enumerate()
+            .map(|(index, chat)| {
+                // One row per conversation, the cursor chip on the row a
+                // delete lands on. The panel's own thread is marked, because
+                // that is the one the user may be reading — a list that could
+                // not tell them apart would make every delete a gamble.
+                let style = if index == pick.cursor {
+                    theme.selected()
+                } else {
+                    theme.text()
+                };
+                let name = if chat.title.trim().is_empty() {
+                    entry(CHAT_UNTITLED, lang).to_string()
+                } else {
+                    chat.title.trim().to_string()
+                };
+                let mark = if index == app.assistant.active {
+                    entry(CHAT_SHOWN, lang)
+                } else {
+                    ""
+                };
+                Line::from(Span::styled(
+                    text::clip_to(&format!("{}. {name}{mark}", index + 1), width),
+                    style,
+                ))
+            })
+            .collect(),
         Dialog::Cheat(cheat) => cheat_body(cheat, lang, theme, width),
         Dialog::Notices(_) => {
             if app.log.is_empty() {
@@ -1254,7 +1443,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 Line::from(Span::styled(entry(UART_PROMPT, lang), theme.muted())),
                 Line::default(),
             ];
-            out.extend(field_rows(field_spans(&uart.field, theme), theme, width));
+            out.extend(field_box(field_spans(&uart.field, theme), theme, width));
             out.push(Line::default());
             match (&uart.error, &uart.status) {
                 (Some(error), _) => out.extend(
@@ -1346,13 +1535,13 @@ fn field_key(field: &mut Field, key: KeyEvent) -> bool {
 /// global handler rather than being swallowed here.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        // Ctrl+R flips a masked field between stars and text, and is answered
+        // Ctrl+R flips a secret field between stars and text, and is answered
         // before the chord bail-out below because it belongs to the field.
         // Every other chord stays global: `Ctrl+Q` must still quit and
         // `Ctrl+T` still repaint with a modal in the way.
         if key.code == KeyCode::Char('r') {
             if let Some(Dialog::Prompt(prompt)) = &mut app.dialog {
-                if matches!(prompt.action, PromptAction::LanToken) {
+                if prompt.action.asks_for_a_secret() {
                     prompt.masked = !prompt.masked;
                     return true;
                 }
@@ -1398,7 +1587,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // The pick dials the board, and says so: a link the user
                 // asked for by name is news; whether it caught is the log's.
                 Some(device) => {
-                    app.connect_to_board(&device.id, device.name.as_deref(), device.rssi, false);
+                    app.connect_to_board(
+                        &device.address,
+                        device.name.as_deref(),
+                        device.rssi,
+                        false,
+                    );
                 }
                 None if !pick.scanning => {
                     let _ = app.start_ble_scan();
@@ -1431,7 +1625,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // Anything else leaves the field exactly as it was. The dialog
                 // stays up, so a key with no meaning here is not a key that
                 // cancels.
+                let was = prompt.field.text.chars().count();
                 field_key(&mut prompt.field, key);
+                let now = prompt.field.text.chars().count();
+                // A character that just landed stays in the clear for its
+                // moment; one that was taken away puts the reveal out, because
+                // the index it holds is a place in the text and the edit moved
+                // the characters left into it. A key that only moved the caret
+                // changes nothing. See [`PROMPT_REVEAL`].
+                if now > was {
+                    prompt.show_last_char();
+                } else if now < was {
+                    prompt.hide_the_char();
+                }
                 app.dialog = Some(Dialog::Prompt(prompt));
             }
         }
@@ -1470,6 +1676,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.push_notice(notice);
             }
             _ => app.dialog = Some(Dialog::ThemePick(pick)),
+        },
+        // The list of conversations, with a delete on Enter. The cursor moves
+        // by the arrows; every other key leaves the window up, because "not
+        // this window's key" and "close the window" are different answers and
+        // only Escape means the second.
+        Dialog::ChatPick(mut pick) => match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Up | KeyCode::Down => {
+                let last = app.assistant.chats.len().saturating_sub(1);
+                pick.move_cursor(key.code == KeyCode::Down, last);
+                app.dialog = Some(Dialog::ChatPick(pick));
+            }
+            // Enter forgets the row under the cursor. The window closes on
+            // the way out: the notice says what happened, and a list still up
+            // would be a list one row stale.
+            KeyCode::Enter => {
+                crate::views::assistant::delete_conversation_at(app, pick.cursor);
+            }
+            _ => app.dialog = Some(Dialog::ChatPick(pick)),
         },
         Dialog::Settings(offset) => {
             if key.code == KeyCode::Esc {
@@ -2649,10 +2874,10 @@ mod tests {
         assert_eq!(field.answer(), "固件.bin");
     }
 
-    /// The field is painted with a one-cell caret in it, the placeholder only
-    /// while there is nothing to show, and a rule under it: an input nobody can
-    /// see is the state every prompt opens in, so the place to type into is
-    /// drawn whether or not it holds anything.
+    /// The field is painted as a box with a one-cell caret in it, and the
+    /// placeholder only while there is nothing to show: an input nobody can see
+    /// is the state every prompt opens in, so the place to type into is drawn
+    /// whether or not it holds anything.
     #[test]
     fn the_field_paints_its_caret() {
         let app = App {
@@ -2660,51 +2885,112 @@ mod tests {
             ..App::default()
         };
         let theme = Theme::DARK;
-        let field_row = |prompt: Prompt| -> Line<'static> {
+        let rows_of = |prompt: Prompt| -> Vec<Line<'static>> {
             let rows = body(&Dialog::Prompt(prompt), &app, 60, &theme);
-            rows[rows.len() - 2].clone()
+            rows[rows.len() - 3..].to_vec()
         };
-        let rule_row = |prompt: Prompt| -> Line<'static> {
-            let rows = body(&Dialog::Prompt(prompt), &app, 60, &theme);
-            rows[rows.len() - 1].clone()
+        let row_text = |row: &Line<'static>| -> String {
+            row.spans.iter().map(|s| s.content.as_ref()).collect()
         };
 
-        let empty = field_row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
-        let shown: String = empty.spans.iter().map(|s| s.content.as_ref()).collect();
+        let rows = rows_of(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
+        assert_eq!(rows.len(), 3, "a field is a box: top, content, bottom");
+        let (top, field, bottom) = (&rows[0], &rows[1], &rows[2]);
+
+        // The box is the dialog frame's own furniture one size down, drawn
+        // rather than filled — so an empty field is a place, not a gap between
+        // two labels.
+        let edge = Style::default().fg(theme.line_strong);
+        let top_text = row_text(top);
+        assert!(top_text.starts_with("  ╭"), "{top_text:?}");
+        assert!(top_text.ends_with('╮'), "{top_text:?}");
+        let bottom_text = row_text(bottom);
+        assert!(bottom_text.starts_with("  ╰"), "{bottom_text:?}");
+        assert!(bottom_text.ends_with('╯'), "{bottom_text:?}");
+        assert_eq!(text::columns(&top_text), 60, "the box fills the row");
+        assert_eq!(top.spans[0].style, theme.card());
+        assert_eq!(top.spans[1].style, edge, "the edge is the frame's ink");
+
+        let shown = row_text(field);
         assert!(
-            shown.contains("for example BenchNet"),
+            shown.starts_with("  │ for example BenchNet"),
             "an empty field says what it wants: {shown:?}"
         );
-        let caret = empty
+        assert!(shown.ends_with('│'), "{shown:?}");
+        assert_eq!(text::columns(&shown), 60, "the box fills the row");
+        let caret = field
             .spans
             .iter()
             .position(|span| span.style == theme.selected())
             .expect("a caret chip");
-        assert_eq!(empty.spans[caret].content, " ", "the caret is one cell");
-        // The row is a place: filled to the box's own edge, on the input
-        // ground, so it reads as a field rather than as a gap between labels.
-        assert_eq!(empty.spans[0].style, theme.input());
+        assert_eq!(field.spans[caret].content, " ", "the caret is one cell");
+        // The interior is the card's own ground: a row painted in a background
+        // colour would read as a line the user selected rather than as a field.
+        assert_eq!(field.spans[0].style, theme.card());
         assert_eq!(
-            empty.spans.last().expect("the fill").style,
-            theme.input(),
-            "the row is filled to the edge"
+            field.spans[field.spans.len() - 2].style,
+            theme.card(),
+            "the interior is filled to the box's side"
         );
-        assert_eq!(text::columns(&shown), 60, "the field fills the row");
-
-        // The rule under it is the field's own bottom edge: the strong border
-        // colour, one row of it, indented like the field.
-        let rule = rule_row(Prompt::new(WIFI_TITLE, PromptAction::WifiSsid));
-        assert_eq!(rule.spans[0].content, "  ");
-        assert!(rule.spans[1].content.starts_with("──────"), "{rule:?}");
-        assert_eq!(rule.spans[1].style, Style::default().fg(theme.line_strong));
 
         let mut typed = Prompt::new(WIFI_TITLE, PromptAction::WifiSsid);
         typed.field.insert('x');
-        let typed_row = field_row(typed);
-        let shown: String = typed_row.spans.iter().map(|s| s.content.as_ref()).collect();
+        let typed_row = rows_of(typed)[1].clone();
+        let shown = row_text(&typed_row);
         assert!(
-            shown.starts_with("  x "),
+            shown.starts_with("  │x "),
             "the caret sits after what was typed: {shown:?}"
+        );
+    }
+
+    /// A masked field shows one star per character, except the character the
+    /// last edit put there: it stays in the clear for its moment, the way the
+    /// assistant's key field shows a character it was given. Ctrl+R still shows
+    /// the whole field, and a character taken away takes the reveal with it.
+    #[test]
+    fn a_masked_field_reveals_only_the_last_character() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.lan_token = String::new();
+        prompt_lan_token(&mut app);
+        for ch in "abcd".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
+        }
+        let theme = app.theme();
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(
+            painted.contains("***d"),
+            "the character just typed is in the clear:\n{painted}"
+        );
+        assert!(
+            !painted.contains("abcd"),
+            "the ones before it are not:\n{painted}"
+        );
+
+        // The moment passes, and the star takes the character back.
+        let Some(Dialog::Prompt(prompt)) = &mut app.dialog else {
+            panic!("the prompt is up");
+        };
+        prompt.reveal = Some((3, Instant::now() - Duration::from_millis(1)));
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(painted.contains("****"), "the reveal ends:\n{painted}");
+
+        // An edit that takes a character away puts the reveal out too: the
+        // index it holds is a place in the text, and the edit moved the
+        // characters left into it.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        let painted = text_of(&body(&app.dialog.clone().unwrap(), &app, 60, &theme));
+        assert!(
+            painted.contains("***"),
+            "nothing is left in the clear:\n{painted}"
         );
     }
 
@@ -3017,16 +3303,97 @@ mod tests {
             "nothing was announced about a token"
         );
     }
+
+    /// A conversation row for the picker's tests: an id, a name from its first
+    /// question, nothing else.
+    fn chat(id: u64, title: &str) -> crate::views::assistant::ChatState {
+        crate::views::assistant::ChatState {
+            id,
+            title: title.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The delete picker lists the conversations, marks the one the panel is
+    /// showing, and Escape leaves every one of them alone — the palette's
+    /// delete is a question now, not a command.
+    #[test]
+    fn the_chat_picker_lists_and_cancels() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.assistant.chats = vec![
+            chat(1, "boot loop"),
+            chat(2, "wifi keeps dropping"),
+            chat(3, ""),
+        ];
+        app.assistant.active = 1;
+
+        open_chat_pick(&mut app);
+        assert!(matches!(app.dialog, Some(Dialog::ChatPick(_))));
+        let shown = crate::ui::render_to_text(&app, 80, 24);
+        assert!(shown.contains("1. boot loop"), "{shown}");
+        assert!(
+            shown.contains("2. wifi keeps dropping · shown"),
+            "the panel's thread is not marked: {shown}"
+        );
+        assert!(
+            shown.contains("3. (no messages)"),
+            "an unnamed conversation has no row: {shown}"
+        );
+
+        // Down walks the list; Escape closes without deleting anything.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let cursor = match app.dialog.as_ref() {
+            Some(Dialog::ChatPick(pick)) => pick.cursor,
+            other => panic!("the picker is not up: {other:?}"),
+        };
+        assert_eq!(cursor, 2, "Down did not walk the list");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape kept the window");
+        assert_eq!(app.assistant.chats.len(), 3, "Escape deleted something");
+    }
+
+    /// Enter forgets the row under the cursor, and the panel keeps the thread
+    /// it was showing when a row before it in the list goes.
+    #[test]
+    fn the_chat_picker_deletes_the_row_under_the_cursor() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.assistant.chats = vec![chat(1, "boot loop"), chat(2, "wifi"), chat(3, "audio")];
+        app.assistant.active = 2;
+
+        open_chat_pick(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "the window outlived the delete");
+        assert_eq!(app.assistant.chats.len(), 2);
+        assert_eq!(
+            app.assistant.chats[app.assistant.active].title, "audio",
+            "the panel moved off the thread it was showing"
+        );
+        assert!(
+            app.notices
+                .last()
+                .is_some_and(|notice| notice.text.contains("deleted")),
+            "the delete went unannounced: {:?}",
+            app.notices.last().map(|notice| &notice.text)
+        );
+    }
 }
 
 #[cfg(test)]
 mod pick_tests {
     use super::*;
 
-    fn device(name: &str, id: &str, board: bool) -> crate::cli::FoundDevice {
+    fn device(name: &str, address: &str, board: bool) -> crate::cli::FoundDevice {
         crate::cli::FoundDevice {
             name: Some(name.to_string()),
-            id: id.to_string(),
+            address: address.to_string(),
             board,
             rssi: None,
         }

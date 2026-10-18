@@ -1,6 +1,6 @@
 [package]
 name = "linkr-tui"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Cross-platform host CLI and TUI for the Linkr Bee wireless serial bridge"
 license = "Apache-2.0"
@@ -42,6 +42,15 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 # in `src/main.rs`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# BlueZ, asked for the one thing `btleplug` does not do: a discovery filter
+# with an RSSI reading in it, under which the daemon reports every
+# advertisement instead of only the ones whose signal moved. That is the
+# difference between hearing a board that sits still and not hearing it at
+# all, which is what a scan has to be able to tell. See `Listening` in
+# `src/transport/ble.rs`.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluez-async = "0.9"
 
 # The Windows executable wears the project's mark, which lives in a Windows
 # resource section and nowhere else: `build.rs` embeds `assets/icon.ico`. The

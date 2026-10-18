@@ -199,6 +199,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if regions.assistant.width > 0 {
         draw_assistant(frame, app, regions.assistant);
     }
+    draw_selection(frame, app, &regions);
     draw_bar(
         frame,
         app,
@@ -353,15 +354,78 @@ fn draw_divider(frame: &mut Frame, theme: &crate::theme::Theme, area: Rect) {
 /// on its left is what says the pane stops there, and the pane beside it is
 /// *narrowed*, never covered. The rows are anchored at the bottom by
 /// `panel_lines`, so the newest turn is the one on screen.
+/// The text column of the docked panel: the column less its left rule.
+pub fn panel_text_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x + DIVIDER_WIDTH,
+        width: area.width.saturating_sub(DIVIDER_WIDTH),
+        ..area
+    }
+}
+
+/// The area a centre view paints its body in: inside the frame for a framed
+/// view, the whole rect for the pane.
+///
+/// The same arithmetic `draw_centre` runs, exposed so a mouse handler
+/// resolving a drag and the painter writing the rows cannot disagree about
+/// where the body starts.
+pub fn body_text_area(app: &App, area: Rect) -> Rect {
+    if body::is_framed(app.view) {
+        app.theme().view_block(app.view_name()).inner(area)
+    } else {
+        area
+    }
+}
+
+/// The assistant's run, painted on the cells it covers.
+///
+/// Under the toasts and the modal layer, over the text: the run is a claim
+/// about rows the two assistant paints just wrote, so it goes on after them —
+/// and before anything that is allowed to cover them.
+fn draw_selection(frame: &mut Frame, app: &App, regions: &Regions) {
+    use crate::views::assistant::SelectRegion;
+    let Some(selection) = &app.assistant.select else {
+        return;
+    };
+    let rect = match selection.region {
+        SelectRegion::Panel if regions.assistant.width > 0 => panel_text_area(regions.assistant),
+        SelectRegion::View if app.view == crate::event::View::Assistant => {
+            body_text_area(app, regions.centre)
+        }
+        // The paint that held the run is not on screen: there is nothing to
+        // highlight, and the run is dropped when that paint leaves.
+        _ => return,
+    };
+    let theme = app.theme();
+    let (start, end) = selection.ordered();
+    let buffer = frame.buffer_mut();
+    for row in start.0..=end.0 {
+        let y = rect.y.saturating_add(row);
+        if y >= rect.bottom() {
+            break;
+        }
+        // The run takes the whole of every row between its ends, and each end
+        // from its own column — columns the area holds, so a run past the
+        // right edge paints what is there.
+        let first = if row == start.0 { start.1 } else { 0 };
+        let last = if row == end.0 { end.1 } else { u16::MAX };
+        for col in first..=last.min(rect.width.saturating_sub(1)) {
+            let x = rect.x.saturating_add(col);
+            if x >= rect.right() {
+                break;
+            }
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_style(cell.style().patch(theme.selection()));
+            }
+        }
+    }
+}
+
 fn draw_assistant(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     // The rows get the column minus its edge, so a row can never be laid out
     // against the panel's width and then paint over the rule.
-    let text_area = Rect {
-        x: area.x + DIVIDER_WIDTH,
-        width: area.width.saturating_sub(DIVIDER_WIDTH),
-        ..area
-    };
+    let text_area = panel_text_area(area);
     let lines =
         crate::views::assistant::panel_lines(app, &theme, text_area.width, text_area.height);
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
@@ -461,6 +525,9 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
         height,
     };
     let level = toast::border_level(&app.notices).unwrap_or(crate::event::NoticeLevel::Info);
+    // The column before the box gives up anything wide to it first: see
+    // [`toast::clear_the_edge`].
+    toast::clear_the_edge(frame.buffer_mut(), corner);
     let block = Block::bordered()
         .border_style(Style::default().fg(theme.toast_border(level)))
         .style(theme.toast());
@@ -1352,6 +1419,57 @@ mod tests {
         // The frame's row count is unchanged: the toast overlays, it does not
         // reflow the layout.
         assert_eq!(with.lines().count(), without.lines().count());
+    }
+
+    /// The column the toast's left border is in never holds a glyph wide
+    /// enough to be drawn across it.
+    ///
+    /// A cell right after a wide glyph is taken for the glyph's own second
+    /// half by the frame's diff and is then never sent to the terminal — the
+    /// border written there is simply dropped, and the box comes up with a
+    /// hole down the middle of its left side, which is what a screenshot
+    /// showed. The box's own arithmetic decides where the edge lands, so the
+    /// sweep is over a spread of widths rather than over anything found in the
+    /// frame.
+    #[test]
+    fn nothing_wide_reaches_into_a_toast_border() {
+        use ratatui::buffer::CellWidth;
+        for width in 30..140u16 {
+            let mut app = App {
+                lang: Lang::Zh,
+                ..App::default()
+            };
+            app.push_notice(crate::app::Notice {
+                text:
+                    "连接中：正在查找设备…（一条较长的中文通知，让边框左侧正好与背景的宽字符重叠）"
+                        .to_string(),
+                level: NoticeLevel::Info,
+            });
+            let toast_width = toast::width(&app.notices).min(width);
+            let height = app.notices.len() as u16 + 2;
+            let edge = width - toast_width;
+            let Some(buffer) = render_buffer(&app, width, 24) else {
+                continue;
+            };
+            for row in 0..height {
+                let symbol = match row {
+                    0 => "┌",
+                    row if row == height - 1 => "└",
+                    _ => "│",
+                };
+                assert_eq!(
+                    buffer[(edge, BAR_HEIGHT + row)].symbol(),
+                    symbol,
+                    "width {width}, row {row}: the box's left side went missing"
+                );
+                if edge > 0 {
+                    assert!(
+                        buffer[(edge - 1, BAR_HEIGHT + row)].cell_width() <= 1,
+                        "width {width}, row {row}: a glyph wide enough to be drawn across the border was left beside it"
+                    );
+                }
+            }
+        }
     }
 
     /// A frame is a pure function of the state: the same state paints the same

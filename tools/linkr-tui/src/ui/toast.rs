@@ -1,5 +1,7 @@
 //! Toasts: the short-lived notices that float over the top-right corner.
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use crate::app::{App, Notice};
@@ -62,6 +64,32 @@ pub fn border_level(notices: &[Notice]) -> Option<crate::event::NoticeLevel> {
         };
     }
     level
+}
+
+/// Clear the column just left of a toast box of any glyph wide enough to be
+/// drawn into the column the box's own left edge is in.
+///
+/// A terminal draws a glyph two cells wide across both of them — a CJK word in
+/// the sidebar, an emoji in a device name — and the second cell is drawn over
+/// whatever the frame put there. When that cell is the box's left edge, the
+/// frame still says the border is there and the screen says otherwise: the box
+/// comes up with a hole down the middle of its side, which is what a
+/// screenshot showed. The column is therefore given up before the edge is
+/// drawn, so that nothing reaches into it. Only wide glyphs go: the column
+/// belongs to whatever is behind the toast, and a narrow glyph is not in the
+/// edge's way.
+pub fn clear_the_edge(buffer: &mut Buffer, corner: Rect) {
+    use ratatui::buffer::CellWidth;
+    let Some(x) = corner.x.checked_sub(1) else {
+        return;
+    };
+    for y in corner.y..corner.bottom() {
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            if cell.cell_width() > 1 {
+                cell.set_symbol(" ");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +193,43 @@ mod tests {
             border_level(&[notice("a", Info), notice("b", Error), notice("c", Warn)]),
             Some(Error)
         );
+    }
+
+    /// The column before the box gives up its wide glyphs and keeps everything
+    /// else: a glyph that would be drawn into the border's own column is the
+    /// hole the sweep exists to prevent.
+    #[test]
+    fn the_column_before_the_box_gives_up_anything_wide() {
+        use ratatui::style::{Color, Style};
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 3));
+        // A wide glyph reaching into the box's left edge at x = 4.
+        buffer[(3, 0)]
+            .set_symbol("中")
+            .set_style(Style::default().fg(Color::Red));
+        // A narrow one: not in the edge's way.
+        buffer[(3, 1)].set_symbol("x");
+        // A wide glyph whose second cell stops one short of the edge.
+        buffer[(2, 2)].set_symbol("中");
+
+        clear_the_edge(&mut buffer, Rect::new(4, 0, 4, 3));
+
+        assert_eq!(buffer[(3, 0)].symbol(), " ", "nothing may reach the edge");
+        assert_eq!(
+            buffer[(3, 0)].fg,
+            Color::Red,
+            "and the column keeps the ink it was painted in"
+        );
+        assert_eq!(buffer[(3, 1)].symbol(), "x", "a narrow glyph stays");
+        assert_eq!(
+            buffer[(2, 2)].symbol(),
+            "中",
+            "a glyph that stops short stays"
+        );
+        assert_eq!(buffer[(3, 2)].symbol(), " ");
+
+        // A box at the frame's own left edge has no column to give: it is
+        // drawn as it is rather than carved out of the buffer's edge.
+        clear_the_edge(&mut buffer, Rect::new(0, 0, 4, 3));
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
     }
 }

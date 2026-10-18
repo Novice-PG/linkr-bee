@@ -178,10 +178,13 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
 fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, area: Rect) {
     let theme = app.theme();
     // prompt + separator + blank + legend, plus the box's own two rows: the
-    // window is whatever is left, capped at the registry's own maximum.
+    // window is whatever is left, capped at the registry's own maximum — and
+    // at the rows the level has, so the quick list is a short box rather than
+    // a tall one with empty air under it.
     const CHROME_ROWS: u16 = 6;
     let room = area.height.saturating_sub(CHROME_ROWS) as usize;
-    let visible = palette::MAX_VISIBLE.min(room).max(1);
+    let rows = palette::rows_in(state.level, &state.query);
+    let visible = palette::MAX_VISIBLE.min(room).max(1).min(rows.len().max(1));
     let (width, _) = wanted(area, PALETTE_WIDTH_PERCENT, area.height);
     let rect = centred(area, width, visible as u16 + CHROME_ROWS);
     frame.render_widget(Clear, rect);
@@ -192,20 +195,19 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
 
     let mut lines = palette::lines_in(state, app.lang, visible, &theme);
     lines.push(Line::default());
-    lines.push(palette::legend(app.lang, &theme));
+    lines.push(palette::legend(app.lang, &theme, state.level));
     frame.render_widget(Paragraph::new(lines).style(theme.card()), inner);
 
     // The list's own scrollbar, on the rows the list actually occupies: the
     // query line and the separator above it are chrome, and the legend below
     // it is too.
-    let found = palette::matches(&state.query);
     let list = Rect {
         y: inner.y + 2,
         height: visible as u16,
         ..inner
     };
-    let top = palette::window_start(state, found.len(), visible);
-    scroll::draw(frame, list, found.len(), top, visible, theme.scrollbar());
+    let top = palette::window_start(state, rows.len(), visible);
+    scroll::draw(frame, list, rows.len(), top, visible, theme.scrollbar());
 }
 
 #[cfg(test)]
@@ -317,6 +319,14 @@ mod tests {
             ..App::default()
         };
         crate::palette::open(&mut app);
+        // The list the palette opens on is short enough to fit as it is.
+        let text = ui::render_to_text(&app, 100, 30);
+        assert!(!text.contains('┃'), "a bar down a list that fits:\n{text}");
+        assert!(text.contains("More actions"), "{text}");
+
+        // The second level is the registry: rows past the window, a bar.
+        let state = app.palette.as_mut().expect("the palette is up");
+        state.set_level(crate::palette::Level::All);
         let text = ui::render_to_text(&app, 100, 30);
         assert!(text.contains('┃'), "no bar down the full list:\n{text}");
 
