@@ -107,22 +107,26 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{:.1} {}", step, UNITS[at])
 }
 
-/// The four bars a WiFi list draws for a signal strength, strongest reading
-/// first: `▂▄▆█` at -55 dBm or better, one bar fewer for each ten less.
+/// The four dots a WiFi list draws for a signal strength, strongest reading
+/// first: `●●●●` at -55 dBm or better, one filled dot fewer for each ten less.
 ///
-/// A number on its own is a measurement; four bars are a ranking, which is
+/// A number on its own is a measurement; four dots are a ranking, which is
 /// what a list is read for — which of these is worth joining. The thresholds
 /// are the usual WiFi ones, and the reading is the firmware's own.
 ///
-/// The empty slots are `▁`, the bottom eighth of the same block family, not
-/// an underscore: an underscore sits on the baseline where a border sits, and
-/// a row of them reads as a stray rule rather than as a meter with room left.
+/// Dots, not the usual block ladder, because the older Windows console this
+/// interface has to run in draws the ambiguous block glyphs as ASCII
+/// stand-ins, and no stand-in keeps a block's *height*: `▁` and `▂` both came
+/// out as the same mark, so a weak reading read as a row of underscores —
+/// which is exactly what a screenshot showed. Filled and open circles have
+/// stand-ins of their own (`*` and `o`) that a console cannot confuse, so the
+/// ranking survives every font and both consoles.
 pub fn signal_bars(dbm: i32) -> &'static str {
     match dbm {
-        -55.. => "▂▄▆█",
-        -65..=-56 => "▂▄▆▁",
-        -75..=-66 => "▂▄▁▁",
-        _ => "▂▁▁▁",
+        -55.. => "●●●●",
+        -65..=-56 => "●●●○",
+        -75..=-66 => "●●○○",
+        _ => "●○○○",
     }
 }
 
@@ -242,24 +246,30 @@ mod tests {
         );
     }
 
-    /// The bars rank a reading the way a WiFi list does — full at -55 dBm or
-    /// better, one bar fewer for each ten less — and every reading gets at
-    /// least one bar rather than a blank that looks like a missing device.
+    /// The dots rank a reading the way a WiFi list does — four filled at
+    /// -55 dBm or better, one fewer for each ten less — and every reading
+    /// gets at least one filled dot rather than a blank that looks like a
+    /// missing device.
     #[test]
     fn signal_bars_rank_a_reading() {
-        assert_eq!(signal_bars(-30), "▂▄▆█");
-        assert_eq!(signal_bars(-55), "▂▄▆█");
-        assert_eq!(signal_bars(-56), "▂▄▆▁");
-        assert_eq!(signal_bars(-65), "▂▄▆▁");
-        assert_eq!(signal_bars(-66), "▂▄▁▁");
-        assert_eq!(signal_bars(-75), "▂▄▁▁");
-        assert_eq!(signal_bars(-76), "▂▁▁▁");
-        assert_eq!(signal_bars(-100), "▂▁▁▁");
-        assert_eq!(columns(signal_bars(-54)), 4, "four columns, whichever bars");
+        assert_eq!(signal_bars(-30), "●●●●");
+        assert_eq!(signal_bars(-55), "●●●●");
+        assert_eq!(signal_bars(-56), "●●●○");
+        assert_eq!(signal_bars(-65), "●●●○");
+        assert_eq!(signal_bars(-66), "●●○○");
+        assert_eq!(signal_bars(-75), "●●○○");
+        assert_eq!(signal_bars(-76), "●○○○");
+        assert_eq!(signal_bars(-100), "●○○○");
+        assert_eq!(columns(signal_bars(-54)), 4, "four columns, whichever dots");
         assert!(
             !signal_bars(-100).contains('_'),
-            "an empty slot is a block, not a rule under the row"
+            "an empty slot is an open dot, not a rule under the row"
         );
+        // The reading a screenshot showed as a bare line of underscores: the
+        // weakest meter still has a filled dot, and the open ones beside it
+        // cannot be read as a rule.
+        assert!(signal_bars(-74).starts_with('●'), "{}", signal_bars(-74));
+        assert!(signal_bars(-74).ends_with("○○"), "{}", signal_bars(-74));
     }
 
     /// A meter is `width` cells whatever the share: half up, clamped to the

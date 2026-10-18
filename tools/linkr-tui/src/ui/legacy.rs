@@ -31,8 +31,11 @@
 //!   of the device's line to the right just as surely as a label's arrow did.
 //! * **The right edge.** The console's scrollbar lies over the window's last
 //!   column or two, and the frame's right edge — the counters, the tail of a
-//!   line — is painted under it. [`RIGHT_MARGIN`] columns are left unpainted
-//!   for it.
+//!   line — is painted under it. [`RIGHT_MARGIN`] columns are kept free of
+//!   *text* for it, and [`prepare`] carries the background of the cell beside
+//!   them across: an unpainted margin is the terminal's own background, which
+//!   on a light theme is a black band down the right edge — what one
+//!   screenshot showed.
 //!
 //! All of this is off unless the process is talking to conhost: Windows
 //! Terminal sets `WT_SESSION` in its environment, and a terminal that does
@@ -76,7 +79,8 @@ pub fn drawing_area(full: Rect, legacy: bool) -> Rect {
     }
 }
 
-/// Narrow one painted frame: stand-ins for the ambiguous glyphs, and no bold.
+/// Narrow one painted frame: stand-ins for the ambiguous glyphs, no bold, and
+/// the margin wearing the row's own ground.
 ///
 /// Painted frames only — inside the draw call, after every widget has run.
 /// `--print-frame` and the tests paint through the same call with the pass
@@ -87,6 +91,31 @@ pub fn prepare(buffer: &mut Buffer) {
         cell.modifier.remove(Modifier::BOLD);
         if let Some(stand_in) = narrow_symbol(cell.symbol()) {
             cell.set_symbol(stand_in);
+        }
+    }
+    carry_background(buffer);
+}
+
+/// Carry each row's background across the margin the scrollbar sits over.
+///
+/// No widget paints the margin — that is what keeps the frame's text out from
+/// under the scrollbar — but a cell nobody paints keeps the terminal's own
+/// background, and on a light theme that is a black band down the window's
+/// right edge, two columns of it, which is exactly what a screenshot showed.
+/// The margin takes the background of the last cell the frame did paint and
+/// nothing else: the symbol a blank was left as stays a blank.
+fn carry_background(buffer: &mut Buffer) {
+    let area = buffer.area;
+    // The last column a widget painted: the drawing area is the window but
+    // for the margin, and the margin is what this walks.
+    let Some(source) = area.width.checked_sub(RIGHT_MARGIN + 1) else {
+        return;
+    };
+    let source = area.x + source;
+    for y in area.y..area.bottom() {
+        let bg = buffer[(source, y)].bg;
+        for x in (area.right() - RIGHT_MARGIN)..area.right() {
+            buffer[(x, y)].set_bg(bg);
         }
     }
 }
@@ -297,6 +326,36 @@ mod tests {
         // `±` are, and this interface never draws it — the device's text is
         // where it comes from.
         assert_eq!(buffer[(4, 0)].symbol(), "?");
+    }
+
+    /// The margin wears the row's own ground: it is never painted by a widget
+    /// — which is the point — but left at the terminal's background it is a
+    /// band of the wrong colour down the right edge of a light theme.
+    #[test]
+    fn the_margin_takes_the_background_of_the_cell_beside_it() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 2));
+        let ground = Style::default().bg(ratatui::style::Color::Rgb(250, 250, 245));
+        buffer[(3, 0)].set_style(ground).set_symbol("x");
+        buffer[(3, 1)].set_style(ground).set_symbol("y");
+
+        prepare(&mut buffer);
+
+        for y in 0..2 {
+            for x in 4..6 {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    ratatui::style::Color::Rgb(250, 250, 245),
+                    "({x},{y}) kept the terminal's own background"
+                );
+            }
+        }
+        // The cell the background was read from is untouched, and a window
+        // too narrow for a margin at all is left alone.
+        assert_eq!(buffer[(3, 0)].symbol(), "x");
+        assert_eq!(buffer[(3, 1)].symbol(), "y");
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 1, 1));
+        prepare(&mut narrow);
+        assert_eq!(narrow[(0, 0)].bg, ratatui::style::Color::Reset);
     }
 
     /// The replacement character most of all: it is what the pane paints for

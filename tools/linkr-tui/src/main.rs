@@ -1441,7 +1441,9 @@ fn main() -> io::Result<()> {
     }
     // The remembered half of a dial: the LAN host as typed, and the board
     // Connect should try before this run has dialled anything. A dial the
-    // command line named replaces both below.
+    // command line named replaces both below. The board is named by what the
+    // last dial learned it was called — a bare address in the Device row says
+    // everything to a scanner and nothing to the person at the bench.
     app.lan_host = stored.lan_host.clone();
     // The token row opens with what is remembered for that address, the way
     // the web fills its field on load: a bridge that has been here before
@@ -1456,6 +1458,9 @@ fn main() -> io::Result<()> {
             Selection::Address(stored.address.clone()),
             args.connect_timeout,
         ));
+        if !stored.device_name.is_empty() {
+            app.remember_device_name(&stored.address, &stored.device_name);
+        }
     }
     if storing {
         app.settings = Some(settings);

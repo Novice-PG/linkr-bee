@@ -269,7 +269,7 @@ pub struct WifiResult {
 /// Take a scan result apart: `MyNet wpa2 ch=6 -54dBm` becomes the name, the
 /// signal, and `wpa2 ch=6`.
 ///
-/// The list wants the three separately — the bars go in front of the row, the
+/// The list wants the three separately — the dots go in front of the row, the
 /// name is what joining takes, and the rest is context — which is why this
 /// peels once and hands the pieces back rather than making every caller
 /// re-find the same boundary.
@@ -756,7 +756,7 @@ mod tests {
     }
 
     /// A scan line comes apart into the three pieces a row draws: the name a
-    /// join takes, the signal the bars are ranked by, and the radio's notes
+    /// join takes, the signal the dots are ranked by, and the radio's notes
     /// between them.
     #[test]
     fn a_scan_result_line_comes_apart_into_name_signal_and_notes() {

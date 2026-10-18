@@ -309,6 +309,19 @@ impl DevicePick {
         self.devices.len()
     }
 
+    /// How many rows each device takes at `width`.
+    ///
+    /// One when its row fits the box whole, more when the window is too
+    /// narrow for it and the row wraps. The scroll counts *rows*, and this is
+    /// the count the painter will use — the same helper, so the two cannot
+    /// disagree about how tall one device is.
+    pub fn line_spans(&self, width: usize) -> Vec<usize> {
+        self.devices
+            .iter()
+            .map(|device| device_rows(device, width).len())
+            .collect()
+    }
+
     /// Move the cursor, clamped to the list.
     pub fn move_cursor(&mut self, down: bool) {
         let last = self.devices.len().saturating_sub(1);
@@ -319,22 +332,26 @@ impl DevicePick {
         }
     }
 
-    /// Move the window the least amount that keeps the cursor inside `room`
-    /// visible rows.
+    /// Move the window the least amount that keeps the cursor's own rows
+    /// inside `room` visible rows.
     ///
     /// `room` is what the modal can show, which the key handler asks for the
-    /// same way the settings form does — through the painter's own arithmetic,
-    /// so the two cannot disagree about how tall the box is. Zero means no
-    /// paint has said (a headless test, the first tick): the window keeps what
-    /// it had.
-    pub fn follow(&mut self, room: usize) {
+    /// same way the painter does — through the painter's own arithmetic, so
+    /// the two cannot disagree about how tall the box is. `line_spans` is
+    /// [`DevicePick::line_spans`] at the width being painted: a device whose
+    /// row wraps is more than one row of the box, and the window scrolls in
+    /// the rows the box actually has. Zero means no paint has said (a
+    /// headless test, the first tick): the window keeps what it had.
+    pub fn follow(&mut self, room: usize, line_spans: &[usize]) {
         if room == 0 {
             return;
         }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + room {
-            self.scroll = self.cursor + 1 - room;
+        let top: usize = line_spans.iter().take(self.cursor).sum();
+        let span = line_spans.get(self.cursor).copied().unwrap_or(1);
+        if top < self.scroll {
+            self.scroll = top;
+        } else if top + span > self.scroll + room {
+            self.scroll = top + span - room;
         }
     }
 
@@ -1000,6 +1017,62 @@ fn cheat_body(cheat: &Cheat, lang: Lang, theme: &Theme, width: usize) -> Vec<Lin
     out
 }
 
+/// One device's rows at `width`: the table row whole when it fits, and the
+/// same pieces laid out when the box is too narrow for it.
+///
+/// The row is the list's one table — board, signal, name, address — and at the
+/// widths a terminal window actually has it fits whole, name in its own column
+/// and the address in the one beside it. When the window is too narrow for
+/// that, the row *breaks* rather than being cut with an ellipsis: the address
+/// is the half a user checks against a board and the name the half they pick
+/// by, so neither may be the part that disappears. Only the padding goes
+/// first — air for the eye, not a thing said — and then the address drops to a
+/// row of its own, under the name column: a MAC split across two lines is
+/// neither readable nor copyable, which is what a plain wrap of the whole row
+/// produces.
+fn device_rows(device: &crate::cli::FoundDevice, width: usize) -> Vec<String> {
+    let name = device.name.as_deref().unwrap_or("(no name)");
+    let board = if device.board { "bee" } else { "-" };
+    // The signal the scan heard it at, ranked by dots and named by the
+    // number: a full column even when the adapter had no reading for a device
+    // it heard, so the names stay in one line down the box.
+    let signal = match device.rssi {
+        Some(dbm) => format!("{} {:>4}dBm", text::signal_bars(i32::from(dbm)), dbm),
+        None => format!("{:>12}", "—"),
+    };
+    // Padded by columns, not by characters: a name in a wide script is wider
+    // than it is long, and the id column is what would move.
+    let laid_out = format!(
+        "{board:>3} {signal} {} {}",
+        text::pad_to(name, 24),
+        device.id
+    );
+    if text::columns(&laid_out) <= width {
+        return vec![laid_out];
+    }
+    // Without the padding when only the padding is what does not fit: the
+    // addresses go ragged rather than the row going onto two lines for air.
+    let compact = format!("{board:>3} {signal} {name} {}", device.id);
+    if text::columns(&compact) <= width {
+        return vec![compact];
+    }
+    // Narrower still, and the row comes apart at its seams: the head wraps
+    // where it must, and the address keeps to a row of its own.
+    let head = format!("{board:>3} {signal} {name}");
+    let mut rows = wrap_rows(&head, width);
+    let name_column = text::columns(&format!("{board:>3} {signal} "));
+    let indent = if name_column + text::columns(&device.id) <= width {
+        name_column
+    } else {
+        0
+    };
+    rows.extend(wrap_rows(
+        &format!("{}{}", " ".repeat(indent), device.id),
+        width,
+    ));
+    rows
+}
+
 /// Every row of the dialog's body, before the window is taken.
 ///
 /// `width` only matters to the confirmation, which wraps its prompt; the other
@@ -1044,37 +1117,22 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 };
                 return vec![Line::from(Span::styled(why, theme.muted()))];
             }
-            // One row per device, the way the help is one row per key: the box
-            // is then a fixed height for a known list, and the cursor stays on
-            // a row rather than somewhere inside a paragraph.
+            // One row per device — the box is a fixed height for a known list,
+            // and the cursor stays on a row rather than somewhere inside a
+            // paragraph — and a row the window cannot hold whole wraps onto
+            // the rows below it rather than being cut with an ellipsis.
             pick.devices
                 .iter()
                 .enumerate()
-                .map(|(index, device)| {
-                    let name = device.name.as_deref().unwrap_or("(no name)");
-                    let board = if device.board { "bee" } else { "-" };
-                    // The signal the scan heard it at, ranked by bars and
-                    // named by the number: a full column even when the
-                    // adapter had no reading for a device it heard, so the
-                    // names stay in one line down the box.
-                    let signal = match device.rssi {
-                        Some(dbm) => format!("{} {:>4}dBm", text::signal_bars(i32::from(dbm)), dbm),
-                        None => format!("{:>12}", "—"),
-                    };
-                    // Padded by columns, not by characters: a name in a wide
-                    // script is wider than it is long, and the id column is
-                    // what would move.
-                    let row = format!(
-                        "{board:>3} {signal} {} {}",
-                        text::pad_to(name, 24),
-                        device.id
-                    );
+                .flat_map(|(index, device)| {
                     let style = if index == pick.cursor {
                         theme.selected()
                     } else {
                         theme.text()
                     };
-                    Line::from(Span::styled(text::clip_to(&row, width), style))
+                    device_rows(device, width)
+                        .into_iter()
+                        .map(move |row| Line::from(Span::styled(row, style)))
                 })
                 .collect()
         }
@@ -1284,12 +1342,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // window the user was reading.
             KeyCode::Up | KeyCode::Down => {
                 pick.move_cursor(key.code == KeyCode::Down);
-                let room = crate::ui::overlay::dialog_body_room(
-                    app.screen,
-                    app.sidebar_visible,
-                    pick.rows().max(1),
-                );
-                pick.follow(room);
+                // The window's own arithmetic, asked the way the painter
+                // asks it: a device whose row wraps is more than one row of
+                // the box, so the scroll counts the rows the paint will draw
+                // — through the painter's helpers, so the two cannot
+                // disagree about how tall the box is.
+                let width =
+                    crate::ui::overlay::dialog_body_width(app.screen, app.sidebar_visible) as usize;
+                let spans = pick.line_spans(width.max(1));
+                let rows = spans.iter().sum::<usize>().max(1);
+                let room =
+                    crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+                pick.follow(room, &spans);
                 app.dialog = Some(Dialog::DevicePick(pick));
             }
             // Enter dials the row under the cursor — by address, which is the
@@ -2976,7 +3040,7 @@ mod pick_tests {
         assert!(pick.selected().is_none());
     }
 
-    /// A device row leads with the signal the scan heard it at, bars and
+    /// A device row leads with the signal the scan heard it at, dots and
     /// reading; a device the adapter had no reading for keeps the column and
     /// shows a dash rather than inventing a number.
     #[test]
@@ -3000,7 +3064,7 @@ mod pick_tests {
             .lines()
             .find(|row| row.contains("Bee"))
             .expect("the row is drawn");
-        assert!(bee.contains("▂▄▆▁  -58dBm"), "{bee}");
+        assert!(bee.contains("●●●○  -58dBm"), "{bee}");
         let far = text
             .lines()
             .find(|row| row.contains("Far"))
@@ -3040,18 +3104,92 @@ mod pick_tests {
             message: String::new(),
             scroll: 0,
         };
+        // The width the rows fit at: one line each, so the window moves in
+        // device-sized steps, the way it always has.
+        let spans = pick.line_spans(70);
+        assert_eq!(spans, vec![1; 10]);
         for _ in 0..4 {
             pick.move_cursor(true);
-            pick.follow(3);
+            pick.follow(3, &spans);
         }
         assert_eq!(pick.cursor, 4);
         assert_eq!(pick.scroll(), 2, "the least move that shows the cursor");
         for _ in 0..9 {
             pick.move_cursor(false);
-            pick.follow(3);
+            pick.follow(3, &spans);
         }
         assert_eq!(pick.cursor, 0);
         assert_eq!(pick.scroll(), 0, "and the top of the list shows again");
+    }
+
+    /// A row the window is too narrow to hold whole wraps onto the rows below
+    /// it — the name and the address both stay readable — where a cut would
+    /// have left one of them behind an ellipsis.
+    #[test]
+    fn a_row_the_window_cannot_hold_wraps_instead_of_being_cut() {
+        let app = App::default();
+        let dialog = Dialog::DevicePick(DevicePick {
+            devices: vec![crate::cli::FoundDevice {
+                rssi: Some(-74),
+                ..device("Linkr BLE UART-1", "DA:EB:CC:48:40:1A", true)
+            }],
+            cursor: 0,
+            scanning: false,
+            message: String::new(),
+            scroll: 0,
+        });
+        // Narrow enough for the address to have to move: the head is the
+        // board mark, the dots and the name, and the address rides the row
+        // under it, indented to the name column.
+        let narrow = painted(&dialog, &app, 36, 6);
+        let rows: Vec<&str> = narrow.lines().filter(|row| !row.is_empty()).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "bee ●●○○  -74dBm Linkr BLE UART-1",
+                "                 DA:EB:CC:48:40:1A",
+            ],
+            "the row was cut or split instead of broken at its seam: {narrow}"
+        );
+        // Wide enough, and the row is the one-line table it always was.
+        let wide = painted(&dialog, &app, 70, 6);
+        assert_eq!(
+            wide.lines().filter(|row| !row.is_empty()).count(),
+            1,
+            "the table row came apart at a width it fits: {wide}"
+        );
+    }
+
+    /// The scroll counts the rows the paint will draw, so a cursor on a
+    /// wrapped row still ends up on the screen — the arithmetic the key
+    /// handler hands over.
+    #[test]
+    fn a_wrapped_row_scrolls_by_the_rows_it_paints() {
+        let mut pick = DevicePick {
+            devices: vec![
+                device("Linkr BLE UART-1", "DA:EB:CC:48:40:1A", true),
+                device("Linkr BLE UART-3", "FB:F6:91:14:33:3A", true),
+                device("Linkr BLE UART-5", "EE:C7:42:34:48:CF", true),
+            ],
+            cursor: 0,
+            scanning: false,
+            message: String::new(),
+            scroll: 0,
+        };
+        // At this width each row wraps onto two lines; a window of three rows
+        // can show one device and a half of the next.
+        let spans = pick.line_spans(36);
+        assert_eq!(spans, vec![2, 2, 2]);
+        pick.move_cursor(true);
+        pick.move_cursor(true);
+        pick.follow(3, &spans);
+        let top: usize = spans.iter().take(pick.cursor).sum();
+        assert!(
+            pick.scroll() <= top && top + spans[pick.cursor] <= pick.scroll() + 3,
+            "cursor rows {top}..{} outside the window at {}",
+            top + spans[pick.cursor],
+            pick.scroll()
+        );
     }
 
     /// A scan that could not run says why in the dialog rather than being

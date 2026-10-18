@@ -126,6 +126,23 @@ pub fn dialog_body_room(screen: Rect, sidebar: bool, body_rows: usize) -> usize 
     box_height(body_rows, ceiling_height(region.height)).saturating_sub(3) as usize
 }
 
+/// How wide a dialog body is drawn at a `screen`-sized frame.
+///
+/// [`dialog_body_room`]'s other half, for the callers that have to measure
+/// rows between two paints: the picker's scroll has to know the width a row
+/// will be wrapped at before the frame that wraps it is painted. The
+/// arithmetic is `paint_dialog`'s own; zero means the modal is not painted at
+/// this size, the same as the room above.
+pub fn dialog_body_width(screen: Rect, sidebar: bool) -> u16 {
+    let region = super::regions(screen, sidebar).centre;
+    if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
+        return 0;
+    }
+    wanted(region, DIALOG_WIDTH_PERCENT, region.height)
+        .0
+        .saturating_sub(2)
+}
+
 fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Rect) {
     let theme = app.theme();
     // As tall as its content, up to the ceiling the region allows: the body

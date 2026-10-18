@@ -262,10 +262,10 @@ fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
 
 /// One scan row, split where the colour changes.
 struct ScanRow {
-    /// The reading, when the firmware gave one. `None` means no bars are
+    /// The reading, when the firmware gave one. `None` means no dots are
     /// invented and the name simply starts where the others' names do.
     dbm: Option<i32>,
-    /// The bars and the reading, or the blank the name lines up behind.
+    /// The dots and the reading, or the blank the name lines up behind.
     meter: String,
     /// Between the meter and the name: two columns, except behind a meter
     /// that was not there.
@@ -607,7 +607,7 @@ mod tests {
         assert!(!text.contains("Password"), "{text}");
     }
 
-    /// Scan results are listed, ranked by signal: the bars and the reading in
+    /// Scan results are listed, ranked by signal: the dots and the reading in
     /// front, then the name, then the radio's own notes.
     #[test]
     fn scan_results_are_listed() {
@@ -618,15 +618,15 @@ mod tests {
         assert!(text.contains("Home"), "{text}");
         assert!(text.contains("Office"), "{text}");
         assert!(
-            text.contains("▂▄▆█  -48dBm  Home wpa2 ch=6"),
+            text.contains("●●●●  -48dBm  Home wpa2 ch=6"),
             "the row leads with the signal it was heard at: {text}"
         );
         assert!(!text.contains("no results yet"), "{text}");
     }
 
     /// The meter is not painted in the row's muted grey: in three of the six
-    /// themes that grey sits within a whisker of the panel, and the bars then
-    /// go missing — which is the report this answers.
+    /// themes that grey sits within a whisker of the panel, and the meter then
+    /// goes missing — which is the report this answers.
     #[test]
     fn the_scan_meter_is_painted_to_be_seen() {
         let theme = Theme::SOLARIZED;
@@ -638,7 +638,7 @@ mod tests {
             .find(|line| line.spans.iter().any(|span| span.content.contains("Home")))
             .expect("the scan row");
         let meter = &row.spans[0];
-        assert!(meter.content.contains("▂▄▆█"), "{:?}", meter.content);
+        assert!(meter.content.contains("●●●●"), "{:?}", meter.content);
         assert_eq!(
             meter.style.fg,
             theme.signal_style(-48).fg,

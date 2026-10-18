@@ -1271,6 +1271,26 @@ impl App {
             return;
         };
         let stored = store.read();
+        // The remembered half of a Bluetooth dial: the address and the name
+        // the board was dialled under. Either moves only with an *addressed*
+        // dial — a LAN or a command-line link was not about a board and must
+        // not forget the one that was — and the two move together, so a name
+        // can never end up beside the address of a different board. A dial
+        // that heard no name is not news that the name already kept for the
+        // same address was wrong, so that one stays.
+        let (address, device_name) = match &self.last_dial {
+            Some(Dial::Ble(crate::transport::ble::Selection::Address(address), _)) => {
+                let name = match &self.advertised_name {
+                    Some(name) => name.clone(),
+                    None if stored.address.eq_ignore_ascii_case(address) => {
+                        stored.device_name.clone()
+                    }
+                    None => String::new(),
+                };
+                (address.clone(), name)
+            }
+            _ => (stored.address.clone(), stored.device_name.clone()),
+        };
         store.write(&Settings {
             // A `stdio` transport is a fact about this run — a flag built it
             // — and is left out rather than written as a choice.
@@ -1279,14 +1299,8 @@ impl App {
                 chosen => Some(chosen),
             },
             lan_host: self.lan_host.clone(),
-            // Only an addressed Bluetooth dial updates it; a LAN dial was not
-            // about a board and must not forget the one that was.
-            address: match &self.last_dial {
-                Some(Dial::Ble(crate::transport::ble::Selection::Address(address), _)) => {
-                    address.clone()
-                }
-                _ => stored.address,
-            },
+            address,
+            device_name,
             view: Some(self.view),
             theme: Some(self.theme),
             lang: Some(self.lang),
@@ -1388,14 +1402,11 @@ impl App {
                 let address = described.strip_prefix("ble:").unwrap_or(&described);
                 // Hex groups, so an address is recognized as one and a
                 // searched-for name is not mistaken for it. A platform that
-                // identifies devices by UUID lands in the `None` arm and keeps
-                // its own spelling.
-                let tail = Self::address_tail_of(address);
-                match (&self.advertised_name, tail) {
-                    (Some(name), Some(tail)) => format!("{name} {tail}"),
-                    (Some(name), None) => name.clone(),
-                    (None, None) => address.to_string(),
-                    (None, Some(_)) => address.to_string(),
+                // identifies devices by UUID keeps its own spelling, and a
+                // board that never named itself is named by its address.
+                match &self.advertised_name {
+                    Some(name) => Self::named_with_tail(name, address),
+                    None => address.to_string(),
                 }
             }
             // A bridge names itself by what it runs — "loopback", the command
@@ -1431,6 +1442,93 @@ impl App {
             .map(|g| g.len() + 1)
             .sum::<usize>();
         Some(&address[offset..])
+    }
+
+    /// A board's name with the tail of the address it belongs to: "Linkr BLE
+    /// UART-3" and `FB:F6:91:14:33:3A` read together as `Linkr BLE UART-3 33:3A`.
+    ///
+    /// The one spelling of a named board, wherever a row has to write one: a
+    /// scan result coming in, the link coming up, and the shelf being read at
+    /// startup all name the same board the same way. The tail is upper-cased
+    /// with the address, because the address rows show hex the way it is
+    /// written down, not the way a platform happens to report it.
+    fn named_with_tail(name: &str, address: &str) -> String {
+        match Self::address_tail_of(&address.to_ascii_uppercase()) {
+            Some(tail) => format!("{name} {tail}"),
+            None => name.to_string(),
+        }
+    }
+
+    /// Name the board a run starts aimed at, from what the last run learned.
+    ///
+    /// The shelf keeps the name and the address as a pair, and this is the
+    /// pair put back: the name beside the dial — so a dial that comes up
+    /// keeps calling the board by its name — and the row that says it, the
+    /// same row a scan result paints.
+    pub fn remember_device_name(&mut self, address: &str, name: &str) {
+        self.advertised_name = Some(name.to_string());
+        self.device_name = Self::named_with_tail(name, address);
+    }
+
+    /// Name the target a dial is aimed at, for the row that shows the wait.
+    ///
+    /// The name the air carried is dropped with the last dial — it belonged
+    /// to that target — unless this dial is aimed at the very same address: a
+    /// name remembered for the address being dialled names this target
+    /// exactly as much as it named the last one. The address is the name of
+    /// last resort.
+    fn aim_device_row_at(&mut self, dial: &Dial) {
+        let same_address = matches!(
+            (self.last_dial.as_ref(), dial),
+            (
+                Some(Dial::Ble(crate::transport::ble::Selection::Address(previous), _)),
+                Dial::Ble(crate::transport::ble::Selection::Address(address), _),
+            ) if previous.eq_ignore_ascii_case(address)
+        );
+        if !same_address {
+            self.advertised_name = None;
+        }
+        self.device_name = match (dial, &self.advertised_name) {
+            (Dial::Ble(crate::transport::ble::Selection::Address(address), _), Some(name)) => {
+                Self::named_with_tail(name, address)
+            }
+            _ => match Self::dialed_device_name(dial) {
+                Some(name) => name,
+                None => self.device_name.clone(),
+            },
+        };
+    }
+
+    /// A remembered board the scan has now heard by name.
+    ///
+    /// A run can be aimed at an address whose name it does not know: the name
+    /// is learned when a board is dialled from a scan result, and a run that
+    /// only ever auto-dialled its remembered board has never had one — the
+    /// Device row showed a MAC. The scan that fills the picker hears the name,
+    /// and hearing it once is enough to name the row and to keep the name for
+    /// the next run. Nothing else moves: the dial still goes where it went.
+    fn name_the_remembered_board(&mut self, devices: &[crate::cli::FoundDevice]) {
+        if self.advertised_name.is_some() {
+            return;
+        }
+        let Some(address) = self.last_dial.as_ref().and_then(|dial| match dial {
+            Dial::Ble(crate::transport::ble::Selection::Address(address), _) => {
+                Some(address.as_str())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(name) = devices
+            .iter()
+            .find(|device| device.id.eq_ignore_ascii_case(address))
+            .and_then(|device| device.name.clone())
+        else {
+            return;
+        };
+        self.advertised_name = Some(name.clone());
+        self.device_name = Self::named_with_tail(&name, address);
+        self.save_settings();
     }
 
     /// What the Device row says: the board that is up, or the one the next
@@ -1474,6 +1572,9 @@ impl App {
             let _ = self.ensure_lan_token();
         }
         let opened = dial.opened()?;
+        // Name the row before the dial is remembered: whether the row keeps
+        // the name it already has is decided against the *previous* target.
+        self.aim_device_row_at(dial);
         // Remembered only once the link opened: a dial that failed is not
         // something `connect` should try again behind the user's back.
         self.last_dial = Some(dial.clone());
@@ -1483,12 +1584,6 @@ impl App {
         // switching the transport and dialling again a sequence the user can
         // actually perform.
         self.transport_locked = true;
-        // Whatever the last scan heard belonged to the last dial: this one
-        // names its own target.
-        self.advertised_name = None;
-        if let Some(name) = Self::dialed_device_name(dial) {
-            self.device_name = name;
-        }
         self.adopt(opened);
         Ok(())
     }
@@ -1748,12 +1843,8 @@ impl App {
         // not the one coming.
         //
         // The row names the target while it comes up, so the wait shows what
-        // is being waited for. Any name the last scan heard belonged to the
-        // *last* dial and goes with it.
-        self.advertised_name = None;
-        if let Some(name) = Self::dialed_device_name(dial) {
-            self.device_name = name;
-        }
+        // is being waited for.
+        self.aim_device_row_at(dial);
         self.transport_locked = true;
         self.state = ConnectionState::Connecting;
         self.dialing = Some(DialJob {
@@ -2424,13 +2515,9 @@ impl App {
         if let Some(name) = advertised_name {
             self.advertised_name = Some(name.to_string());
         }
-        self.device_name = match (
-            advertised_name,
-            Self::address_tail_of(&address.to_ascii_uppercase()),
-        ) {
-            (Some(name), Some(tail)) => format!("{name} {tail}"),
-            (Some(name), None) => name.to_string(),
-            (None, _) => address.to_ascii_uppercase(),
+        self.device_name = match advertised_name {
+            Some(name) => Self::named_with_tail(name, address),
+            None => address.to_ascii_uppercase(),
         };
         // The signal the scan heard the board at. A connected board stops
         // advertising, so the reading taken while listening is the last one
@@ -2487,6 +2574,7 @@ impl App {
     fn refresh_scan_list(&mut self) {
         let mut devices = std::mem::take(&mut self.ble_scan.devices);
         devices.retain(|device| device.board);
+        self.name_the_remembered_board(&devices);
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
             let selected = pick.selected().map(|device| device.id.clone());
             pick.devices = devices;
@@ -2524,6 +2612,7 @@ impl App {
         // scan that has answered cannot still hold it.
         let connect_single = std::mem::take(&mut self.scan_connects_one);
         devices.retain(|device| device.board);
+        self.name_the_remembered_board(&devices);
         if connect_single {
             // A user who moved on while the scan listened — switched the
             // transport to LAN, dialled something by hand — is not waiting for
@@ -2562,12 +2651,16 @@ impl App {
             // A fresh answer is not the old failure: what the scan said before
             // belongs to the scan before.
             pick.message.clear();
-            let room = crate::ui::overlay::dialog_body_room(
-                self.screen,
-                self.sidebar_visible,
-                pick.rows().max(1),
-            );
-            pick.follow(room);
+            // The window's own arithmetic, asked the way the key handler asks
+            // it: a row the box is too narrow for is more than one row tall,
+            // and the scroll counts the rows the paint will draw.
+            let width =
+                crate::ui::overlay::dialog_body_width(self.screen, self.sidebar_visible) as usize;
+            let spans = pick.line_spans(width.max(1));
+            let rows = spans.iter().sum::<usize>().max(1);
+            let room =
+                crate::ui::overlay::dialog_body_room(self.screen, self.sidebar_visible, rows);
+            pick.follow(room, &spans);
         }
     }
 
@@ -6544,6 +6637,163 @@ mod tests {
             crate::settings::SettingsStore::at(&path).read().address,
             "EE:C7:42:34:48:CF",
             "a LAN dial is not about a board"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The board's name outlives the run beside its address: the Device row
+    /// says what the board is called on the next start rather than a bare
+    /// MAC — and a LAN dial, which was never about a board, does not forget
+    /// either half.
+    #[test]
+    fn a_board_name_outlives_the_run() {
+        use crate::transport::ble::Selection;
+
+        let path = std::env::temp_dir().join(format!(
+            "linkr-tui-settings-name-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.settings = Some(crate::settings::SettingsStore::at(&path));
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        app.advertised_name = Some("Linkr BLE UART-3".to_string());
+        app.set_view(View::Terminal);
+        let read = crate::settings::SettingsStore::at(&path).read();
+        assert_eq!(read.address, "FB:F6:91:14:33:3A");
+        assert_eq!(read.device_name, "Linkr BLE UART-3");
+
+        // A dial that heard no name is not news that the name already kept
+        // for the same address was wrong.
+        app.advertised_name = None;
+        app.set_view(View::Terminal);
+        assert_eq!(
+            crate::settings::SettingsStore::at(&path).read().device_name,
+            "Linkr BLE UART-3"
+        );
+
+        // Dialling a different board moves the pair: the new address has no
+        // name until the air carries one, and the old name is not it.
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("EE:C7:42:34:48:CF".to_string()),
+            None,
+        ));
+        app.set_view(View::Terminal);
+        let read = crate::settings::SettingsStore::at(&path).read();
+        assert_eq!(read.address, "EE:C7:42:34:48:CF");
+        assert_eq!(read.device_name, "", "a name belongs to one address");
+
+        app.advertised_name = Some("Linkr BLE UART-1".to_string());
+        app.set_view(View::Terminal);
+        // A LAN dial names its host, which is not the board the next
+        // Bluetooth dial is aimed at: neither the address nor the name moves.
+        app.last_dial = Some(Dial::Lan {
+            host: "192.168.0.100".to_string(),
+            token: None,
+        });
+        app.set_view(View::Terminal);
+        let read = crate::settings::SettingsStore::at(&path).read();
+        assert_eq!(
+            read.address, "EE:C7:42:34:48:CF",
+            "a LAN dial is not about a board"
+        );
+        assert_eq!(
+            read.device_name, "Linkr BLE UART-1",
+            "nor does it rename one"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A run that starts aimed at a remembered board says the board's name,
+    /// not its address — and the dial that follows cannot undo it, while a
+    /// dial at another board does.
+    #[test]
+    fn a_remembered_board_is_named_by_its_name() {
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let remembered = || Dial::Ble(Selection::Address("fb:f6:91:14:33:3a".to_string()), None);
+        // What `main` does with the shelf at startup: the address aims the
+        // dial, the name names the row.
+        app.last_dial = Some(remembered());
+        app.remember_device_name("fb:f6:91:14:33:3a", "Linkr BLE UART-3");
+        assert_eq!(app.device_text(), "Linkr BLE UART-3 33:3A");
+
+        // The startup dial pressed against the same address keeps the name.
+        app.aim_device_row_at(&remembered());
+        assert_eq!(app.device_text(), "Linkr BLE UART-3 33:3A");
+
+        // A dial at a *different* board drops it: the name belonged to the
+        // board that carried it.
+        app.aim_device_row_at(&Dial::Ble(
+            Selection::Address("EE:C7:42:34:48:CF".to_string()),
+            None,
+        ));
+        assert_eq!(app.advertised_name, None);
+        assert_eq!(app.device_text(), "EE:C7:42:34:48:CF");
+
+        // And that board coming up with a name of its own says so.
+        app.advertised_name = Some("Linkr BLE UART-1".to_string());
+        let wire = crate::transport::testing::MemoryLink::ble_addressed("EE:C7:42:34:48:CF");
+        app.adopt(crate::transport::OpenedLink::open(wire.link()).expect("opens"));
+        assert_eq!(app.device_text(), "Linkr BLE UART-1 48:CF");
+    }
+
+    /// A remembered board the scan hears by name is named in the Device row —
+    /// the run that only ever auto-dialled has never seen a scan result, and
+    /// the row showed a MAC — and the name is kept for the next run with it.
+    #[test]
+    fn a_scan_names_the_remembered_board() {
+        use crate::cli::FoundDevice;
+        use crate::transport::ble::Selection;
+
+        let path = std::env::temp_dir().join(format!(
+            "linkr-tui-settings-scan-name-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.settings = Some(crate::settings::SettingsStore::at(&path));
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        assert_eq!(app.device_text(), "FB:F6:91:14:33:3A");
+
+        let heard = |name: Option<&str>, id: &str| FoundDevice {
+            name: name.map(str::to_string),
+            id: id.to_string(),
+            board: true,
+            rssi: Some(-60),
+        };
+        // A name heard for another board is not this board's name, and the
+        // remembered board heard without one names nothing.
+        app.name_the_remembered_board(&[
+            heard(Some("Linkr BLE UART-1"), "DA:EB:CC:48:40:1A"),
+            heard(None, "FB:F6:91:14:33:3A"),
+        ]);
+        assert_eq!(app.device_text(), "FB:F6:91:14:33:3A");
+
+        app.name_the_remembered_board(&[
+            heard(Some("Linkr BLE UART-1"), "DA:EB:CC:48:40:1A"),
+            heard(Some("Linkr BLE UART-3"), "FB:F6:91:14:33:3A"),
+        ]);
+        assert_eq!(app.device_text(), "Linkr BLE UART-3 33:3A");
+        assert_eq!(
+            crate::settings::SettingsStore::at(&path).read().device_name,
+            "Linkr BLE UART-3"
         );
         let _ = std::fs::remove_file(&path);
     }

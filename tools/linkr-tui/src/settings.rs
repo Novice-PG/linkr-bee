@@ -1,12 +1,12 @@
 //! The interface's own choices, remembered between runs.
 //!
-//! Eight small facts a user would resent retyping: which transport the sidebar
-//! stood on, the LAN host they dial, the address of the board they last dialled,
-//! the view they were reading, the theme, the language, how the Enter key is
-//! spelled on the wire and whether both directions are traced. They live in the
-//! shared JSON shelf the agent stores already use — the `tui.*` keys — because
-//! that file already has the one thing this needs and would otherwise have to
-//! grow: an atomic write.
+//! Nine small facts a user would resent retyping: which transport the sidebar
+//! stood on, the LAN host they dial, the address and the name of the board they
+//! last dialled, the view they were reading, the theme, the language, how the
+//! Enter key is spelled on the wire and whether both directions are traced.
+//! They live in the shared JSON shelf the agent stores already use — the
+//! `tui.*` keys — because that file already has the one thing this needs and
+//! would otherwise have to grow: an atomic write.
 //!
 //! Everything here is deliberately lossy. A value that is missing, empty or
 //! unrecognised reads as `None`, and the caller decides the default; a settings
@@ -27,6 +27,7 @@ use crate::theme::ThemeChoice;
 const TRANSPORT: &str = "tui.transport";
 const LAN_HOST: &str = "tui.lan_host";
 const ADDRESS: &str = "tui.address";
+const DEVICE_NAME: &str = "tui.device_name";
 const VIEW: &str = "tui.view";
 const THEME: &str = "tui.theme";
 const LANG: &str = "tui.lang";
@@ -45,6 +46,11 @@ pub struct Settings {
     /// The address of the last board dialled over Bluetooth, so a bench with
     /// one board does not make the user find it again every morning.
     pub address: String,
+    /// The name the board answered to — `Linkr BLE UART-3` — which the Device
+    /// row says beside the tail of the address. The address alone leaves the
+    /// row a bare MAC: everything to a scanner, nothing to the person looking
+    /// at the bench.
+    pub device_name: String,
     /// The view the keyboard was on.
     pub view: Option<View>,
     pub theme: Option<ThemeChoice>,
@@ -94,6 +100,7 @@ impl SettingsStore {
                 .filter(|kind| *kind != Transport::Stdio),
             lan_host: self.file.get(LAN_HOST).unwrap_or_default(),
             address: self.file.get(ADDRESS).unwrap_or_default(),
+            device_name: self.file.get(DEVICE_NAME).unwrap_or_default(),
             view: self.file.get(VIEW).as_deref().and_then(View::from_name),
             theme: self
                 .file
@@ -123,6 +130,7 @@ impl SettingsStore {
         self.file.set(TRANSPORT, transport);
         self.file.set(LAN_HOST, settings.lan_host.trim());
         self.file.set(ADDRESS, settings.address.trim());
+        self.file.set(DEVICE_NAME, settings.device_name.trim());
         self.file
             .set(VIEW, settings.view.map(View::as_str).unwrap_or_default());
         self.file.set(
@@ -164,6 +172,7 @@ mod tests {
             transport: Some(Transport::Lan),
             lan_host: "192.168.0.100".to_string(),
             address: "EE:C7:42:34:48:CF".to_string(),
+            device_name: "Linkr BLE UART-1".to_string(),
             view: Some(View::Network),
             theme: Some(ThemeChoice::Light),
             lang: Some(Lang::En),

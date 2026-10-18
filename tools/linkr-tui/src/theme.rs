@@ -573,8 +573,8 @@ impl Theme {
     }
 }
 
-/// Which theme the user chose, as persisted in `tui.json`. The web remembers
-/// the same choice in `localStorage["linkr-theme"]`.
+/// Which theme the user chose, kept as the `tui.theme` key in the settings
+/// shelf. The web remembers the same choice in `localStorage["linkr-theme"]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeChoice {
     #[default]
