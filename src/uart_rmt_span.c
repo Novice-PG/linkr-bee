@@ -33,9 +33,10 @@
  * a duration is only stored when an edge follows within 819 us, so no stored
  * run can reach the 15-bit limit (twice the window), and a line whose bit
  * time exceeds the window (below ~1.2 kHz) produces no captures at all — the
- * follower reads it as a quiet line and holds its rate. The probe ladder
- * started at 2617 baud; everything a console realistically boots to is far
- * above both floors.
+ * follower reads it as a line it cannot measure and holds its rate (the level
+ * witness is what keeps it from calling such a line silent, see
+ * uart_autobaud.c). The probe ladder started at 2617 baud; everything a
+ * console realistically boots to is far above both floors.
  */
 #include "uart_rmt_span.h"
 
@@ -80,7 +81,6 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
  * captured — see the .c header.
  */
 #define SPAN_IDLE_TICKS	16384u
-#define SPAN_MIN_RUNS	4u	/* below this there is no span to speak of */
 
 #define SPAN_MEM_WORDS	SOC_RMT_MEM_WORDS_PER_CHANNEL
 /* RMTMEM in the ROM linker script: 0x3ff56800 = RMT base + 0x800. */
@@ -88,6 +88,7 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 
 static rmt_dev_t *span_rmt;
 static bool span_ready;
+static int span_rx_pin = -1;
 
 /*
  * One capture, as the follower reads it: sum the runs, classify each against
@@ -114,7 +115,7 @@ static bool span_ready;
 static void span_measure(uint32_t words, struct linkr_uart_span *span)
 {
 	uint32_t sum = 0, dmin = UINT32_MAX, runs = 0, zeros = 0;
-	uint32_t bits = 0, misfits = 0, est_q4 = 0;
+	uint32_t bits = 0, misfits = 0, est_q8 = 0;
 
 	for (uint32_t w = 0; w < words; w++) {
 		uint32_t v = SPAN_MEM[SPAN_CH * SPAN_MEM_WORDS + w];
@@ -138,7 +139,7 @@ static void span_measure(uint32_t words, struct linkr_uart_span *span)
 	span->dmin = (dmin != UINT32_MAX) ? dmin * SPAN_DIV : 0u;
 	span->bits = 0u;
 	span->misfits = 0u;
-	span->est_q4 = 0u;
+	span->est_q8 = 0u;
 	span->trustworthy = false;
 
 	if (runs == 0u) {
@@ -162,8 +163,9 @@ static void span_measure(uint32_t words, struct linkr_uart_span *span)
 		}
 	}
 
-	/* Sixteenths of a channel-clock cycle; Q4 keeps the fractional part. */
-	est_q4 = (uint32_t)((((uint64_t)sum) << 4) / bits);
+	/* Q8 of a channel-clock tick; Q8 keeps the quantisation far below
+	 * the span's own +/-1 tick even at the fastest rates. */
+	est_q8 = (uint32_t)((((uint64_t)sum) << 8) / bits);
 
 	/* Every run must sit within an eighth of a bit time of a multiple. */
 	for (uint32_t w = 0; w < words; w++) {
@@ -180,11 +182,11 @@ static void span_measure(uint32_t words, struct linkr_uart_span *span)
 			}
 			m = (d[i] + dmin / 2u) / dmin;
 			m = MAX(m, 1u);
-			delta = (uint64_t)d[i] << 4;
-			delta = delta > (uint64_t)m * est_q4 ?
-				delta - (uint64_t)m * est_q4 :
-				(uint64_t)m * est_q4 - delta;
-			if (delta * 8u > est_q4) {
+			delta = (uint64_t)d[i] << 8;
+			delta = delta > (uint64_t)m * est_q8 ?
+				delta - (uint64_t)m * est_q8 :
+				(uint64_t)m * est_q8 - delta;
+			if (delta * 8u > est_q8) {
 				misfits++;
 			}
 		}
@@ -192,9 +194,9 @@ static void span_measure(uint32_t words, struct linkr_uart_span *span)
 
 	span->bits = bits;
 	span->misfits = misfits;
-	/* The follower's units, not this module's: APB cycles in sixteenths. */
-	span->est_q4 = est_q4 * SPAN_DIV;
-	span->trustworthy = runs >= SPAN_MIN_RUNS && misfits * 8u <= runs;
+	/* The follower's units, not this module's: APB cycles in 256ths. */
+	span->est_q8 = est_q8 * SPAN_DIV;
+	span->trustworthy = runs >= LINKR_UART_SPAN_MIN_RUNS && misfits * 8u <= runs;
 }
 
 void linkr_uart_rmt_span_init(uintptr_t uart_reg_addr)
@@ -264,6 +266,7 @@ void linkr_uart_rmt_span_init(uintptr_t uart_reg_addr)
 	rmt_ll_rx_set_mem_owner(span_rmt, SPAN_CH, RMT_LL_MEM_OWNER_HW);
 	rmt_ll_rx_enable(span_rmt, SPAN_CH, true);
 
+	span_rx_pin = pin;
 	span_ready = true;
 	LOG_WRN("rmt span: armed on GPIO%d (UART RX), ch=%u div=%u filter=%u "
 		"idle=%u", pin, SPAN_CH, SPAN_DIV, SPAN_FILTER_TICKS,
@@ -307,6 +310,21 @@ bool linkr_uart_rmt_span_poll(struct linkr_uart_span *span)
 	rmt_ll_rx_enable(span_rmt, SPAN_CH, true);
 
 	return words > 0u;
+}
+
+int linkr_uart_rmt_span_line_level(void)
+{
+	gpio_dev_t *gpio = (gpio_dev_t *)DR_REG_GPIO_BASE;
+
+	if (!span_ready || span_rx_pin < 0) {
+		return -1;
+	}
+
+	if (span_rx_pin < 32) {
+		return (int)((gpio->in >> span_rx_pin) & 1u);
+	}
+
+	return (int)((gpio->in1.data >> (span_rx_pin - 32)) & 1u);
 }
 
 #endif /* LINKR_UART_AUTOBAUD */

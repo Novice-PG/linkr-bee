@@ -155,14 +155,18 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
 #define AUTOBAUD_REFUSED_MAX	6	  /* badly measured windows before saying so */
 /*
- * Consecutive windows in which the line did not toggle at all, after which the
- * port stops being treated as measured against it: 8 x 400 ms = 3.2 s of
- * silence. Not one window — the peer's bursts are ~200 ms apart, so a single
- * empty window can come back empty on timing alone and would drop the
- * protection between two bursts of the same link. Sustained quiet is the one
- * thing that can happen *before* a peer's rate changes, which is what makes it
- * the right signal to reopen on: long enough that a burst gap cannot reach it,
- * short enough to cover the gap a rate change on the other end leaves.
+ * Consecutive windows in which no capture came back and the line sampled idle
+ * (high) whenever the follower looked, after which the port stops being
+ * treated as measured against it: 8 x 400 ms = 3.2 s of silence. Not one
+ * window — the peer's bursts are ~200 ms apart, so a single empty window can
+ * come back empty on timing alone and would drop the protection between two
+ * bursts of the same link. The pin sample is what keeps a *busy* line from
+ * reading as silence: captures stop coming whenever the traffic has no gap
+ * the receiver can begin from, and without the sample a working stream would
+ * hand the port back after 3.2 s. Sustained quiet is the one thing that can
+ * happen *before* a peer's rate changes, which is what makes it the right
+ * signal to reopen on: long enough that a burst gap cannot reach it, short
+ * enough to cover the gap a rate change on the other end leaves.
  */
 #define AUTOBAUD_QUIET_UNVERIFY 8
 /*
@@ -312,14 +316,14 @@ static bool autobaud_reads_like_a_missing_bit(uint32_t rate, uint32_t current,
 }
 
 /*
- * The fractional sixteenths of a Q4 cycle count, in hundredths — for logs
- * ("694" printed beside ".44"). The span estimate is the only Q4 number this
+ * The fractional 256ths of a Q8 cycle count, in hundredths — for logs
+ * ("694" printed beside ".44"). The span estimate is the only Q8 number this
  * file handles, and printing it as a bare integer would hide the sub-cycle
  * part that makes it worth printing at all.
  */
-static uint32_t autobaud_hundredths(uint32_t q4)
+static uint32_t autobaud_hundredths(uint32_t q8)
 {
-	return ((q4 & 15u) * 100u + 8u) / 16u;
+	return ((q8 & 255u) * 100u + 128u) / 256u;
 }
 
 /*
@@ -333,9 +337,10 @@ static void autobaud_tick(struct k_work *work)
 {
 	uart_dev_t *hw = autobaud_hw();
 	uint32_t now = k_uptime_get_32();
-	uint32_t old_baud, div_meas4, div_cur, next, lo, hi;
+	uint32_t old_baud, div_meas8, div_cur, next, lo, hi, dmin_rate;
 	struct linkr_uart_span span;
 	bool captured;
+	int line_level;
 	uint64_t measured;
 
 	ARG_UNUSED(work);
@@ -345,9 +350,11 @@ static void autobaud_tick(struct k_work *work)
 	 * listening. One burst per window is all the follower needs, and the
 	 * receiver only starts from the next burst's first edge anyway (see
 	 * uart_rmt_span.h), so a burst arriving while one is already being
-	 * measured costs nothing.
+	 * measured costs nothing. The pin sample is the witness that tells a
+	 * silent line from a busy one when no capture came back.
 	 */
 	captured = linkr_uart_rmt_span_poll(&span);
+	line_level = linkr_uart_rmt_span_line_level();
 
 	k_work_reschedule(&autobaud_work, K_MSEC(AUTOBAUD_WINDOW_MS));
 
@@ -356,35 +363,53 @@ static void autobaud_tick(struct k_work *work)
 	}
 
 	if (!captured) {
-		/* Nothing was captured, and a window with no capture says
-		 * nothing about the rate — so it must not eat the refusal
-		 * budget either. It does say something about the *link*: a
-		 * line this quiet is no longer one we hold any evidence
-		 * about, so the port's rate stops being treated as measured
-		 * against it and the next reading is followed again. See
-		 * AUTOBAUD_QUIET_UNVERIFY. */
-		if (++autobaud_quiet >= AUTOBAUD_QUIET_UNVERIFY) {
-			autobaud_quiet = AUTOBAUD_QUIET_UNVERIFY;
-			if (autobaud_verified) {
-				autobaud_verified = false;
-				LOG_WRN("UART autobaud: line silent for %u "
-					"windows, no longer measured against "
-					"the port",
-					AUTOBAUD_QUIET_UNVERIFY);
+		/* Nothing was captured. Two very different lines look like
+		 * that: one that said nothing, and one busy without a gap
+		 * the receiver could begin from — it only starts a capture
+		 * once the line has been idle. The rate is owed nothing by
+		 * either, but only the first is silence: a line in space is
+		 * proof the line was active, so it neither ages the quiet
+		 * count nor drops the port's claim of being measured against
+		 * the line. (One sample can miss a busy line's level, but a
+		 * false "silent" needs eight windows whose samples all came
+		 * back high, and eight coin flips in a row do not happen.)
+		 * See AUTOBAUD_QUIET_UNVERIFY. */
+		if (line_level != 0) {
+			if (++autobaud_quiet >= AUTOBAUD_QUIET_UNVERIFY) {
+				autobaud_quiet = AUTOBAUD_QUIET_UNVERIFY;
+				if (autobaud_verified) {
+					autobaud_verified = false;
+					LOG_WRN("UART autobaud: line silent "
+						"for %u windows, no longer "
+						"measured against the port",
+						AUTOBAUD_QUIET_UNVERIFY);
+				}
 			}
+		} else {
+			autobaud_quiet = 0;
 		}
 		return;
 	}
 	autobaud_quiet = 0;
 
 	if (!span.trustworthy) {
+		if (span.runs < LINKR_UART_SPAN_MIN_RUNS) {
+			/* Too short a train to measure — a burst's own tail
+			 * closed by the arming, not the line saying
+			 * something badly. Like an empty window for the
+			 * rate: not a refusal, and not a reason to drop a
+			 * candidate waiting for its second window. The
+			 * activity itself is already counted: the capture
+			 * reset the quiet count above. */
+			return;
+		}
 		/* The line said something and it was captured, but the runs
-		 * do not sit on whole multiples of their own estimate — too
-		 * short a train for a span, a rate that moved mid-capture, a
-		 * torn edge. Not a measurement: nothing here may move the
-		 * port or count as evidence about the rate. The latch this
-		 * replaced called the state "the two polarities disagreed"
-		 * and refused it the same way. */
+		 * do not sit on whole multiples of their own estimate — a
+		 * rate that moved mid-capture, a torn edge. Not a
+		 * measurement: nothing here may move the port or count as
+		 * evidence about the rate. The latch this replaced called
+		 * the state "the two polarities disagreed" and refused it
+		 * the same way. */
 		autobaud_forget();
 		if (++autobaud_refused >= AUTOBAUD_REFUSED_MAX) {
 			autobaud_refused = 0;
@@ -398,20 +423,20 @@ static void autobaud_tick(struct k_work *work)
 	}
 	autobaud_refused = 0;
 
-	div_meas4 = span.est_q4;
+	div_meas8 = span.est_q8;
 	old_baud = linkr_uart_config_current();
 
-	/* Both numbers are APB cycles per bit in sixteenths: the estimator
-	 * measured the line in APB ticks, and the divider register holds the
-	 * port's own source clock over baud, the source clock being
-	 * UART_SCLK_DEFAULT = APB on this chip (see uart_esp32.c). The clock
-	 * cancels out of the ratio — no frequency constant is needed, and the
-	 * bench's +42 ppm between the two crystals cancels with it, because
-	 * this board programs its own divider from its own ticks. If the
-	 * bridge UART is ever moved off APB, this ratio and the RMT source
-	 * clock must move together. */
+	/* Both numbers are APB cycles per bit: the estimator measured the
+	 * line in APB ticks (in 256ths), and the divider register holds the
+	 * port's own source clock over baud (in 16ths), the source clock
+	 * being UART_SCLK_DEFAULT = APB on this chip (see uart_esp32.c). The
+	 * clock cancels out of the ratio — no frequency constant is needed,
+	 * and the bench's +42 ppm between the two crystals cancels with it,
+	 * because this board programs its own divider from its own ticks. If
+	 * the bridge UART is ever moved off APB, this ratio and the RMT
+	 * source clock must move together. */
 	div_cur = (hw->clk_div.div_int << 4) | hw->clk_div.div_frag;
-	measured = ((uint64_t)old_baud * div_cur) / div_meas4;
+	measured = ((uint64_t)old_baud * div_cur * 16u) / div_meas8;
 
 	if (measured < AUTOBAUD_MIN_BAUD || measured > AUTOBAUD_MAX_BAUD) {
 		autobaud_forget();
@@ -419,7 +444,7 @@ static void autobaud_tick(struct k_work *work)
 			autobaud_warned_at = now;
 			LOG_WRN("UART autobaud: implausible %u.%02u cycles/bit "
 				"over %u runs -> %u, keeping %u",
-				div_meas4 >> 4, autobaud_hundredths(div_meas4),
+				div_meas8 >> 8, autobaud_hundredths(div_meas8),
 				span.runs, (uint32_t)measured, old_baud);
 		}
 		return;
@@ -473,8 +498,8 @@ static void autobaud_tick(struct k_work *work)
 			LOG_WRN("UART autobaud: line reads %u (%u.%02u "
 				"cycles/bit over %u runs, port programmed for "
 				"%u) — our own rate, not a move; holding %u",
-				(uint32_t)measured, div_meas4 >> 4,
-				autobaud_hundredths(div_meas4), span.runs,
+				(uint32_t)measured, div_meas8 >> 8,
+				autobaud_hundredths(div_meas8), span.runs,
 				(uint32_t)((div_cur + 8u) >> 4), old_baud);
 		}
 		return;
@@ -509,6 +534,40 @@ static void autobaud_tick(struct k_work *work)
 		return;
 	}
 
+	/*
+	 * The same question asked of the shortest run instead of the fitted
+	 * estimate. The estimate divides a sum by a count, so a peer whose
+	 * write() gaps land inside one polarity stretches every run of it and
+	 * the reading can walk outside its ±2% band while the shortest run —
+	 * which a gap between bytes does not touch — still sits on the grid.
+	 * The bench caught this with 0xF0 written byte by byte at the port's
+	 * own 1500000: the fit read 1.5/5.5, inside no band, and a repeat of
+	 * the same stream could have confirmed a move to 271k on a live link.
+	 * What the estimate misses this catches: a byte stream can only reach
+	 * the divisors of the refusal, never a rate it never carried, so a
+	 * shortest run that itself reports one of those divisors is refused
+	 * with the same reasoning as above.
+	 */
+	if (span.dmin > 0u) {
+		dmin_rate = (uint32_t)(((uint64_t)old_baud * div_cur) /
+				       (16u * (uint64_t)span.dmin));
+		if (autobaud_reads_like_a_missing_bit(
+			    dmin_rate, old_baud,
+			    autobaud_verified ? AUTOBAUD_MAX_FACTOR
+					      : AUTOBAUD_ARTIFACT_MAX_FACTOR)) {
+			autobaud_forget();
+			if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
+				autobaud_warned_at = now;
+				LOG_WRN("UART autobaud: shortest run reads %u "
+					"every window while the port is %u — "
+					"our own rate over a run longer than "
+					"one bit, holding %u",
+					dmin_rate, old_baud, old_baud);
+			}
+			return;
+		}
+	}
+
 	if (next != autobaud_candidate) {
 		autobaud_candidate = next;
 		autobaud_confirm = 1;
@@ -536,7 +595,7 @@ static void autobaud_tick(struct k_work *work)
 	 * 694+7/16 = 115200, 8333+5/16 = 9600 at 80 MHz. */
 	LOG_WRN("UART autobaud: line rate %u -> %u (%u.%02u cycles/bit over "
 		"%u runs, dmin %u cycles), divider now %u + %u/16",
-		old_baud, next, div_meas4 >> 4, autobaud_hundredths(div_meas4),
+		old_baud, next, div_meas8 >> 8, autobaud_hundredths(div_meas8),
 		span.runs, span.dmin, hw->clk_div.div_int,
 		hw->clk_div.div_frag);
 }
