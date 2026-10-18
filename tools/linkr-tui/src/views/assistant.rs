@@ -9,7 +9,7 @@
 //!
 //! Two surfaces, one form. The *view* is the thread: session, composer,
 //! conversation, tasks. The *settings window* — `Ctrl+P`, "Configure the
-//! assistant" — is the five fields and the note list, raised as a dialog. They
+//! assistant" — is the fields and the note list, raised as a dialog. They
 //! split because a form the user has to scroll past is what pushed the thread
 //! off the pane, and both halves share `AssistantState` so the caret, the
 //! hidden key and the note cursor are one piece of state rather than two
@@ -146,6 +146,14 @@ pub struct AssistantState {
     pub model: String,
     pub api_key: String,
     pub headers: String,
+    /// Which protocol the request will speak, as `AGENT_PROVIDERS` spells it,
+    /// and how much thinking the model is asked for.
+    pub provider: String,
+    pub reasoning: String,
+    /// The context window and the output ceiling as typed. Empty is "the
+    /// built-in default", the same meaning `0` has once parsed.
+    pub context_window: String,
+    pub max_tokens: String,
     /// What the last save said, in the interface language's own words. A field
     /// name from the validator is not a sentence a user can act on, so it is
     /// translated here rather than shown raw.
@@ -205,6 +213,13 @@ impl Default for AssistantState {
             model: String::new(),
             api_key: String::new(),
             headers: String::new(),
+            // The two selects have no blank state: a select paints a value
+            // whatever the store holds, and the default is the protocol and
+            // the level a request goes out with when nothing was chosen.
+            provider: crate::agent::config::AGENT_PROVIDERS[0].id.to_string(),
+            reasoning: crate::agent::config::AGENT_REASONING_LEVELS[0].to_string(),
+            context_window: String::new(),
+            max_tokens: String::new(),
             notice: None,
             // One empty conversation, always: see [`AssistantState::chats`].
             chats: vec![ChatState::default()],
@@ -332,7 +347,7 @@ impl AssistantState {
 /// The field the keyboard is typing into.
 ///
 /// One entry per editable field. They live in two places now: the composer is
-/// the view's, and the five settings are the settings window's — a user opens
+/// the view's, and the model settings are the settings window's — a user opens
 /// the view to talk to the model and opens the window on purpose when the
 /// notice says they must configure it first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -348,6 +363,14 @@ pub enum AgentField {
     ApiKey,
     /// Extra HTTP headers, one per line.
     Headers,
+    /// The protocol the request speaks. A choice, not text.
+    Protocol,
+    /// How much thinking the model is asked for. A choice, not text.
+    Reasoning,
+    /// The context window the endpoint is announced with. Digits, not text.
+    ContextWindow,
+    /// The output ceiling. Digits, not text.
+    MaxTokens,
     /// A note being typed, below the notes it will join.
     Notes,
 }
@@ -358,11 +381,19 @@ pub enum AgentField {
 /// is what the view became once the settings moved out into their own window.
 /// Tab here walks a form with an end, and the end is the last setting — never a
 /// trip through a caret that is not painted anywhere the user can see it.
-pub const SETTINGS: [AgentField; 5] = [
+///
+/// The order is the web panel's own, because the two are one feature: endpoint,
+/// model, key, headers, protocol, reasoning, window, ceiling — and then the
+/// note row, which only this interface has.
+pub const SETTINGS: [AgentField; 9] = [
     AgentField::Endpoint,
     AgentField::Model,
     AgentField::ApiKey,
     AgentField::Headers,
+    AgentField::Protocol,
+    AgentField::Reasoning,
+    AgentField::ContextWindow,
+    AgentField::MaxTokens,
     AgentField::Notes,
 ];
 
@@ -376,6 +407,10 @@ impl AgentField {
             AgentField::Model => s.agent_field_model,
             AgentField::ApiKey => s.agent_field_key,
             AgentField::Headers => s.agent_field_headers,
+            AgentField::Protocol => s.agent_field_protocol,
+            AgentField::Reasoning => s.agent_field_reasoning,
+            AgentField::ContextWindow => s.agent_field_context_window,
+            AgentField::MaxTokens => s.agent_field_max_tokens,
             AgentField::Notes => s.agent_field_note,
         }
     }
@@ -404,6 +439,10 @@ impl AgentField {
     }
 
     /// The text of this field, for a painter that reads one field.
+    ///
+    /// The two selects answer with the id they store rather than with the word
+    /// for it: [`AgentField::value`] is what a row paints, and this is what a
+    /// caller holding the raw setting wants.
     pub fn text(self, state: &AssistantState) -> &str {
         match self {
             AgentField::Composer => &state.chat().composer,
@@ -411,8 +450,46 @@ impl AgentField {
             AgentField::Model => &state.model,
             AgentField::ApiKey => &state.api_key,
             AgentField::Headers => &state.headers,
+            AgentField::Protocol => &state.provider,
+            AgentField::Reasoning => &state.reasoning,
+            AgentField::ContextWindow => &state.context_window,
+            AgentField::MaxTokens => &state.max_tokens,
             AgentField::Notes => &state.note_input,
         }
+    }
+
+    /// What this field's row paints.
+    ///
+    /// Not always [`AgentField::text`]: a select paints the *word* for the
+    /// value it holds — `Anthropic Messages 接口`, `中` — because a row the user
+    /// can act on shows the choice rather than the id the store keeps.
+    pub fn value(self, state: &AssistantState, lang: crate::i18n::Lang) -> String {
+        match self {
+            AgentField::Protocol => crate::agent::config::provider_for(&state.provider)
+                .label(lang)
+                .to_string(),
+            AgentField::Reasoning => {
+                crate::agent::config::reasoning_label(&state.reasoning, lang).to_string()
+            }
+            _ => self.text(state).to_string(),
+        }
+    }
+
+    /// Whether this field is a choice rather than a place to type.
+    ///
+    /// The arrows and the space bar step it; a letter is not a value it can
+    /// hold, and typing one into it is a keystroke with nowhere to go.
+    pub fn is_select(self) -> bool {
+        matches!(self, AgentField::Protocol | AgentField::Reasoning)
+    }
+
+    /// Whether this field takes digits and nothing else.
+    ///
+    /// A number field that accepted letters would hold a value the validator
+    /// refuses at save time, and the refusal would arrive after the user had
+    /// moved on — so the character is refused at the keystroke instead.
+    pub fn is_number(self) -> bool {
+        matches!(self, AgentField::ContextWindow | AgentField::MaxTokens)
     }
 
     /// Whether this field holds a secret, so the painter never paints it.
@@ -542,8 +619,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     match key.code {
         KeyCode::Backspace => {
-            let text = field_text_mut(app);
-            text.pop();
+            if let Some(text) = field_text_mut(app) {
+                text.pop();
+            }
         }
         // Up and Down are consumed either way. The assistant is a form, and an
         // arrow it has no use for would otherwise reach the pane below this
@@ -563,24 +641,71 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // already taken the chords that are the interface's own, so what
         // reaches here without a CONTROL or ALT modifier is printable.
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let text = field_text_mut(app);
-            text.push(ch);
+            if let Some(text) = field_text_mut(app) {
+                text.push(ch);
+            }
         }
         _ => return false,
     }
     true
 }
 
-/// The mutable text of the focused field.
-fn field_text_mut(app: &mut App) -> &mut String {
+/// The mutable text of the focused field, when that field has text.
+///
+/// The two selects have none: a choice is stepped rather than typed, and
+/// `None` here is what keeps a letter from landing in a row that cannot hold
+/// it.
+fn field_text_mut(app: &mut App) -> Option<&mut String> {
     let state = &mut app.assistant;
     match state.focus {
-        AgentField::Composer => &mut state.chat_mut().composer,
-        AgentField::Endpoint => &mut state.endpoint,
-        AgentField::Model => &mut state.model,
-        AgentField::ApiKey => &mut state.api_key,
-        AgentField::Headers => &mut state.headers,
-        AgentField::Notes => &mut state.note_input,
+        AgentField::Composer => Some(&mut state.chat_mut().composer),
+        AgentField::Endpoint => Some(&mut state.endpoint),
+        AgentField::Model => Some(&mut state.model),
+        AgentField::ApiKey => Some(&mut state.api_key),
+        AgentField::Headers => Some(&mut state.headers),
+        AgentField::ContextWindow => Some(&mut state.context_window),
+        AgentField::MaxTokens => Some(&mut state.max_tokens),
+        AgentField::Protocol | AgentField::Reasoning => None,
+        AgentField::Notes => Some(&mut state.note_input),
+    }
+}
+
+/// Step the focused field's choice one value, wrapping at both ends.
+///
+/// A select has no caret to type into, so the arrows and the space bar are how
+/// it is changed — which is the gesture every terminal form has used for a
+/// choice row, and the one a user whose hands are already on the arrows will
+/// try first.
+fn cycle_choice(app: &mut App, forward: bool) {
+    let state = &mut app.assistant;
+    match state.focus {
+        AgentField::Protocol => {
+            let choices = crate::agent::config::AGENT_PROVIDERS;
+            let at = choices
+                .iter()
+                .position(|provider| provider.id == state.provider)
+                .unwrap_or(0);
+            let next = if forward {
+                (at + 1) % choices.len()
+            } else {
+                (at + choices.len() - 1) % choices.len()
+            };
+            state.provider = choices[next].id.to_string();
+        }
+        AgentField::Reasoning => {
+            let choices = crate::agent::config::AGENT_REASONING_LEVELS;
+            let at = choices
+                .iter()
+                .position(|level| *level == state.reasoning)
+                .unwrap_or(0);
+            let next = if forward {
+                (at + 1) % choices.len()
+            } else {
+                (at + choices.len() - 1) % choices.len()
+            };
+            state.reasoning = choices[next].to_string();
+        }
+        _ => {}
     }
 }
 
@@ -619,8 +744,8 @@ pub fn focus_composer(app: &mut App) {
 
 /// Give the caret back to the composer and put the settings window away.
 ///
-/// The caret moves with the window, always: while it is up the caret is one of
-/// the five fields, and the moment it shuts the caret is the composer's. A caret
+/// The caret moves with the window, always: while it is up the caret is in
+/// the window, and the moment it shuts the caret is the composer's. A caret
 /// left on a field the view does not paint is a keystroke that lands nowhere.
 pub fn close_settings(app: &mut App) {
     app.assistant.focus = AgentField::Composer;
@@ -631,9 +756,13 @@ pub fn close_settings(app: &mut App) {
 
 /// One key in the settings window. Returns true when the form took it.
 ///
-/// Tab and the arrows walk the five fields — the arrows *except* on the note
-/// row, where they walk the note list instead: that row is where a field meets
-/// a list, and the list is the only thing that says which note `Delete` means.
+/// Tab and the arrows walk the fields — the arrows *except* on the note row,
+/// where they walk the note list instead: that row is where a field meets a
+/// list, and the list is the only thing that says which note `Delete` means.
+/// Left and Right are the select fields' own: on a row that holds a choice they
+/// step it, and anywhere else they fall through to the dispatcher, which has no
+/// use for them either but is where the decision belongs.
+///
 /// Enter saves the whole form, or files the note when the note row has the
 /// caret, because a half-filled endpoint is not a configuration and saving
 /// field by field would leave the model configured with an endpoint that was
@@ -649,8 +778,9 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::BackTab => app.assistant.focus = app.assistant.focus.prev(),
         KeyCode::Tab => app.assistant.focus = app.assistant.focus.next(),
         KeyCode::Backspace => {
-            let text = field_text_mut(app);
-            text.pop();
+            if let Some(text) = field_text_mut(app) {
+                text.pop();
+            }
             app.assistant.hide_key_char();
         }
         KeyCode::Up if app.assistant.focus == AgentField::Notes => {
@@ -662,6 +792,8 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Up => app.assistant.focus = app.assistant.focus.prev(),
         KeyCode::Down => app.assistant.focus = app.assistant.focus.next(),
+        KeyCode::Left if app.assistant.focus.is_select() => cycle_choice(app, false),
+        KeyCode::Right if app.assistant.focus.is_select() => cycle_choice(app, true),
         // Delete removes the note under the cursor. Not a letter, which would
         // take that letter out of the field being typed in, and not Backspace,
         // which already means "delete a character".
@@ -673,11 +805,28 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
         // A control character is not text: the window's own chords (there are
         // none) and the interface's own are decided before this handler runs.
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let text = field_text_mut(app);
-            text.push(ch);
-            // The key field's own half of the bargain: one star per character,
-            // and the one just typed still in the clear. See [`KEY_REVEAL`].
-            app.assistant.show_last_key_char();
+            if app.assistant.focus.is_select() {
+                // Space steps a choice the way the arrows do — a select is what
+                // the row is, and the space bar is what a list takes — and any
+                // other character is not a value it can hold.
+                if ch == ' ' {
+                    cycle_choice(app, true);
+                }
+            } else if app.assistant.focus.is_number() {
+                if ch.is_ascii_digit() {
+                    if let Some(text) = field_text_mut(app) {
+                        text.push(ch);
+                    }
+                }
+            } else {
+                if let Some(text) = field_text_mut(app) {
+                    text.push(ch);
+                }
+                // The key field's own half of the bargain: one star per
+                // character, and the one just typed still in the clear. See
+                // [`KEY_REVEAL`].
+                app.assistant.show_last_key_char();
+            }
         }
         _ => return false,
     }
@@ -970,22 +1119,20 @@ fn submit_prompt(app: &mut App) {
         crate::exec::executor::Mode::Manual => crate::exec::approval::ExecutionMode::Manual,
         crate::exec::executor::Mode::FullAuto => crate::exec::approval::ExecutionMode::FullAuto,
     };
-    let mut messages = vec![crate::agent::runtime::ChatMessage {
-        role: crate::agent::runtime::ChatRole::System,
-        content: format!(
-            "You are the assistant of a wireless serial bridge. You answer \
-             questions about the target it is attached to, and you may \
-             propose commands for it; you never pretend to have run one.\n\
-             {}",
-            crate::exec::approval::execution_mode_prompt(execution_mode)
-        ),
-    }];
+    let system = format!(
+        "You are the assistant of a wireless serial bridge. You answer \
+         questions about the target it is attached to, and you may \
+         propose commands for it; you never pretend to have run one.\n\
+         {}",
+        crate::exec::approval::execution_mode_prompt(execution_mode)
+    );
     // The conversation continues: what the model is told is the thread so far,
     // not only the sentence just typed. Without this the assistant answers
     // every question as the first one, and "why?" is a question with nothing
     // behind it. The store bounds the list, so this cannot grow forever.
+    let mut history: Vec<crate::agent::runtime::ChatMessage> = Vec::new();
     for turn in &app.assistant.chat().messages {
-        messages.push(crate::agent::runtime::ChatMessage {
+        history.push(crate::agent::runtime::ChatMessage {
             role: if turn.role == "assistant" {
                 crate::agent::runtime::ChatRole::Assistant
             } else {
@@ -994,6 +1141,23 @@ fn submit_prompt(app: &mut App) {
             content: turn.text.clone(),
         });
     }
+    // And how much of it goes is the configured window's business rather than a
+    // constant: a request that carries more history than the window holds is
+    // refused by the provider, with an error that names no setting. The oldest
+    // turns go first, and the thread on screen keeps every one of them — this
+    // trims the request, not the conversation.
+    let budget = crate::agent::context::context_budget_chars(
+        config.effective_context_window(),
+        system.chars().count(),
+        config.output_ceiling(),
+    );
+    crate::agent::context::trim_history(&mut history, budget);
+    let mut messages = Vec::with_capacity(history.len() + 1);
+    messages.push(crate::agent::runtime::ChatMessage {
+        role: crate::agent::runtime::ChatRole::System,
+        content: system,
+    });
+    messages.extend(history);
     if app.agent_client.is_none() {
         app.agent_client = Some(crate::agent::runtime::AgentClient::default());
     }
@@ -1021,40 +1185,99 @@ fn submit_prompt(app: &mut App) {
 /// which is the only thing in this view that decides whether a prompt can be
 /// queued.
 fn save_settings(app: &mut App) {
-    let mut input = crate::agent::config::AgentConfigInput::new();
+    use crate::agent::config;
+    let lang = app.lang;
+    let mut input = config::AgentConfigInput::new();
     input.endpoint = app.assistant.endpoint.trim().to_string();
     input.model = app.assistant.model.trim().to_string();
     input.api_key = app.assistant.api_key.trim().to_string();
-    input.headers =
-        crate::agent::config::parse_agent_headers(&app.assistant.headers).unwrap_or_default();
-    match crate::agent::config::validate_agent_config(&input) {
+    input.headers = config::parse_agent_headers(&app.assistant.headers).unwrap_or_default();
+    input.provider = config::provider_or_default(&app.assistant.provider);
+    input.reasoning = config::reasoning_or_default(&app.assistant.reasoning);
+    // A number that is not a number is refused by name before the validator
+    // sees it, because the validator reads a `0` as "the built-in default" and
+    // a typo would otherwise save as one — silently, and for the one field the
+    // user cannot see the effect of.
+    let Some(context_window) = parse_number(&app.assistant.context_window) else {
+        refuse_setting(app, AgentField::ContextWindow.label(lang));
+        return;
+    };
+    let Some(max_tokens) = parse_number(&app.assistant.max_tokens) else {
+        refuse_setting(app, AgentField::MaxTokens.label(lang));
+        return;
+    };
+    input.context_window = context_window;
+    input.max_tokens = max_tokens;
+    match config::validate_agent_config(&input) {
         Ok(validated) => {
             // Written where a restart will find it. `configured` alone would
             // have made the view claim a model it forgets on the next launch.
-            let stored = crate::agent::config::StoredAgentConfig {
+            let stored = config::StoredAgentConfig {
                 endpoint: input.endpoint.clone(),
                 model: input.model.clone(),
                 api_key: input.api_key.clone(),
                 headers: app.assistant.headers.clone(),
+                provider: input.provider.to_string(),
+                reasoning: input.reasoning.to_string(),
+                context_window: app.assistant.context_window.clone(),
+                max_tokens: app.assistant.max_tokens.clone(),
             };
             if let Some(store) = app.agent_store.as_mut() {
-                crate::agent::config::save_agent_config(store, &stored);
+                config::save_agent_config(store, &stored);
             }
             app.assistant.config = Some(validated);
             app.assistant.configured = true;
             app.assistant.notice = None;
         }
         // A bare field name from the validator is not a sentence. It is named
-        // here rather than shown raw, and the half that already parses is left
-        // as it was rather than blanked.
-        Err(field) => {
-            let text = app.strings().agent_setting_invalid.to_string();
-            app.push_notice(crate::app::Notice {
-                text: format!("{text}: {field}"),
-                level: crate::event::NoticeLevel::Warn,
-            });
+        // here rather than shown raw — in the interface's language, and by the
+        // row's own label — and the half that already parses is left as it was
+        // rather than blanked.
+        Err(name) => {
+            let label = field_from_name(&name)
+                .map(|field| field.label(lang))
+                .unwrap_or(&name);
+            refuse_setting(app, label);
         }
     }
+}
+
+/// A number as typed, where empty means "the built-in default" (`0`) and
+/// anything else that is not a number means "no".
+fn parse_number(text: &str) -> Option<i64> {
+    if text.trim().is_empty() {
+        return Some(0);
+    }
+    text.trim().parse().ok()
+}
+
+/// The row a validator's field name belongs to.
+///
+/// The validator speaks the web build's names — `apiKey`, `contextWindow` —
+/// and the notice after a refusal is a sentence about a row the user can see.
+/// A name that matches no row is passed through as it came: a field this window
+/// does not have is not one this function can point at.
+fn field_from_name(name: &str) -> Option<AgentField> {
+    match name {
+        "endpoint" => Some(AgentField::Endpoint),
+        "model" => Some(AgentField::Model),
+        "apiKey" => Some(AgentField::ApiKey),
+        "headers" => Some(AgentField::Headers),
+        "provider" => Some(AgentField::Protocol),
+        "reasoning" => Some(AgentField::Reasoning),
+        "contextWindow" => Some(AgentField::ContextWindow),
+        "maxTokens" => Some(AgentField::MaxTokens),
+        _ => None,
+    }
+}
+
+/// Say which row the refusal is about, in the interface's language.
+fn refuse_setting(app: &mut App, label: &str) {
+    let text = app.strings().agent_setting_invalid.to_string();
+    app.push_notice(crate::app::Notice {
+        text: format!("{text}: {label}"),
+        level: crate::event::NoticeLevel::Warn,
+    });
 }
 
 /// Answer yes to the outstanding approval: the command is cleared and the task
@@ -1119,8 +1342,8 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // The composer, then the thread. The settings are not here: five fields and
-    // a note list are what this view used to show *instead of* the
+    // The composer, then the thread. The settings are not here: the fields
+    // and a note list are what this view used to show *instead of* the
     // conversation, and they now live in their own window — `Ctrl+P`, "Configure
     // the assistant" — where a user who came to configure opens it on purpose
     // and one who came to talk never scrolls past them.
@@ -1358,8 +1581,8 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
     lines
 }
 
-/// The settings window's body: the five fields, the save's answer, and the
-/// notes the last field files.
+/// The settings window's body: the fields, the warning a too-small window
+/// earns, the save's answer, and the notes the last field files.
 ///
 /// Painted by the dialog rather than by the view, which is the whole point of
 /// the move — but it is still *this* module's form, so the caret, the hidden key
@@ -1380,10 +1603,16 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
         // See [`KEY_REVEAL`].
         let value = if field.is_secret() && !state.api_key.is_empty() {
             key_row(state)
-        } else if field.text(state).is_empty() {
-            s.value_unknown.to_string()
         } else {
-            field.text(state).to_string()
+            let value = field.value(state, app.lang);
+            if value.is_empty() {
+                // An empty text field still paints a row: the placeholder is
+                // what says the caret is on a field at all. A select is never
+                // empty — it paints the choice it holds.
+                s.value_unknown.to_string()
+            } else {
+                value
+            }
         };
         let label = format!("  {}{}", field.label(app.lang), s.label_separator);
         // One string, clipped once. Colouring the label separately would mean
@@ -1397,6 +1626,31 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
             } else {
                 theme.text()
             },
+        )));
+    }
+    // A window too small for the fixed part plus an answer fails on every
+    // question, which is worth saying before the question rather than after
+    // the failure. It is a property of the *saved* configuration, not of the
+    // half-typed form: the numbers are allowed to be below the line and the
+    // line is what gets reported.
+    if saved_window_is_tight(app) {
+        let (fixed, minimum) = (
+            crate::agent::config::AGENT_FIXED_CONTEXT_TOKENS,
+            state
+                .config
+                .as_ref()
+                .map(|config| {
+                    crate::agent::config::minimum_useful_context_window(config.max_tokens)
+                })
+                .unwrap_or_default(),
+        );
+        let text = crate::text::fill(
+            s.agent_window_tight,
+            &[fixed.to_string(), minimum.to_string()],
+        );
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&format!("  {text}"), width as usize),
+            theme.warn(),
         )));
     }
     if let Some(notice) = &state.notice {
@@ -1451,13 +1705,29 @@ pub fn settings_caret_row(app: &App) -> usize {
     2 + at
 }
 
+/// Whether the saved configuration's window cannot carry its own request.
+///
+/// The condition the settings body warns on, in one place: the painter and the
+/// row arithmetic below have to agree about whether that row is there, and two
+/// copies of the condition are two answers waiting to disagree.
+fn saved_window_is_tight(app: &App) -> bool {
+    app.assistant.config.as_ref().is_some_and(|config| {
+        crate::agent::config::is_context_window_tight(config.context_window, config.max_tokens)
+    })
+}
+
 /// The row of the settings body the note cursor is painted on.
 ///
-/// The note list starts under the five fields, the save's answer when there is
-/// one, and a blank row and the section heading.
+/// The note list starts under the fields, the tight-window warning when the
+/// saved configuration has one, the save's answer when there is one, and a
+/// blank row and the section heading.
 pub fn settings_note_row(app: &App) -> usize {
     let state = &app.assistant;
-    let list = 2 + SETTINGS.len() + usize::from(state.notice.is_some()) + 2;
+    let list = 2
+        + SETTINGS.len()
+        + usize::from(saved_window_is_tight(app))
+        + usize::from(state.notice.is_some())
+        + 2;
     let last = state.notes.len().saturating_sub(1);
     list + state.note_cursor.min(last)
 }
@@ -1692,6 +1962,19 @@ mod tests {
                 // The settings window is the other surface that paints rows,
                 // and it is the one with the longest labels on it — a pane that
                 // clips the composer but wraps the endpoint is still broken.
+                // A saved window too small to carry its own request adds the
+                // longest row of all, and it is within the pane at every width
+                // or the warning is a wall of its own.
+                a.assistant.config = Some(crate::agent::config::AgentConfig {
+                    endpoint: "https://api.example.com/v1".to_string(),
+                    model: "m".to_string(),
+                    api_key: String::new(),
+                    headers: Vec::new(),
+                    provider: crate::agent::config::OPENAI_COMPLETIONS,
+                    reasoning: "off",
+                    context_window: 1200,
+                    max_tokens: 4096,
+                });
                 for line in settings_lines(&a, &theme, width) {
                     let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                     assert!(
@@ -1716,12 +1999,13 @@ mod tests {
             ("bravo".to_string(), String::new()),
             ("charlie".to_string(), String::new()),
         ];
-        for field in [
-            AgentField::Endpoint,
-            AgentField::Model,
-            AgentField::ApiKey,
-            AgentField::Headers,
-        ] {
+        // Every field, not just the four that were there before: a row added to
+        // the list without a row added to the paint is exactly the bug this
+        // test exists for.
+        for field in SETTINGS {
+            if field == AgentField::Notes {
+                continue;
+            }
             open_settings(&mut a, field);
             let row = settings_caret_row(&a);
             let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
@@ -1755,6 +2039,64 @@ mod tests {
             painted.contains("charlie"),
             "with an answer above the list: {painted:?}"
         );
+    }
+
+    /// A saved window too small for the request itself is warned about under
+    /// the form, in the interface's language and with both numbers in it — and
+    /// the note cursor's row is the row *after* the warning, which is the
+    /// arithmetic that has to agree with the painter.
+    #[test]
+    fn a_tight_window_is_warned_under_the_form() {
+        use crate::agent::config::{AgentConfig, AGENT_FIXED_CONTEXT_TOKENS};
+        let theme = Theme::DARK;
+        for lang in [Lang::Zh, Lang::En] {
+            let mut a = app(lang);
+            a.assistant.notes = vec![("alpha".to_string(), String::new())];
+            a.assistant.config = Some(AgentConfig {
+                endpoint: "https://h/v1".to_string(),
+                model: "m".to_string(),
+                api_key: String::new(),
+                headers: Vec::new(),
+                provider: crate::agent::config::OPENAI_COMPLETIONS,
+                reasoning: "off",
+                context_window: 2000,
+                max_tokens: 4096,
+            });
+            open_settings(&mut a, AgentField::Notes);
+
+            let rows = settings_lines(&a, &theme, 100);
+            let painted = body_text(&rows);
+            assert!(
+                painted.contains(&AGENT_FIXED_CONTEXT_TOKENS.to_string()),
+                "the warning does not say what the prompt costs: {painted:?}"
+            );
+            assert!(
+                painted.contains(
+                    &crate::agent::config::minimum_useful_context_window(4096).to_string()
+                ),
+                "the warning does not say what would fit: {painted:?}"
+            );
+            assert_eq!(
+                body_text(&rows[settings_note_row(&a)..settings_note_row(&a) + 1]).trim(),
+                "alpha",
+                "the note list did not move down for the warning"
+            );
+
+            // A window with room is not warned about, and the list is a row
+            // higher.
+            if let Some(config) = a.assistant.config.as_mut() {
+                config.context_window = 32768;
+            }
+            let rows = settings_lines(&a, &theme, 100);
+            assert!(
+                !body_text(&rows).contains(&AGENT_FIXED_CONTEXT_TOKENS.to_string()),
+                "a comfortable window was warned about"
+            );
+            assert_eq!(
+                body_text(&rows[settings_note_row(&a)..settings_note_row(&a) + 1]).trim(),
+                "alpha"
+            );
+        }
     }
 }
 
@@ -1824,7 +2166,7 @@ mod interaction {
         );
     }
 
-    /// Tab walks the window's five fields forward and BackTab back, wrapping at
+    /// Tab walks the window's fields forward and BackTab back, wrapping at
     /// both ends — and the composer is not among them: the caret either has a
     /// row in the window or it is not in the window at all.
     #[test]
@@ -1905,6 +2247,142 @@ mod interaction {
         press_settings(&mut bad, KeyCode::Enter);
         assert!(!bad.assistant.configured, "a bad endpoint was accepted");
         assert!(!bad.notices.is_empty(), "the refusal was not said out loud");
+    }
+
+    /// The two choice rows are stepped rather than typed into: the arrows and
+    /// the space bar walk the list and wrap at both ends, and a letter is not a
+    /// value either of them can hold.
+    #[test]
+    fn a_choice_row_steps_and_refuses_letters() {
+        use crate::agent::config::{AGENT_PROVIDERS, AGENT_REASONING_LEVELS};
+
+        let mut a = app();
+        settings(&mut a, AgentField::Protocol);
+        assert_eq!(a.assistant.provider, AGENT_PROVIDERS[0].id);
+
+        press_settings(&mut a, KeyCode::Right);
+        assert_eq!(a.assistant.provider, AGENT_PROVIDERS[1].id, "forward");
+        press_settings(&mut a, KeyCode::Left);
+        assert_eq!(a.assistant.provider, AGENT_PROVIDERS[0].id, "and back");
+        press_settings(&mut a, KeyCode::Left);
+        assert_eq!(
+            a.assistant.provider,
+            AGENT_PROVIDERS[AGENT_PROVIDERS.len() - 1].id,
+            "backwards wraps to the end"
+        );
+        press_settings(&mut a, KeyCode::Char(' '));
+        assert_eq!(
+            a.assistant.provider, AGENT_PROVIDERS[0].id,
+            "space steps forward the way a list takes it"
+        );
+        press_settings(&mut a, KeyCode::Char('z'));
+        assert_eq!(
+            a.assistant.provider, AGENT_PROVIDERS[0].id,
+            "a letter is not a protocol"
+        );
+
+        // The reasoning row is the same gesture over its own list.
+        press_settings(&mut a, KeyCode::Tab);
+        assert_eq!(a.assistant.focus, AgentField::Reasoning);
+        assert_eq!(a.assistant.reasoning, AGENT_REASONING_LEVELS[0]);
+        press_settings(&mut a, KeyCode::Right);
+        assert_eq!(a.assistant.reasoning, AGENT_REASONING_LEVELS[1]);
+        press_settings(&mut a, KeyCode::Left);
+        press_settings(&mut a, KeyCode::Left);
+        assert_eq!(
+            a.assistant.reasoning,
+            AGENT_REASONING_LEVELS[AGENT_REASONING_LEVELS.len() - 1],
+            "backwards wraps"
+        );
+    }
+
+    /// A number row takes digits and nothing else: a letter would hold a value
+    /// the validator refuses at save time — after the user had moved on — and a
+    /// pasted `16,000` is one number rather than text.
+    #[test]
+    fn a_number_row_takes_digits_only() {
+        let mut a = app();
+        settings(&mut a, AgentField::ContextWindow);
+        press_settings(&mut a, KeyCode::Char('1'));
+        press_settings(&mut a, KeyCode::Char('6'));
+        press_settings(&mut a, KeyCode::Char('x'));
+        press_settings(&mut a, KeyCode::Char(' '));
+        press_settings(&mut a, KeyCode::Char('k'));
+        assert_eq!(a.assistant.context_window, "16");
+        press_settings(&mut a, KeyCode::Backspace);
+        assert_eq!(a.assistant.context_window, "1");
+
+        paste_at_caret(&mut a, "16,000");
+        assert_eq!(
+            a.assistant.context_window, "116000",
+            "the digits landed and the punctuation did not"
+        );
+
+        // A paste onto a choice row changes nothing and says nothing: there is
+        // no text for it to land in.
+        settings(&mut a, AgentField::Protocol);
+        let before = a.assistant.provider.clone();
+        let notices = a.notices.len();
+        paste_at_caret(&mut a, "anthropic");
+        assert_eq!(a.assistant.provider, before);
+        assert_eq!(a.notices.len(), notices, "a paste that landed nowhere");
+    }
+
+    /// The whole form saves: the protocol, the level and the numbers reach the
+    /// validated configuration, and the store keeps the typed text for the next
+    /// launch.
+    #[test]
+    fn saving_keeps_the_protocol_and_the_numbers() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-settings-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut a = app();
+        a.agent_store = Some(crate::agent::store::JsonFile::at(&path));
+        a.assistant.endpoint = "https://api.anthropic.com/v1".to_string();
+        a.assistant.model = "claude-x".to_string();
+        a.assistant.api_key = "sk-x".to_string();
+        a.assistant.provider = "anthropic-messages".to_string();
+        a.assistant.reasoning = "medium".to_string();
+        a.assistant.context_window = "16000".to_string();
+        a.assistant.max_tokens = "2048".to_string();
+        settings(&mut a, AgentField::Protocol);
+        press_settings(&mut a, KeyCode::Enter);
+
+        let config = a.assistant.config.clone().expect("the form saved");
+        assert_eq!(config.provider, "anthropic-messages");
+        assert_eq!(config.reasoning, "medium");
+        assert_eq!(config.context_window, 16000);
+        assert_eq!(config.max_tokens, 2048);
+
+        let store = a.agent_store.as_ref().expect("a store");
+        let stored = crate::agent::config::load_agent_config(store);
+        assert_eq!(stored.provider, "anthropic-messages");
+        assert_eq!(stored.reasoning, "medium");
+        assert_eq!(stored.context_window, "16000");
+        assert_eq!(stored.max_tokens, "2048");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A number field holding something that is not a number is refused by the
+    /// row's own name rather than saved as the built-in default, which is what
+    /// a `0` means here.
+    #[test]
+    fn a_number_that_is_not_a_number_is_refused_by_name() {
+        let mut a = app();
+        a.assistant.endpoint = "https://api.example.com/v1".to_string();
+        a.assistant.model = "m".to_string();
+        a.assistant.context_window = "16k".to_string();
+        settings(&mut a, AgentField::ContextWindow);
+        press_settings(&mut a, KeyCode::Enter);
+        assert!(!a.assistant.configured, "a typo became a saved value");
+        let said = a
+            .notices
+            .last()
+            .map(|notice| notice.text.clone())
+            .unwrap_or_default();
+        let label = AgentField::ContextWindow.label(a.lang);
+        assert!(said.contains(label), "{said:?} does not name {label:?}");
     }
 
     /// A prompt only becomes a task once a model is configured.
@@ -2349,24 +2827,26 @@ pub fn take_clipboard(app: &mut App) -> Option<String> {
 /// worked.
 pub fn paste_at_caret(app: &mut App, text: &str) {
     let focused = app.assistant.focus;
-    let field = match focused {
-        AgentField::Composer => Some(&mut app.assistant.chat_mut().composer),
-        AgentField::Endpoint => Some(&mut app.assistant.endpoint),
-        AgentField::Model => Some(&mut app.assistant.model),
-        AgentField::ApiKey => Some(&mut app.assistant.api_key),
-        AgentField::Headers => Some(&mut app.assistant.headers),
-        AgentField::Notes => Some(&mut app.assistant.note_input),
-    };
-    let Some(field) = field else {
+    // A select has no text to put anything into. A paste on that row is a
+    // keystroke with nowhere to go, and a notice saying "pasted 12 chars" about
+    // a row that did not change would be a lie.
+    if focused.is_select() {
         return;
-    };
+    }
     let pasted = if focused == AgentField::Notes {
         text.to_string()
+    } else if focused.is_number() {
+        // A number field takes digits: a pasted `16,000` lands as `16000`
+        // rather than as text the validator refuses at save time — which the
+        // user would not see until the next Enter, long after the paste.
+        text.chars().filter(char::is_ascii_digit).collect()
     } else {
         text.replace("\r\n", " ").replace(['\r', '\n'], " ")
     };
     let count = pasted.trim().chars().count();
-    field.push_str(&pasted);
+    if let Some(field) = field_text_mut(app) {
+        field.push_str(&pasted);
+    }
     // The paste lands in one of the fields the window paints, the key among
     // them: a pasted key shows its last character the way a typed one does,
     // rather than all of it.

@@ -266,8 +266,8 @@ pub enum Dialog {
     Uart(Uart),
     /// The assistant's settings, scrolled to a row.
     ///
-    /// Its own window rather than a section of the assistant view: five fields
-    /// and a note list are what the view was showing *instead of* the
+    /// Its own window rather than a section of the assistant view: the fields
+    /// and the note list are what the view was showing *instead of* the
     /// conversation, and a form a user opens on purpose is easier to fill than
     /// one they scroll past. The caret is `assistant.focus` — one piece of
     /// state, so the paste chord and the painter agree about where the keys

@@ -1,10 +1,18 @@
 //! The LLM transport — the one part of the agent this crate did not carry.
 //!
 //! Until now a prompt was a thing the view recorded and nothing ever answered.
-//! This is the answer: one OpenAI-compatible `/chat/completions` round trip
-//! over `reqwest` with rustls, the protocol every provider in
-//! [`crate::agent::config`] already lists — OpenAI, DeepSeek, Ollama, vLLM and
-//! most gateways.
+//! This is the answer: a streamed round trip over `reqwest` with rustls, in the
+//! three wire protocols [`crate::agent::config`] lists — OpenAI-compatible
+//! `/chat/completions` (OpenAI, DeepSeek, Ollama, vLLM and most gateways),
+//! Anthropic `/v1/messages`, and Google `generateContent`.
+//!
+//! The protocol is a property of the request, not of the transport: one job
+//! carries the configuration it was asked for, and the URL, the headers, the
+//! body and the reading of the stream are chosen from `provider` at the one
+//! place each is built. Three protocols in one file rather than three
+//! transports, because everything around the difference — the runtime, the
+//! channel, the redaction of a key from an error body, the UTF-8 that straddles
+//! two chunks — is the same work done once.
 //!
 //! # Why it looks like a transport
 //!
@@ -262,19 +270,20 @@ impl AgentClient {
 
 /// One round trip, streamed, reporting as it goes.
 ///
-/// The body asks for a stream with the usage reported at the end, which is the
-/// one option every OpenAI-compatible provider understands. What comes back is
-/// a series of `data:` lines separated by blank ones — server-sent events — and
-/// the reply arrives as deltas of `choices[0].delta.content` until a final event
-/// carries `finish_reason`, after which `usage` may follow in the same event or
-/// in a later one.
+/// The body asks for a stream and the provider answers with a series of `data:`
+/// lines separated by blank ones — server-sent events. What each event means is
+/// the protocol's: OpenAI-compatible deltas of `choices[0].delta.content`
+/// followed by a usage report, Anthropic `content_block_delta` events with the
+/// bill split between `message_start` and `message_delta`, Google candidates
+/// whose parts carry the text and a running `usageMetadata`.
 ///
-/// A provider that does not stream still answers with one event and a
-/// `message` rather than a `delta`, which is read the same way: the reply is in
-/// `choices[0].message.content` and the token counts are in `usage`.
+/// A provider that does not stream still answers with one event, and the
+/// readers below take the single-message shape as well: the reply arrives whole
+/// and the same code path reads it.
 async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     let key = job.config.api_key.clone();
-    let url = chat_url(&job.config.endpoint);
+    let provider = job.config.provider;
+    let url = endpoint_url(&job.config);
 
     let mut request = client_for()
         .post(&url)
@@ -283,9 +292,7 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         // answer with JSON and the deltas would never arrive.
         .header("accept", "text/event-stream")
         .body(request_body(&job.config, &job.messages, true));
-    if !key.is_empty() {
-        request = request.header("authorization", format!("Bearer {key}"));
-    }
+    request = authorize(request, &job.config);
     for (name, value) in &job.config.headers {
         request = request.header(name.as_str(), value.as_str());
     }
@@ -348,7 +355,7 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         // Every event in the chunk is read, and any text it holds is sent as
         // one delta: a chunk is a unit of what arrived, and one delta per chunk
         // is what the interface renders on.
-        let text = drain_events(&mut buffer, &mut usage);
+        let text = drain_events(provider, &mut buffer, &mut usage);
         if !text.is_empty() {
             saw_text = true;
             send(&reply, &job.task_id, Progress::Delta(text));
@@ -436,11 +443,32 @@ fn proxy_from(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<reqwest:
     Some(proxy)
 }
 
-/// The next complete SSE event in `buffer`, and what is left after it.
+/// The payload of one SSE frame, or `None` when the frame carries none.
 ///
-/// `\n\n` is the separator, and a lone `\r\n\r\n` is what some gateways send —
-/// so the search is for the longest run of blank-line separators and the event
-/// is everything before it.
+/// A frame is what the blank-line separator bounded, and it can hold more than
+/// the `data:` line: Anthropic's stream sends `event: content_block_delta`
+/// first, and a reader that required the frame to *begin* with `data:` read the
+/// whole protocol as silence — the request went out, the provider answered, and
+/// the panel said the answer held nothing. Several `data:` lines in one frame
+/// are one payload separated by newlines, which is what the encoding says they
+/// meant.
+fn data_of(frame: &str) -> Option<String> {
+    let mut payload: Option<String> = None;
+    for line in frame.lines() {
+        let Some(line) = line.strip_prefix("data:") else {
+            continue;
+        };
+        match payload.as_mut() {
+            Some(payload) => {
+                payload.push('\n');
+                payload.push_str(line);
+            }
+            None => payload = Some(line.to_string()),
+        }
+    }
+    payload
+}
+
 /// Read every complete SSE event in `buffer`, leaving the unfinished tail
 /// behind, and return the text they carried.
 ///
@@ -448,11 +476,11 @@ fn proxy_from(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<reqwest:
 /// can span several chunks. Reading the batch one event at a time without
 /// joining them is how two events in one chunk came out as a single line of
 /// mangled JSON — which parsed as nothing, and the reply went with it.
-fn drain_events(buffer: &mut String, usage: &mut Usage) -> String {
+fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> String {
     let mut text = String::new();
     while let Some((event, rest)) = next_event(buffer) {
         *buffer = rest;
-        let Some(payload) = event.strip_prefix("data:") else {
+        let Some(payload) = data_of(&event) else {
             continue;
         };
         let payload = payload.trim();
@@ -466,11 +494,32 @@ fn drain_events(buffer: &mut String, usage: &mut Usage) -> String {
         // its last delta rather than in an event of its own — put the usage
         // object beside the final slice of the reply, and an event that was
         // read for its tokens alone would drop the words it came with.
-        if let Some(delta) = text_of(payload) {
+        if let Some(delta) = text_of(provider, payload) {
             text.push_str(&delta);
         }
-        if let Some(reported) = usage_of(payload) {
-            *usage = reported;
+        if let Some(reported) = usage_of(provider, payload) {
+            if provider == crate::agent::config::ANTHROPIC_MESSAGES
+                || provider == crate::agent::config::GOOGLE_GENERATIVE_AI
+            {
+                // These two protocols bill in pieces, and a piece is not the
+                // whole bill: Anthropic sends the input count in
+                // `message_start` and the finished output count in
+                // `message_delta`, Gemini sends a running total on every chunk.
+                // Replacing the total with each piece would throw the other
+                // half away, so a counter that was not reported leaves the one
+                // already read standing.
+                if reported.input > 0 {
+                    usage.input = reported.input;
+                }
+                if reported.output > 0 {
+                    usage.output = reported.output;
+                }
+                if reported.total_tokens > 0 {
+                    usage.total_tokens = reported.total_tokens;
+                }
+            } else {
+                *usage = reported;
+            }
         }
     }
     text
@@ -510,6 +559,11 @@ fn decode_utf8(bytes: &mut Vec<u8>) -> String {
     }
 }
 
+/// The next complete SSE event in `buffer`, and what is left after it.
+///
+/// `\n\n` is the separator, and a lone `\r\n\r\n` is what some gateways send —
+/// so the search is for the longest run of blank-line separators and the event
+/// is everything before it.
 fn next_event(buffer: &str) -> Option<(String, String)> {
     for separator in ["\r\n\r\n", "\n\n"] {
         if let Some(at) = buffer.find(separator) {
@@ -523,13 +577,22 @@ fn next_event(buffer: &str) -> Option<(String, String)> {
 }
 
 /// The text one stream event carries, if it carries any.
+fn text_of(provider: &str, event: &str) -> Option<String> {
+    match provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => anthropic_text(event),
+        crate::agent::config::GOOGLE_GENERATIVE_AI => google_text(event),
+        _ => completions_text(event),
+    }
+}
+
+/// The text one `/chat/completions` event carries, if it carries any.
 ///
 /// Two shapes reach here and both are real: a delta during the answer
 /// (`choices[0].delta.content`), and a provider that answers in one message
 /// (`choices[0].message.content`). Reading the delta first is not a preference —
 /// a provider that sends both sends the message only once, at the end, and
 /// reading the message on every event would repeat the whole reply.
-fn text_of(event: &str) -> Option<String> {
+fn completions_text(event: &str) -> Option<String> {
     let choices = field(event, "choices")?;
     let first = first_element(choices)?;
     if let Some(delta) = field(first, "delta") {
@@ -541,8 +604,60 @@ fn text_of(event: &str) -> Option<String> {
     unquote(field(message, "content")?)
 }
 
+/// The text one Messages event carries: a `text_delta` and nothing else.
+///
+/// `content_block_delta` is not always the answer. A model asked to think
+/// streams `thinking_delta` events through the same field, and painting those
+/// would put the model's working into the reply — where the panel would show it
+/// as the assistant's own words and the session would store it as an answer.
+/// The type is checked rather than the text being read blind.
+///
+/// A `content_block_start` carries an empty text block and a `message_stop`
+/// carries none: both read as nothing here.
+fn anthropic_text(event: &str) -> Option<String> {
+    let delta = field(event, "delta")?;
+    if unquote(field(delta, "type")?).as_deref() != Some("text_delta") {
+        return None;
+    }
+    unquote(field(delta, "text")?)
+}
+
+/// The text one Gemini chunk carries: every part of the first candidate that
+/// the model did not mark as a thought.
+///
+/// Parts arrive split for no reason the reader is told — a chunk can hold the
+/// first half of a sentence in one and the rest in the next — so they are
+/// joined rather than taking the first. `thought: true` is Gemini's spelling of
+/// the same private working Anthropic streams as `thinking_delta`, and is
+/// skipped for the same reason.
+fn google_text(event: &str) -> Option<String> {
+    let candidates = field(event, "candidates")?;
+    let first = first_element(candidates)?;
+    let content = field(first, "content")?;
+    let parts = field(content, "parts")?;
+    let mut out = String::new();
+    for part in array_elements(parts) {
+        if field(part, "thought").is_some_and(|raw| raw.trim() == "true") {
+            continue;
+        }
+        if let Some(text) = field(part, "text").and_then(unquote) {
+            out.push_str(&text);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The token accounting a stream event carries, if it carries one.
-fn usage_of(event: &str) -> Option<Usage> {
+fn usage_of(provider: &str, event: &str) -> Option<Usage> {
+    match provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => anthropic_usage(event),
+        crate::agent::config::GOOGLE_GENERATIVE_AI => google_usage(event),
+        _ => completions_usage(event),
+    }
+}
+
+/// The bill in one `/chat/completions` event.
+fn completions_usage(event: &str) -> Option<Usage> {
     let usage = field(event, "usage")?;
     // A provider that was not asked for its accounting still spells the key —
     // OpenAI sends `"usage":null` on every chunk — and reading that as a
@@ -552,6 +667,38 @@ fn usage_of(event: &str) -> Option<Usage> {
         return None;
     }
     Some(parse_usage(usage))
+}
+
+/// The bill in one Messages event.
+///
+/// Two events carry it: `message_start` puts the input count (and the first
+/// output count) inside `message.usage`, and `message_delta` carries the final
+/// output count in a `usage` of its own. Both are named here because both are
+/// real, and neither is complete.
+fn anthropic_usage(event: &str) -> Option<Usage> {
+    let usage = field(event, "message")
+        .and_then(|message| field(message, "usage"))
+        .or_else(|| field(event, "usage"))?;
+    if usage.trim() == "null" {
+        return None;
+    }
+    Some(Usage {
+        input: number_in(usage, "input_tokens"),
+        output: number_in(usage, "output_tokens"),
+        total_tokens: number_in(usage, "total_tokens"),
+        ..Usage::default()
+    })
+}
+
+/// The bill in one Gemini chunk, under Gemini's own names.
+fn google_usage(event: &str) -> Option<Usage> {
+    let usage = field(event, "usageMetadata")?;
+    Some(Usage {
+        input: number_in(usage, "promptTokenCount"),
+        output: number_in(usage, "candidatesTokenCount"),
+        total_tokens: number_in(usage, "totalTokenCount"),
+        ..Usage::default()
+    })
 }
 
 /// The chat-completions URL. A trailing slash is stripped rather than
@@ -570,13 +717,97 @@ fn chat_url(endpoint: &str) -> String {
     format!("{base}/chat/completions")
 }
 
+/// The URL one request goes to: the protocol's own path on the configured
+/// endpoint.
+fn endpoint_url(config: &AgentConfig) -> String {
+    match config.provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => messages_url(&config.endpoint),
+        crate::agent::config::GOOGLE_GENERATIVE_AI => {
+            generate_content_url(&config.endpoint, &config.model)
+        }
+        _ => chat_url(&config.endpoint),
+    }
+}
+
+/// The Messages URL, completed to `/v1/messages` unless the endpoint already
+/// says where it is.
+///
+/// The same rule as `chat_url`, with one more spelling to get right: the
+/// official API's base already carries the version (`https://api.anthropic.com/v1`,
+/// which is what the settings hint tells users to paste), so `/v1` is not
+/// appended to it a second time. An endpoint that names the version itself
+/// (`…/anthropic`, the shape DeepSeek documents) gets the version added, and
+/// one that names the whole path is left exactly as it is.
+fn messages_url(endpoint: &str) -> String {
+    let base = endpoint.trim().trim_end_matches('/');
+    if base.ends_with("/messages") {
+        return base.to_string();
+    }
+    if base.ends_with("/v1") {
+        return format!("{base}/messages");
+    }
+    format!("{base}/v1/messages")
+}
+
+/// The Gemini streaming URL: `…/models/<model>:streamGenerateContent?alt=sse`.
+///
+/// The model is part of the path rather than of the body, and `alt=sse` is what
+/// makes the answer a stream: without it the SDK-shaped endpoint answers with
+/// one buffered JSON array instead of the `data:` lines this reader knows.
+fn generate_content_url(endpoint: &str, model: &str) -> String {
+    let base = endpoint.trim().trim_end_matches('/');
+    if base.contains(":streamGenerateContent") {
+        return base.to_string();
+    }
+    format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+}
+
+/// Add the protocol's own headers, the credential among them.
+///
+/// The credential is not always `Authorization: Bearer`: Anthropic's API takes
+/// `x-api-key` and Gemini's takes `x-goog-api-key`, and a request that sends
+/// the key in the wrong header is refused with a message about the key — which
+/// sends the user looking at a key that was never wrong.
+///
+/// `anthropic-version` is a protocol header rather than an auth one and is sent
+/// even when no key is configured: an endpoint that speaks the protocol without
+/// a key still needs to be told which version of it is being spoken.
+fn authorize(request: reqwest::RequestBuilder, config: &AgentConfig) -> reqwest::RequestBuilder {
+    let request = match config.provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => {
+            request.header("anthropic-version", "2023-06-01")
+        }
+        _ => request,
+    };
+    let key = config.api_key.trim();
+    if key.is_empty() {
+        return request;
+    }
+    match config.provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => request.header("x-api-key", key),
+        crate::agent::config::GOOGLE_GENERATIVE_AI => request.header("x-goog-api-key", key),
+        _ => request.header("authorization", format!("Bearer {key}")),
+    }
+}
+
 /// The request body, written by hand.
 ///
-/// No `serde_json`: the request has three fields, and a dependency that
-/// serialises a struct with `#[derive]` to save eight lines of `format!` is a
-/// dependency that then has to be taught about the response too. The endpoint,
-/// the model and the messages are the whole of what a provider needs.
+/// No `serde_json`: the request has a handful of fields, and a dependency that
+/// serialises a struct with `#[derive]` to save a page of `format!` is a
+/// dependency that then has to be taught about the response too. A function
+/// per protocol rather than one function with three sets of branches, because
+/// the protocols disagree about where the system prompt goes, what the
+/// assistant's role is called, and whether streaming is in the URL or the body.
 fn request_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) -> String {
+    match config.provider {
+        crate::agent::config::ANTHROPIC_MESSAGES => anthropic_body(config, messages, stream),
+        crate::agent::config::GOOGLE_GENERATIVE_AI => google_body(config, messages),
+        _ => completions_body(config, messages, stream),
+    }
+}
+
+/// The OpenAI-compatible body.
+fn completions_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) -> String {
     let mut out = String::from("{\"model\":");
     out.push_str(&crate::agent::tasks::json_string(&config.model));
     out.push_str(",\"messages\":[");
@@ -590,20 +821,17 @@ fn request_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) ->
         out.push_str(&crate::agent::tasks::json_string(&message.content));
         out.push('}');
     }
-    // `max_tokens` is always sent, and a stored zero is the built-in default
-    // before it goes out rather than after: `0` is this program's spelling of
-    // "let the built-in default decide" (the upstream web build sends
-    // `maxTokens || 4096` here), but a provider reads the literal field, and
-    // the range it accepts starts at 1 — DeepSeek answers a zero with
-    // `Invalid max_tokens value, the valid range of max_tokens is [1, 393216]`
-    // and every question fails.
-    let max_tokens = if config.max_tokens > 0 {
-        config.max_tokens
-    } else {
-        crate::agent::config::AGENT_DEFAULT_MAX_TOKENS
-    };
     out.push_str("],\"max_tokens\":");
-    out.push_str(&max_tokens.to_string());
+    out.push_str(&max_tokens(config).to_string());
+    // The reasoning level goes out under the name this protocol gave it. `off`
+    // adds nothing at all, which is the default and what the web build does for
+    // the custom endpoints this protocol is used with: a server that does not
+    // know the field is a server that answers a 400, and one that does know it
+    // has been told nothing about how much thinking the user wants.
+    if let Some(level) = effort_level(config.reasoning) {
+        out.push_str(",\"reasoning_effort\":");
+        out.push_str(&crate::agent::tasks::json_string(level));
+    }
     if stream {
         // `stream` on its own is enough for the deltas; `stream_options` is what
         // asks for the token counts in a final event, because the default is
@@ -614,6 +842,152 @@ fn request_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) ->
     }
     out.push('}');
     out
+}
+
+/// The Anthropic Messages body.
+///
+/// The differences from the OpenAI shape are all in this one function: the
+/// system prompt is a field of its own rather than a message, `max_tokens` is
+/// mandatory rather than optional, and a thinking model is asked for its budget
+/// rather than for an effort word.
+fn anthropic_body(config: &AgentConfig, messages: &[ChatMessage], stream: bool) -> String {
+    let (system, turns) = split_system(messages);
+    let ceiling = max_tokens(config);
+    let mut out = String::from("{\"model\":");
+    out.push_str(&crate::agent::tasks::json_string(&config.model));
+    out.push_str(",\"max_tokens\":");
+    out.push_str(&ceiling.to_string());
+    if !system.is_empty() {
+        out.push_str(",\"system\":");
+        out.push_str(&crate::agent::tasks::json_string(&system));
+    }
+    out.push_str(",\"messages\":[");
+    for (i, message) in turns.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"role\":");
+        out.push_str(&crate::agent::tasks::json_string(message.role.as_str()));
+        out.push_str(",\"content\":");
+        out.push_str(&crate::agent::tasks::json_string(&message.content));
+        out.push('}');
+    }
+    out.push(']');
+    // A budget, not a word: this protocol asks in tokens. The request is
+    // refused rather than downgraded when the budget cannot keep its promised
+    // room for the answer, so a ceiling too small to think in sends no thinking
+    // field at all — a plain answer beats a guaranteed 400.
+    if let Some(budget) = thinking_budget(config.reasoning, ceiling) {
+        out.push_str(",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
+        out.push_str(&budget.to_string());
+        out.push('}');
+    }
+    if stream {
+        out.push_str(",\"stream\":true");
+    }
+    out.push('}');
+    out
+}
+
+/// The Gemini body.
+///
+/// Streaming is not a field here — it is `:streamGenerateContent` in the URL —
+/// so this function takes no `stream` argument. The assistant's role is spelled
+/// `model`, the system prompt is `systemInstruction`, and the whole bill of
+/// settings lives under `generationConfig`.
+fn google_body(config: &AgentConfig, messages: &[ChatMessage]) -> String {
+    let (system, turns) = split_system(messages);
+    let ceiling = max_tokens(config);
+    let mut out = String::from("{\"contents\":[");
+    for (i, message) in turns.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"role\":");
+        let role = match message.role {
+            ChatRole::Assistant => "model",
+            _ => "user",
+        };
+        out.push_str(&crate::agent::tasks::json_string(role));
+        out.push_str(",\"parts\":[{\"text\":");
+        out.push_str(&crate::agent::tasks::json_string(&message.content));
+        out.push_str("}]}");
+    }
+    out.push(']');
+    if !system.is_empty() {
+        out.push_str(",\"systemInstruction\":{\"parts\":[{\"text\":");
+        out.push_str(&crate::agent::tasks::json_string(&system));
+        out.push_str("}]}");
+    }
+    out.push_str(",\"generationConfig\":{\"maxOutputTokens\":");
+    out.push_str(&ceiling.to_string());
+    if let Some(budget) = thinking_budget(config.reasoning, ceiling) {
+        // `includeThoughts` is what makes the model show its working at all;
+        // the budget is the cap. Both are asked for, and the reply reader skips
+        // the thought parts — the count is what the level was for.
+        out.push_str(",\"thinkingConfig\":{\"includeThoughts\":true,\"thinkingBudget\":");
+        out.push_str(&budget.to_string());
+        out.push('}');
+    }
+    out.push_str("}}");
+    out
+}
+
+/// The conversation split into its system prompt and its turns.
+///
+/// Two of the three protocols carry the system prompt in a field of its own
+/// rather than as a message with a `system` role, and a request that sends it
+/// as a message is refused by name. Several system messages are joined rather
+/// than all but the first dropped: this crate writes one, and a caller that
+/// wrote two meant both.
+fn split_system(messages: &[ChatMessage]) -> (String, Vec<&ChatMessage>) {
+    let mut system: Vec<&str> = Vec::new();
+    let mut turns: Vec<&ChatMessage> = Vec::new();
+    for message in messages {
+        match message.role {
+            ChatRole::System => system.push(&message.content),
+            _ => turns.push(message),
+        }
+    }
+    (system.join("\n\n"), turns)
+}
+
+/// The output ceiling that actually goes out (see [`AgentConfig::output_ceiling`]).
+fn max_tokens(config: &AgentConfig) -> i64 {
+    config.output_ceiling()
+}
+
+/// The output of an answer that is spent thinking before a word is written.
+const MIN_ANSWER_TOKENS: i64 = 1024;
+
+/// The effort word, when the user asked for reasoning at all.
+///
+/// `off` is the default and sends nothing: a model that was not asked to think
+/// is not being told to think cheaply.
+fn effort_level(level: &str) -> Option<&str> {
+    match level {
+        "low" | "medium" | "high" => Some(level),
+        _ => None,
+    }
+}
+
+/// The thinking budget a level asks for, in tokens.
+///
+/// The numbers are the upstream adapter's own — low, medium and high are 2k,
+/// 8k and 16k — and the budget never eats the last kilotoken of the answer,
+/// because a model that spends its whole output allowance thinking has no room
+/// left to say anything. A ceiling with no room at all leaves `None`, and the
+/// caller sends no thinking field: thinking past the answer's own limit is a
+/// request the provider refuses.
+fn thinking_budget(level: &str, max_tokens: i64) -> Option<i64> {
+    let base = match level {
+        "low" => 2048,
+        "medium" => 8192,
+        "high" => 16384,
+        _ => return None,
+    };
+    let budget = base.min((max_tokens - MIN_ANSWER_TOKENS).max(0));
+    (budget > 0).then_some(budget)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,22 +1016,24 @@ pub fn parse_completion(text: &str) -> Option<Completion> {
     })
 }
 
-/// The token accounting, when the provider reported it. A missing or
+/// The token accounting from an OpenAI-compatible report. A missing or
 /// non-numeric field reads as zero rather than as an error: a provider that
 /// reports usage for some models and not others must not make the reply
 /// unusable.
 fn parse_usage(object: &str) -> Usage {
-    let number = |key: &str| {
-        field(object, key)
-            .and_then(|raw| raw.trim().parse().ok())
-            .unwrap_or(0)
-    };
     Usage {
-        input: number("prompt_tokens"),
-        output: number("completion_tokens"),
-        total_tokens: number("total_tokens"),
+        input: number_in(object, "prompt_tokens"),
+        output: number_in(object, "completion_tokens"),
+        total_tokens: number_in(object, "total_tokens"),
         ..Usage::default()
     }
+}
+
+/// One numeric field of a JSON object, or zero.
+fn number_in(object: &str, key: &str) -> u64 {
+    field(object, key)
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// The value of `key` in a flat JSON object, as a raw span.
@@ -700,13 +1076,37 @@ fn field<'a>(object: &'a str, key: &str) -> Option<&'a str> {
 
 /// The first element of a JSON array, as a raw span.
 fn first_element(array: &str) -> Option<&str> {
-    let inner = array.trim().strip_prefix('[')?.strip_suffix(']')?;
+    array_elements(array).into_iter().next()
+}
+
+/// Every element of a JSON array, as raw spans.
+///
+/// The reader that needs more than the first: Gemini splits an answer across
+/// `parts` without telling the reader how many there are, so each has to be
+/// visited rather than the first taken and the rest assumed empty.
+fn array_elements(array: &str) -> Vec<&str> {
+    let mut elements = Vec::new();
+    let Some(inner) = array
+        .trim()
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+    else {
+        return elements;
+    };
     let bytes = inner.as_bytes();
-    let at = skip_ws(bytes, 0);
-    if at >= bytes.len() {
-        return None;
+    let mut at = skip_ws(bytes, 0);
+    while at < bytes.len() {
+        let Some((span, next)) = value_span(inner, at) else {
+            break;
+        };
+        elements.push(span);
+        at = skip_ws(bytes, next);
+        if bytes.get(at) != Some(&b',') {
+            break;
+        }
+        at = skip_ws(bytes, at + 1);
     }
-    value_span(inner, at).map(|(span, _)| span)
+    elements
 }
 
 /// The span of the JSON value starting at `at`, and the index after it.
@@ -878,6 +1278,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::{ANTHROPIC_MESSAGES, GOOGLE_GENERATIVE_AI, OPENAI_COMPLETIONS};
     use crate::i18n::Lang;
 
     fn config(endpoint: &str) -> AgentConfig {
@@ -886,8 +1287,8 @@ mod tests {
             model: "m".to_string(),
             api_key: String::new(),
             headers: Vec::new(),
-            provider: "openai-completions",
-            reasoning: "none",
+            provider: crate::agent::config::OPENAI_COMPLETIONS,
+            reasoning: "off",
             context_window: 8192,
             max_tokens: 1024,
         }
@@ -1046,15 +1447,21 @@ mod tests {
              data: [DONE]\n\n",
         );
         let mut usage = Usage::default();
-        let text = drain_events(&mut buffer, &mut usage);
+        let text = drain_events(OPENAI_COMPLETIONS, &mut buffer, &mut usage);
         assert_eq!(text, "one two");
         assert!(buffer.is_empty(), "the whole batch was consumed");
 
         // And an event split across two chunks waits for its other half.
         let mut buffer = String::from("data: {\"choices\":[{\"delta\":{\"content\":\"hal");
-        assert_eq!(drain_events(&mut buffer, &mut usage), "");
+        assert_eq!(
+            drain_events(OPENAI_COMPLETIONS, &mut buffer, &mut usage),
+            ""
+        );
         buffer.push_str("f\"}}]}\n\n");
-        assert_eq!(drain_events(&mut buffer, &mut usage), "half");
+        assert_eq!(
+            drain_events(OPENAI_COMPLETIONS, &mut buffer, &mut usage),
+            "half"
+        );
     }
 
     /// A character split across two chunks stays one character: decoded
@@ -1210,7 +1617,7 @@ mod tests {
     #[test]
     fn a_delta_is_what_arrives_mid_stream() {
         let event = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hel"}}]}"#;
-        assert_eq!(text_of(event).as_deref(), Some("hel"));
+        assert_eq!(text_of(OPENAI_COMPLETIONS, event).as_deref(), Some("hel"));
     }
 
     /// The event that carries the bill carries words too, on every gateway that
@@ -1226,7 +1633,7 @@ mod tests {
         )
         .to_string();
         let mut usage = Usage::default();
-        let text = drain_events(&mut buffer, &mut usage);
+        let text = drain_events(OPENAI_COMPLETIONS, &mut buffer, &mut usage);
         assert_eq!(text, "hi there", "the last delta went with the usage");
         assert_eq!(usage.input, 3);
         assert_eq!(usage.output, 2);
@@ -1237,9 +1644,10 @@ mod tests {
     /// overwrite a real one with zeros.
     #[test]
     fn a_null_usage_is_not_a_report() {
-        assert!(usage_of(r#"{"choices":[],"usage":null}"#).is_none());
-        assert!(usage_of(r#"{"choices":[]}"#).is_none());
-        let reported = usage_of(r#"{"usage":{"prompt_tokens":5}}"#).expect("a report");
+        assert!(usage_of(OPENAI_COMPLETIONS, r#"{"choices":[],"usage":null}"#).is_none());
+        assert!(usage_of(OPENAI_COMPLETIONS, r#"{"choices":[]}"#).is_none());
+        let reported =
+            usage_of(OPENAI_COMPLETIONS, r#"{"usage":{"prompt_tokens":5}}"#).expect("a report");
         assert_eq!(reported.input, 5);
     }
 
@@ -1247,8 +1655,8 @@ mod tests {
     #[test]
     fn a_single_message_is_read_from_message() {
         let event = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#;
-        assert_eq!(text_of(event).as_deref(), Some("done"));
-        let usage = usage_of(event).expect("usage");
+        assert_eq!(text_of(OPENAI_COMPLETIONS, event).as_deref(), Some("done"));
+        let usage = usage_of(OPENAI_COMPLETIONS, event).expect("usage");
         assert_eq!(usage.input, 2);
         assert_eq!(usage.output, 3);
     }
@@ -1256,7 +1664,323 @@ mod tests {
     /// `[DONE]` is a sentinel with no JSON, and must not be read as a delta.
     #[test]
     fn the_done_sentinel_is_not_a_delta() {
-        assert!(text_of("data: [DONE]").is_none());
+        assert!(text_of(OPENAI_COMPLETIONS, "data: [DONE]").is_none());
+    }
+
+    /// The three protocols answer at three different paths, and an endpoint
+    /// that already names the path it needs is not asked for it twice.
+    #[test]
+    fn each_protocol_answers_at_its_own_path() {
+        // The Messages API: the official base already carries the version —
+        // which is exactly what the settings hint tells users to paste — so it
+        // is not appended a second time.
+        assert_eq!(
+            messages_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            messages_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "a base without the version gets one"
+        );
+        assert_eq!(
+            messages_url("https://api.anthropic.com/"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            messages_url("https://gateway/v1/messages"),
+            "https://gateway/v1/messages"
+        );
+
+        // Gemini: the model and the streaming verb are both in the URL.
+        assert_eq!(
+            generate_content_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini-2.5-flash"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            generate_content_url(
+                "https://gateway/v1beta/models/m:streamGenerateContent?alt=sse",
+                "m"
+            ),
+            "https://gateway/v1beta/models/m:streamGenerateContent?alt=sse"
+        );
+
+        // And the choice is taken from the configured protocol, not guessed.
+        let mut cfg = config("https://api.anthropic.com/v1");
+        cfg.provider = ANTHROPIC_MESSAGES;
+        assert!(endpoint_url(&cfg).ends_with("/v1/messages"), "{cfg:?}");
+        let mut cfg = config("https://generativelanguage.googleapis.com/v1beta");
+        cfg.provider = GOOGLE_GENERATIVE_AI;
+        assert!(endpoint_url(&cfg).contains("/models/m:streamGenerateContent"));
+    }
+
+    /// The key rides in the header the protocol actually reads it from, and
+    /// `anthropic-version` goes out even when there is no key: it is the
+    /// protocol's header, not the credential's.
+    #[test]
+    fn the_key_rides_in_the_protocols_own_header() {
+        let headers = |provider: &'static str| {
+            let mut cfg = config("https://x/v1");
+            cfg.provider = provider;
+            cfg.api_key = "sk-test".to_string();
+            let built = authorize(client_for().post("https://x/v1"), &cfg)
+                .build()
+                .expect("a built request");
+            let read = |name: &str| {
+                built
+                    .headers()
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_string())
+            };
+            (
+                read("authorization"),
+                read("x-api-key"),
+                read("x-goog-api-key"),
+                read("anthropic-version"),
+            )
+        };
+
+        let openai = headers(OPENAI_COMPLETIONS);
+        assert_eq!(openai.0.as_deref(), Some("Bearer sk-test"));
+
+        let anthropic = headers(ANTHROPIC_MESSAGES);
+        assert_eq!(anthropic.1.as_deref(), Some("sk-test"));
+        assert_eq!(anthropic.3.as_deref(), Some("2023-06-01"));
+        assert!(anthropic.0.is_none(), "a bearer header this API ignores");
+
+        let google = headers(GOOGLE_GENERATIVE_AI);
+        assert_eq!(google.2.as_deref(), Some("sk-test"));
+
+        // Keyless: Anthropic still has to be told which version is spoken.
+        let mut cfg = config("https://x/v1");
+        cfg.provider = ANTHROPIC_MESSAGES;
+        let built = authorize(client_for().post("https://x/v1"), &cfg)
+            .build()
+            .expect("a built request");
+        assert!(built.headers().get("x-api-key").is_none());
+        assert_eq!(
+            built.headers().get("anthropic-version").unwrap(),
+            "2023-06-01"
+        );
+    }
+
+    /// The Messages body says the system prompt in a field of its own — a
+    /// `system` message is refused by name — and asks for thinking in tokens
+    /// rather than in effort words.
+    #[test]
+    fn the_messages_body_carries_a_system_field_and_a_budget() {
+        let mut cfg = config("https://api.anthropic.com/v1");
+        cfg.provider = ANTHROPIC_MESSAGES;
+        cfg.reasoning = "medium";
+        cfg.max_tokens = 4096;
+        let body = request_body(
+            &cfg,
+            &[
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "be brief".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "hi".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: "hello".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "again".to_string(),
+                },
+            ],
+            true,
+        );
+        assert!(body.contains("\"system\":\"be brief\""), "{body}");
+        assert!(
+            !body.contains("\"role\":\"system\""),
+            "the system prompt is not a message here: {body}"
+        );
+        assert!(body.contains("\"max_tokens\":4096"), "{body}");
+        assert!(body.contains("\"stream\":true"), "{body}");
+        // medium asks for 8k, and the answer keeps the last kilotoken: 4096-1024.
+        assert!(
+            body.contains("\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":3072}"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("stream_options"),
+            "a field this protocol does not have: {body}"
+        );
+
+        // And `off` sends no thinking at all rather than a disabled one.
+        let mut cfg = config("https://api.anthropic.com/v1");
+        cfg.provider = ANTHROPIC_MESSAGES;
+        let body = request_body(
+            &cfg,
+            &[ChatMessage {
+                role: ChatRole::User,
+                content: "hi".to_string(),
+            }],
+            true,
+        );
+        assert!(!body.contains("thinking"), "{body}");
+    }
+
+    /// Gemini's body keeps the system prompt out of the turns, calls the
+    /// assistant `model`, and carries the whole configuration under
+    /// `generationConfig` — with streaming in the URL rather than the body.
+    #[test]
+    fn the_gemini_body_speaks_gemini() {
+        let mut cfg = config("https://generativelanguage.googleapis.com/v1beta");
+        cfg.provider = GOOGLE_GENERATIVE_AI;
+        cfg.reasoning = "low";
+        cfg.max_tokens = 4096;
+        let body = request_body(
+            &cfg,
+            &[
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: "be brief".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: "hello".to_string(),
+                },
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: "again".to_string(),
+                },
+            ],
+            true,
+        );
+        assert!(
+            body.contains("\"systemInstruction\":{\"parts\":[{\"text\":\"be brief\"}]}"),
+            "{body}"
+        );
+        assert!(body.contains("\"role\":\"model\""), "{body}");
+        assert!(
+            !body.contains("\"role\":\"assistant\""),
+            "the role has this protocol's own name: {body}"
+        );
+        assert!(
+            body.contains("\"generationConfig\":{\"maxOutputTokens\":4096"),
+            "{body}"
+        );
+        assert!(
+            body.contains("\"thinkingConfig\":{\"includeThoughts\":true,\"thinkingBudget\":2048}"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("\"stream\""),
+            "streaming is the URL's business here: {body}"
+        );
+    }
+
+    /// The budget follows the level and never eats the answer's last
+    /// kilotoken; a ceiling with no room for both sends no thinking field at
+    /// all, because the request would be refused rather than downgraded.
+    #[test]
+    fn a_thinking_budget_keeps_room_for_the_answer() {
+        assert_eq!(thinking_budget("off", 4096), None);
+        assert_eq!(thinking_budget("low", 4096), Some(2048));
+        assert_eq!(thinking_budget("medium", 4096), Some(3072));
+        assert_eq!(thinking_budget("high", 4096), Some(3072));
+        assert_eq!(thinking_budget("high", 100_000), Some(16384));
+        assert_eq!(thinking_budget("medium", 1024), None, "no room to think in");
+        assert_eq!(effort_level("off"), None);
+        assert_eq!(effort_level("low"), Some("low"));
+    }
+
+    /// Anthropic's stream is read from `content_block_delta`, and the model's
+    /// own thinking is not the answer: `thinking_delta` has the same shape and
+    /// must not be painted as a reply.
+    #[test]
+    fn a_thinking_delta_is_not_an_answer() {
+        let musing = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
+        assert!(text_of(ANTHROPIC_MESSAGES, musing).is_none(), "{musing}");
+        let answer =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#;
+        assert_eq!(text_of(ANTHROPIC_MESSAGES, answer).as_deref(), Some("ok"));
+        // A block start carries an empty text block and reads as nothing.
+        let start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        assert!(text_of(ANTHROPIC_MESSAGES, start).is_none());
+    }
+
+    /// The Messages bill arrives in two halves and the total is both of them:
+    /// read one-for-one, the input count from `message_start` was overwritten
+    /// by `message_delta`, which carries the output alone.
+    #[test]
+    fn the_messages_bill_is_read_from_both_halves() {
+        let mut buffer = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        )
+        .to_string();
+        let mut usage = Usage::default();
+        let text = drain_events(ANTHROPIC_MESSAGES, &mut buffer, &mut usage);
+        assert_eq!(text, "hi", "the thinking events carried no text anyway");
+        assert_eq!(usage.input, 11, "the input count survived the second event");
+        assert_eq!(usage.output, 42, "and the output count is the final one");
+    }
+
+    /// Anthropic names the event on a line of its own before the payload, and a
+    /// reader that wanted the frame to *begin* with `data:` read the whole
+    /// protocol as silence — the request went out, the provider answered, and
+    /// the panel said the answer held nothing. The frames here are the ones the
+    /// endpoint actually sends, `event:` line and all.
+    #[test]
+    fn a_frame_that_names_its_event_is_still_read() {
+        let mut buffer = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"山\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"高\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        )
+        .to_string();
+        let mut usage = Usage::default();
+        let text = drain_events(ANTHROPIC_MESSAGES, &mut buffer, &mut usage);
+        assert_eq!(text, "山高", "the frames were read as silence");
+        assert_eq!(usage.input, 5, "the message_start bill was read");
+        assert_eq!(usage.output, 2, "and the message_delta one");
+    }
+
+    /// Gemini splits an answer across `parts` without saying how many, and a
+    /// part marked `thought` is the model's working rather than its answer.
+    #[test]
+    fn gemini_parts_arrive_joined_and_thoughts_skipped() {
+        let event = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one "},{"thought":true,"text":"private"},{"text":"two"}]}}]}"#;
+        assert_eq!(
+            text_of(GOOGLE_GENERATIVE_AI, event).as_deref(),
+            Some("one two")
+        );
+        let musing = r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"musing"}]}}]}"#;
+        assert!(
+            text_of(GOOGLE_GENERATIVE_AI, musing).is_none(),
+            "a thought is not an answer"
+        );
+        let bill = r#"{"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}"#;
+        assert!(
+            text_of(GOOGLE_GENERATIVE_AI, bill).is_none(),
+            "a bill is not text"
+        );
+        let usage = usage_of(GOOGLE_GENERATIVE_AI, bill).expect("usage");
+        assert_eq!(usage.input, 7);
+        assert_eq!(usage.output, 3);
+        assert_eq!(usage.total_tokens, 10);
     }
 
     /// A transport that is started and answered by nothing is `Unreachable`,

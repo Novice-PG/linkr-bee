@@ -304,6 +304,22 @@ pub struct Strings {
     pub agent_field_key: &'static str,
     /// The extra headers field label.
     pub agent_field_headers: &'static str,
+    /// The protocol (provider) field label.
+    pub agent_field_protocol: &'static str,
+    /// The reasoning-level field label.
+    pub agent_field_reasoning: &'static str,
+    /// The context-window field label.
+    pub agent_field_context_window: &'static str,
+    /// The output-ceiling field label.
+    pub agent_field_max_tokens: &'static str,
+    /// The word for a reasoning level, one per `AGENT_REASONING_LEVELS`.
+    pub agent_reasoning_off: &'static str,
+    pub agent_reasoning_low: &'static str,
+    pub agent_reasoning_medium: &'static str,
+    pub agent_reasoning_high: &'static str,
+    /// The warning under a context window too small for the request itself.
+    /// Two `{}`: what the fixed part costs, and the smallest window that works.
+    pub agent_window_tight: &'static str,
     /// The note field label.
     pub agent_field_note: &'static str,
     /// The conversation section heading.
@@ -451,6 +467,15 @@ const ZH: Strings = Strings {
     agent_field_model: "模型",
     agent_field_key: "密钥",
     agent_field_headers: "自定义头",
+    agent_field_protocol: "接口协议",
+    agent_field_reasoning: "推理强度",
+    agent_field_context_window: "上下文窗口",
+    agent_field_max_tokens: "输出上限",
+    agent_reasoning_off: "关闭",
+    agent_reasoning_low: "低",
+    agent_reasoning_medium: "中",
+    agent_reasoning_high: "高",
+    agent_window_tight: "窗口偏小：提示词约占 {} token，加上输出至少需要 {}，当前设置下每问都可能超窗",
     agent_field_note: "记一条",
     agent_thread_section: "对话",
     clipboard_empty: "读不到剪贴板",
@@ -607,6 +632,15 @@ const EN: Strings = Strings {
     agent_field_model: "model",
     agent_field_key: "key",
     agent_field_headers: "headers",
+    agent_field_protocol: "protocol",
+    agent_field_reasoning: "reasoning",
+    agent_field_context_window: "context window",
+    agent_field_max_tokens: "max output",
+    agent_reasoning_off: "off",
+    agent_reasoning_low: "low",
+    agent_reasoning_medium: "medium",
+    agent_reasoning_high: "high",
+    agent_window_tight: "the window is small: the prompt costs about {} tokens and the answer needs {} more, so questions may overrun it",
     agent_field_note: "note",
     agent_thread_section: "conversation",
     clipboard_empty: "the clipboard could not be read",
@@ -970,6 +1004,15 @@ mod tests {
                 s.agent_field_model,
                 s.agent_field_key,
                 s.agent_field_headers,
+                s.agent_field_protocol,
+                s.agent_field_reasoning,
+                s.agent_field_context_window,
+                s.agent_field_max_tokens,
+                s.agent_reasoning_off,
+                s.agent_reasoning_low,
+                s.agent_reasoning_medium,
+                s.agent_reasoning_high,
+                s.agent_window_tight,
                 s.agent_field_note,
                 s.agent_needs_endpoint,
                 s.agent_setting_invalid,

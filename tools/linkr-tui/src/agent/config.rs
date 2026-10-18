@@ -148,23 +148,43 @@ pub struct AgentProvider {
     pub hint_en: &'static str,
 }
 
+impl AgentProvider {
+    /// The name the settings window shows for this protocol.
+    pub fn label(&self, lang: crate::i18n::Lang) -> &'static str {
+        match lang {
+            crate::i18n::Lang::Zh => self.label_zh,
+            crate::i18n::Lang::En => self.label_en,
+        }
+    }
+}
+
+/// The protocol ids, spelled once.
+///
+/// The provider list, the validator and the transport all read these, so a
+/// rename cannot leave the request builder speaking a protocol the settings
+/// form no longer offers — which would be a mismatch no test of either half
+/// alone could see.
+pub const OPENAI_COMPLETIONS: &str = "openai-completions";
+pub const ANTHROPIC_MESSAGES: &str = "anthropic-messages";
+pub const GOOGLE_GENERATIVE_AI: &str = "google-generative-ai";
+
 pub const AGENT_PROVIDERS: [AgentProvider; 3] = [
     AgentProvider {
-        id: "openai-completions",
+        id: OPENAI_COMPLETIONS,
         label_zh: "OpenAI 兼容接口",
         label_en: "OpenAI-compatible API",
         hint_zh: "适用于提供 /chat/completions 的服务，例如 OpenAI、DeepSeek、Ollama、vLLM",
         hint_en: "For services exposing /chat/completions, such as OpenAI, DeepSeek, Ollama or vLLM",
     },
     AgentProvider {
-        id: "anthropic-messages",
+        id: ANTHROPIC_MESSAGES,
         label_zh: "Anthropic Messages 接口",
         label_en: "Anthropic Messages API",
         hint_zh: "适用于提供 /v1/messages 的服务，例如 https://api.anthropic.com/v1",
         hint_en: "For services exposing /v1/messages, such as https://api.anthropic.com/v1",
     },
     AgentProvider {
-        id: "google-generative-ai",
+        id: GOOGLE_GENERATIVE_AI,
         label_zh: "Google Gemini 接口",
         label_en: "Google Generative AI",
         hint_zh: "适用于提供 generateContent 的服务，例如 https://generativelanguage.googleapis.com/v1beta",
@@ -174,6 +194,44 @@ pub const AGENT_PROVIDERS: [AgentProvider; 3] = [
 
 /// Ascending thinking budget. `off` leaves reasoning options out of the request.
 pub const AGENT_REASONING_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
+
+/// The provider record an id names, or the default's.
+pub fn provider_for(id: &str) -> &'static AgentProvider {
+    AGENT_PROVIDERS
+        .iter()
+        .find(|provider| provider.id == id)
+        .unwrap_or(&AGENT_PROVIDERS[0])
+}
+
+/// The provider a stored (or hand-edited) id names, or the first one.
+///
+/// A store can be edited by hand and a future version can drop a protocol, so
+/// an id that names nothing lands on the built-in default rather than on a
+/// value the request builder would then have to guess about.
+pub fn provider_or_default(id: &str) -> &'static str {
+    provider_for(id).id
+}
+
+/// The same for a reasoning level: a stored value naming no level reads `off`,
+/// which is the one level that adds nothing to a request.
+pub fn reasoning_or_default(level: &str) -> &'static str {
+    AGENT_REASONING_LEVELS
+        .iter()
+        .find(|candidate| **candidate == level)
+        .copied()
+        .unwrap_or(AGENT_REASONING_LEVELS[0])
+}
+
+/// The word for a reasoning level, in the interface language.
+pub fn reasoning_label(level: &str, lang: crate::i18n::Lang) -> &'static str {
+    let s = lang.strings();
+    match level {
+        "low" => s.agent_reasoning_low,
+        "medium" => s.agent_reasoning_medium,
+        "high" => s.agent_reasoning_high,
+        _ => s.agent_reasoning_off,
+    }
+}
 
 pub const AGENT_DEFAULT_CONTEXT_WINDOW: i64 = 32768;
 pub const AGENT_DEFAULT_MAX_TOKENS: i64 = 4096;
@@ -213,6 +271,36 @@ pub struct AgentConfig {
     pub reasoning: &'static str,
     pub context_window: i64,
     pub max_tokens: i64,
+}
+
+impl AgentConfig {
+    /// The output ceiling that actually goes out.
+    ///
+    /// `0` is this program's spelling of "let the built-in default decide" (the
+    /// upstream web build sends `maxTokens || 4096`), but a provider reads the
+    /// literal field and the range it accepts starts at 1 — DeepSeek answers a
+    /// zero with `Invalid max_tokens value, the valid range of max_tokens is
+    /// [1, 393216]` and every question fails.
+    pub fn output_ceiling(&self) -> i64 {
+        if self.max_tokens > 0 {
+            self.max_tokens
+        } else {
+            AGENT_DEFAULT_MAX_TOKENS
+        }
+    }
+
+    /// The context window the budget is calculated from.
+    ///
+    /// The same spelling of "default" as the ceiling: an unset window is the
+    /// built-in one rather than an unknown, which is what the web build hands
+    /// its own budget function.
+    pub fn effective_context_window(&self) -> i64 {
+        if self.context_window > 0 {
+            self.context_window
+        } else {
+            AGENT_DEFAULT_CONTEXT_WINDOW
+        }
+    }
 }
 
 /// Validate a config and normalise it. Field-specific errors are reported by
@@ -457,16 +545,25 @@ mod tests {
     }
 }
 
-/// The four keys the agent configuration is stored under, and where.
+/// The keys the agent configuration is stored under, and where.
 ///
 /// Separate keys rather than one blob, because the store is a key-value shelf
 /// and a form that edits one field should not have to parse and rewrite the
-/// other three to do it. The API key has its own for the same reason and one
-/// more: the key is the field most likely to be rotated alone.
+/// rest to do it. The API key has its own for the same reason and one more:
+/// the key is the field most likely to be rotated alone.
+///
+/// The four protocol keys joined the four address keys when the form stopped
+/// being one protocol's. They are stored as written rather than as parsed, for
+/// the same reason the address fields are: a half-typed window is not a broken
+/// configuration and a load must hand back exactly what a save took.
 const KEY_ENDPOINT: &str = "linkr-agent-model:endpoint";
 const KEY_MODEL: &str = "linkr-agent-model:model";
 const KEY_API_KEY: &str = "linkr-agent-model:key";
 const KEY_HEADERS: &str = "linkr-agent-model:headers";
+const KEY_PROVIDER: &str = "linkr-agent-model:provider";
+const KEY_REASONING: &str = "linkr-agent-model:reasoning";
+const KEY_CONTEXT_WINDOW: &str = "linkr-agent-model:context-window";
+const KEY_MAX_TOKENS: &str = "linkr-agent-model:max-tokens";
 
 /// The form's contents, as the view keeps them.
 ///
@@ -482,26 +579,49 @@ pub struct StoredAgentConfig {
     /// Extra headers, one `Name: Value` per line — [`format_agent_headers`]'s
     /// own output, so a round trip is the same function backwards.
     pub headers: String,
+    /// The protocol id, as `AGENT_PROVIDERS` spells it. Blanks and unknown ids
+    /// read as the default at load.
+    pub provider: String,
+    /// One of `AGENT_REASONING_LEVELS`.
+    pub reasoning: String,
+    /// The context window and the output ceiling as typed. Empty means "the
+    /// built-in default", which is the same meaning `0` has once parsed.
+    pub context_window: String,
+    pub max_tokens: String,
 }
 
-/// Write the four fields. A blank field is written as blank rather than
-/// removed, so "the user cleared the model" and "there is no model yet" are the
-/// same thing and a load cannot tell them apart by accident.
+/// Write the fields. A blank field is written as blank rather than removed, so
+/// "the user cleared the model" and "there is no model yet" are the same thing
+/// and a load cannot tell them apart by accident.
 pub fn save_agent_config<S: Storage>(storage: &mut S, config: &StoredAgentConfig) {
     storage.set(KEY_ENDPOINT, &config.endpoint);
     storage.set(KEY_MODEL, &config.model);
     storage.set(KEY_API_KEY, &config.api_key);
     storage.set(KEY_HEADERS, &config.headers);
+    storage.set(KEY_PROVIDER, &config.provider);
+    storage.set(KEY_REASONING, &config.reasoning);
+    storage.set(KEY_CONTEXT_WINDOW, &config.context_window);
+    storage.set(KEY_MAX_TOKENS, &config.max_tokens);
 }
 
 /// Read them back. A store with nothing in it gives a blank form, which is the
 /// same shape the view starts with.
+///
+/// The protocol and the reasoning level are the two fields that are always
+/// *something*: a select paints a value whether or not one was ever chosen, so
+/// a blank or unknown store entry resolves to the default here rather than
+/// leaving the window painting an empty row the user cannot select back to.
 pub fn load_agent_config<S: Storage>(storage: &S) -> StoredAgentConfig {
+    let chosen = |key: &str| storage.get(key).unwrap_or_default();
     StoredAgentConfig {
-        endpoint: storage.get(KEY_ENDPOINT).unwrap_or_default(),
-        model: storage.get(KEY_MODEL).unwrap_or_default(),
-        api_key: storage.get(KEY_API_KEY).unwrap_or_default(),
-        headers: storage.get(KEY_HEADERS).unwrap_or_default(),
+        endpoint: chosen(KEY_ENDPOINT),
+        model: chosen(KEY_MODEL),
+        api_key: chosen(KEY_API_KEY),
+        headers: chosen(KEY_HEADERS),
+        provider: provider_or_default(&chosen(KEY_PROVIDER)).to_string(),
+        reasoning: reasoning_or_default(&chosen(KEY_REASONING)).to_string(),
+        context_window: chosen(KEY_CONTEXT_WINDOW),
+        max_tokens: chosen(KEY_MAX_TOKENS),
     }
 }
 
@@ -526,6 +646,10 @@ mod store_tests {
                     model: "llama-3".into(),
                     api_key: "sk-x".into(),
                     headers: "X-A: 1".into(),
+                    provider: "anthropic-messages".into(),
+                    reasoning: "medium".into(),
+                    context_window: "16000".into(),
+                    max_tokens: "2048".into(),
                 },
             );
         }
@@ -534,18 +658,50 @@ mod store_tests {
         assert_eq!(loaded.model, "llama-3");
         assert_eq!(loaded.api_key, "sk-x");
         assert_eq!(loaded.headers, "X-A: 1");
+        assert_eq!(loaded.provider, "anthropic-messages");
+        assert_eq!(loaded.reasoning, "medium");
+        assert_eq!(loaded.context_window, "16000");
+        assert_eq!(loaded.max_tokens, "2048");
         let _ = std::fs::remove_file(&path);
     }
 
     /// A store with nothing in it gives a blank form, not an error: the view
     /// opens on an empty configuration and that is the designed first frame.
+    /// The two selects are the exception — a select paints a value whatever the
+    /// store holds.
     #[test]
     fn an_empty_store_is_a_blank_form() {
         let mut path = std::env::temp_dir();
         path.push(format!("linkr-cfg-empty-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let loaded = load_agent_config(&JsonFile::at(&path));
-        assert_eq!(loaded, StoredAgentConfig::default());
+        assert_eq!(
+            loaded,
+            StoredAgentConfig {
+                provider: AGENT_PROVIDERS[0].id.to_string(),
+                reasoning: AGENT_REASONING_LEVELS[0].to_string(),
+                ..StoredAgentConfig::default()
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A stored id that names nothing — a hand-edited file, or a protocol a
+    /// later version dropped — reads as the default rather than as a value the
+    /// request builder would then have to guess about.
+    #[test]
+    fn an_unknown_protocol_reads_as_the_default() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("linkr-cfg-unknown-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = JsonFile::at(&path);
+            store.set("linkr-agent-model:provider", "carrier-pigeon");
+            store.set("linkr-agent-model:reasoning", "maximum");
+        }
+        let loaded = load_agent_config(&JsonFile::at(&path));
+        assert_eq!(loaded.provider, AGENT_PROVIDERS[0].id);
+        assert_eq!(loaded.reasoning, AGENT_REASONING_LEVELS[0]);
         let _ = std::fs::remove_file(&path);
     }
 

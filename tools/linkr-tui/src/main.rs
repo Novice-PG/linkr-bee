@@ -108,7 +108,7 @@ enum OverlayPreview {
     /// caret can be looked at without a device — which is the only way to look
     /// at a dialog that is normally raised to *do* something.
     WifiSsid,
-    /// The assistant's settings: five fields, a note list and a caret that has
+    /// The assistant's settings: fields, a note list and a caret that has
     /// nowhere else to be looked at.
     Settings,
 }
@@ -1886,6 +1886,16 @@ fn load_agent_state(app: &mut App) {
     // screen to say why.
     input.headers =
         linkr_tui::agent::config::parse_agent_headers(&saved.headers).unwrap_or_default();
+    // The protocol and the reasoning level are already resolved to a value the
+    // form can paint — `load_agent_config` answers with the default when the
+    // store holds nothing or holds a name that no longer exists.
+    input.provider = linkr_tui::agent::config::provider_or_default(&saved.provider);
+    input.reasoning = linkr_tui::agent::config::reasoning_or_default(&saved.reasoning);
+    // A stored number that no longer parses is the same failure as a bad
+    // endpoint, and reads the same way: the model is not configured. A blank
+    // one means the built-in default, which is what `0` means here.
+    input.context_window = saved.context_window.trim().parse().unwrap_or(0);
+    input.max_tokens = saved.max_tokens.trim().parse().unwrap_or(0);
     // A stored config that no longer validates must not leave the view claiming
     // a model it cannot use: the answer here is the same one the Enter key
     // gives, so a bad endpoint is caught the same way wherever it came from.
@@ -1895,6 +1905,10 @@ fn load_agent_state(app: &mut App) {
     app.assistant.model = input.model;
     app.assistant.api_key = input.api_key;
     app.assistant.headers = saved.headers;
+    app.assistant.provider = saved.provider;
+    app.assistant.reasoning = saved.reasoning;
+    app.assistant.context_window = saved.context_window;
+    app.assistant.max_tokens = saved.max_tokens;
     // The conversations come back too, oldest first, which is the order they
     // were written in — the store keeps the last few turns of each and drops
     // the oldest conversations past its cap, so a long thread loses its
@@ -2851,6 +2865,7 @@ mod tests {
                     model: "gpt".to_string(),
                     api_key: "sk-x".to_string(),
                     headers: "X-Tenant: acme".to_string(),
+                    ..Default::default()
                 },
             );
         }
