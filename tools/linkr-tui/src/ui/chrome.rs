@@ -170,6 +170,7 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
     let focus = match app.focus {
         crate::app::Focus::Terminal => s.focus_terminal,
         crate::app::Focus::Sidebar => s.focus_sidebar,
+        crate::app::Focus::Assistant => s.focus_assistant,
     };
     let state_style = theme.state_dot(app.state);
     let mut spans = vec![Span::styled(format!("[{focus}] "), theme.accent())];
@@ -253,6 +254,7 @@ fn focus_detail(app: &App, s: &crate::i18n::Strings) -> String {
                 .unwrap_or_else(|| s.focus_terminal.to_string())
         }
         crate::app::Focus::Terminal => s.term_input.to_string(),
+        crate::app::Focus::Assistant => s.agent_field_composer.to_string(),
     }
 }
 

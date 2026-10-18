@@ -47,7 +47,40 @@ pub struct Regions {
     pub top_bar: Rect,
     pub sidebar: Rect,
     pub centre: Rect,
+    /// The docked assistant panel's column, zero-width when it does not show.
+    pub assistant: Rect,
     pub bottom_bar: Rect,
+}
+
+/// The narrowest the centre may become before the panel gives up its column.
+///
+/// The pane keeps this many columns whatever the panel wants: below it the
+/// device's output is too cramped to read, and the full-width assistant view
+/// (F5) is where a small window reads a conversation anyway.
+pub const CENTRE_MIN: u16 = 48;
+
+/// The panel's column: a share of the band, kept inside what a conversation
+/// needs and what a pane can spare. The left rule is part of the column, the
+/// way the rail's edge is part of the rail's.
+pub const ASSISTANT_WIDTH_MIN: u16 = 32;
+pub const ASSISTANT_WIDTH_MAX: u16 = 64;
+
+/// The panel's width for a band of `width`, or zero when there is no room.
+///
+/// `5/12` of the band — the web panel is a share of the timeline rather than a
+/// fixed column, and a share keeps both sides in proportion as the window
+/// grows — clamped to the two ends, and never at the expense of
+/// [`CENTRE_MIN`] columns of pane. A width below the minimum is no width at
+/// all: two columns of panel is not a panel, it is a pane with its edge worn
+/// off, and the pane would rather have the columns back.
+pub fn assistant_width(width: u16) -> u16 {
+    let room = width.saturating_sub(CENTRE_MIN);
+    if room < ASSISTANT_WIDTH_MIN {
+        return 0;
+    }
+    (width * 5 / 12)
+        .clamp(ASSISTANT_WIDTH_MIN, ASSISTANT_WIDTH_MAX)
+        .min(room)
 }
 
 /// Resolve the designed layout for an area.
@@ -56,6 +89,16 @@ pub struct Regions {
 /// centre gets the whole middle band, so a narrow terminal or a user who
 /// wants the view full width both get the same thing.
 pub fn regions(area: Rect, sidebar: bool) -> Regions {
+    regions_for(area, sidebar, false)
+}
+
+/// [`regions`], with the docked assistant panel as well.
+///
+/// The panel takes its column out of the centre, and yields it — zero width,
+/// nothing painted — when there is no room for it. The yields are ordered: a
+/// terminal too narrow for the rail *and* a usable centre gives the rail up
+/// first, because the rail is chrome and the pane is the device.
+pub fn regions_for(area: Rect, sidebar: bool, panel: bool) -> Regions {
     let [top_bar, middle, bottom_bar] = Layout::vertical([
         Constraint::Length(BAR_HEIGHT),
         Constraint::Min(0),
@@ -64,12 +107,13 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
     .areas(area);
 
     if !sidebar {
-        return Regions {
+        return split_panel(
             top_bar,
-            sidebar: Rect { width: 0, ..middle },
-            centre: middle,
+            Rect { width: 0, ..middle },
+            middle,
+            panel,
             bottom_bar,
-        };
+        );
     }
 
     // A terminal narrower than the sidebar plus a usable centre would leave the
@@ -79,10 +123,38 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
     let [sidebar_area, centre] =
         Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).areas(middle);
 
+    split_panel(top_bar, sidebar_area, centre, panel, bottom_bar)
+}
+
+/// Take the panel's column out of the centre.
+fn split_panel(
+    top_bar: Rect,
+    sidebar: Rect,
+    centre: Rect,
+    panel: bool,
+    bottom_bar: Rect,
+) -> Regions {
+    let width = if panel {
+        assistant_width(centre.width)
+    } else {
+        0
+    };
+    if width == 0 {
+        return Regions {
+            top_bar,
+            sidebar,
+            centre,
+            assistant: Rect { width: 0, ..centre },
+            bottom_bar,
+        };
+    }
+    let [centre_area, assistant] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(centre);
     Regions {
         top_bar,
-        sidebar: sidebar_area,
-        centre,
+        sidebar,
+        centre: centre_area,
+        assistant,
         bottom_bar,
     }
 }
@@ -90,12 +162,14 @@ pub fn regions(area: Rect, sidebar: bool) -> Regions {
 /// The cell grid the terminal pane's emulator is sized to, for a window of
 /// `cols`×`rows`.
 ///
-/// This is the paint's own arithmetic: the rail counted even when it is
-/// closed, so toggling it does not rewrap the device's whole history. Every
-/// column of the rect is one the paint fills, which is what keeps the device's
-/// own wrap between the pane's edges.
+/// This is the design's arithmetic with everything counted: the rail and the
+/// assistant panel, even when either is closed. Toggling one then moves the
+/// paint, not the pane — and a pane whose grid moved would rewrap the device's
+/// whole history, which is the one thing a layout toggle must not do. Every
+/// column of the rect is one the paint fills when both are shown, which is
+/// what keeps the device's own wrap between the pane's edges.
 pub fn pane_area(cols: u16, rows: u16) -> Rect {
-    regions(Rect::new(0, 0, cols, rows), true).centre
+    regions_for(Rect::new(0, 0, cols, rows), true, true).centre
 }
 
 /// Paint one frame.
@@ -113,7 +187,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // The page ground first, so no cell keeps the emulator's default background.
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    let regions = regions(area, app.sidebar_visible);
+    let regions = regions_for(area, app.sidebar_visible, app.panel_wanted());
 
     draw_top_bar(frame, app, regions.top_bar);
     // Closed, the rail is a zero-width strip and the centre already owns the
@@ -122,6 +196,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_sidebar(frame, app, regions.sidebar);
     }
     draw_centre(frame, app, regions.centre);
+    if regions.assistant.width > 0 {
+        draw_assistant(frame, app, regions.assistant);
+    }
     draw_bar(
         frame,
         app,
@@ -268,6 +345,40 @@ fn draw_divider(frame: &mut Frame, theme: &crate::theme::Theme, area: Rect) {
         .map(|_| Line::from(Span::styled(DIVIDER_GLYPH, theme.line())))
         .collect();
     frame.render_widget(Paragraph::new(rule).style(theme.panel()), column);
+}
+
+/// The docked assistant panel: the thread on the right of the pane.
+///
+/// Painted like the rail, because it is a column and not an overlay: the rule
+/// on its left is what says the pane stops there, and the pane beside it is
+/// *narrowed*, never covered. The rows are anchored at the bottom by
+/// `panel_lines`, so the newest turn is the one on screen.
+fn draw_assistant(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    // The rows get the column minus its edge, so a row can never be laid out
+    // against the panel's width and then paint over the rule.
+    let text_area = Rect {
+        x: area.x + DIVIDER_WIDTH,
+        width: area.width.saturating_sub(DIVIDER_WIDTH),
+        ..area
+    };
+    let lines =
+        crate::views::assistant::panel_lines(app, &theme, text_area.width, text_area.height);
+    frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
+    // The rule down the panel's left edge, for the same reason the rail has
+    // one: a column without an edge reads as part of the pane. A column too
+    // narrow to hold both the rule and a character keeps the rule, because
+    // there is no such column: `assistant_width` never hands out one.
+    if area.width > DIVIDER_WIDTH && area.height > 0 {
+        let column = Rect {
+            width: DIVIDER_WIDTH,
+            ..area
+        };
+        let rule: Vec<Line<'static>> = (0..column.height)
+            .map(|_| Line::from(Span::styled(DIVIDER_GLYPH, theme.line())))
+            .collect();
+        frame.render_widget(Paragraph::new(rule).style(theme.panel()), column);
+    }
 }
 
 fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
@@ -564,6 +675,105 @@ mod tests {
         }
     }
 
+    /// The docked panel takes its column out of the terminal view's band and
+    /// gives it back everywhere else: the console keeps the device's screen,
+    /// and the assistant rides beside it rather than over it.
+    #[test]
+    fn the_panel_docks_beside_the_console() {
+        let app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let wide = area(140, 30);
+        let regions = regions_for(wide, app.sidebar_visible, app.panel_wanted());
+        assert!(regions.assistant.width > 0, "no panel at 140 columns");
+        assert_eq!(
+            regions.assistant.x,
+            regions.centre.right(),
+            "the panel does not start where the pane stops"
+        );
+        assert_eq!(
+            regions.assistant.right(),
+            wide.right(),
+            "the panel is not flush with the window"
+        );
+
+        // The rule is what says the column is the panel's: without it the
+        // panel's ground runs into the pane's.
+        let buffer = render_buffer(&app, 140, 30).expect("a frame");
+        assert_eq!(
+            buffer[(regions.assistant.x, 10)].symbol(),
+            DIVIDER_GLYPH,
+            "no rule on the panel's edge"
+        );
+        // The composer and its key hint are painted: a panel with nowhere to
+        // type is a panel the user will try to type into.
+        let text = render_to_text(&app, 140, 30);
+        assert!(text.contains('>'), "no composer marker: {text:?}");
+        assert!(text.contains("Ctrl+N"), "no key hint: {text:?}");
+
+        // Any other view gives the band back: the panel belongs to the
+        // terminal, and a frame of Diagnostics is not a terminal.
+        let elsewhere = App {
+            view: View::Diagnostics,
+            ..App::default()
+        };
+        let regions = regions_for(wide, elsewhere.sidebar_visible, elsewhere.panel_wanted());
+        assert_eq!(regions.assistant.width, 0, "the panel followed the view");
+        assert_eq!(
+            regions.centre.right(),
+            wide.right(),
+            "the pane did not get the columns back"
+        );
+    }
+
+    /// A window with no room for both gives the panel up rather than the pane:
+    /// the device's output is the one thing on screen that cannot be scrolled
+    /// smaller, and a share of a band that is too narrow for it is no panel at
+    /// all — two columns of chat is a pane with its edge worn off.
+    #[test]
+    fn a_narrow_band_gives_the_panel_up() {
+        let app = App::default();
+        let regions = regions_for(area(80, 24), app.sidebar_visible, true);
+        assert_eq!(regions.assistant.width, 0, "the panel squeezed the pane");
+        assert_eq!(
+            regions.centre.width,
+            80 - SIDEBAR_WIDTH,
+            "the pane did not keep the band"
+        );
+    }
+
+    /// The panel's share of the band, from the clamps at both ends to the
+    /// nothing it becomes when the pane would go below its own minimum.
+    #[test]
+    fn the_panel_takes_a_share_of_the_band() {
+        assert_eq!(assistant_width(0), 0);
+        assert_eq!(assistant_width(79), 0, "no room below the minimum");
+        assert_eq!(
+            assistant_width(80),
+            ASSISTANT_WIDTH_MIN,
+            "the smallest panel is the minimum"
+        );
+        assert_eq!(assistant_width(120), 50, "the share is five twelfths");
+        assert_eq!(
+            assistant_width(400),
+            ASSISTANT_WIDTH_MAX,
+            "the largest panel is the maximum"
+        );
+        // Whatever the width, the pane keeps its own minimum whenever the
+        // panel is shown at all.
+        for width in 0..400u16 {
+            let panel = assistant_width(width);
+            if panel > 0 {
+                assert!(
+                    width - panel >= CENTRE_MIN,
+                    "{width} left the pane {} columns",
+                    width - panel
+                );
+            }
+        }
+    }
+
     /// The page takes the window whole: no column is held back as air on
     /// either side.
     ///
@@ -817,13 +1027,17 @@ mod tests {
     /// the pill is right-aligned and only its width moves.
     #[test]
     fn the_terminal_pane_carries_its_status_pill() {
-        // The chip runs to here and stops: the pane's last column is the margin.
-        let chip_right = 110 - 1 - PILL_MARGIN;
         for lang in [Lang::Zh, Lang::En] {
             let app = App {
                 lang,
                 ..App::default()
             };
+            // The chip runs to here and stops: the pane's last column is the
+            // margin. Which column that is comes from the one place that
+            // decides it — the frame carries the assistant's panel too, and a
+            // second copy of the width arithmetic here is what would drift.
+            let centre = regions_for(area(110, 30), app.sidebar_visible, app.panel_wanted());
+            let chip_right = centre.centre.right() - 1 - PILL_MARGIN;
             let theme = app.theme();
             let buffer = render_buffer(&app, 110, 30).expect("a frame");
             let row = 1;
@@ -875,9 +1089,13 @@ mod tests {
             lang: Lang::En,
             ..App::default()
         };
-        // The pane's last column, and the pane's rows: the middle band, minus
-        // the pill's own margin.
-        let column = 110 - 1;
+        // The pane's last column — from the layout's own arithmetic, because
+        // the assistant's panel takes its share off the right — and the pane's
+        // rows: the middle band, minus the pill's own margin.
+        let column = regions_for(area(110, 30), app.sidebar_visible, app.panel_wanted())
+            .centre
+            .right()
+            - 1;
         let thumb = |app: &App| -> Vec<u16> {
             let buffer = render_buffer(app, 110, 30).expect("a frame");
             (1..29)

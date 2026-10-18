@@ -268,6 +268,8 @@ pub enum Focus {
     Sidebar,
     #[default]
     Terminal,
+    /// The docked assistant panel beside the terminal.
+    Assistant,
 }
 
 /// The one-shot modifier latch: modifiers a chord arms for the very next key,
@@ -543,6 +545,16 @@ pub struct App {
     /// narrow terminal — that case is handled inside [`crate::ui::regions`],
     /// which shrinks the rail rather than dropping it.
     pub sidebar_visible: bool,
+    /// Whether the docked assistant panel takes its column in the terminal
+    /// view.
+    ///
+    /// Open by default: the panel beside the pane is the layout the interface
+    /// landed on, and closing it is the user's call — the same rule the rail
+    /// follows. When the centre would be narrower than
+    /// [`crate::ui::CENTRE_MIN`], the panel yields its column instead of
+    /// squeezing the pane, and the full-width assistant view (F5) is where a
+    /// small window reads a conversation.
+    pub assistant_panel: bool,
     /// Whether frames are painted for the legacy Windows console (conhost).
     ///
     /// Set once by the event loop before the first paint, and false everywhere
@@ -782,6 +794,7 @@ impl Default for App {
             focus: Focus::default(),
             latch: Latch::default(),
             sidebar_visible: true,
+            assistant_panel: true,
             legacy_console: false,
             transport: Transport::default(),
             transport_locked: false,
@@ -1002,6 +1015,51 @@ impl App {
             text,
             level: NoticeLevel::Info,
         }
+    }
+
+    /// Open or close the docked assistant panel.
+    ///
+    /// Closing it while the keyboard is in the panel would leave the keys
+    /// typing into a column the user cannot see, so focus follows it back to
+    /// the terminal — the same bargain [`Self::toggle_sidebar`] makes. There is
+    /// no notice: the column appears and disappears, and the screen is the
+    /// announcement.
+    pub fn toggle_assistant_panel(&mut self) {
+        self.assistant_panel = !self.assistant_panel;
+        if !self.assistant_panel && self.focus == Focus::Assistant {
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    /// Whether the keyboard is in the docked panel.
+    ///
+    /// Both halves have to hold: the panel is painted in the terminal view
+    /// only, and a focus left on it after the view changed would be a caret
+    /// nobody can see. [`Self::set_view`] hands the keys back, so this is a
+    /// read rather than a second rule.
+    pub fn assistant_panel_focused(&self) -> bool {
+        self.assistant_panel && self.focus == Focus::Assistant && self.view == View::Terminal
+    }
+
+    /// Whether this frame wants the panel's column: open, and on the view it
+    /// belongs to. Whether there is *room* for it is
+    /// [`crate::ui::regions_for`]'s to say, because that is where the widths
+    /// are known.
+    pub fn panel_wanted(&self) -> bool {
+        self.assistant_panel && self.view == View::Terminal
+    }
+
+    /// Whether the docked panel has room in the frame the keyboard is being
+    /// handled in.
+    ///
+    /// The same arithmetic the painter uses, from the size `fit_pane_to` kept:
+    /// the alternative is a focus moved into a column the painter then drops,
+    /// which is a caret nobody can see and keys that look broken.
+    pub fn panel_fits(&self) -> bool {
+        crate::ui::regions_for(self.screen, self.sidebar_visible, true)
+            .assistant
+            .width
+            > 0
     }
 
     /// Show a notice, dropping the oldest when either stack is full.
@@ -1228,6 +1286,11 @@ impl App {
     /// Select a view.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
+        // The panel lives in the terminal view; a focus left in it would be a
+        // caret the next keystroke lands in with nothing on screen to show it.
+        if self.focus == Focus::Assistant && view != View::Terminal {
+            self.focus = Focus::Terminal;
+        }
         self.save_settings();
     }
 
@@ -2064,44 +2127,62 @@ impl App {
             }
         };
 
+        // Which conversation asked: the reply goes back to the thread that sent
+        // the question, wherever the panel has moved since. A task whose chat is
+        // gone — the store's cap forgot it — lands in the panel's current one
+        // rather than nowhere, because an answer read in the wrong thread is
+        // still better than an answer the user is told they never got.
+        let chat_id = app
+            .assistant
+            .task_chat
+            .iter()
+            .find(|(task, _)| task == &found.id)
+            .map(|(_, chat)| *chat);
+        let index = chat_id
+            .and_then(|id| app.assistant.chats.iter().position(|chat| chat.id == id))
+            .unwrap_or_else(|| app.assistant.active.min(app.assistant.chats.len() - 1));
+        // Stamped from the clock as it is now, read before the conversation is
+        // borrowed: the stamp is what the store's cap orders conversations by,
+        // so it belongs to the save below rather than to the paint above.
+        let now = app.environment_stamp() * 1000;
+        let chat = &mut app.assistant.chats[index];
+
         // The two numbers the view shows are a running total, so one more message is
         // folded in rather than replacing the count.
-        {
-            let running = crate::agent::usage::Usage {
-                input: app.assistant.usage.0,
-                output: app.assistant.usage.1,
-                ..crate::agent::usage::Usage::default()
-            };
-            let merged = crate::agent::usage::add_usage(&running, &usage);
-            app.assistant.usage = (merged.input, merged.output);
-        }
+        let running = crate::agent::usage::Usage {
+            input: chat.usage.0,
+            output: chat.usage.1,
+            ..crate::agent::usage::Usage::default()
+        };
+        let merged = crate::agent::usage::add_usage(&running, &usage);
+        chat.usage = (merged.input, merged.output);
 
         // The reply is the assistant's turn in the conversation. A failure is a turn
         // too: the thread of what was asked and what came back is the record, and a
         // gap in it is worse than a turn that says the model did not answer.
-        app.assistant
-            .display
-            .push(crate::agent::session::DisplayLine {
-                role: "assistant".to_string(),
-                text: summary.clone(),
-            });
+        let turn = crate::agent::session::DisplayLine {
+            role: "assistant".to_string(),
+            text: summary.clone(),
+        };
+        chat.display.push(turn.clone());
+        // A failure is shown but not remembered: the same contract `push_turn`
+        // keeps for the question's path — the thread is the record of what
+        // happened, and the messages are what the model is asked to continue.
+        if status == "answered" {
+            chat.messages.push(turn);
+        }
         let keep = crate::agent::session::SESSION_MESSAGES;
-        let from = app.assistant.display.len().saturating_sub(keep);
-        app.assistant.display.drain(..from);
+        let keep_display = crate::agent::session::SESSION_DISPLAY;
+        let from = chat.display.len().saturating_sub(keep_display);
+        chat.display.drain(..from);
+        let from = chat.messages.len().saturating_sub(keep);
+        chat.messages.drain(..from);
+        chat.updated_at = now;
+
         // Persisted here rather than only at the view's Enter: the reply arrives on
         // this beat, and a session saved on the question alone would lose every
         // answer if the program ended between the two.
-        let key = app.agent_device_key();
-        let now = app.environment_stamp() * 1000;
-        if let Some(store) = app.agent_store.as_mut() {
-            let _ = crate::agent::session::save_session(
-                store,
-                &key,
-                &app.assistant.display,
-                &app.assistant.display,
-                now,
-            );
-        }
+        crate::views::assistant::persist_session(app);
 
         // Whatever happened, the answer is in the store: a task that says "failed"
         // is the record of a question that was asked.

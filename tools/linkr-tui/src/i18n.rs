@@ -93,6 +93,8 @@ pub struct Strings {
     pub focus_terminal: &'static str,
     /// The focus tag's word for the sidebar.
     pub focus_sidebar: &'static str,
+    /// The focus tag's word for the docked assistant panel.
+    pub focus_assistant: &'static str,
     /// What the keyboard is typing into while the terminal has it.
     pub term_input: &'static str,
     /// The palette hint.
@@ -244,6 +246,12 @@ pub struct Strings {
     pub asst_full_auto_expired: &'static str,
     /// The token-usage row label.
     pub asst_usage_label: &'static str,
+    /// The conversation row label: which thread, of how many.
+    pub asst_chat_label: &'static str,
+    /// The docked panel's key hint, under the composer.
+    pub asst_panel_keys: &'static str,
+    /// Shown when the window has no room for the docked panel.
+    pub asst_panel_narrow: &'static str,
     /// The pending-approval row.
     pub asst_awaiting: &'static str,
     /// A request that never reached the model, with the transport's own why.
@@ -324,8 +332,12 @@ pub struct Strings {
     pub agent_mode_auto: &'static str,
     pub agent_mode_full: &'static str,
     pub agent_mode_manual: &'static str,
-    /// The notice when the conversation was cleared.
-    pub agent_cleared: &'static str,
+    /// The notice when a fresh conversation was started.
+    pub agent_new_chat: &'static str,
+    /// Prefix of the notice naming the conversation the panel moved to.
+    pub agent_chat_switched: &'static str,
+    /// The notice when the open conversation was forgotten.
+    pub agent_chat_deleted: &'static str,
     /// The word for a finding awaiting review.
     pub pending_review: &'static str,
 
@@ -392,6 +404,7 @@ const ZH: Strings = Strings {
     watch_empty: "暂无发现",
     focus_terminal: "终端",
     focus_sidebar: "侧栏",
+    focus_assistant: "助手",
     term_input: "输入",
     hint_palette: "Ctrl+P 面板",
     hint_help: "F1 帮助",
@@ -453,7 +466,9 @@ const ZH: Strings = Strings {
     agent_mode_auto: "自动",
     agent_mode_full: "全自动",
     agent_mode_manual: "手动",
-    agent_cleared: "对话已清空",
+    agent_new_chat: "已新建对话",
+    agent_chat_switched: "已切换对话",
+    agent_chat_deleted: "对话已删除",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
@@ -490,6 +505,9 @@ const ZH: Strings = Strings {
     asst_mode_full_auto: "全自动（危险命令仍确认）",
     asst_full_auto_expired: "Full Auto 已到时并回退到 Auto，后续命令需要确认。",
     asst_usage_label: "Token 用量",
+    asst_chat_label: "对话",
+    asst_panel_keys: "Ctrl+N 新对话 · Alt+↑↓ 切换",
+    asst_panel_narrow: "窗口太窄放不下助手：Ctrl+B 收侧栏，或 F5 整屏查看",
     asst_awaiting: "等待确认",
     asst_unreachable: "模型没有应答：{}",
     asst_rejected: "服务商拒绝（HTTP {}）：{}",
@@ -542,6 +560,7 @@ const EN: Strings = Strings {
     watch_empty: "no findings yet",
     focus_terminal: "Terminal",
     focus_sidebar: "Sidebar",
+    focus_assistant: "Assistant",
     term_input: "typing",
     hint_palette: "Ctrl+P palette",
     hint_help: "F1 help",
@@ -607,7 +626,9 @@ const EN: Strings = Strings {
     agent_mode_auto: "auto",
     agent_mode_full: "full auto",
     agent_mode_manual: "manual",
-    agent_cleared: "Conversation cleared",
+    agent_new_chat: "Started a new conversation",
+    agent_chat_switched: "Conversation",
+    agent_chat_deleted: "Conversation deleted",
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
@@ -647,6 +668,9 @@ const EN: Strings = Strings {
     asst_full_auto_expired:
         "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
     asst_usage_label: "Token usage",
+    asst_chat_label: "Conversation",
+    asst_panel_keys: "Ctrl+N new · Alt+↑↓ switch",
+    asst_panel_narrow: "No room for the assistant panel — Ctrl+B hides the rail, F5 opens it full width",
     asst_awaiting: "awaiting approval",
     asst_unreachable: "the model did not answer: {}",
     asst_rejected: "the provider refused (HTTP {}): {}",
@@ -904,6 +928,7 @@ mod tests {
                 s.watch_empty,
                 s.focus_terminal,
                 s.focus_sidebar,
+                s.focus_assistant,
                 s.term_input,
                 s.hint_palette,
                 s.hint_help,
@@ -953,7 +978,6 @@ mod tests {
                 s.agent_mode_auto,
                 s.agent_mode_full,
                 s.agent_mode_manual,
-                s.agent_cleared,
                 s.pending_review,
                 s.net_wifi_section,
                 s.net_wifi_needs_ble,
@@ -987,6 +1011,12 @@ mod tests {
                 s.asst_mode_manual,
                 s.asst_mode_full_auto,
                 s.asst_usage_label,
+                s.asst_chat_label,
+                s.asst_panel_keys,
+                s.asst_panel_narrow,
+                s.agent_new_chat,
+                s.agent_chat_switched,
+                s.agent_chat_deleted,
                 s.asst_awaiting,
                 s.asst_unreachable,
                 s.asst_rejected,

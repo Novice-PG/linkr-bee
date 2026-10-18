@@ -170,8 +170,8 @@ const LEVEL_WARN: Entry = ["warn", "警告"];
 const LEVEL_ERROR: Entry = ["error", "错误"];
 
 const HELP_NOTE: Entry = [
-    "Every other key goes to the device while the terminal view is up: the letters, the cursor keys, Home/End, Delete — and Tab, which completes on the target. While the pane has the keyboard and a link is up, Ctrl+C interrupts the device too.",
-    "终端视图在前时，其余按键都会发送到设备：字母、方向键、Home/End、Delete，以及用于补全的 Tab。键盘在终端且已连接时，Ctrl+C 也发给设备（中断正在运行的程序）。",
+    "Every other key goes to the device while the terminal view is up: the letters, the cursor keys, Home/End, Delete — and Tab, which completes on the target. While the pane has the keyboard and a link is up, Ctrl+C interrupts the device too. The assistant's chords — Ctrl+N, Ctrl+V, Alt+↑/↓ — are the assistant's only while its panel or its view holds the keyboard; with the pane focused they go to the device like any other key.",
+    "终端视图在前时，其余按键都会发送到设备：字母、方向键、Home/End、Delete，以及用于补全的 Tab。键盘在终端且已连接时，Ctrl+C 也发给设备（中断正在运行的程序）。助手的按键（Ctrl+N、Ctrl+V、Alt+↑/↓）只在面板或助手视图持有键盘时属于助手；焦点在终端时，它们和其他按键一样发给设备。",
 ];
 
 /// The help overlay's chord list. The keys stay literal — they are what the
@@ -180,6 +180,14 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
     ("F2–F5", ["Switch the view", "切换视图"]),
+    ("Ctrl+B", ["Hide or show the sidebar", "显示或隐藏侧栏"]),
+    (
+        "Ctrl+←/→",
+        [
+            "Move the keyboard: pane, rail, assistant",
+            "移动焦点：终端、侧栏、助手",
+        ],
+    ),
     (
         "Ctrl+Up",
         ["Focus the sidebar (Esc returns)", "聚焦侧栏（Esc 返回）"],
@@ -207,6 +215,27 @@ const HELP_ROWS: &[(&str, Entry)] = &[
     ),
     ("PgUp / PgDn", ["Scroll the pane", "滚动终端"]),
     ("End", ["Jump to the newest line", "跳到最新一行"]),
+    (
+        "Ctrl+N",
+        [
+            "New conversation (assistant focused)",
+            "新建对话（助手聚焦时）",
+        ],
+    ),
+    (
+        "Alt+↑/↓",
+        [
+            "Switch conversation (assistant focused)",
+            "切换对话（助手聚焦时）",
+        ],
+    ),
+    (
+        "Ctrl+V",
+        [
+            "Paste into the composer (assistant focused)",
+            "粘贴到输入框（助手聚焦时）",
+        ],
+    ),
     ("Ctrl+L", ["Clear the pane", "清屏"]),
     ("Ctrl+Shift+Y", ["Copy the screen", "复制整屏"]),
     ("Ctrl+T", ["Choose the theme", "选择主题"]),
@@ -1847,17 +1876,26 @@ mod tests {
     #[test]
     fn the_help_names_the_chords() {
         let app = App::default();
-        let shown = text_of(&lines(&Dialog::Help(0), &app, 60, 20));
+        // The whole body, not the first window of it: the list scrolls in a
+        // real frame, and a chord that is one page down is still a chord the
+        // help names.
+        let height = body_height(&app, &Dialog::Help(0), 60);
+        let shown = text_of(&lines(&Dialog::Help(0), &app, 60, height));
         for key in [
             "Ctrl+P",
             "F1",
             "F2–F5",
+            "Ctrl+B",
+            "Ctrl+←/→",
             "Ctrl+Up",
             "Enter",
             "Ctrl+C",
             "Ctrl+Shift+C",
             "Ctrl+Shift+Y",
             "PgUp",
+            "Ctrl+N",
+            "Alt+↑/↓",
+            "Ctrl+V",
             "Ctrl+L",
             "Ctrl+T",
             "Ctrl+Q",

@@ -37,8 +37,80 @@ use std::time::{Duration, Instant};
 /// short enough that a shoulder is not a reader.
 const KEY_REVEAL: Duration = Duration::from_millis(1500);
 
+/// One conversation: the thread on screen, the messages the model is given,
+/// the tokens it has cost, and the half-typed question waiting in the composer.
+///
+/// The draft lives here rather than in one global composer so switching
+/// conversations switches what you were typing with it — a new chat that
+/// inherited the last one's half-written question would be two conversations
+/// with one draft between them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatState {
+    /// Stable across saves. Ids are allocated from the highest in the list, so
+    /// a conversation keeps its identity when an older one is forgotten.
+    pub id: u64,
+    /// What the panel's header shows: the first question, clipped. Empty until
+    /// there is a question to name the conversation after.
+    pub title: String,
+    /// What the thread shows: every turn, oldest first, including failures.
+    pub display: Vec<crate::agent::session::DisplayLine>,
+    /// What the model is told: the turns worth sending. A failed turn is shown
+    /// but not remembered as something the assistant said.
+    pub messages: Vec<crate::agent::session::DisplayLine>,
+    /// Input and output tokens for this conversation.
+    pub usage: (u64, u64),
+    /// The draft.
+    pub composer: String,
+    /// When this conversation last changed (milliseconds). The store forgets
+    /// the oldest conversation first, and this is what "oldest" means; the
+    /// in-memory copy carries it so a save does not restamp every chat.
+    pub updated_at: u64,
+}
+
+impl ChatState {
+    /// The size of the conversation, which is what decides when it is worth
+    /// naming: the title is taken from the first question, not kept in sync
+    /// with the latest one — a thread that renames itself as you talk is a
+    /// thread you cannot find again.
+    fn name_after(&mut self, goal: &str) {
+        if !self.title.is_empty() {
+            return;
+        }
+        let first_line = goal.lines().next().unwrap_or("").trim();
+        if first_line.is_empty() {
+            return;
+        }
+        self.title = first_line.chars().take(48).collect();
+    }
+
+    /// The same conversation as the store's plain record.
+    fn stored(&self) -> crate::agent::session::Chat {
+        crate::agent::session::Chat {
+            id: self.id,
+            title: self.title.clone(),
+            display: self.display.clone(),
+            messages: self.messages.clone(),
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+impl From<crate::agent::session::Chat> for ChatState {
+    fn from(chat: crate::agent::session::Chat) -> ChatState {
+        ChatState {
+            id: chat.id,
+            title: chat.title,
+            display: chat.display,
+            messages: chat.messages,
+            composer: String::new(),
+            usage: (0, 0),
+            updated_at: chat.updated_at,
+        }
+    }
+}
+
 /// Everything the assistant view knows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AssistantState {
     /// Whether a model endpoint is configured.
     pub configured: bool,
@@ -51,16 +123,12 @@ pub struct AssistantState {
     /// and a countdown that reached zero without the mode moving would be a
     /// lie.
     pub full_auto_until: Option<Instant>,
-    /// Token totals for the conversation.
-    pub usage: (u64, u64),
     /// This device's task history, newest first.
     pub tasks: Vec<TaskRecord>,
     /// This device's durable notes.
     pub notes: Vec<(String, String)>,
     /// A task awaiting its approval click, if any.
     pub awaiting: Option<String>,
-    /// The composer: what is being typed before Enter sends it as a goal.
-    pub composer: String,
     /// Which field the keyboard is typing into. The composer is a field too,
     /// because the whole view is one form with two halves and tabbing between
     /// them is how a user moves from configuring the model to talking to it.
@@ -82,13 +150,25 @@ pub struct AssistantState {
     /// name from the validator is not a sentence a user can act on, so it is
     /// translated here rather than shown raw.
     pub notice: Option<String>,
-    /// The conversation turns, oldest first: what was asked and what came back.
+    /// Every conversation this device remembers, oldest first, and the index of
+    /// the one the panel is showing.
     ///
-    /// Kept separately from the task history because it is what the *session* is
-    /// — a task is a record of a job, and this is the thread of a conversation.
-    /// Persisted by `agent::session` across restarts, which is the one piece of
-    /// agent state that was still write-only until now.
-    pub display: Vec<crate::agent::session::DisplayLine>,
+    /// Never empty: a panel with no conversation is a panel with nowhere to
+    /// type, and "no conversation" and "one empty conversation" would then be
+    /// two states the rest of the code has to tell apart for nothing. What the
+    /// *store* keeps is the same list minus the empty ones.
+    pub chats: Vec<ChatState>,
+    /// The index into [`AssistantState::chats`], not the id: the panel walks
+    /// the list, and the id is what the store is keyed by.
+    pub active: usize,
+    /// Which conversation each in-flight task's answer belongs to, as
+    /// `(task id, conversation id)`.
+    ///
+    /// Session-only, and keyed by task because that is what a reply arrives
+    /// carrying: a task restored from the store has no run behind it, and a
+    /// reply that arrives after the panel moved on must still land in the
+    /// conversation that asked.
+    pub task_chat: Vec<(String, u64)>,
     /// Which note the keyboard is on, for removal.
     ///
     /// The cursor rides the list as `refresh_notes` fills it, which is the
@@ -110,7 +190,121 @@ pub struct AssistantState {
     pub key_reveal: Option<(usize, Instant)>,
 }
 
+impl Default for AssistantState {
+    fn default() -> Self {
+        AssistantState {
+            configured: false,
+            mode: None,
+            full_auto_until: None,
+            tasks: Vec::new(),
+            notes: Vec::new(),
+            awaiting: None,
+            focus: AgentField::Composer,
+            config: None,
+            endpoint: String::new(),
+            model: String::new(),
+            api_key: String::new(),
+            headers: String::new(),
+            notice: None,
+            // One empty conversation, always: see [`AssistantState::chats`].
+            chats: vec![ChatState::default()],
+            active: 0,
+            task_chat: Vec::new(),
+            note_cursor: 0,
+            note_input: String::new(),
+            inbox: Vec::new(),
+            key_reveal: None,
+        }
+    }
+}
+
 impl AssistantState {
+    /// The conversation the panel is showing.
+    pub fn chat(&self) -> &ChatState {
+        &self.chats[self.active.min(self.chats.len().saturating_sub(1))]
+    }
+
+    /// The same conversation, for writing.
+    pub fn chat_mut(&mut self) -> &mut ChatState {
+        let index = self.active.min(self.chats.len().saturating_sub(1));
+        &mut self.chats[index]
+    }
+
+    /// A conversation by id: how a reply finds the thread that asked, whatever
+    /// the panel is showing by the time it lands.
+    pub fn chat_by_id_mut(&mut self, id: u64) -> Option<&mut ChatState> {
+        self.chats.iter_mut().find(|chat| chat.id == id)
+    }
+
+    /// The id a new conversation takes: one past the highest in the list. A
+    /// conversation forgotten by the store's cap could hand its number out
+    /// again, and that is safe because a reply in flight is looked up by id
+    /// only while the task that carries it is still live.
+    fn next_chat_id(&self) -> u64 {
+        self.chats.iter().map(|chat| chat.id).max().unwrap_or(0) + 1
+    }
+
+    /// Take what the store kept as the panel's own list, cursor and all.
+    ///
+    /// The door the binary opens: `load_agent_state` in `main.rs` has nothing
+    /// in memory the user made — only the blank page a fresh assistant starts
+    /// on — so the store's list *is* the list, and the cursor is the
+    /// conversation that was open when the program last saved. An empty store
+    /// leaves that blank page alone, which is the state the panel is built on.
+    pub fn restore(&mut self, saved: Option<crate::agent::session::DeviceChats>) {
+        let Some(saved) = saved else {
+            return;
+        };
+        self.chats = saved.chats.into_iter().map(ChatState::from).collect();
+        self.active = self
+            .chats
+            .iter()
+            .position(|chat| chat.id == saved.active)
+            .unwrap_or(0);
+    }
+
+    /// Merge what the store kept into the panel's list, keeping the cursor on
+    /// the conversation it was on.
+    ///
+    /// The store drops empty conversations and the oldest past its cap, so
+    /// after a save the panel shows what a restart would show. The exceptions
+    /// are the blank conversations the store has never seen — the fresh page a
+    /// user has just opened, and the draft in it — which stay: a draft is not a
+    /// conversation, but losing one to a save would be.
+    ///
+    /// The cursor only moves when the store forgets the page it was on. A save
+    /// cannot drop a blank page, so a user who opens a conversation and types
+    /// into it stays in it; a user whose conversation the cap took is put on
+    /// the store's own pick rather than nowhere.
+    fn adopt(&mut self, saved: Option<crate::agent::session::DeviceChats>) {
+        let active_before = self.chat().id;
+        let Some(saved) = saved else {
+            return;
+        };
+        let mut kept: Vec<ChatState> = Vec::new();
+        for stored in saved.chats {
+            let draft = self.chats.iter().find(|c| c.id == stored.id);
+            kept.push(ChatState {
+                composer: draft.map(|c| c.composer.clone()).unwrap_or_default(),
+                usage: draft.map(|c| c.usage).unwrap_or_default(),
+                ..ChatState::from(stored)
+            });
+        }
+        for mine in &self.chats {
+            let unseen = !kept.iter().any(|c| c.id == mine.id);
+            if unseen && mine.display.is_empty() && mine.messages.is_empty() {
+                kept.push(mine.clone());
+            }
+        }
+        self.chats = kept;
+        self.active = self
+            .chats
+            .iter()
+            .position(|c| c.id == active_before)
+            .or_else(|| self.chats.iter().position(|c| c.id == saved.active))
+            .unwrap_or(0);
+    }
+
     /// A character just landed in the field the keyboard is on: if that field
     /// holds the key, the character the caret left behind stays in the clear
     /// until its moment passes.
@@ -212,7 +406,7 @@ impl AgentField {
     /// The text of this field, for a painter that reads one field.
     pub fn text(self, state: &AssistantState) -> &str {
         match self {
-            AgentField::Composer => &state.composer,
+            AgentField::Composer => &state.chat().composer,
             AgentField::Endpoint => &state.endpoint,
             AgentField::Model => &state.model,
             AgentField::ApiKey => &state.api_key,
@@ -381,7 +575,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 fn field_text_mut(app: &mut App) -> &mut String {
     let state = &mut app.assistant;
     match state.focus {
-        AgentField::Composer => &mut state.composer,
+        AgentField::Composer => &mut state.chat_mut().composer,
         AgentField::Endpoint => &mut state.endpoint,
         AgentField::Model => &mut state.model,
         AgentField::ApiKey => &mut state.api_key,
@@ -411,9 +605,16 @@ pub fn open_settings(app: &mut App, field: AgentField) {
 /// paint, so the next keystroke would be typed into a row nobody is showing —
 /// which is the state `handle_key` spends a line guarding against, closed here
 /// instead of being cleaned up after.
+///
+/// The composer is painted twice — in the docked panel and in the full-width
+/// view — and only the second needs the view moved. A chord that answered
+/// "focus the composer" by swapping the panel for the whole screen would take
+/// the console away from a user who was already typing.
 pub fn focus_composer(app: &mut App) {
     close_settings(app);
-    app.set_view(crate::event::View::Assistant);
+    if !app.assistant_panel_focused() {
+        app.set_view(crate::event::View::Assistant);
+    }
 }
 
 /// Give the caret back to the composer and put the settings window away.
@@ -488,34 +689,49 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
 /// Saved on every turn rather than at exit: the session is the one piece of agent
 /// state a user would actually miss, and a bridge that loses it on a crash has
 /// lost the conversation, not a setting.
-fn push_turn(app: &mut App, role: &str, text: &str) {
-    app.assistant
-        .display
-        .push(crate::agent::session::DisplayLine {
-            role: role.to_string(),
-            text: text.to_string(),
-        });
+///
+/// `remember` says whether the model is to be told this turn on the next
+/// question: a question and a real answer are, a failure the panel shows is
+/// not — the thread is the record of what happened, and the messages are what
+/// the assistant is asked to continue.
+fn push_turn(app: &mut App, role: &str, text: &str, remember: bool) {
+    let line = crate::agent::session::DisplayLine {
+        role: role.to_string(),
+        text: text.to_string(),
+    };
+    let chat = app.assistant.chat_mut();
+    chat.display.push(line.clone());
+    if remember {
+        chat.messages.push(line);
+    }
     // The store keeps the last few turns; the view shows the same bound, so what
     // is on screen is what is on disk rather than more of one than the other.
     let keep = crate::agent::session::SESSION_MESSAGES;
-    let from = app.assistant.display.len().saturating_sub(keep);
-    app.assistant.display.drain(..from);
+    let keep_display = crate::agent::session::SESSION_DISPLAY;
+    let chat = app.assistant.chat_mut();
+    let from = chat.display.len().saturating_sub(keep_display);
+    chat.display.drain(..from);
+    let from = chat.messages.len().saturating_sub(keep);
+    chat.messages.drain(..from);
     persist_session(app);
 }
 
-/// Write the conversation where a restart will find it.
-fn persist_session(app: &mut App) {
+/// Write the conversations where a restart will find them.
+///
+/// The panel's copy is trimmed to whatever the store actually kept, so what is
+/// on screen is what is on disk. Doing it here rather than at exit is the same
+/// bargain `push_turn` documents: a crash must not cost the conversation.
+pub fn persist_session(app: &mut App) {
     let key = app.agent_device_key();
     let now = app.environment_stamp() * 1000;
-    if let Some(store) = app.agent_store.as_mut() {
-        let _ = crate::agent::session::save_session(
-            store,
-            &key,
-            &app.assistant.display,
-            &app.assistant.display,
-            now,
-        );
-    }
+    let active = app.assistant.chat().id;
+    let stored: Vec<crate::agent::session::Chat> =
+        app.assistant.chats.iter().map(ChatState::stored).collect();
+    let Some(store) = app.agent_store.as_mut() else {
+        return;
+    };
+    let saved = crate::agent::session::save_chats(store, &key, active, &stored, now);
+    app.assistant.adopt(saved);
 }
 
 /// Add the note being typed, with the newest task's answer as its evidence.
@@ -696,10 +912,16 @@ fn submit_prompt(app: &mut App) {
         });
         return;
     }
-    let goal = std::mem::take(&mut app.assistant.composer);
+    let goal = std::mem::take(&mut app.assistant.chat_mut().composer);
     if goal.trim().is_empty() {
         return;
     }
+    // The conversation is named by its first question and stamped as changed:
+    // the store forgets the oldest first, and this is the moment that decides
+    // which conversation that is.
+    app.assistant.chat_mut().name_after(&goal);
+    app.assistant.chat_mut().updated_at = app.environment_stamp() * 1000;
+    let chat_id = app.assistant.chat().id;
     let id = format!("t{}", app.assistant.tasks.len() + app.assistant.inbox.len());
     let record = crate::agent::tasks::TaskRecord {
         id,
@@ -714,10 +936,17 @@ fn submit_prompt(app: &mut App) {
     }
     app.assistant.tasks.insert(0, record.clone());
     app.assistant.inbox.insert(0, goal.clone());
-    push_turn(app, "user", &goal);
+    // The answer goes back to the conversation that asked, wherever the panel
+    // has moved by the time it lands.
+    app.assistant.task_chat.push((record.id.clone(), chat_id));
+    push_turn(app, "user", &goal, true);
     // The store holds the last twenty; the view shows what it holds.
     app.assistant.tasks.truncate(20);
     app.assistant.inbox.truncate(20);
+    let live: Vec<String> = app.assistant.tasks.iter().map(|t| t.id.clone()).collect();
+    app.assistant
+        .task_chat
+        .retain(|(task, _)| live.contains(task));
 
     // The prompt now goes to the model. `submit` returns immediately and the
     // reply arrives later on the beat the interface already runs, so a slow
@@ -741,22 +970,30 @@ fn submit_prompt(app: &mut App) {
         crate::exec::executor::Mode::Manual => crate::exec::approval::ExecutionMode::Manual,
         crate::exec::executor::Mode::FullAuto => crate::exec::approval::ExecutionMode::FullAuto,
     };
-    let messages = vec![
-        crate::agent::runtime::ChatMessage {
-            role: crate::agent::runtime::ChatRole::System,
-            content: format!(
-                "You are the assistant of a wireless serial bridge. You answer \
-                 questions about the target it is attached to, and you may \
-                 propose commands for it; you never pretend to have run one.\n\
-                 {}",
-                crate::exec::approval::execution_mode_prompt(execution_mode)
-            ),
-        },
-        crate::agent::runtime::ChatMessage {
-            role: crate::agent::runtime::ChatRole::User,
-            content: goal,
-        },
-    ];
+    let mut messages = vec![crate::agent::runtime::ChatMessage {
+        role: crate::agent::runtime::ChatRole::System,
+        content: format!(
+            "You are the assistant of a wireless serial bridge. You answer \
+             questions about the target it is attached to, and you may \
+             propose commands for it; you never pretend to have run one.\n\
+             {}",
+            crate::exec::approval::execution_mode_prompt(execution_mode)
+        ),
+    }];
+    // The conversation continues: what the model is told is the thread so far,
+    // not only the sentence just typed. Without this the assistant answers
+    // every question as the first one, and "why?" is a question with nothing
+    // behind it. The store bounds the list, so this cannot grow forever.
+    for turn in &app.assistant.chat().messages {
+        messages.push(crate::agent::runtime::ChatMessage {
+            role: if turn.role == "assistant" {
+                crate::agent::runtime::ChatRole::Assistant
+            } else {
+                crate::agent::runtime::ChatRole::User
+            },
+            content: turn.text.clone(),
+        });
+    }
     if app.agent_client.is_none() {
         app.agent_client = Some(crate::agent::runtime::AgentClient::default());
     }
@@ -861,10 +1098,16 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             width,
             theme,
         ));
-        let usage = format_tokens(state.usage.0 + state.usage.1);
+        let usage = format_tokens(state.chat().usage.0 + state.chat().usage.1);
         lines.push(field_row(
             &format!("  {}{}", s.asst_usage_label, s.label_separator),
             &usage,
+            width,
+            theme,
+        ));
+        lines.push(field_row(
+            &format!("  {}{}", s.asst_chat_label, s.label_separator),
+            &chat_label(state),
             width,
             theme,
         ));
@@ -889,7 +1132,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     // four-column pane.
     let marker = "  > ";
     let room = (width as usize).saturating_sub(text::columns(marker));
-    let typed = text::clip_to(&state.composer, room);
+    let typed = text::clip_to(&state.chat().composer, room);
     lines.push(Line::from(vec![
         Span::styled(marker.to_string(), theme.accent()),
         Span::styled(typed, theme.text()),
@@ -900,34 +1143,10 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     // list below it is the durable record rather than the conversation itself.
     lines.push(Line::from(""));
     lines.push(heading(s.agent_thread_section, width, theme));
-    if state.display.is_empty() {
+    if state.chat().display.is_empty() {
         lines.push(note(&format!("  {}", s.asst_no_tasks), width, theme));
     } else {
-        for turn in &state.display {
-            let who = if turn.role == "assistant" {
-                s.agent_who_model
-            } else {
-                s.agent_who_user
-            };
-            let marker = if turn.role == "assistant" { "< " } else { "> " };
-            lines.push(Line::from(Span::styled(
-                text::clip_to(&format!("  {marker}{who}"), width as usize),
-                theme.muted(),
-            )));
-            // An answer is markdown; a question is plain text the user typed.
-            if turn.role == "assistant" {
-                let room = (width as usize).saturating_sub(4);
-                for mut line in crate::agent::markdown::render(&turn.text, room, theme) {
-                    line.spans.insert(0, Span::raw("    "));
-                    lines.push(line);
-                }
-            } else {
-                lines.push(Line::from(Span::styled(
-                    text::clip_to(&format!("    {}", turn.text), width as usize),
-                    theme.text(),
-                )));
-            }
-        }
+        lines.extend(thread_lines(state, app, width, theme));
     }
 
     lines.push(Line::from(""));
@@ -955,6 +1174,187 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         }
     }
 
+    lines
+}
+
+/// What the header calls a conversation: its place in the list and the name
+/// its first question gave it.
+fn chat_label(state: &AssistantState) -> String {
+    let index = state.active.min(state.chats.len().saturating_sub(1));
+    let total = state.chats.len().max(1);
+    let title = state.chat().title.trim();
+    if title.is_empty() {
+        format!("{}/{}", index + 1, total)
+    } else {
+        format!("{}/{} · {}", index + 1, total, title)
+    }
+}
+
+/// The turns of the open conversation, oldest first: what was asked, what came
+/// back — and the answer that is still being written, so a reply appears as it
+/// arrives rather than only when it lands.
+///
+/// Shared by the view and the docked panel: the two are the same thread seen at
+/// two widths, and a second painter would be a second thing to keep in step.
+fn thread_lines(
+    state: &AssistantState,
+    app: &App,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let s = app.strings();
+    let whole = |lines: &mut Vec<Line<'static>>, role: &str, body: &str| {
+        let who = if role == "assistant" {
+            s.agent_who_model
+        } else {
+            s.agent_who_user
+        };
+        let marker = if role == "assistant" { "< " } else { "> " };
+        lines.push(Line::from(Span::styled(
+            text::clip_to(&format!("  {marker}{who}"), width as usize),
+            theme.muted(),
+        )));
+        // An answer is markdown; a question is plain text the user typed.
+        if role == "assistant" {
+            let room = (width as usize).saturating_sub(4);
+            for mut line in crate::agent::markdown::render(body, room, theme) {
+                line.spans.insert(0, Span::raw("    "));
+                lines.push(line);
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                text::clip_to(&format!("    {}", body), width as usize),
+                theme.text(),
+            )));
+        }
+    };
+
+    let mut lines = Vec::new();
+    for turn in &state.chat().display {
+        whole(&mut lines, &turn.role, &turn.text);
+    }
+    if let Some(task) = state.tasks.first() {
+        let in_flight = task.status == "asking" || task.status == "typing";
+        if in_flight && !task.summary.is_empty() {
+            whole(&mut lines, "assistant", &task.summary);
+        }
+    }
+    lines
+}
+
+/// The docked panel next to the terminal: the same conversation as the view,
+/// laid out for a column rather than a page.
+///
+/// The web panel's shape — a header that names the thread, the conversation,
+/// and the composer under your thumbs — anchored at the bottom so that what is
+/// newest is what is on screen. A document painted top-down would show the
+/// oldest turns and hide the answer; this shows the answer and hides the
+/// oldest turns, which is the half a reader can scroll back for in the view.
+pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
+    let s = app.strings();
+    let state = &app.assistant;
+    let room = width as usize;
+
+    // The header names the thread the way the web panel does: the question's
+    // own words once there is one. `1/1` and an empty title are both noise —
+    // there is nothing to tell apart — so a lone unnamed thread gets just the
+    // view's name; more than one thread, or a title, and the label earns its
+    // place.
+    let title = state.chat().title.trim();
+    let label = if state.chats.len() > 1 {
+        chat_label(state)
+    } else {
+        title.to_string()
+    };
+    let name = app.lang.view_name(crate::event::View::Assistant);
+    let head = if label.is_empty() {
+        format!(" ⌁ {name}")
+    } else {
+        format!(" ⌁ {name} · {label}")
+    };
+    let head_title = Line::from(Span::styled(text::clip_to(&head, room), theme.accent()));
+    let head_status = if state.configured {
+        let mode = state
+            .mode
+            .map(|m| format!("{}{}", mode_word(m, app), full_auto_countdown(app)))
+            .unwrap_or_else(|| s.asst_mode_auto.to_string());
+        let usage = state.chat().usage.0 + state.chat().usage.1;
+        let text = if usage == 0 {
+            format!(" {} · {}", s.asst_mode_label, mode)
+        } else {
+            format!(
+                " {} · {} · {} {}",
+                s.asst_mode_label,
+                mode,
+                format_tokens(usage),
+                s.asst_usage_label
+            )
+        };
+        Line::from(Span::styled(text::clip_to(&text, room), theme.muted()))
+    } else {
+        Line::from(Span::styled(
+            text::clip_to(&format!(" {}", s.asst_not_configured), room),
+            theme.warn(),
+        ))
+    };
+
+    let marker = " > ";
+    let typed = text::clip_to(&state.chat().composer, room.saturating_sub(3));
+    // A caret at the end of the draft: the panel is where the keyboard is when
+    // it has focus, and a composer that cannot be told from a label is one the
+    // user wonders whether their keys are reaching.
+    let caret = if app.assistant_panel_focused() {
+        "▏"
+    } else {
+        ""
+    };
+    let composer = Line::from(vec![
+        Span::styled(marker.to_string(), theme.accent()),
+        Span::styled(typed, theme.text()),
+        Span::styled(caret.to_string(), theme.accent()),
+    ]);
+    let hint = Line::from(Span::styled(
+        text::clip_to(&format!(" {}", s.asst_panel_keys), room),
+        theme.muted(),
+    ));
+
+    // The fixed rows yield from the ends: the status first, then the blank,
+    // then the title — what must survive is the composer and the key hint.
+    let mut head = vec![head_title, head_status];
+    let mut blanks = 1usize;
+    let tail = vec![composer, hint];
+    loop {
+        let total = head.len() + blanks + tail.len();
+        if total <= height as usize || (head.len() <= 1 && blanks == 0) {
+            break;
+        }
+        if head.len() > 1 {
+            head.pop();
+        } else if blanks > 0 {
+            blanks = 0;
+        } else {
+            break;
+        }
+    }
+    let body_room = (height as usize).saturating_sub(head.len() + blanks + tail.len());
+    let mut body = if state.chat().display.is_empty() {
+        vec![Line::from(Span::styled(
+            text::clip_to(&format!("  {}", s.asst_no_tasks), room),
+            theme.muted(),
+        ))]
+    } else {
+        thread_lines(state, app, width, theme)
+    };
+    if body.len() > body_room {
+        body.drain(..body.len() - body_room);
+    }
+
+    let mut lines = head;
+    for _ in 0..blanks {
+        lines.push(Line::from(""));
+    }
+    lines.extend(body);
+    lines.extend(tail);
     lines
 }
 
@@ -1104,7 +1504,7 @@ mod tests {
         let mut a = app(Lang::En);
         a.assistant.configured = true;
         a.assistant.mode = Some(Mode::FullAuto);
-        a.assistant.usage = (1200, 3400);
+        a.assistant.chat_mut().usage = (1200, 3400);
         a.assistant.tasks = vec![TaskRecord {
             id: "t1".into(),
             device_key: "k".into(),
@@ -1401,7 +1801,8 @@ mod interaction {
         paste_into_focus(&mut a, "explain\nthe log");
         assert_eq!(a.view, crate::event::View::Assistant, "the caret came up");
         assert_eq!(
-            a.assistant.composer, "explain the log",
+            a.assistant.chat().composer,
+            "explain the log",
             "one line at a time"
         );
         assert_eq!(
@@ -1417,7 +1818,8 @@ mod interaction {
             "the window stayed up"
         );
         assert_eq!(
-            a.assistant.composer, "explain the log",
+            a.assistant.chat().composer,
+            "explain the log",
             "the composer held still"
         );
     }
@@ -1463,14 +1865,18 @@ mod interaction {
         let mut a = app();
         press(&mut a, KeyCode::Char('h'));
         press(&mut a, KeyCode::Char('i'));
-        assert_eq!(a.assistant.composer, "hi");
+        assert_eq!(a.assistant.chat().composer, "hi");
         assert!(a.assistant.endpoint.is_empty());
 
         settings(&mut a, AgentField::Endpoint);
         press_settings(&mut a, KeyCode::Char('u'));
         press_settings(&mut a, KeyCode::Char('r'));
         assert_eq!(a.assistant.endpoint, "ur");
-        assert_eq!(a.assistant.composer, "hi", "the composer did not move");
+        assert_eq!(
+            a.assistant.chat().composer,
+            "hi",
+            "the composer did not move"
+        );
         press_settings(&mut a, KeyCode::Backspace);
         assert_eq!(a.assistant.endpoint, "u");
 
@@ -1479,7 +1885,7 @@ mod interaction {
         close_settings(&mut a);
         assert_eq!(a.assistant.focus, AgentField::Composer);
         press(&mut a, KeyCode::Char('!'));
-        assert_eq!(a.assistant.composer, "hi!", "the caret went back");
+        assert_eq!(a.assistant.chat().composer, "hi!", "the caret went back");
         assert_eq!(a.assistant.endpoint, "u", "and the setting stayed");
     }
 
@@ -1505,14 +1911,14 @@ mod interaction {
     #[test]
     fn a_prompt_without_a_model_says_so() {
         let mut a = app();
-        a.assistant.composer = "what is the uptime".to_string();
+        a.assistant.chat_mut().composer = "what is the uptime".to_string();
         press(&mut a, KeyCode::Enter);
         assert!(
             a.assistant.tasks.is_empty(),
             "an unconfigured model queued work"
         );
         assert!(a.assistant.inbox.is_empty());
-        assert_eq!(a.assistant.composer, "what is the uptime");
+        assert_eq!(a.assistant.chat().composer, "what is the uptime");
         assert!(!a.notices.is_empty());
     }
 
@@ -1521,13 +1927,13 @@ mod interaction {
     fn a_prompt_with_a_model_becomes_a_task() {
         let mut a = app();
         a.assistant.configured = true;
-        a.assistant.composer = "df -h".to_string();
+        a.assistant.chat_mut().composer = "df -h".to_string();
         press(&mut a, KeyCode::Enter);
         assert_eq!(a.assistant.tasks.len(), 1);
         assert_eq!(a.assistant.tasks[0].goal, "df -h");
         assert_eq!(a.assistant.tasks[0].status, "asking");
         assert!(
-            a.assistant.composer.is_empty(),
+            a.assistant.chat().composer.is_empty(),
             "the composer kept its text"
         );
     }
@@ -1550,7 +1956,7 @@ mod interaction {
             context_window: 8192,
             max_tokens: 1024,
         });
-        a.assistant.composer = "uptime".into();
+        a.assistant.chat_mut().composer = "uptime".into();
         press(&mut a, KeyCode::Enter);
 
         assert_eq!(a.assistant.tasks.len(), 1);
@@ -1663,13 +2069,123 @@ mod interaction {
 
         let mut n = app();
         n.assistant.awaiting = Some("reboot".to_string());
-        n.assistant.composer = "already".to_string();
+        n.assistant.chat_mut().composer = "already".to_string();
         press(&mut n, KeyCode::Char('n'));
         assert!(n.assistant.awaiting.is_none(), "no did not answer");
         assert_eq!(
-            n.assistant.composer, "already",
+            n.assistant.chat().composer,
+            "already",
             "a key leaked past the answer"
         );
+    }
+
+    /// A new conversation is a fresh page, and the one before it is still
+    /// there — its turns, its name and the draft in its composer. A "new" that
+    /// destroyed the last thread would be a destructive action wearing a
+    /// friendly name.
+    #[test]
+    fn a_new_conversation_keeps_the_last_one() {
+        let mut a = app();
+        a.assistant
+            .chat_mut()
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "user".into(),
+                text: "hello".into(),
+            });
+        a.assistant.chat_mut().composer = "half-typed".into();
+        let first = a.assistant.chat().id;
+
+        new_conversation(&mut a);
+        assert_eq!(a.assistant.chats.len(), 2, "the old page went away");
+        assert_ne!(a.assistant.chat().id, first, "the new page reused the id");
+        assert!(a.assistant.chat().composer.is_empty());
+        assert!(a.assistant.chat().display.is_empty());
+        assert_eq!(a.assistant.chats[0].display[0].text, "hello");
+        assert_eq!(
+            a.assistant.chats[0].composer, "half-typed",
+            "the draft went with the old page"
+        );
+
+        // The keys walk the list, and both directions wrap: with two threads
+        // the next one is the other one, whichever way it was asked for.
+        switch_conversation(&mut a, -1);
+        assert_eq!(a.assistant.chat().id, first, "the walk did not go back");
+        switch_conversation(&mut a, 1);
+        assert_ne!(
+            a.assistant.chat().id,
+            first,
+            "the walk did not come forward"
+        );
+        switch_conversation(&mut a, 1);
+        assert!(a.assistant.chats.len() == 2, "the walk made a page");
+    }
+
+    /// Deleting the page on screen forgets it and the page behind it takes the
+    /// panel. The last one cannot be deleted out from under the composer:
+    /// removing it leaves a fresh page, because a panel with no conversation
+    /// is a panel with nowhere to type.
+    #[test]
+    fn deleting_a_conversation_leaves_the_panel_a_page() {
+        let mut a = app();
+        a.assistant
+            .chat_mut()
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "assistant".into(),
+                text: "answer".into(),
+            });
+        new_conversation(&mut a);
+        assert_eq!(a.assistant.chats.len(), 2);
+
+        delete_conversation(&mut a);
+        assert_eq!(a.assistant.chats.len(), 1, "the wrong number went");
+        assert_eq!(
+            a.assistant.chat().display[0].text,
+            "answer",
+            "the wrong page went"
+        );
+        assert_eq!(a.assistant.active, 0, "the cursor left the survivor");
+
+        delete_conversation(&mut a);
+        assert_eq!(a.assistant.chats.len(), 1, "the last page vanished");
+        assert!(a.assistant.chat().display.is_empty());
+        assert!(a.assistant.chat().composer.is_empty());
+    }
+
+    /// The panel's header counts the thread once there is more than one and
+    /// names it once a question has; a lone blank page gets the view's name and
+    /// nothing else, because `1/1` tells nobody anything.
+    #[test]
+    fn the_panel_header_names_the_thread_it_shows() {
+        let theme = Theme::DARK;
+        let mut a = app();
+        let head = |a: &App| {
+            panel_lines(a, &theme, 40, 12)[..1]
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let name = a.lang.view_name(crate::event::View::Assistant);
+        assert_eq!(
+            head(&a),
+            format!(" ⌁ {name}"),
+            "a lone blank page grew a label"
+        );
+
+        a.assistant.chat_mut().name_after("diagnose the boot loop");
+        new_conversation(&mut a);
+        let text = head(&a);
+        assert!(
+            text.contains("2/2"),
+            "the new page is not counted: {text:?}"
+        );
+
+        switch_conversation(&mut a, -1);
+        let text = head(&a);
+        assert!(text.contains("1/2"), "{text:?}");
+        assert!(text.contains("diagnose the boot loop"), "{text:?}");
     }
 }
 
@@ -1697,21 +2213,102 @@ pub fn cycle_mode(app: &mut App) {
     });
 }
 
-/// Start a new conversation, on disk as well as on screen.
+/// Start a new conversation and make it the one the panel shows.
 ///
-/// A clear that left the store alone would be undone by the next restart, which
-/// is the one thing a clear must not do.
-pub fn clear_conversation(app: &mut App) {
-    app.assistant.display.clear();
-    let key = app.agent_device_key();
-    if let Some(store) = app.agent_store.as_mut() {
-        crate::agent::session::clear_session(store, &key);
-    }
+/// The thread that was open stays in the list: a new chat is a fresh page, not
+/// the destruction of the last one — and the old page is what the switch keys
+/// walk back to. The store keeps the last few, oldest first out, exactly as it
+/// bounds a single one.
+pub fn new_conversation(app: &mut App) {
+    let id = app.assistant.next_chat_id();
+    app.assistant.chats.push(ChatState {
+        id,
+        updated_at: app.environment_stamp() * 1000,
+        ..ChatState::default()
+    });
+    app.assistant.active = app.assistant.chats.len() - 1;
+    app.assistant.focus = AgentField::Composer;
+    persist_session(app);
     let s = app.strings();
     app.push_notice(crate::app::Notice {
-        text: s.agent_cleared.to_string(),
+        text: s.agent_new_chat.to_string(),
         level: crate::event::NoticeLevel::Info,
     });
+}
+
+/// Walk the conversation list: `-1` is the previous thread, `+1` the next.
+///
+/// It wraps around: with a handful of threads a key that stops at the ends
+/// saves a rule and costs a trip to the other end when the one you want is the
+/// one behind you.
+pub fn switch_conversation(app: &mut App, delta: isize) {
+    let len = app.assistant.chats.len();
+    if len < 2 {
+        return;
+    }
+    let at = app.assistant.active.min(len - 1) as isize;
+    app.assistant.active = (at + delta).rem_euclid(len as isize) as usize;
+    app.assistant.focus = AgentField::Composer;
+    persist_session(app);
+    let text = format!(
+        "{} {}",
+        app.strings().agent_chat_switched,
+        chat_label(&app.assistant)
+    );
+    app.push_notice(crate::app::Notice {
+        text,
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+/// Forget the conversation on screen.
+///
+/// The last one cannot be deleted out from under the composer: removing it
+/// leaves a fresh empty conversation rather than none, which is the state the
+/// panel is built on.
+pub fn delete_conversation(app: &mut App) {
+    let index = app
+        .assistant
+        .active
+        .min(app.assistant.chats.len().saturating_sub(1));
+    if app.assistant.chats.len() > 1 {
+        app.assistant.chats.remove(index);
+    } else {
+        let id = app.assistant.next_chat_id();
+        app.assistant.chats[0] = ChatState {
+            id,
+            ..ChatState::default()
+        };
+    }
+    app.assistant.active = app
+        .assistant
+        .active
+        .min(app.assistant.chats.len().saturating_sub(1));
+    persist_session(app);
+    let text = app.strings().agent_chat_deleted.to_string();
+    app.push_notice(crate::app::Notice {
+        text,
+        level: crate::event::NoticeLevel::Info,
+    });
+}
+
+/// Put the open conversation on the clipboards, questions and answers both.
+pub fn copy_conversation(app: &mut App) {
+    let s = app.strings();
+    let mut text = String::new();
+    for turn in &app.assistant.chat().display {
+        let who = if turn.role == "assistant" {
+            s.agent_who_model
+        } else {
+            s.agent_who_user
+        };
+        text.push_str(who);
+        text.push('\n');
+        text.push_str(&turn.text);
+        text.push_str("\n\n");
+    }
+    let notice = app.copy_text(&text);
+    app.push_notice(notice);
 }
 
 /// Paste the system clipboard onto the assistant's caret, bringing that caret
@@ -1753,7 +2350,7 @@ pub fn take_clipboard(app: &mut App) -> Option<String> {
 pub fn paste_at_caret(app: &mut App, text: &str) {
     let focused = app.assistant.focus;
     let field = match focused {
-        AgentField::Composer => Some(&mut app.assistant.composer),
+        AgentField::Composer => Some(&mut app.assistant.chat_mut().composer),
         AgentField::Endpoint => Some(&mut app.assistant.endpoint),
         AgentField::Model => Some(&mut app.assistant.model),
         AgentField::ApiKey => Some(&mut app.assistant.api_key),

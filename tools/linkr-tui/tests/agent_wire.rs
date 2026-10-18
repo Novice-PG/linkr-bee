@@ -84,7 +84,7 @@ fn configured_app(port: u16) -> App {
 }
 
 fn send_prompt(app: &mut App, prompt: &str) {
-    app.assistant.composer = prompt.to_string();
+    app.assistant.chat_mut().composer = prompt.to_string();
     linkr_tui::views::assistant::handle_key(
         app,
         crossterm::event::KeyEvent::new(
@@ -134,8 +134,12 @@ fn a_prompt_is_answered_by_a_local_model() {
     let task = &app.assistant.tasks[0];
     assert_eq!(status, "answered", "{}", task.summary);
     assert_eq!(task.summary, "hi there", "the stream was not assembled");
-    assert_eq!(app.assistant.usage, (3, 2), "the usage was not folded in");
-    let thread = app.assistant.display.last().expect("a model turn");
+    assert_eq!(
+        app.assistant.chat().usage,
+        (3, 2),
+        "the usage was not folded in"
+    );
+    let thread = app.assistant.chat().display.last().expect("a model turn");
     assert_eq!(thread.role, "assistant");
     assert_eq!(thread.text, "hi there");
 

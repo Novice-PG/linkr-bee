@@ -1895,16 +1895,18 @@ fn load_agent_state(app: &mut App) {
     app.assistant.model = input.model;
     app.assistant.api_key = input.api_key;
     app.assistant.headers = saved.headers;
-    // The conversation comes back too, oldest first, which is the order it was
-    // written in — `load_session` keeps the last N turns and drops the rest, so
-    // a long thread loses its beginning rather than its end.
-    app.assistant.display = app
+    // The conversations come back too, oldest first, which is the order they
+    // were written in — the store keeps the last few turns of each and drops
+    // the oldest conversations past its cap, so a long thread loses its
+    // beginning rather than its end, and the freshest threads are the ones a
+    // busy week leaves standing. `adopt` puts the panel's blank page back on
+    // top of them: a draft is not a conversation, but it is not the store's to
+    // throw away either.
+    let chats = app
         .agent_store
-        .as_mut()
-        .and_then(|store| {
-            linkr_tui::agent::session::load_session(store, &key).map(|session| session.display)
-        })
-        .unwrap_or_default();
+        .as_ref()
+        .and_then(|store| linkr_tui::agent::session::load_chats(store, &key));
+    app.assistant.restore(chats);
 }
 
 /// The first line of `path`, which is how a secret is handed over: a file the
@@ -1924,18 +1926,24 @@ fn pane_area(cols: u16, rows: u16) -> Rect {
     ui::pane_area(cols, rows)
 }
 
-/// The centre region as the *paint* lays it out, rail shown or hidden.
+/// The centre region as the *paint* lays it out, rail and panel and all.
 ///
 /// Not [`pane_area`]: that is the emulator's width, which deliberately stays
-/// put when the rail is hidden so a toggle does not rewrap the device's whole
-/// history. A mouse point, though, is measured against what the user sees, so
-/// the drag asks this one and clamps to the emulated screen afterwards.
+/// put when a column appears or goes so a toggle does not rewrap the device's
+/// whole history. A mouse point, though, is measured against what the user
+/// sees — the rail and the assistant's panel both take their columns off it —
+/// so the drag asks this one and clamps to the emulated screen afterwards.
 // The interactive session's helpers. A CLI-only binary has no loop that calls
 // them, so they leave the build rather than warn as dead code; the tests that
 // drive them keep them under `test`.
 #[cfg(any(feature = "tui", test))]
 fn painted_centre(app: &App, cols: u16, rows: u16) -> Rect {
-    ui::regions(Rect::new(0, 0, cols, rows), app.sidebar_visible).centre
+    ui::regions_for(
+        Rect::new(0, 0, cols, rows),
+        app.sidebar_visible,
+        app.panel_wanted(),
+    )
+    .centre
 }
 
 /// The pane cell a mouse point is on, when it is on the pane at all: a point
@@ -2229,14 +2237,82 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.focus = Focus::Sidebar;
             return false;
         }
+        // --- the layout ----------------------------------------------------
+        // Ctrl+B hides and shows the rail. This is the chord every sidebar
+        // has, and the layout needs it: the rail costs thirty columns, and a
+        // user on a narrow window needs them back without a trip through the
+        // palette. Hiding it while the keyboard is on it hands the keyboard
+        // back, which `toggle_sidebar` decides.
+        (KeyCode::Char('b'), true) => {
+            let notice = app.toggle_sidebar();
+            app.push_notice(notice);
+            return false;
+        }
+        // Ctrl+Left and Ctrl+Right switch between the console and the
+        // assistant. See [`focus_pane`] for what "the assistant" means here
+        // and why the panel opens on the way in.
+        (KeyCode::Left, true) => {
+            focus_pane(app, -1);
+            return false;
+        }
+        (KeyCode::Right, true) => {
+            focus_pane(app, 1);
+            return false;
+        }
         // --- the assistant ---------------------------------------------------
-        // Five chords, each landing where the work is: the composer for a
-        // question or a paste, the settings window for a setting, and the mode
-        // cycle and the clear on the view that shows them. A shortcut that
-        // opens the view but leaves the keyboard somewhere else is one that
-        // saves a keystroke and costs two — and the settings are a window now,
-        // so the configure chord raises it wherever the keyboard happened to
-        // be.
+        // The composer for a question or a paste, the settings window for a
+        // setting, the mode cycle, and a new conversation — each landing where
+        // the work is, and each scoped to the assistant rather than global.
+        // That scoping is the point: every one of these is a key a shell also
+        // wants — `Ctrl+N` is the next history line, `Ctrl+S` is flow control,
+        // `Ctrl+V` is verbatim insert — and taking one away from the pane
+        // behind the panel would break the terminal to serve a column the user
+        // is not in. The Shift spellings below are kept as aliases for the
+        // terminals that report the shift flag; the Ctrl spellings are for the
+        // ones that do not, which is most of the consoles this is read on.
+        (KeyCode::Char('k'), true) if agent_has_the_keyboard(app) => {
+            views::assistant::focus_composer(app);
+            return false;
+        }
+        (KeyCode::Char('s'), true) if agent_has_the_keyboard(app) => {
+            views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
+            return false;
+        }
+        (KeyCode::Char('o'), true) if agent_has_the_keyboard(app) => {
+            views::assistant::cycle_mode(app);
+            return false;
+        }
+        // A new conversation, on the screen the user is already looking at:
+        // from the panel it is the panel's header that changes, which is the
+        // whole announcement a switch needs.
+        (KeyCode::Char('n'), true) if agent_has_the_keyboard(app) => {
+            views::assistant::new_conversation(app);
+            return false;
+        }
+        // The clipboard, pasted at the caret. Scoped for the same reason the
+        // rest are: the device keeps its own `Ctrl+V`.
+        (KeyCode::Char('v'), true) if agent_has_the_keyboard(app) => {
+            if let Some(text) = views::assistant::take_clipboard(app) {
+                views::assistant::paste_at_caret(app, &text);
+            }
+            return false;
+        }
+        // Alt+Up and Alt+Down walk the conversation list. Alt rather than
+        // Ctrl: inside a field the arrows keep their meaning, and Alt is the
+        // modifier the panel has to spare — a shell's own Alt+Up is rare
+        // enough that scoping this to the assistant is the whole guard.
+        (KeyCode::Up, false)
+            if key.modifiers.contains(KeyModifiers::ALT) && agent_has_the_keyboard(app) =>
+        {
+            views::assistant::switch_conversation(app, -1);
+            return false;
+        }
+        (KeyCode::Down, false)
+            if key.modifiers.contains(KeyModifiers::ALT) && agent_has_the_keyboard(app) =>
+        {
+            views::assistant::switch_conversation(app, 1);
+            return false;
+        }
         (KeyCode::Char('K'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
             views::assistant::focus_composer(app);
             return false;
@@ -2247,12 +2323,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         (KeyCode::Char('M'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.set_view(View::Assistant);
-            crate::views::assistant::cycle_mode(app);
+            views::assistant::cycle_mode(app);
             return false;
         }
+        // The Shift spelling *shows* the assistant as well as starting a fresh
+        // conversation: with the panel shut, a new thread would otherwise be
+        // announced and not seen. The Ctrl spelling above does not, because
+        // the user who pressed it was already in the panel.
         (KeyCode::Char('N'), true) if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.set_view(View::Assistant);
-            crate::views::assistant::clear_conversation(app);
+            if !app.panel_wanted() {
+                app.set_view(View::Assistant);
+            }
+            views::assistant::new_conversation(app);
             return false;
         }
         // The clipboard, pasted as text. `V` is not a device key the way a
@@ -2288,6 +2370,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
 
+    // An overlay has already taken the keys it wants: the palette's handler
+    // consumed them, the dialog's handler consumed them, and the global chords
+    // above were matched before either. What is left is nobody's — and it must
+    // not fall through, because the layer below is a live console: an unbound
+    // control character reaching the pane would be typed into it, and PageDown
+    // would walk the scrollback under a search box. Saying so once here is
+    // what keeps every key from having to remember it, and it is what a
+    // control chord falling through the palette *should* have meant all along.
+    if app.overlay_open() {
+        return false;
+    }
+
     if app.focus == Focus::Sidebar {
         match key.code {
             KeyCode::Down => app.cursor_down(),
@@ -2304,6 +2398,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Esc => app.focus = Focus::Terminal,
             _ => {}
         }
+        return false;
+    }
+
+    // The docked panel is a column of the terminal view with the keyboard in
+    // it: the composer takes the text, Escape hands the keys back to the pane
+    // — the panel is a place you visit, not a mode — and nothing left here is
+    // the device's. A control character typed into a console behind a chat
+    // column is what this dispatch exists to prevent.
+    if app.assistant_panel_focused() {
+        if key.code == KeyCode::Esc {
+            app.focus = Focus::Terminal;
+            return false;
+        }
+        views::assistant::handle_key(app, key);
         return false;
     }
 
@@ -2378,6 +2486,73 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
+/// Whether the assistant's composer is the thing this keyboard would type
+/// into.
+///
+/// Two paints hold a composer — the docked panel and the full-width view — and
+/// the chords that belong to the assistant are scoped by this rather than bound
+/// globally, because each of them is a key a shell also wants. A dialog over
+/// the view is not the composer, so the full-width half of the test says so.
+#[cfg(any(feature = "tui", test))]
+fn agent_has_the_keyboard(app: &App) -> bool {
+    app.assistant_panel_focused()
+        || (app.view == View::Assistant && app.focus == Focus::Terminal && !app.overlay_open())
+}
+
+/// Walk the keyboard sideways: the console and the assistant, with the rail
+/// past the console's other edge.
+///
+/// Rightward travel from the pane is "go to the assistant", and the assistant
+/// is wherever its conversation is on screen: the docked panel when the window
+/// has room for it, the full-width view otherwise. A panel that is shut is
+/// *opened* on the way in — a focus moved into a column the painter then drops
+/// is a keyboard the user has lost — and a window with no room is told so
+/// rather than half-served. Leftward travel is the way back: panel to pane,
+/// full-width view to terminal view, pane to rail.
+#[cfg(any(feature = "tui", test))]
+fn focus_pane(app: &mut App, direction: isize) {
+    if direction > 0 {
+        match app.focus {
+            // The rail is the leftmost stop; the assistant is the one after
+            // the pane, so rightward travel reaches it in two steps.
+            Focus::Sidebar => app.focus = Focus::Terminal,
+            Focus::Terminal => {
+                if app.view == View::Assistant {
+                    // The assistant is already the whole screen, and there is
+                    // no keystroke to spend on saying so.
+                    return;
+                }
+                if app.panel_fits() {
+                    app.assistant_panel = true;
+                    app.focus = Focus::Assistant;
+                } else {
+                    let text = app.strings().asst_panel_narrow.to_string();
+                    app.push_notice(linkr_tui::app::Notice {
+                        text,
+                        level: linkr_tui::event::NoticeLevel::Info,
+                    });
+                }
+            }
+            // The panel is the rightmost stop: rightward travel ends here.
+            Focus::Assistant => {}
+        }
+        return;
+    }
+
+    match app.focus {
+        Focus::Assistant => app.focus = Focus::Terminal,
+        Focus::Terminal => {
+            if app.view == View::Assistant {
+                app.set_view(View::Terminal);
+            } else {
+                app.focus = Focus::Sidebar;
+            }
+        }
+        // Leftward travel ends at the rail.
+        Focus::Sidebar => {}
+    }
+}
+
 /// Put `text` where the caret the user can see is, and say whether a field
 /// took it.
 ///
@@ -2403,6 +2578,10 @@ fn paste_into_shown_field(app: &mut App, text: &str) -> bool {
     }
     // A dialog with no field has no caret of its own, and a paste must not
     // reach past it to whatever is behind.
+    if app.dialog.is_none() && app.assistant_panel_focused() {
+        views::assistant::paste_at_caret(app, text);
+        return true;
+    }
     if app.dialog.is_none() && app.view == View::Assistant && app.focus == Focus::Terminal {
         views::assistant::paste_at_caret(app, text);
         return true;
@@ -3189,6 +3368,252 @@ mod tests {
         );
     }
 
+    /// Ctrl+B hides the rail and brings it back, and the keyboard the rail was
+    /// holding comes back with it. The rail costs thirty columns, and those
+    /// columns are the difference between a console that fits a table and one
+    /// that wraps it.
+    #[test]
+    fn ctrl_b_hides_and_shows_the_rail() {
+        let mut app = App::default();
+        assert!(app.sidebar_visible, "the rail starts shown");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        assert!(!app.sidebar_visible, "Ctrl+B did not hide the rail");
+        assert!(!app.notices.is_empty(), "hiding the rail said nothing");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        assert!(app.sidebar_visible, "Ctrl+B did not bring it back");
+
+        // Hiding it while the keyboard is on it hands the keyboard back: a
+        // focus in a column nothing is painting is a keyboard the user lost.
+        app.focus = Focus::Sidebar;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            app.focus,
+            Focus::Terminal,
+            "the keyboard stayed on the rail"
+        );
+    }
+
+    /// Ctrl+Left and Ctrl+Right walk between the console and the assistant,
+    /// past the rail on the way: rightward from the pane is "the
+    /// conversation", leftward is the way back — and a panel that is shut is
+    /// opened by the same chord rather than focused where nobody can see it.
+    #[test]
+    fn ctrl_left_and_right_walk_the_panes() {
+        let mut app = App {
+            // The frame the keys are handled in: the fit test reads it, and a
+            // window with no size has no room for anything.
+            screen: Rect::new(0, 0, 140, 30),
+            ..App::default()
+        };
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            app.focus,
+            Focus::Assistant,
+            "right did not reach the assistant"
+        );
+        assert!(app.assistant_panel, "the panel was closed on arrival");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.focus, Focus::Terminal, "left did not come back");
+        assert!(app.assistant_panel, "left closed the panel");
+
+        // Left again reaches the rail, and right returns to the pane — the
+        // assistant is the stop after that, not this one.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.focus, Focus::Sidebar, "left did not reach the rail");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.focus, Focus::Terminal, "right skipped the pane");
+
+        // A panel that is shut and has room is opened on the way in: asking
+        // for the conversation with the keyboard is asking for it to be there.
+        app.assistant_panel = false;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert!(app.assistant_panel, "right did not open the panel");
+        assert_eq!(app.focus, Focus::Assistant);
+
+        // The full-width view is the assistant too: left comes back to the
+        // terminal view, and right has nowhere further to go.
+        let mut wide = App {
+            screen: Rect::new(0, 0, 140, 30),
+            ..App::default()
+        };
+        wide.set_view(View::Assistant);
+        handle_key(
+            &mut wide,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(wide.view, View::Assistant, "right left the assistant view");
+        handle_key(
+            &mut wide,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
+        assert_eq!(wide.view, View::Terminal, "left did not leave the view");
+    }
+
+    /// An app with a live link and a frame's worth of screen: the loopback the
+    /// other device tests use. A keystroke can only be counted as *sent* when
+    /// there is something to send it over, so a test that watches the wire has
+    /// to have one.
+    fn linked_app(screen: Rect) -> App {
+        let mut app = App {
+            screen,
+            ..App::default()
+        };
+        app.connect(Dial::Stdio("-".into()).open().expect("the loopback builds"))
+            .expect("the loopback opens");
+        for _ in 0..50 {
+            app.pump();
+            if app.connected() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.connected(), "the loopback came up");
+        app
+    }
+
+    /// A window with no room for the panel says so rather than moving the
+    /// keyboard into a column that is not painted.
+    #[test]
+    fn a_window_with_no_room_keeps_the_keyboard_in_the_pane() {
+        let mut app = App {
+            screen: Rect::new(0, 0, 80, 24),
+            ..App::default()
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.focus, Focus::Terminal, "the keyboard left the pane");
+        assert!(!app.notices.is_empty(), "the refusal was silent");
+    }
+
+    /// The panel's keys are the panel's: a letter goes to the composer and not
+    /// to the wire, Escape hands the keyboard back, and a control character
+    /// with no chord of its own reaches nobody — least of all the live console
+    /// behind a chat column.
+    #[test]
+    fn the_panel_keeps_the_console_off_the_keyboard() {
+        let mut app = linked_app(Rect::new(0, 0, 140, 30));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.focus, Focus::Assistant);
+
+        let typed = app.tx;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.chat().composer, "l", "the composer missed it");
+        assert_eq!(app.tx, typed, "a letter reached the device");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.tx, typed, "Ctrl+D reached the device");
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Terminal, "Escape did not hand back");
+        assert!(app.assistant_panel, "Escape closed the panel");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(app.tx > typed, "the pane took the keyboard back");
+
+        // The palette opens over the console, and neither the query nor an
+        // unbound control chord reaches the device behind it: an overlay is a
+        // barrier, which is what falling through one should have meant all
+        // along.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_some(), "Ctrl+P did not open the palette");
+        let before = app.tx;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.tx, before, "the overlay leaked to the device");
+    }
+
+    /// The assistant's own chords only answer when the assistant has the
+    /// keyboard: `Ctrl+N` is a new conversation in the panel and the shell's
+    /// next-history line in the pane, and both are what the user in front of
+    /// them meant by it.
+    #[test]
+    fn the_assistant_chords_are_scoped_to_the_assistant() {
+        let mut app = linked_app(Rect::new(0, 0, 140, 30));
+
+        // The pane has the keyboard: the device gets the key.
+        let before = app.tx;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            app.assistant.chats.len(),
+            1,
+            "a page was made from the pane"
+        );
+        assert!(app.tx > before, "Ctrl+N did not reach the device");
+
+        // The panel has it: a new conversation, and nothing to the wire.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        let before = app.tx;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.assistant.chats.len(), 2, "Ctrl+N made no conversation");
+        assert_eq!(app.tx, before, "Ctrl+N reached the device from the panel");
+
+        // Alt+Up and Alt+Down walk the list from there.
+        let open = app.assistant.chat().id;
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        assert_ne!(app.assistant.chat().id, open, "Alt+Down did not switch");
+        assert_eq!(app.tx, before, "the walk reached the device");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(app.assistant.chat().id, open, "Alt+Up did not switch back");
+    }
+
     /// Ctrl+Q and Ctrl+C stop the loop while nothing is connected; a bare 'q'
     /// does not, so the terminal stays open while the user is typing to the
     /// device.
@@ -3272,7 +3697,7 @@ mod tests {
         // handler's own doing and not the device's.
         app.set_view(View::Assistant);
         assert!(!handle_key(&mut app, letter));
-        assert_eq!(app.assistant.composer, "x");
+        assert_eq!(app.assistant.chat().composer, "x");
         assert_eq!(app.tx, 1, "the composer is not the wire");
     }
 
@@ -3335,13 +3760,31 @@ mod tests {
 
         app.set_view(View::Assistant);
         assert!(paste_into_shown_field(&mut app, "explain\nthe log"));
-        assert_eq!(app.assistant.composer, "explain the log");
+        assert_eq!(app.assistant.chat().composer, "explain the log");
 
         dialogs::open_help(&mut app);
         assert!(
             !paste_into_shown_field(&mut app, "x"),
             "a fieldless dialog is not a door past it"
         );
+
+        // The docked panel is the composer's other paint, so the paste lands
+        // on the caret the user can see there too.
+        let mut docked = App {
+            focus: Focus::Assistant,
+            ..App::default()
+        };
+        assert!(paste_into_shown_field(&mut docked, "df\n-h"));
+        assert_eq!(docked.assistant.chat().composer, "df -h");
+
+        // And a dialog over the panel is a barrier, exactly as it is over the
+        // view: neither caret is the one on screen.
+        dialogs::open_help(&mut docked);
+        assert!(
+            !paste_into_shown_field(&mut docked, "x"),
+            "the panel took a paste past a dialog"
+        );
+        assert_eq!(docked.assistant.chat().composer, "df -h");
     }
 
     /// Ctrl+T opens the theme picker — no more one-theme-per-press cycling —
@@ -3787,9 +4230,10 @@ mod tests {
     /// A fed frame is painted by an emulator the size of the frame's pane.
     ///
     /// The pane's size is not the frame's: it is the centre region, after the
-    /// bars and the sidebar. That is exactly the arithmetic the event loop runs
-    /// every tick, so a preview cannot show a device wrapped at the default 80
-    /// columns inside a wider frame and read as an emulator bug.
+    /// bars, the sidebar *and* the assistant's panel. That is exactly the
+    /// arithmetic the event loop runs every tick, so a preview cannot show a
+    /// device wrapped at the default 80 columns inside a wider frame and read
+    /// as an emulator bug.
     #[test]
     fn a_fed_frame_is_painted_by_a_pane_of_the_frames_size() {
         let mut app = App {
@@ -3800,11 +4244,14 @@ mod tests {
         // keep however wide the frame was.
         assert_eq!(app.terminal.size(), (80, 24));
 
-        let pane = fit_pane_to(140, 30, &mut app);
+        // Wide enough that the pane is past the emulator's default even after
+        // the assistant's panel has taken its share of the band.
+        let pane = fit_pane_to(220, 30, &mut app);
         assert!(
             pane.width > 80,
             "the pane is wider than the default: {pane:?}"
         );
+        assert_eq!(pane, pane_area(220, 30), "not the pane the paint uses");
         assert_eq!(app.terminal.size(), (pane.width, pane.height));
 
         app.terminal.push_text(&"x".repeat(pane.width as usize));
@@ -3817,6 +4264,22 @@ mod tests {
             "a full-width line does not wrap early: {rows:?}"
         );
         assert_eq!(rows[1], "", "and it is one line, not two: {rows:?}");
+    }
+
+    /// The device is told the pane's size, and the panel is not the pane's
+    /// business: opening or closing it must not change what the emulator
+    /// thinks its grid is, or the device would reflow its history for a column
+    /// of chat. The rail is the one that moves the pane, and always did.
+    #[test]
+    fn the_pane_keeps_its_size_when_the_panel_moves() {
+        let mut shown = App::default();
+        let pane = fit_pane_to(140, 30, &mut shown);
+        let mut hidden = App {
+            assistant_panel: false,
+            ..App::default()
+        };
+        assert_eq!(fit_pane_to(140, 30, &mut hidden), pane);
+        assert_eq!(hidden.terminal.size(), shown.terminal.size());
     }
 
     /// `--print-frame --overlay` draws the modal, in the language asked for —

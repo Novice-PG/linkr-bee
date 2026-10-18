@@ -50,7 +50,12 @@ const T_AGENT_ASK: Entry = ["Ask the assistant", "向助手提问"];
 const T_AGENT_NOTE: Entry = ["Write a note", "写一条笔记"];
 const T_AGENT_MODE: Entry = ["Change execution mode", "切换执行模式"];
 const T_AGENT_REPORT: Entry = ["Export diagnostic report", "导出排查报告"];
-const T_AGENT_CLEAR: Entry = ["Clear the conversation", "清空对话"];
+const T_AGENT_PANEL: Entry = ["Show or hide the assistant panel", "显示或隐藏助手面板"];
+const T_AGENT_NEW: Entry = ["New conversation", "新建对话"];
+const T_AGENT_PREV: Entry = ["Previous conversation", "上一个对话"];
+const T_AGENT_NEXT: Entry = ["Next conversation", "下一个对话"];
+const T_AGENT_DELETE: Entry = ["Delete the conversation", "删除对话"];
+const T_AGENT_COPY: Entry = ["Copy the conversation", "复制对话"];
 const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
 const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
 
@@ -250,10 +255,38 @@ fn agent_report(app: &mut App) {
     crate::views::assistant::export_report(app);
 }
 
-fn agent_clear(app: &mut App) {
-    crate::views::assistant::clear_conversation(app);
+/// Open or put away the docked assistant panel.
+///
+/// The panel is a layout state rather than a view: it narrows the terminal
+/// instead of replacing it, which is why toggling it needs no notice — the
+/// screen says which way it went. Opening it from another view brings the
+/// terminal back for the same reason: without it the screen would say nothing.
+fn toggle_agent_panel(app: &mut App) {
+    if !app.assistant_panel {
+        app.set_view(View::Terminal);
+    }
+    app.toggle_assistant_panel();
 }
 
+fn agent_new_chat(app: &mut App) {
+    crate::views::assistant::new_conversation(app);
+}
+
+fn agent_prev_chat(app: &mut App) {
+    crate::views::assistant::switch_conversation(app, -1);
+}
+
+fn agent_next_chat(app: &mut App) {
+    crate::views::assistant::switch_conversation(app, 1);
+}
+
+fn agent_delete_chat(app: &mut App) {
+    crate::views::assistant::delete_conversation(app);
+}
+
+fn agent_copy_chat(app: &mut App) {
+    crate::views::assistant::copy_conversation(app);
+}
 /// The network bridge's own functions, as palette entries.
 ///
 /// The network view is a form whose rows are entered from, and that is the right
@@ -540,17 +573,52 @@ pub const ACTIONS: &[Action] = &[
         run: agent_report,
     },
     Action {
-        id: "agent.clear",
-        title: T_AGENT_CLEAR,
+        id: "agent.panel",
+        title: T_AGENT_PANEL,
         category: CAT_AGENT,
         shortcut: "",
-        run: agent_clear,
+        run: toggle_agent_panel,
+    },
+    Action {
+        id: "agent.new_chat",
+        title: T_AGENT_NEW,
+        category: CAT_AGENT,
+        shortcut: "Ctrl+N",
+        run: agent_new_chat,
+    },
+    Action {
+        id: "agent.prev_chat",
+        title: T_AGENT_PREV,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_prev_chat,
+    },
+    Action {
+        id: "agent.next_chat",
+        title: T_AGENT_NEXT,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_next_chat,
+    },
+    Action {
+        id: "agent.delete_chat",
+        title: T_AGENT_DELETE,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_delete_chat,
+    },
+    Action {
+        id: "agent.copy_chat",
+        title: T_AGENT_COPY,
+        category: CAT_AGENT,
+        shortcut: "",
+        run: agent_copy_chat,
     },
     Action {
         id: "app.sidebar",
         title: T_SIDEBAR,
         category: CAT_APP,
-        shortcut: "",
+        shortcut: "Ctrl+B",
         run: toggle_sidebar,
     },
     Action {
@@ -882,7 +950,12 @@ mod tests {
         "agent.note",
         "agent.mode",
         "agent.report",
-        "agent.clear",
+        "agent.panel",
+        "agent.new_chat",
+        "agent.prev_chat",
+        "agent.next_chat",
+        "agent.delete_chat",
+        "agent.copy_chat",
         "app.sidebar",
         "app.copy",
         "app.quit",
@@ -1073,33 +1146,77 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Clearing the conversation wipes what is on screen *and* what is on disk:
-    /// a clear that left the store untouched would be undone by the next
-    /// restart, which is the one thing a clear must not do.
+    /// Conversations come and go durably: a new one is a fresh page that keeps
+    /// the last, deleting one reaches the store, and the store's list is what
+    /// the panel shows. A chat that only lived in memory would come back after
+    /// a restart, which is the one thing either action must not do.
     #[test]
-    fn clearing_the_conversation_is_durable() {
+    fn starting_and_deleting_conversations_is_durable() {
+        use crate::agent::session::{load_chats, DisplayLine};
         let mut path = std::env::temp_dir();
-        path.push(format!("linkr-palette-clear-{}.json", std::process::id()));
+        path.push(format!("linkr-palette-chat-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut app = App {
             agent_store: Some(crate::agent::store::JsonFile::at(&path)),
             ..App::default()
         };
-        app.assistant
-            .display
-            .push(crate::agent::session::DisplayLine {
-                role: "user".into(),
-                text: "hello".into(),
-            });
-        agent_clear(&mut app);
-        assert!(app.assistant.display.is_empty());
+        // A conversation with something in it, saved the way a turn saves it.
+        app.assistant.chat_mut().display.push(DisplayLine {
+            role: "user".into(),
+            text: "hello".into(),
+        });
+        crate::views::assistant::persist_session(&mut app);
+        assert_eq!(
+            load_chats(
+                app.agent_store.as_ref().expect("store"),
+                &app.agent_device_key()
+            )
+            .map(|saved| saved.chats.len()),
+            Some(1),
+            "the turn did not reach the store"
+        );
+
+        // A new page: on screen, not in the store — a draft is not a
+        // conversation, but it is not the store's to throw away either.
+        agent_new_chat(&mut app);
+        assert_eq!(app.assistant.chats.len(), 2, "a new chat is a new page");
+        assert_eq!(
+            load_chats(
+                app.agent_store.as_ref().expect("store"),
+                &app.agent_device_key()
+            )
+            .map(|saved| saved.chats.len()),
+            Some(1),
+            "the empty page was stored"
+        );
+
+        // Deleting the open (empty) page leaves the saved thread, on screen
+        // and on disk.
+        agent_delete_chat(&mut app);
+        assert_eq!(app.assistant.chats.len(), 1);
+        assert_eq!(app.assistant.chats[0].display[0].text, "hello");
+        assert_eq!(
+            load_chats(
+                app.agent_store.as_ref().expect("store"),
+                &app.agent_device_key()
+            )
+            .map(|saved| saved.chats.len()),
+            Some(1),
+            "the delete did not leave the thread"
+        );
+
+        // Deleting the last one leaves a fresh blank page rather than none,
+        // and the store forgets the thread for good.
+        agent_delete_chat(&mut app);
+        assert_eq!(app.assistant.chats.len(), 1, "a blank page takes its place");
+        assert!(app.assistant.chats[0].display.is_empty());
         assert!(
-            crate::agent::session::load_session(
+            load_chats(
                 app.agent_store.as_ref().expect("store"),
                 &app.agent_device_key()
             )
             .is_none(),
-            "the clear did not reach the store"
+            "the delete did not reach the store"
         );
         let _ = std::fs::remove_file(&path);
     }
