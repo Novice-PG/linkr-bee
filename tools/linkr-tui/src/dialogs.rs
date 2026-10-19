@@ -258,7 +258,11 @@ const HELP_ROWS: &[(&str, Entry)] = &[
 ];
 
 /// Columns the help list gives the key before the meaning.
-const HELP_KEY_WIDTH: usize = 14;
+///
+/// The longest chord is `Ctrl+Shift+C`, twelve columns; four columns of air
+/// after it keep the two columns from reading as one word. A key is never
+/// longer than this, and the meaning column is the same on every row.
+const HELP_KEY_WIDTH: usize = 16;
 
 // --- the dialog state --------------------------------------------------------
 
@@ -1351,32 +1355,48 @@ fn device_rows(device: &crate::cli::FoundDevice, width: usize, glyphs: GlyphSet)
 
 /// Every row of the dialog's body, before the window is taken.
 ///
-/// `width` only matters to the confirmation, which wraps its prompt; the other
-/// two bodies are one row per item at any width, which is what lets the scroll
-/// keys work without knowing the box they are scrolling in.
+/// `width` matters to the confirmation, whose prompt wraps, and to the help,
+/// whose meanings and note wrap to the box; the remaining bodies are one row
+/// per item at any width, which is what lets the scroll keys work without
+/// knowing the box they are scrolling in.
 fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let lang = app.lang;
     match dialog {
         Dialog::Help(_) => {
-            let mut out: Vec<Line<'static>> = HELP_ROWS
-                .iter()
-                .map(|(key, meaning)| {
-                    // The key names are the keyboard's own: `↑↓` folds to `^v`
-                    // for a terminal whose font has no arrows, like the hints
-                    // under every view. Folded before it is padded, so the
-                    // meaning column does not move with the glyph set.
-                    let key = theme.fold(key);
-                    Line::from(vec![
-                        Span::styled(text::pad_to(key.as_ref(), HELP_KEY_WIDTH), theme.focus()),
-                        Span::styled(theme.fold(entry(*meaning, lang)), theme.text()),
-                    ])
-                })
-                .collect();
+            // Two columns, and both of them wrap: a meaning under the key
+            // column it belongs to, and the note at the box's own edge. A
+            // meaning longer than the box used to be cut at the border with
+            // no sign that anything was missing; the note — the paragraph
+            // that says where every other key goes — was cut on every frame
+            // it was painted in. The key column is padded, the continuation
+            // rows are indented to it, and nothing is dropped.
+            let room = width.saturating_sub(HELP_KEY_WIDTH).max(1);
+            let mut out: Vec<Line<'static>> = Vec::new();
+            for (key, meaning) in HELP_ROWS {
+                // The key names are the keyboard's own: `↑↓` folds to `^v`
+                // for a terminal whose font has no arrows, like the hints
+                // under every view. Folded before it is padded, so the
+                // meaning column does not move with the glyph set.
+                let key = theme.fold(key);
+                let meaning = theme.fold(entry(*meaning, lang));
+                for (row, line) in wrap_rows(meaning.as_ref(), room).into_iter().enumerate() {
+                    let head = if row == 0 {
+                        Span::styled(text::pad_to(key.as_ref(), HELP_KEY_WIDTH), theme.focus())
+                    } else {
+                        Span::raw(" ".repeat(HELP_KEY_WIDTH))
+                    };
+                    out.push(Line::from(vec![head, Span::styled(line, theme.text())]));
+                }
+            }
             out.push(Line::default());
-            out.push(Line::from(Span::styled(
-                theme.fold(entry(HELP_NOTE, lang)),
-                theme.muted(),
-            )));
+            out.extend(
+                wrap_rows(theme.fold(entry(HELP_NOTE, lang)).as_ref(), width.max(1))
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, theme.muted()))),
+            );
+            // A blank row keeps the note from reading as one paragraph with
+            // the legend the painter puts under it.
+            out.push(Line::default());
             out
         }
         Dialog::DevicePick(pick) => {
@@ -1621,10 +1641,28 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
 /// How many rows the body has. Derived from the body itself, so a row added to
 /// the help list cannot leave the scroll keys behind.
 fn row_count(app: &App, dialog: &Dialog) -> usize {
-    // A width no line reaches: every row is one row, which is what the scroll
-    // keys need to know. The confirmation is never scrolled, so its wrapping
-    // does not matter here.
-    body(dialog, app, 10_000, &app.theme()).len()
+    // The help wraps its meanings and its note to the box it is painted in,
+    // so how many rows it holds depends on the width. Ask the painter's own
+    // helper, the way the device picker does, or End would stop short of the
+    // tail the window cannot show. Before a paint has measured a screen
+    // (a headless test), a width no line reaches keeps one row per item.
+    let width = if matches!(dialog, Dialog::Help(_)) {
+        let width = crate::ui::overlay::dialog_body_width(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+        ) as usize;
+        if width == 0 {
+            10_000
+        } else {
+            width
+        }
+    } else {
+        // The confirmation is never scrolled, and the log and the forms clip
+        // one row per item; their wrapping is not this count's business.
+        10_000
+    };
+    body(dialog, app, width, &app.theme()).len()
 }
 
 /// How many rows the body needs at `width`.
@@ -2387,9 +2425,22 @@ mod tests {
     /// the user staring at blanks.
     #[test]
     fn the_help_scrolls_and_stops_at_the_ends() {
-        let mut app = App::default();
+        // A frame the modal can be measured in: the help wraps to the box,
+        // so the count the keys clamp to has to be the count the painter
+        // draws. The rail and the panel are closed to give it the wide box.
+        let mut app = App {
+            screen: ratatui::layout::Rect::new(0, 0, 200, 50),
+            sidebar_visible: false,
+            assistant_panel: false,
+            ..App::default()
+        };
+        let width = crate::ui::overlay::dialog_body_width(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+        );
         let height = 6;
-        let first = text_of(&lines(&Dialog::Help(0), &app, 60, height));
+        let first = text_of(&lines(&Dialog::Help(0), &app, width, height));
         assert!(first.contains("Ctrl+P"), "{first}");
 
         open_help(&mut app);
@@ -2398,13 +2449,53 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.dialog, Some(Dialog::Help(0)));
         handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        let last = row_count(&app, &Dialog::Help(0)) - 1;
+        // The count knows about the wrapping: End lands on the body's last
+        // row, not on the row the unwrapped list would have ended at.
+        let all = body(&Dialog::Help(0), &app, width as usize, &app.theme());
+        let last = all.len() - 1;
+        assert_eq!(row_count(&app, &Dialog::Help(0)), all.len());
         assert_eq!(app.dialog, Some(Dialog::Help(last)));
         // Past the end stays at the end, and the window shows the tail.
         handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.dialog, Some(Dialog::Help(last)));
-        let tail = text_of(&lines(&Dialog::Help(last), &app, 60, height));
-        assert!(tail.contains("Ctrl+Q"), "{tail}");
+        let tail = text_of(&lines(&Dialog::Help(last), &app, width, height));
+        let end = text_of(&all[last..]);
+        assert!(tail.ends_with(&end), "{tail}");
+    }
+
+    /// The help's two columns stay apart even at the longest chord, and a
+    /// meaning or the note that outgrows the box wraps instead of being cut.
+    #[test]
+    fn the_help_wraps_inside_its_box() {
+        let app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        for width in [30u16, 44, 60, 94] {
+            let height = body_height(&app, &Dialog::Help(0), width);
+            let rows = lines(&Dialog::Help(0), &app, width, height);
+            for line in &rows {
+                assert!(
+                    line.width() <= width as usize,
+                    "a row outgrew {width} columns: {:?}",
+                    text_of(std::slice::from_ref(line))
+                );
+            }
+            let shown = text_of(&rows);
+            // The longest key and the note's last words survive the box at
+            // every width; the old painter cut the note off at the border.
+            assert!(shown.contains("Ctrl+Shift+C"), "{shown}");
+            assert!(shown.contains("属于助手"), "{shown}");
+        }
+        // The gutter: the longest chord is followed by four blanks before
+        // the meaning starts.
+        let rows = lines(&Dialog::Help(0), &app, 94, 40);
+        let row = rows
+            .iter()
+            .find(|line| text_of(std::slice::from_ref(line)).starts_with("Ctrl+Shift+C"))
+            .expect("the longest chord is drawn");
+        let row = text_of(std::slice::from_ref(row));
+        assert_eq!(&row[12..16], "    ", "{row:?}");
     }
 
     /// The sheet carries every command in its group, in both languages —

@@ -143,7 +143,7 @@ fn narrow_symbol(symbol: &str) -> Option<&'static str> {
 /// glyph this interface draws, found by walking the source; a glyph the
 /// console renders wide that is not here is a line that walks right on the
 /// old console, and adding it is one row.
-const STAND_INS: [(char, &str); 35] = [
+const STAND_INS: [(char, &str); 36] = [
     // Dashes and the small punctuation the layout uses as separators.
     ('\u{2014}', "-"),  // — em dash
     ('\u{2013}', "-"),  // – en dash
@@ -166,6 +166,7 @@ const STAND_INS: [(char, &str); 35] = [
     ('\u{25d0}', "o"), // ◐ half-filled circle
     // Bars and blocks: the progress bar and the sparkline, graded so a
     // stand-in still carries the shape the block did.
+    ('\u{2580}', "="), // ▀ upper half
     ('\u{2581}', "_"), // ▁ one eighth
     ('\u{2582}', "_"), // ▂ one quarter
     ('\u{2583}', "="), // ▃ three eighths
@@ -291,6 +292,17 @@ mod tests {
             );
             assert_eq!(narrow(glyph), narrow_symbol(&glyph.to_string()));
         }
+    }
+
+    /// Both halves of the mark's half-block cells have a stand-in. The logo
+    /// is drawn as `▀`/`▄` with the two greens in the foreground and the
+    /// background; a `▀` left out of the table fell through to `UNKNOWN`, and
+    /// the old console's splash showed a field of question marks where the
+    /// mark's upper half should have been.
+    #[test]
+    fn the_marks_half_blocks_keep_their_place() {
+        assert_eq!(narrow('\u{2580}'), Some("="), "▀ has no stand-in");
+        assert_eq!(narrow('\u{2584}'), Some("="), "▄ has no stand-in");
     }
 
     #[test]

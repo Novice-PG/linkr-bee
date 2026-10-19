@@ -1015,6 +1015,29 @@ mod tests {
         );
     }
 
+    /// The whole frame through the compatibility pass: the mark's half blocks
+    /// become `=`, not the `?` an unmapped ambiguous glyph gets. A screenshot
+    /// of the old console showed the mark as a field of question marks because
+    /// `▀` was missing from the stand-in table while `▄` was already in it.
+    #[test]
+    fn the_old_console_keeps_the_marks_half_blocks() {
+        let app = App {
+            legacy_console: true,
+            splash_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            ..App::default()
+        };
+        let buffer = render_buffer(&app, 60, 24).expect("a frame paints");
+        let painted: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            painted.contains('='),
+            "the mark lost its half blocks: {painted:?}"
+        );
+        assert!(
+            !painted.contains('?'),
+            "the mark kept the unknown stand-in: {painted:?}"
+        );
+    }
+
     /// A window too narrow for both halves yields sidebar width to the centre:
     /// a view is never squeezed to nothing to keep an empty strip.
     #[test]

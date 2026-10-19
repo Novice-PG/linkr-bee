@@ -198,9 +198,13 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     lines.push(dialogs::legend(dialog, app.lang, &theme));
     frame.render_widget(Paragraph::new(lines).style(theme.card()), inner);
 
-    // The bar spans the body rows and stops above the legend: the legend is
-    // chrome, and a thumb beside it would claim the key hints scroll.
+    // The bar rides the box's own right border rather than the body's last
+    // column: a wrapped row may fill its width to the edge, and a bar over
+    // the text would eat the last glyph of every such row. The border is
+    // chrome already, so the thumb replaces a stretch of it.
     let window = Rect {
+        x: inner.right(),
+        width: 1,
         height: body_height as u16,
         ..inner
     };
@@ -394,8 +398,8 @@ mod tests {
         assert!(text.contains("UART"), "the query matched nothing:\n{text}");
     }
 
-    /// A dialog body longer than its box carries the bar down the inner right
-    /// column, over the body rows only: the thumb starts flush with the body's
+    /// A dialog body longer than its box carries the bar down the box's right
+    /// border, over the body rows only: the thumb starts flush with the body's
     /// first row, and the legend row stays chrome.
     #[test]
     fn a_dialog_body_that_overflows_carries_a_scrollbar() {
@@ -420,7 +424,9 @@ mod tests {
         );
 
         let buffer = ui::render_buffer(&app, 80, 24).expect("a frame");
-        let bar = inner.right() - 1;
+        // The border column, not the body's last one: a wrapped row may fill
+        // its width to the edge, and a bar over it would eat the last glyph.
+        let bar = inner.right();
         assert_eq!(buffer[(bar, inner.y)].symbol(), "┃", "the top of the track");
         assert_ne!(
             buffer[(bar, inner.bottom() - 1)].symbol(),
