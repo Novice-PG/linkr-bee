@@ -35,7 +35,11 @@
   --line-strong: rgba(255, 255, 255, 0.17);
   --placeholder: #7c8a9e;
 
-  --accent: #3fc88a;
+  /* The accent in the form the tinted borders, glows and hover washes below
+   * need: the same green, so `<token> / 0.12` follows the theme instead of
+   * keeping the other theme's green the way a literal rgba() did. */
+  --accent-rgb: 63 200 138;
+  --accent: rgb(var(--accent-rgb));
   --accent-strong: #5fe0a6;
   --accent-ink: #04160e;
   --primary-grad: linear-gradient(180deg, #4fda9d, #33b87d);
@@ -85,7 +89,8 @@
   --line-strong: rgba(15, 32, 56, 0.2);
   --placeholder: #5e6e84;
 
-  --accent: #1f9d64;
+  --accent-rgb: 31 157 100;
+  --accent: rgb(var(--accent-rgb));
   --accent-strong: #157a4c;
   --accent-ink: #ffffff;
   --primary-grad: linear-gradient(180deg, #2fb377, #1f9d64);
@@ -169,8 +174,8 @@ body {
 }
 
 .rail-btn.active {
-  border-color: rgba(63, 200, 138, 0.22);
-  background: rgba(63, 200, 138, 0.12);
+  border-color: rgb(var(--accent-rgb) / 0.22);
+  background: rgb(var(--accent-rgb) / 0.12);
   color: var(--accent-strong);
 }
 
@@ -183,7 +188,7 @@ body {
   height: 14px;
   border-radius: 2px;
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(63, 200, 138, 0.6);
+  box-shadow: 0 0 8px rgb(var(--accent-rgb) / 0.6);
 }
 
 .rail-btn:focus-visible {
@@ -206,31 +211,37 @@ body {
   display: grid;
 }
 
+/* The rail layout is for pointer devices. `settings-drawer-layout` is chosen by
+ * the input device, not the window width — every coarse-pointer host (all
+ * phones and tablets, and HarmonyOS) uses the overlay drawer at any width — so
+ * gating on width alone put a flex rail into a one-column grid: it stretched to
+ * the full width and covered the page, intercepting every tap. A 1194x834 iPad
+ * in landscape is exactly that case. */
 @media (min-width: 1101px) {
-  .app-shell {
+  html:not(.settings-drawer-layout) .app-shell {
     --sidebar-width: clamp(312px, 23vw, 400px);
     grid-template-columns: 56px minmax(0, var(--sidebar-width)) minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
 
-  .rail {
+  html:not(.settings-drawer-layout) .rail {
     display: flex;
     grid-column: 1;
     grid-row: 2;
   }
 
-  .controls {
+  html:not(.settings-drawer-layout) .controls {
     grid-column: 2;
     grid-row: 2;
     padding-right: 0;
   }
 
-  .workpanel {
+  html:not(.settings-drawer-layout) .workpanel {
     grid-column: 3;
     grid-row: 2;
   }
 
-  .app-shell.controls-hidden {
+  html:not(.settings-drawer-layout) .app-shell.controls-hidden {
     grid-template-columns: 56px 0 minmax(0, 1fr);
   }
 }
@@ -339,8 +350,8 @@ h1 {
 }
 
 .status-pill:has(.status-dot.connected) {
-  border-color: rgba(63, 200, 138, 0.3);
-  background: rgba(63, 200, 138, 0.1);
+  border-color: rgb(var(--accent-rgb) / 0.3);
+  background: rgb(var(--accent-rgb) / 0.1);
   color: var(--text);
 }
 
@@ -352,13 +363,13 @@ h1 {
 
 .status-dot.connected {
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(63, 200, 138, 0.14);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.14);
 }
 
 .status-dot.connected::after {
   inset: -2px;
   border-width: 1px;
-  border-color: rgba(63, 200, 138, 0.5);
+  border-color: rgb(var(--accent-rgb) / 0.5);
   animation-duration: 2.4s;
 }
 
@@ -416,6 +427,8 @@ h1 {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  /* The section header is a full-bleed band now; the card owns its corners. */
+  overflow: hidden;
 }
 
 [data-theme="light"] .controls .card {
@@ -427,17 +440,79 @@ h1 {
   border-color: var(--line);
 }
 
+/* A section title is the pane title's own type, not a caption: the terminal
+ * header beside the drawer sets 13 px/600 with no tracking, and the drawer used
+ * to set a 10.5 px letter-spaced label, so the two panes disagreed about what a
+ * section heading is. */
 .card-title {
   margin-bottom: 12px;
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  color: var(--placeholder);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+/* Card headers take the shape .terminal-head already has — a chrome band with
+ * the title on it — at card scale: full bleed inside the card, the accent dot,
+ * and a hairline under it. The negative margins cancel .card's 16 px padding;
+ * the card clips the band with its own radius. */
+.controls .card > .card-title {
+  margin: -16px -16px 14px;
+  padding: 11px 16px;
+  min-height: 44px;
+  align-items: center;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+
+/* The collapsible section is its header plus whatever it reveals, so its
+ * summary is the band and the hairline only appears once there is something
+ * under it. */
+.controls .diagnostics-summary {
+  padding: 11px 16px;
+  min-height: 44px;
+  background: var(--panel-2);
+}
+
+.controls .diagnostics-summary .card-title {
+  margin-bottom: 0;
+}
+
+.controls .diagnostics-card[open] > .diagnostics-summary {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* Field labels are labels, not body copy: 12.5 px/400 read as prose next to
+ * the 600-weight controls they describe. */
+.controls .field-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+
+/* A segmented control is chrome, not a label: the 0.25 px tracking the old
+ * sheet added is the only place the shell tracked a control label. */
+.controls .ts-btn {
+  letter-spacing: 0;
+}
+
+/* A diagnostic value is a value: the same mono face the device name and the
+ * terminal counters use, so numbers line up and read as machine output. */
+.controls .diagnostic-item > span:first-child {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.controls .diagnostic-item strong {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .card-title .dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 
 .settings-tabs {
@@ -453,18 +528,21 @@ h1 {
 }
 
 @media (min-width: 1101px) {
-  .settings-tabs {
-    position: sticky;
-    top: -12px;
-    z-index: 6;
-    margin-top: 12px;
-    background: rgba(10, 15, 22, 0.9);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
-  }
-
-  [data-theme="light"] .settings-tabs {
-    background: rgba(255, 255, 255, 0.9);
+  /* One section switcher, not two. The rail IS this row of buttons, and with
+   * the drawer open they sat six pixels apart, both highlighting the same
+   * section — a duplicate menu. The tabs stay in the DOM because rail_nav.js
+   * forwards rail clicks to them; `display: none` leaves them clickable but
+   * takes the duplicate row out of the tab order. Below 1101 px the rail is
+   * not laid out, so the tabs remain the only way to switch and stay visible.
+   *
+   * `!important` because the older sheets re-assert `display: grid` on this
+   * strip with higher specificity than a plain class — style.css:2606 keys on
+   * `.controls.has-agent-settings` and :2306 on `html.settings-drawer-layout`,
+   * and this file is the presentation layer that retunes them without editing
+   * them. One declaration that cannot be outranked beats a selector list that
+   * breaks the next time the legacy sheet grows another variant. */
+  html:not(.settings-drawer-layout) .settings-tabs {
+    display: none !important;
   }
 
   /* One section at a time: the rail and the tabs drive the same page state. */
@@ -762,8 +840,8 @@ h1 {
 }
 
 .preset-chip:hover:not(:disabled) {
-  border-color: rgba(63, 200, 138, 0.4);
-  background: rgba(63, 200, 138, 0.08);
+  border-color: rgb(var(--accent-rgb) / 0.4);
+  background: rgb(var(--accent-rgb) / 0.08);
   color: var(--text);
   transform: none;
 }
@@ -967,15 +1045,28 @@ h1 {
 }
 
 @media (min-width: 1101px) {
-  /* The panel toggle lives in the topbar; the drawer title row is redundant
-   * once the tab strip sits at the top of the panel. */
+  /* The title row comes back now that the tab strip is gone (see above): without
+   * it the drawer began with a card at the very top, while the terminal beside
+   * it starts below a 59 px header band, so the two panes' content did not line
+   * up. It carries the title only — its theme/language buttons are the topbar's
+   * job from 901 px up, and showing both was the same duplication again. */
   .controls .drawer-head {
-    display: none;
+    display: flex;
   }
+}
 
-  .settings-tabs {
-    top: 0;
-    margin-top: 12px;
+/* The topbar keeps theme and language from 901 px up (see the 900 px block
+ * below, which is where it hands them to the drawer), so the drawer's own copy
+ * of those two buttons is a duplicate control pair at every width above the
+ * phone breakpoint — including the 901-1100 band, where the title row was
+ * already visible. Only the title stays. */
+@media (min-width: 901px) {
+  /* The topbar carries these two from 901 px up, so the drawer's copies are a
+   * second pair of the same controls. The close button is not a duplicate: it
+   * is the in-panel way out, so it stays. */
+  .controls .drawer-head-actions #drawerThemeButton,
+  .controls .drawer-head-actions #drawerLangButton {
+    display: none;
   }
 }
 
@@ -1015,6 +1106,14 @@ h1 {
 }
 
 .terminal-output.connected .terminal-empty {
+  display: none;
+}
+
+/* Once a session has existed the empty state is gone for good. It keys on the
+ * current connection, so a disconnect used to bring it back on top of the
+ * transcript that is still in the buffer — transparent, absolutely positioned
+ * and centred, which reads as two texts printed over each other. */
+.terminal-output[data-ever-connected] .terminal-empty {
   display: none;
 }
 
@@ -1171,10 +1270,30 @@ button,
     display: none;
   }
 
-  /* Fingers are not cursors. Measured at 390 px, fourteen controls came out
-   * under 44 px tall: tabs at 30, mode switches at 30, panel buttons at 36 and
-   * the topbar toggle at 40. Lift them to the usual 44 px target; the drawer
-   * already scrolls, so the extra height costs nothing but a swipe. */
+  .terminal-empty {
+    gap: 10px;
+    padding: 20px;
+  }
+
+  .te-mark {
+    width: 52px;
+    height: 52px;
+  }
+}
+
+/* ---------- Touch targets ---------- */
+
+/* Fingers are not cursors, so target size has to follow the input device
+ * rather than the window width. Measured at 390 px, fourteen controls came out
+ * under 44 px tall: tabs at 30, mode switches at 30, panel buttons at 36 and
+ * the topbar toggle at 40. A width-only query left every one of them at 30 px
+ * on a phone held sideways — 844 px wide and still without a pointer — so the
+ * device is asked directly. The width half is kept as a fallback for narrow
+ * desktop windows, and it is the only half the offline audit can verify: its
+ * WKWebView reports a fine pointer, so the coarse-pointer arm is exercised on
+ * hardware, not there. The drawer already scrolls, so the extra height costs a
+ * swipe, not content. */
+@media (pointer: coarse), (max-width: 520px) {
   .settings-tab,
   .ts-btn {
     min-height: 38px;
@@ -1191,16 +1310,6 @@ button,
 
   .term-tools .term-tool {
     min-width: 40px;
-  }
-
-  .terminal-empty {
-    gap: 10px;
-    padding: 20px;
-  }
-
-  .te-mark {
-    width: 52px;
-    height: 52px;
   }
 }
 

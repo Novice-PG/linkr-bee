@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
     <link rel="stylesheet" href="./style.css?v=20260928-connect-entry" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261018-contrast" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261019-drawer-unified" />
   </head>
   <body>
     <main class="app-shell">
@@ -64,7 +64,7 @@
         </div>
       </header>
 
-      <nav class="rail" aria-label="Sections">
+      <nav class="rail" aria-label="Sections" data-i18n-aria="sections">
         <button class="rail-btn active" type="button" data-rail-target="connection" aria-label="Connect" data-i18n-aria="settingsConnection" data-i18n-title="settingsConnection">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M10.5 13.5l3-3"></path>
@@ -552,7 +552,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260910-agent-task-plan"></script>
+    <script type="module" src="./app.js?v=20261019-rail-i18n"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a
