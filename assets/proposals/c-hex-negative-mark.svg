@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - C Hex Negative Mark</title>
+<desc>Solid hive with a transparent prompt.</desc>
+<defs>
+<mask id="cutA">
+<rect width="512" height="512" fill="#000"/>
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="#fff"/>
+<path d="M196 208 L306 256 L196 304" fill="none" stroke="#000" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</mask>
+</defs>
+<rect width="512" height="512" fill="currentColor" mask="url(#cutA)"/>
+</svg>

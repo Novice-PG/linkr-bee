@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/linkr-bee-logo.svg" alt="Linkr Bee" width="520">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/linkr-bee-logo-dark.svg">
+    <img src="assets/linkr-bee-logo.svg" alt="Linkr Bee" width="520">
+  </picture>
 </p>
 
 <p align="center">

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" width="512" height="512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee mark for light backgrounds</title>
+<desc id="d">Hive hexagon holding a terminal prompt and a cursor, darker green for light surfaces.</desc>
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="#1F9D64" stroke-width="30" stroke-linejoin="round"/>
+<path d="M180 210 L270 256 L180 302" fill="none" stroke="#1F9D64" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="306" y="214" width="36" height="84" rx="7" fill="#1F9D64"/>
+</svg>

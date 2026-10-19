@@ -1,14 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
-  <title id="title">Linkr Bee</title>
-  <desc id="desc">Linkr Bee project logo with a linked honeycomb b monogram.</desc>
-
-  <g transform="translate(34 17) scale(.56)">
-    <path d="M102 48Q102 20 130 20H190V139L256 101L410 190V368L256 457L102 368Z" fill="#101722"/>
-    <path d="M256 157L333 202V291L256 336L179 291V202ZM256 130V157M256 336V363" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="256" cy="126" r="18" fill="#FFFFFF"/>
-    <circle cx="256" cy="367" r="18" fill="#FFFFFF"/>
-    <path d="M256 190L304 218V274L256 302L208 274V218Z" fill="#F6B73C"/>
-  </g>
-
-  <text x="350" y="211" fill="#101722" font-family="Inter, 'Avenir Next', ui-sans-serif, system-ui, sans-serif" font-size="146" font-weight="720" letter-spacing="-5">Linkr Bee</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee</title>
+<desc id="d">Linkr Bee wordmark with the hive prompt mark, for light backgrounds.</desc>
+<g transform="translate(30 12) scale(0.575)">
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="#1F9D64" stroke-width="30" stroke-linejoin="round"/>
+<path d="M180 210 L270 256 L180 302" fill="none" stroke="#1F9D64" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="306" y="214" width="36" height="84" rx="7" fill="#1F9D64"/>
+</g>
+<text x="302" y="178" fill="#0F1C2E" font-family="Inter, 'SF Pro Display', 'PingFang SC', ui-sans-serif, system-ui, sans-serif" font-size="128" font-weight="600" letter-spacing="-4">Linkr Bee</text>
+<text x="304" y="232" fill="#0F1C2E" fill-opacity="0.5" font-family="Inter, 'SF Pro Display', 'PingFang SC', ui-sans-serif, system-ui, sans-serif" font-size="23" font-weight="500" letter-spacing="6.5">WIRELESS SERIAL TERMINAL</text>
 </svg>

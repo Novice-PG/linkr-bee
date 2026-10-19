@@ -3,10 +3,15 @@ import { available } from "./agent_runtime.js";
 import {
   AGENT_FIXED_CONTEXT_TOKENS,
   AGENT_PROVIDERS,
+  AGENT_VENDOR_CUSTOM,
+  AGENT_VENDORS,
+  vendorForEndpoint,
   AGENT_REASONING_LEVELS,
   clearAgentConfig,
   endpointSecurity,
+  fetchAgentModels,
   formatAgentHeaders,
+  isValidEndpoint,
   isContextWindowTight,
   loadAgentConfig,
   minimumUsefulContextWindow,
@@ -36,9 +41,25 @@ const labels = {
   endpoint: ["API 地址", "API base URL"],
   endpointHint: ["兼容 Chat Completions，例如 https://api.example.com/v1", "Chat Completions compatible, e.g. https://api.example.com/v1"],
   model: ["模型名称", "Model ID"], key: ["API Key", "API key"],
+  /* The preset model ids go stale, so the form can ask the service what it
+   * offers right now once the address and key are in. */
+  modelHint: ["可手动填写；填好地址和 API Key 后，可点击下方“获取模型列表”从服务端读取当前可用的模型。", "Type it, or fill in the address and API key and use Fetch model list below to read the models the service currently offers."],
+  fetchModels: ["获取模型列表", "Fetch model list"],
+  fetchBusy: ["正在获取模型列表…", "Fetching the model list…"],
+  fetchDone: ["已获取 {count} 个模型，从模型名称输入框的下拉中选择，也可继续手动输入。", "Found {count} models. Open the model field and pick one, or keep typing."],
+  fetchEndpoint: ["请先填写有效的 API 地址。", "Enter a valid API base URL first."],
+  fetchUnauthorized: ["无法获取模型列表：API Key 无效或没有读取模型的权限。", "Could not read the model list: the API key is invalid or cannot list models."],
+  fetchNetwork: ["无法获取模型列表：请求被浏览器跨域或网络拦截，或不支持该接口。可继续手动填写模型名。", "Could not read the model list: the request was blocked (CORS or network) or the endpoint does not support it. Type the model ID instead."],
+  fetchHttp: ["模型列表接口返回 HTTP {status}。可继续手动填写模型名。", "The model list endpoint returned HTTP {status}. Type the model ID instead."],
+  fetchEmpty: ["该服务没有返回可用的模型，请手动填写模型名。", "The service returned no usable models; type the model ID instead."],
   keyHint: ["无需密钥的本地服务可留空。", "Leave blank for a local service that does not require a key."],
   headers: ["附加请求头", "Extra request headers"],
   headersHint: ["每行一个 `名称: 值`。部分端点需要特定请求头才接受浏览器请求，例如 Anthropic 需要 anthropic-dangerous-direct-browser-access: true。", "One `Name: value` per line. Some endpoints only accept a browser request with a specific header, for example Anthropic needs anthropic-dangerous-direct-browser-access: true."],
+  vendor: ["AI 接入商", "AI provider"],
+  /* A preset only fills the fields; it never locks them, and the model id is the
+   * part most likely to go stale, so the hint says so instead of pretending. */
+  vendorHint: ["选择后自动填入 API 地址、接口协议和模型名，三个字段都可以再改；模型名以你的账号可用的为准。", "Choosing a provider fills the API base URL, protocol and model. All three stay editable; use a model your account can actually call."],
+  keyStorage: ["API Key 只保存在这台设备（本浏览器 / 应用的本地存储，键名 linkr-agent-model，明文）。不会上传到 Linkr Bee、本网站或任何服务器，应用也没有云端账号。提问时由本机直接发往你选择的接入商；清除配置或站点数据即可删除。", "The API key stays on this device (this browser/app's local storage, key linkr-agent-model, plaintext). It is not uploaded to Linkr Bee, this site or any server, and the app has no cloud account. A question carries it from this device straight to the provider you chose; clear the configuration or site data to remove it."],
   provider: ["接口协议", "API protocol"],
   providerHint: ["必须与 API 地址匹配，协议不同请求格式也不同。", "Must match the API base URL; each protocol uses a different request format."],
   reasoning: ["推理强度", "Reasoning effort"],
@@ -61,7 +82,7 @@ const labels = {
   pricingError: ["单价必须是 0 到 100000 之间的数字。", "Prices must be numbers between 0 and 100000."],
   headersError: ["请求头格式无效：每行一个 `名称: 值`，名称只能包含字母、数字和连字符。", "Invalid headers: use one `Name: value` per line, with names limited to letters, digits and hyphens."],
   save: ["保存配置", "Save configuration"], clear: ["清除配置", "Clear configuration"],
-  storage: ["配置和 API Key 保存在当前设备的应用 / 浏览器存储中，刷新或重启后保留。清除配置或应用 / 网站数据后删除。", "Configuration and API key are saved in this device's app / browser storage across reloads and restarts. Clear the configuration or app / site data to remove them."],
+  storage: ["其余配置同样保存在本机，刷新或重启后保留；清除配置或清除站点数据后删除。", "The rest of the configuration is stored on this device too, across reloads and restarts; clear the configuration or the site data to remove it."],
   notice: ["提问后，助手会把所需串口日志发送到你配置的模型服务。", "When you ask a question, the assistant sends the requested serial logs to your configured model service."],
   saved: ["配置已保存到当前设备。", "Configuration saved on this device."],
   cleared: ["已清除当前设备上的 AI 配置。", "AI configuration cleared from this device."],
@@ -83,6 +104,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   section.closest(".controls").classList.add("has-agent-settings");
   const $ = (id) => section.querySelector(`#${id}`);
   const inputs = {
+    vendor: $("agentVendor"),
     endpoint: $("agentEndpoint"), model: $("agentModel"), apiKey: $("agentApiKey"),
     provider: $("agentProvider"), reasoning: $("agentReasoning"),
     contextWindow: $("agentContextWindow"), maxTokens: $("agentMaxTokens"),
@@ -120,6 +142,63 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     el.classList.toggle("field-error", (!busy && error) || exposed || Boolean(tight));
   }
   function showStatus(next, failed = false) { status = next; error = failed; renderStatus(); }
+  // Model discovery has its own line: it reports the list, not the record, and
+  // it must not overwrite the save/clear status the user is waiting on.
+  function showModelStatus(key, replacements = {}, failed = false) {
+    const el = $("agentModelStatus");
+    let message = key ? text(key) : "";
+    for (const [name, value] of Object.entries(replacements)) message = message.replace(`{${name}}`, String(value));
+    el.textContent = message;
+    el.classList.toggle("field-error", failed);
+  }
+  let fetchingModels = false;
+  async function fetchModels() {
+    if (busy || fetchingModels) return;
+    if (!isValidEndpoint(inputs.endpoint.value)) {
+      inputs.endpoint.setAttribute("aria-invalid", "true");
+      showModelStatus("fetchEndpoint", {}, true);
+      inputs.endpoint.focus();
+      return;
+    }
+    let requestHeaders;
+    try { requestHeaders = parseAgentHeaders(headersInput.value); }
+    catch {
+      headersInput.setAttribute("aria-invalid", "true");
+      showModelStatus("headersError", {}, true);
+      headersInput.focus();
+      return;
+    }
+    fetchingModels = true;
+    const button = $("agentModelFetch");
+    button.disabled = true;
+    showModelStatus("fetchBusy");
+    try {
+      const models = await fetchAgentModels({
+        endpoint: inputs.endpoint.value.trim(),
+        apiKey: inputs.apiKey.value,
+        headers: requestHeaders,
+        provider: inputs.provider.value || AGENT_PROVIDERS[0].id,
+      });
+      const list = $("agentModelOptions");
+      list.textContent = "";
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model;
+        list.append(option);
+      }
+      showModelStatus("fetchDone", { count: models.length });
+      // Choosing is the point: put the caret where the list opens.
+      if (!inputs.model.value.trim()) inputs.model.focus();
+    } catch (error) {
+      if (error?.code === "models-unauthorized") showModelStatus("fetchUnauthorized", {}, true);
+      else if (error?.code === "models-http") showModelStatus("fetchHttp", { status: error.status ?? "?" }, true);
+      else if (error?.code === "models-empty") showModelStatus("fetchEmpty", {}, true);
+      else showModelStatus("fetchNetwork", {}, true);
+    } finally {
+      fetchingModels = false;
+      button.disabled = false;
+    }
+  }
   /* The provider and reasoning selects are driven by the shared option lists, so
    * the form and the validator cannot drift apart. Their text is translated, so
    * the lists are rebuilt on every language change; the ids never change, so a
@@ -127,6 +206,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   function fillOptions() {
     const index = getLang().startsWith("zh") ? 0 : 1;
     const options = {
+      agentVendor: AGENT_VENDORS.map(({ id, label, hint }) => ({ value: id, label, hint })),
       agentProvider: AGENT_PROVIDERS.map(({ id, label, hint }) => ({ value: id, label, hint })),
       agentReasoning: AGENT_REASONING_LEVELS.map((id) => ({ value: id, label: labels[reasoningLabels[id]] || [id, id] })),
     };
@@ -146,7 +226,14 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     }
   }
   function fill() {
-    for (const [name, input] of Object.entries(inputs)) input.value = config?.[name] || "";
+    for (const [name, input] of Object.entries(inputs)) {
+      // The vendor is not part of the stored record; it is read back from the
+      // endpoint so an existing configuration shows its provider without a
+      // schema change.
+      if (name === "vendor") continue;
+      input.value = config?.[name] || "";
+    }
+    inputs.vendor.value = config ? vendorForEndpoint(config.endpoint) : AGENT_VENDOR_CUSTOM;
     // A select whose value matches no option shows nothing and would submit an
     // empty string, so a missing record falls back to the schema default.
     if (!inputs.provider.value) inputs.provider.value = AGENT_PROVIDERS[0].id;
@@ -168,6 +255,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     if (busy) return;
     resetErrors();
     const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
+    delete draft.vendor;
     // A cleared number input reports an empty string and an empty select reports
     // no choice at all. Both mean "keep the schema default", not invalid input.
     for (const name of ["contextWindow", "maxTokens"]) draft[name] = draft[name].trim() ? Number(draft[name]) : 0;
@@ -229,8 +317,37 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     showStatus("cleared");
     onChange?.();
   });
-  for (const input of Object.values(inputs)) input.addEventListener("input", () => {
+  /* A preset writes the three fields the protocol owns and stops there: the key,
+   * the headers (unless the vendor needs one), the reasoning level and the token
+   * limits belong to the account, not to the vendor. The fields stay editable
+   * afterwards, and Custom changes nothing so an endpoint can be typed by hand. */
+  inputs.vendor.addEventListener("change", () => {
+    const preset = AGENT_VENDORS.find((entry) => entry.id === inputs.vendor.value);
+    if (!preset || preset.id === AGENT_VENDOR_CUSTOM) {
+      showStatus("dirty");
+      return;
+    }
+    inputs.endpoint.value = preset.endpoint;
+    inputs.model.value = preset.model;
+    if (preset.protocol) inputs.provider.value = preset.protocol;
+    /* Replace the headers a previous preset wrote, but never a user's own: the
+     * Anthropic preset sets one, and switching away would otherwise leave a
+     * header that belongs to a service the new endpoint is not. */
+    let currentHeaders = null;
+    try { currentHeaders = parseAgentHeaders(headersInput.value); } catch { currentHeaders = null; }
+    const ownHeaderNames = new Set(AGENT_VENDORS.flatMap((entry) => Object.keys(entry.headers || {})));
+    const onlyPresetHeaders = currentHeaders && Object.keys(currentHeaders).length > 0 &&
+      Object.keys(currentHeaders).every((name) => ownHeaderNames.has(name));
+    if (preset.headers) headersInput.value = formatAgentHeaders(preset.headers);
+    else if (onlyPresetHeaders) headersInput.value = "";
     resetErrors();
+    showStatus("dirty");
+  });
+  $("agentModelFetch").addEventListener("click", fetchModels);
+  for (const [name, input] of Object.entries(inputs)) input.addEventListener("input", () => {
+    resetErrors();
+    // A list fetched for a previous address or key is no longer evidence.
+    if (["vendor", "endpoint", "apiKey", "provider"].includes(name)) showModelStatus("");
     showStatus("dirty");
   });
   for (const [id, action] of [["targetVerify","verify"],["targetBind","bind"],["targetUnbind","clear"],["targetRegenerate","regenerate"]]) {
@@ -253,6 +370,8 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   function refreshLang() {
     for (const el of section.querySelectorAll("[data-ai-setting]")) el.textContent = text(el.dataset.aiSetting);
     fillOptions();
+    // The status was written in the previous language; the fetched options stay.
+    showModelStatus("");
     renderStatus();
   }
   refreshLang();

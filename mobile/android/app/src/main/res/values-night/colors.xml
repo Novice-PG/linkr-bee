@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode counterpart of values/colors.xml: window_bg is the light
+         page colour there, so the window and the page agree in both themes. -->
+    <color name="window_bg">#05080D</color>
+</resources>

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Signal Wing mark</title>
+<desc>Single colour bee body with signal arcs.</desc>
+<defs>
+<mask id="wingCut">
+<rect width="512" height="512" fill="#000"/>
+<path d="M200 152 L304 212 L304 332 L200 392 L96 332 L96 212 Z" fill="#fff"/>
+<path d="M152 244 H248 M152 300 H248" stroke="#000" stroke-width="22" stroke-linecap="round"/>
+</mask>
+</defs>
+<g transform="translate(-25 0)">
+<rect width="512" height="512" fill="currentColor" mask="url(#wingCut)"/>
+<path d="M328 244 A56 56 0 0 1 384 300" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" opacity="0.42"/>
+<path d="M328 208 A92 92 0 0 1 420 300" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round" opacity="0.68"/>
+<path d="M328 172 A128 128 0 0 1 456 300" fill="none" stroke="currentColor" stroke-width="20" stroke-linecap="round"/>
+</g>
+</svg>

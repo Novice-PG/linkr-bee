@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors web/skin-v2.css so the native window and the WebView agree. -->
+    <color name="brand_bg">#05080D</color>
+    <!-- The window behind the WebView, which follows the system theme; the
+         web page itself starts from the same pair. -->
+    <color name="window_bg">#E2E9F4</color>
+    <color name="brand_surface">#0B1118</color>
+    <color name="brand_accent">#3FC88A</color>
+    <color name="brand_text">#E8EEF7</color>
+    <color name="ic_launcher_background">#0B1118</color>
+</resources>

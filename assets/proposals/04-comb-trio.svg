@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Comb Trio</title>
+<desc>Three honeycomb cells, the active one filled.</desc>
+<rect width="512" height="512" rx="112" fill="#101722"/>
+<g transform="translate(0 5)">
+<path d="M176.3 228 L256 274 L256 366 L176.3 412 L96.6 366 L96.6 274 Z" fill="none" stroke="#E8EEF7" stroke-width="20" stroke-linejoin="round"/>
+<path d="M335.7 228 L415.4 274 L415.4 366 L335.7 412 L256 366 L256 274 Z" fill="none" stroke="#E8EEF7" stroke-width="20" stroke-linejoin="round"/>
+<path d="M256 90 L335.7 136 L335.7 228 L256 274 L176.3 228 L176.3 136 Z" fill="#F6B73C" stroke="#F6B73C" stroke-width="20" stroke-linejoin="round"/>
+</g>
+</svg>

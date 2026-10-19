@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One drawable instead of eleven per-orientation bitmaps: the splash is a
+     brand-coloured field with the mark centred, which needs no density variants
+     beyond the mark itself. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/brand_bg" />
+    <item>
+        <bitmap android:gravity="center" android:src="@drawable/splash_mark" />
+    </item>
+</layer-list>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Comb Trio mark</title>
+<desc>Single colour three cell comb.</desc>
+<g transform="translate(0 5)">
+<path d="M176.3 228 L256 274 L256 366 L176.3 412 L96.6 366 L96.6 274 Z" fill="none" stroke="currentColor" stroke-width="22" stroke-linejoin="round"/>
+<path d="M335.7 228 L415.4 274 L415.4 366 L335.7 412 L256 366 L256 274 Z" fill="none" stroke="currentColor" stroke-width="22" stroke-linejoin="round"/>
+<path d="M256 90 L335.7 136 L335.7 228 L256 274 L176.3 228 L176.3 136 Z" fill="currentColor" stroke="currentColor" stroke-width="22" stroke-linejoin="round"/>
+</g>
+</svg>

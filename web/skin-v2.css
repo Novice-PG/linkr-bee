@@ -1,0 +1,1595 @@
+/* =============================================================================
+ * Linkr Bee · skin v2
+ *
+ * A presentation layer only: tokens, shell layout, chrome and the terminal
+ * footer. No behavior lives here and none of the DOM hooks app.js binds to are
+ * renamed. Loaded after style.css + window.css so it can retune the older
+ * visual rules without touching them.
+ *
+ * Material rule: glass is for chrome (topbar, rail, drawer, key strip, chips).
+ * The terminal canvas stays near-solid, because equal-width log text loses
+ * contrast the moment it sits on a translucent surface.
+ * ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #05080d;
+  --bg-glow-1: rgba(63, 200, 138, 0.16);
+  --bg-glow-2: rgba(96, 128, 228, 0.16);
+  --bg-glow-3: rgba(240, 168, 104, 0.07);
+
+  --panel: rgba(17, 24, 34, 0.72);
+  --panel-2: rgba(24, 33, 46, 0.62);
+  --panel-3: rgba(255, 255, 255, 0.07);
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-2: rgba(255, 255, 255, 0.075);
+  --glass-3: rgba(255, 255, 255, 0.12);
+  --glass-line: rgba(255, 255, 255, 0.09);
+  --glass-blur: blur(26px) saturate(150%);
+
+  --text: #e8eef6;
+  --muted: #9aa7b8;
+  --line: rgba(255, 255, 255, 0.09);
+  --line-soft: rgba(255, 255, 255, 0.055);
+  --line-strong: rgba(255, 255, 255, 0.17);
+  --placeholder: #7c8a9e;
+
+  /* The accent in the form the tinted borders, glows and hover washes below
+   * need: the same green, so `<token> / 0.12` follows the theme instead of
+   * keeping the other theme's green the way a literal rgba() did. */
+  --accent-rgb: 63 200 138;
+  --accent: rgb(var(--accent-rgb));
+  --accent-strong: #5fe0a6;
+  --accent-ink: #04160e;
+  --primary-grad: linear-gradient(180deg, #4fda9d, #33b87d);
+  --focus: #6aa6f5;
+  --danger: #ef6a68;
+
+  --rx: #6aa6f5;
+  --tx: #f0a868;
+  --warn: #f0b45e;
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+
+  --terminal: #05080d;
+  --input-bg: rgba(0, 0, 0, 0.22);
+  --btn-hover: rgba(255, 255, 255, 0.09);
+
+  --shadow:
+    0 40px 90px -46px rgba(0, 0, 0, 0.95),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --shadow-flat:
+    0 24px 50px -38px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #e2e9f4;
+  --bg-glow-1: rgba(47, 158, 99, 0.13);
+  --bg-glow-2: rgba(59, 130, 246, 0.09);
+  --bg-glow-3: rgba(226, 148, 78, 0.06);
+
+  --panel: rgba(255, 255, 255, 0.88);
+  --panel-2: rgba(255, 255, 255, 0.72);
+  --panel-3: rgba(15, 32, 56, 0.055);
+  --glass: rgba(255, 255, 255, 0.55);
+  --glass-2: rgba(15, 32, 56, 0.05);
+  --glass-3: rgba(15, 32, 56, 0.08);
+  --glass-line: rgba(15, 32, 56, 0.1);
+
+  --text: #0f1c2e;
+  --muted: #5c6a82;
+  --line: rgba(15, 32, 56, 0.16);
+  --line-soft: rgba(15, 32, 56, 0.1);
+  --line-strong: rgba(15, 32, 56, 0.2);
+  --placeholder: #5e6e84;
+
+  --accent-rgb: 31 157 100;
+  --accent: rgb(var(--accent-rgb));
+  --accent-strong: #157a4c;
+  --accent-ink: #ffffff;
+  --primary-grad: linear-gradient(180deg, #2fb377, #1f9d64);
+  --focus: #3b82f6;
+  --danger: #d93a3a;
+  --rx: #2f6fd0;
+  --tx: #b8671f;
+
+  --terminal: #f8fafd;
+  --input-bg: rgba(15, 32, 56, 0.045);
+  --btn-hover: rgba(15, 32, 56, 0.07);
+
+  --shadow:
+    0 30px 70px -44px rgba(15, 35, 70, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --shadow-flat:
+    0 20px 44px -36px rgba(15, 35, 70, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+body {
+  background:
+    radial-gradient(760px 420px at 8% -6%, var(--bg-glow-1), transparent 62%),
+    radial-gradient(820px 520px at 102% 4%, var(--bg-glow-2), transparent 58%),
+    radial-gradient(700px 460px at 46% 108%, var(--bg-glow-3), transparent 62%),
+    var(--bg);
+}
+
+/* A single focus ring for every control. The UA default draws a square halo
+ * around rounded buttons, which reads as a bug next to this much radius. */
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- Shell: icon rail · drawer · workspace ---------- */
+
+.app-shell {
+  gap: 10px;
+}
+
+.rail {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  padding: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-flat);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.rail-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.rail-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+.rail-btn:hover {
+  background: var(--glass);
+  color: var(--text);
+}
+
+.rail-btn.active {
+  border-color: rgb(var(--accent-rgb) / 0.22);
+  background: rgb(var(--accent-rgb) / 0.12);
+  color: var(--accent-strong);
+}
+
+.rail-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 13px;
+  width: 2px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgb(var(--accent-rgb) / 0.6);
+}
+
+.rail-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.rail-spacer {
+  flex: 1 1 auto;
+}
+
+/* The assistant entry only exists once the agent settings page is enabled.
+ * rail_nav.js mirrors the real tab's [hidden] attribute onto .is-available,
+ * so the rail never advertises a section the page does not have. */
+.rail-btn[data-rail-target="ai"] {
+  display: none;
+}
+
+.rail-btn[data-rail-target="ai"].is-available {
+  display: grid;
+}
+
+/* The rail layout is for pointer devices. `settings-drawer-layout` is chosen by
+ * the input device, not the window width — every coarse-pointer host (all
+ * phones and tablets, and HarmonyOS) uses the overlay drawer at any width — so
+ * gating on width alone put a flex rail into a one-column grid: it stretched to
+ * the full width and covered the page, intercepting every tap. A 1194x834 iPad
+ * in landscape is exactly that case. */
+@media (min-width: 1101px) {
+  html:not(.settings-drawer-layout) .app-shell {
+    --sidebar-width: clamp(312px, 23vw, 400px);
+    grid-template-columns: 56px minmax(0, var(--sidebar-width)) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  html:not(.settings-drawer-layout) .rail {
+    display: flex;
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  html:not(.settings-drawer-layout) .controls {
+    grid-column: 2;
+    grid-row: 2;
+    padding-right: 0;
+  }
+
+  html:not(.settings-drawer-layout) .workpanel {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  html:not(.settings-drawer-layout) .app-shell.controls-hidden {
+    grid-template-columns: 56px 0 minmax(0, 1fr);
+  }
+}
+
+/* Agent mode takes over the whole shell; the rail belongs to the settings
+ * layout and must not claim a grid cell there. */
+html.agent-mode .rail {
+  display: none;
+}
+
+/* ---------- Topbar ---------- */
+
+.topbar {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-flat);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.brand {
+  gap: 10px;
+}
+
+/* The hexagon is the mark now, so the tinted tile behind it is gone: a box
+ * around an outlined hexagon read as two nested frames. */
+.logo {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 0;
+  color: var(--accent);
+  background: none;
+  box-shadow: none;
+}
+
+.logo svg {
+  width: 32px;
+  height: 32px;
+}
+
+h1 {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.support-text {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--placeholder);
+}
+
+[data-theme="dark"] h1 {
+  color: var(--text);
+}
+
+.icon-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.15s ease, color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--glass-2);
+  color: var(--text);
+}
+
+#themeButton .btn-label {
+  display: none;
+}
+
+#themeButton,
+#langButton {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+
+#langButton .btn-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.status-pill {
+  gap: 8px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--glass);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.status-pill:has(.status-dot.connected) {
+  border-color: rgb(var(--accent-rgb) / 0.3);
+  background: rgb(var(--accent-rgb) / 0.1);
+  color: var(--text);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--danger);
+}
+
+.status-dot.connected {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.14);
+}
+
+.status-dot.connected::after {
+  inset: -2px;
+  border-width: 1px;
+  border-color: rgb(var(--accent-rgb) / 0.5);
+  animation-duration: 2.4s;
+}
+
+.device-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+
+.device-name:empty {
+  display: none;
+}
+
+@media (min-width: 901px) {
+  .top-right {
+    display: contents;
+  }
+
+  .status-pill {
+    order: 1;
+    margin-left: 4px;
+  }
+
+  .top-actions {
+    order: 2;
+    margin-left: auto;
+    gap: 4px;
+  }
+
+  .top-actions .mobile-connect {
+    margin-right: 4px;
+  }
+}
+
+/* ---------- Drawer ---------- */
+
+.controls.window-surface {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-flat);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.controls .card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.032);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  /* The section header is a full-bleed band now; the card owns its corners. */
+  overflow: hidden;
+}
+
+[data-theme="light"] .controls .card {
+  border-color: rgba(15, 32, 56, 0.1);
+  background: rgba(15, 32, 56, 0.032);
+}
+
+.controls .card:hover {
+  border-color: var(--line);
+}
+
+/* A section title is the pane title's own type, not a caption: the terminal
+ * header beside the drawer sets 13 px/600 with no tracking, and the drawer used
+ * to set a 10.5 px letter-spaced label, so the two panes disagreed about what a
+ * section heading is. */
+.card-title {
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+/* Card headers take the shape .terminal-head already has — a chrome band with
+ * the title on it — at card scale: full bleed inside the card, the accent dot,
+ * and a hairline under it. The negative margins cancel .card's 16 px padding;
+ * the card clips the band with its own radius. */
+.controls .card > .card-title {
+  margin: -16px -16px 14px;
+  padding: 11px 16px;
+  min-height: 44px;
+  align-items: center;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+
+/* The collapsible section is its header plus whatever it reveals, so its
+ * summary is the band and the hairline only appears once there is something
+ * under it. */
+.controls .diagnostics-summary {
+  padding: 11px 16px;
+  min-height: 44px;
+  background: var(--panel-2);
+}
+
+.controls .diagnostics-summary .card-title {
+  margin-bottom: 0;
+}
+
+.controls .diagnostics-card[open] > .diagnostics-summary {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* Field labels are labels, not body copy: 12.5 px/400 read as prose next to
+ * the 600-weight controls they describe. */
+.controls .field-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+
+/* A segmented control is chrome, not a label: the 0.25 px tracking the old
+ * sheet added is the only place the shell tracked a control label. */
+.controls .ts-btn {
+  letter-spacing: 0;
+}
+
+/* A diagnostic value is a value: the same mono face the device name and the
+ * terminal counters use, so numbers line up and read as machine output. */
+.controls .diagnostic-item > span:first-child {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.controls .diagnostic-item strong {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.card-title .dot {
+  width: 6px;
+  height: 6px;
+}
+
+.settings-tabs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 3px;
+  flex: 0 0 auto;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--input-bg);
+}
+
+@media (min-width: 1101px) {
+  /* One section switcher, not two. The rail IS this row of buttons, and with
+   * the drawer open they sat six pixels apart, both highlighting the same
+   * section — a duplicate menu. The tabs stay in the DOM because rail_nav.js
+   * forwards rail clicks to them; `display: none` leaves them clickable but
+   * takes the duplicate row out of the tab order. Below 1101 px the rail is
+   * not laid out, so the tabs remain the only way to switch and stay visible.
+   *
+   * `!important` because the older sheets re-assert `display: grid` on this
+   * strip with higher specificity than a plain class — style.css:2606 keys on
+   * `.controls.has-agent-settings` and :2306 on `html.settings-drawer-layout`,
+   * and this file is the presentation layer that retunes them without editing
+   * them. One declaration that cannot be outranked beats a selector list that
+   * breaks the next time the legacy sheet grows another variant. */
+  html:not(.settings-drawer-layout) .settings-tabs {
+    display: none !important;
+  }
+
+  /* One section at a time: the rail and the tabs drive the same page state. */
+  .controls[data-settings-active="connection"] [data-settings-page]:not([data-settings-page="connection"]),
+  .controls[data-settings-active="terminal"] [data-settings-page]:not([data-settings-page="terminal"]),
+  .controls[data-settings-active="network"] [data-settings-page]:not([data-settings-page="network"]),
+  .controls[data-settings-active="ai"] [data-settings-page]:not([data-settings-page="ai"]) {
+    display: none;
+  }
+}
+
+.settings-tab {
+  min-height: 30px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.settings-tab.active {
+  border: 0;
+  background: var(--glass-2);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+/* A two-column action grid at 300px leaves ~130px per button; labels with a
+ * space ("Query UART") used to break onto a second line there. */
+.controls .btn-grid .btn {
+  white-space: nowrap;
+}
+
+.controls .btn-grid .btn svg {
+  flex: 0 0 auto;
+}
+
+/* ---------- Terminal ---------- */
+
+.terminal-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--terminal);
+  box-shadow: var(--shadow);
+}
+
+.terminal-head {
+  min-height: 40px;
+  padding: 7px 10px 7px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.026);
+}
+
+[data-theme="light"] .terminal-head {
+  background: rgba(15, 32, 56, 0.025);
+}
+
+.term-title {
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+.term-led {
+  width: 6px;
+  height: 6px;
+}
+
+.term-tools {
+  gap: 3px;
+  flex-wrap: nowrap;
+}
+
+.term-tool {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--placeholder);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.term-tool:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--glass-2);
+  color: var(--text);
+}
+
+.term-hint {
+  padding-left: 6px;
+  font-size: 10px;
+  color: var(--placeholder);
+  opacity: 0.7;
+}
+
+@media (min-width: 901px) {
+  .terminal-output .xterm {
+    padding: 12px;
+  }
+}
+
+/* Single-row accessory strip. Everything scrolls except Ctrl-C, which stays
+ * pinned at the thumb edge because it is the one key pressed blind. */
+.terminal-card .terminal-input-bar {
+  gap: 10px;
+  padding: 8px 10px 9px;
+  border-top: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.024);
+}
+
+[data-theme="light"] .terminal-card .terminal-input-bar {
+  background: rgba(15, 32, 56, 0.022);
+}
+
+.terminal-input-hint {
+  padding: 0 2px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--placeholder);
+}
+
+.terminal-output.connected + .terminal-input-bar .terminal-input-hint {
+  color: var(--muted);
+}
+
+.terminal-card .terminal-input-actions {
+  gap: 7px;
+  align-items: center;
+}
+
+/* The strip holds 34 keys, so it never fits: reserve a hairline track and
+ * reveal the thumb on hover. Space is reserved up front so nothing shifts. */
+.terminal-key-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 5px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  /* A half-visible key at the right edge is the scroll affordance itself; the
+   * hairline tells it apart from the pinned Ctrl-C. (A mask-image fade was
+   * tried first and is ignored by WKWebView.) */
+  border-right: 1px solid var(--line-soft);
+}
+
+.terminal-key-scroll::-webkit-scrollbar {
+  display: block;
+  height: 4px;
+}
+
+.terminal-key-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-key-scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .terminal-key-scroll:hover,
+  .terminal-key-scroll:focus-within {
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  .terminal-key-scroll:hover::-webkit-scrollbar-thumb,
+  .terminal-key-scroll:focus-within::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+  }
+}
+
+/* One row, always. The old layout stacked each group into a 3x2 grid; here the
+ * groups become clusters on a single scrollable track. */
+.terminal-key-group {
+  display: flex;
+  grid-template-columns: none;
+  grid-template-rows: none;
+  gap: 6px;
+  padding: 0;
+}
+
+.terminal-card .terminal-key,
+.terminal-card .terminal-keyboard {
+  width: auto;
+  min-width: 34px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--glass-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: #c3cfdf;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+[data-theme="light"] .terminal-card .terminal-key {
+  border-color: rgba(15, 32, 56, 0.13);
+  background: rgba(15, 32, 56, 0.045);
+  color: #33445c;
+}
+
+.terminal-card .terminal-key:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--glass-3);
+  color: var(--text);
+}
+
+.terminal-card .terminal-key[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.terminal-card .terminal-key:disabled {
+  opacity: 0.42;
+}
+
+/* The one key pressed without looking: pinned outside the scroll track. */
+#breakButton {
+  flex: 0 0 auto;
+  min-width: 62px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: var(--tx);
+  box-shadow:
+    0 8px 18px -12px var(--tx),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  color: #241505;
+  font-weight: 500;
+}
+
+#breakButton:hover:not(:disabled) {
+  border-color: transparent;
+  filter: brightness(1.08);
+  color: #241505;
+}
+
+#breakButton:disabled {
+  border-color: var(--line);
+  background: var(--glass-2);
+  box-shadow: none;
+  color: var(--muted);
+}
+
+/* ---------- Quick commands + status ---------- */
+
+/* Quick commands belong to the terminal, not to the page background: they sit
+ * between the canvas and the key strip and share its hairlines. */
+.terminal-card .presets {
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 8px 10px 3px;
+  overflow-x: auto;
+  border-top: 1px solid var(--line-soft);
+  scrollbar-width: none;
+}
+
+.terminal-card .presets::-webkit-scrollbar {
+  display: none;
+}
+
+.terminal-card .presets + .terminal-input-bar {
+  padding-top: 3px;
+  border-top: 0;
+}
+
+.preset-chip {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--glass);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.preset-chip:disabled {
+  opacity: 0.55;
+}
+
+.preset-chip:hover:not(:disabled) {
+  border-color: rgb(var(--accent-rgb) / 0.4);
+  background: rgb(var(--accent-rgb) / 0.08);
+  color: var(--text);
+  transform: none;
+}
+
+.preset-chip[data-danger="true"]:not(:disabled) {
+  color: rgba(239, 106, 104, 0.8);
+}
+
+.statusbar {
+  gap: 14px;
+  padding: 0 6px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.statusbar .sb-item b {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+#rxCount {
+  color: var(--rx);
+}
+
+#txCount {
+  color: var(--tx);
+}
+
+.statusbar .sb-state {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+/* ---------- Boot failure notice ---------- */
+
+/* This strip only appears when a vendor script failed to load, which is exactly
+ * when the page must not look decorative. Amber, compact, left aligned. */
+.terminal-card .boot-notice {
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(240, 180, 94, 0.26);
+  border-bottom: 1px solid rgba(240, 180, 94, 0.16);
+  background: rgba(240, 180, 94, 0.08);
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.terminal-card .boot-notice .btn {
+  min-height: 26px;
+  padding: 0 10px;
+  border-color: rgba(240, 180, 94, 0.34);
+  background: rgba(240, 180, 94, 0.13);
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.terminal-card .boot-notice .btn:hover:not(:disabled) {
+  border-color: rgba(240, 180, 94, 0.55);
+  background: rgba(240, 180, 94, 0.2);
+  color: var(--warn);
+}
+
+[data-theme="light"] .terminal-card .boot-notice {
+  border-color: rgba(138, 90, 18, 0.22);
+  background: rgba(240, 180, 94, 0.16);
+  color: #7a5210;
+}
+
+[data-theme="light"] .terminal-card .boot-notice .btn {
+  border-color: rgba(138, 90, 18, 0.3);
+  background: rgba(255, 255, 255, 0.7);
+  color: #7a5210;
+}
+
+/* 901–1100px: keep the panel on the left. v1 docked it on the right here, which
+ * made the panel jump across the window at the 1101px breakpoint. */
+@media (min-width: 901px) and (max-width: 1100px) {
+  .app-shell {
+    grid-template-columns: minmax(300px, 34vw) minmax(0, 1fr);
+  }
+
+  .app-shell.controls-hidden {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .controls {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .workpanel {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  /* The panel already carries the primary action; don't duplicate it. */
+  .app-shell:not(.controls-hidden) .top-actions .mobile-connect {
+    display: none;
+  }
+}
+
+/* ---------- Touch / narrow windows keep their existing drawer ---------- */
+
+@media (max-width: 900px) {
+  .topbar {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .brand {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .brand > div {
+    min-width: 0;
+  }
+
+  .brand h1 {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .top-right {
+    display: flex;
+    flex: 0 0 auto;
+  }
+
+  /* v1 drops the pill on touch layouts. A serial terminal is exactly where you
+   * need the link state at a glance, so it stays — just tighter. */
+  .status-pill {
+    display: inline-flex;
+    flex: 0 0 auto;
+    order: -1;
+    padding: 5px 9px;
+    font-size: 11px;
+  }
+
+  .status-pill .device-name {
+    display: none;
+  }
+
+  .terminal-card .terminal-key,
+  .terminal-card .terminal-keyboard {
+    min-width: 40px;
+    height: 38px;
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+
+  #breakButton {
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .terminal-key-group {
+    gap: 7px;
+  }
+
+  .terminal-input-hint {
+    font-size: 11.5px;
+  }
+
+  .statusbar {
+    padding: 4px 6px 0;
+  }
+}
+
+/* Phones: theme and language already live in the drawer header, so the topbar
+ * keeps only the two controls that matter while a device is in hand. */
+@media (max-width: 520px) {
+  .top-actions #themeButton,
+  .top-actions #langButton {
+    display: none;
+  }
+
+  .top-actions .mobile-connect {
+    min-width: 92px;
+  }
+
+  .brand h1 {
+    font-size: 13px;
+  }
+}
+
+@media (min-width: 901px) {
+  /* The on-screen keyboard key is a touch affordance. */
+  .terminal-card .terminal-keyboard {
+    display: none;
+  }
+}
+
+@media (min-width: 1101px) {
+  /* The title row comes back now that the tab strip is gone (see above): without
+   * it the drawer began with a card at the very top, while the terminal beside
+   * it starts below a 59 px header band, so the two panes' content did not line
+   * up. It carries the title only — its theme/language buttons are the topbar's
+   * job from 901 px up, and showing both was the same duplication again. */
+  .controls .drawer-head {
+    display: flex;
+  }
+}
+
+/* The topbar keeps theme and language from 901 px up (see the 900 px block
+ * below, which is where it hands them to the drawer), so the drawer's own copy
+ * of those two buttons is a duplicate control pair at every width above the
+ * phone breakpoint — including the 901-1100 band, where the title row was
+ * already visible. Only the title stays. */
+@media (min-width: 901px) {
+  /* The topbar carries these two from 901 px up, so the drawer's copies are a
+   * second pair of the same controls. The close button is not a duplicate: it
+   * is the in-panel way out, so it stays. */
+  .controls .drawer-head-actions #drawerThemeButton,
+  .controls .drawer-head-actions #drawerLangButton {
+    display: none;
+  }
+}
+
+/* Drawer mode floats over live content: glass there costs legibility on forms,
+ * so the sheet goes nearly opaque. */
+@media (max-width: 1100px) {
+  html.settings-drawer-layout .controls.window-surface {
+    background: rgba(11, 16, 24, 0.97);
+  }
+
+  html[data-theme="light"].settings-drawer-layout .controls.window-surface {
+    background: rgba(255, 255, 255, 0.98);
+  }
+}
+
+/* ---------- AI settings: stored-key disclosure ---------- */
+
+/* The key is written to local storage in plaintext, so the card says where it
+ * goes and what can read it, next to the field rather than in a footer. */
+.agent-settings .key-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.agent-settings .key-note-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--accent-strong);
+}
+
+/* The fetched model list is a suggestion under the key, not a replacement for
+ * the field; a full-width action keeps it clearly separate from Save. */
+.agent-settings .model-fetch {
+  width: 100%;
+  margin-top: 6px;
+}
+
+#agentModelStatus:empty {
+  display: none;
+}
+
+/* ---------- Empty terminal ---------- */
+
+/* Before the first connection the canvas is a black field with nothing on it,
+ * which on a phone is most of the screen. This fills it and disappears the
+ * instant .connected lands on the container (app.js already toggles it). */
+.terminal-output {
+  position: relative;
+}
+
+.terminal-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 28px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.terminal-output.connected .terminal-empty {
+  display: none;
+}
+
+/* Once a session has existed the empty state is gone for good. It keys on the
+ * current connection, so a disconnect used to bring it back on top of the
+ * transcript that is still in the buffer — transparent, absolutely positioned
+ * and centred, which reads as two texts printed over each other. */
+.terminal-output[data-ever-connected] .terminal-empty {
+  display: none;
+}
+
+.te-mark {
+  width: 54px;
+  height: 54px;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.te-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.te-hint {
+  margin: 0;
+  max-width: 260px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--placeholder);
+}
+
+/* ---------- Touch ---------- */
+
+/* WebView defaults that make a native shell feel like a web page: the grey
+ * flash on tap, the rubber-band bounce, double-tap zoom and, worst of all,
+ * the long-press selection handles landing on a keyboard key. */
+body {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+button,
+.rail-btn,
+.preset-chip,
+.terminal-key,
+.settings-tab,
+.btn {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Output stays selectable: copying a boot log is half the point. */
+.terminal-output,
+.terminal-output .xterm,
+.xterm-viewport {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* The strip is a horizontal surface. Without this the browser claims the
+ * swipe as a page pan and the keys never move under the finger. */
+.terminal-key-scroll,
+.terminal-card .presets {
+  touch-action: pan-x;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* iOS zooms the page when a focused field is under 16px. xterm focuses a
+ * hidden textarea on every keystroke, so the whole terminal would drift under
+ * the user's thumb the moment they start typing. */
+.xterm .xterm-helper-textarea {
+  font-size: 16px;
+}
+
+@media (max-width: 900px) {
+  .controls input,
+  .controls textarea,
+  .controls select {
+    font-size: 16px;
+  }
+}
+
+/* ---------- Phones ---------- */
+
+/* At 390 px the desktop toolbar is what breaks first: five topbar controls
+ * plus a six-button terminal header leave the title 60 px wide and the
+ * terminal itself empty of context. */
+@media (max-width: 520px) {
+  /* The pill's word ("Disconnected") repeats what the Connect button already
+   * says and costs the title half its width. Keep the dot; keep the device
+   * name once one is chosen. */
+  .status-pill {
+    min-width: 26px;
+    justify-content: center;
+    padding: 5px 6px;
+  }
+
+  #statusText {
+    display: none;
+  }
+
+  .top-actions .mobile-connect {
+    min-width: 84px;
+    padding: 0 12px;
+  }
+
+  .brand h1 {
+    font-size: 13.5px;
+  }
+
+  /* Quick commands duplicate what typing does, and on a 375 px screen they
+   * cost the key strip a full row. */
+  .terminal-card .presets {
+    display: none;
+  }
+
+  /* The empty state already explains the state; this sentence would be the
+   * third one saying the same thing. */
+  .terminal-input-hint {
+    display: none;
+  }
+
+  /* Six tools is a desktop toolbar. Keep the two a thumb actually reaches. */
+  .term-tools #autoscrollBtn,
+  .term-tools #copyBtn,
+  .term-tools .term-hint {
+    display: none;
+  }
+
+  .terminal-card .term-tool {
+    min-width: 34px;
+    height: 34px;
+    padding: 0 8px;
+  }
+
+  /* 44 px is the smallest target that does not need aiming. */
+  .terminal-card .terminal-key,
+  .terminal-card .terminal-keyboard {
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0 12px;
+    font-size: 12.5px;
+  }
+
+  /* Slightly narrower than desktop so the strip keeps one more key in view. */
+  #breakButton {
+    min-width: 56px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  /* Repeats the dot in the topbar on the same screen. */
+  .statusbar .sb-state {
+    display: none;
+  }
+
+  .terminal-empty {
+    gap: 10px;
+    padding: 20px;
+  }
+
+  .te-mark {
+    width: 52px;
+    height: 52px;
+  }
+}
+
+/* ---------- Touch targets ---------- */
+
+/* Fingers are not cursors, so target size has to follow the input device
+ * rather than the window width. Measured at 390 px, fourteen controls came out
+ * under 44 px tall: tabs at 30, mode switches at 30, panel buttons at 36 and
+ * the topbar toggle at 40. A width-only query left every one of them at 30 px
+ * on a phone held sideways — 844 px wide and still without a pointer — so the
+ * device is asked directly. The width half is kept as a fallback for narrow
+ * desktop windows, and it is the only half the offline audit can verify: its
+ * WKWebView reports a fine pointer, so the coarse-pointer arm is exercised on
+ * hardware, not there. The drawer already scrolls, so the extra height costs a
+ * swipe, not content. */
+@media (pointer: coarse), (max-width: 520px) {
+  .settings-tab,
+  .ts-btn {
+    min-height: 38px;
+  }
+
+  .controls .btn {
+    min-height: 44px;
+  }
+
+  .top-actions .icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .term-tools .term-tool {
+    min-width: 40px;
+  }
+}
+
+/* ---------- Drawer geometry ---------- */
+
+/* style.css carries two conflicting drawer rules: one anchors it left with
+ * translateX(-100%), a later one anchors it right with translateX(100%). The
+ * winner was "right-aligned, moved left by its own width", which leaves the
+ * panel parked at the left edge whenever the viewport is wider than the panel —
+ * 402 px of it on an 834 px tablet. Restate the geometry in one place: left
+ * anchored, hidden by its own width. */
+@media (max-width: 900px) {
+  /* A later rule in style.css — html.settings-drawer-layout .controls, at
+   * specificity 0,2,1 — anchors the panel to the right with translateX(+100%)
+   * and visibility:visible. It was written for the agent sidebar but matches
+   * every drawer layout, so the drawer never left the screen: on an 834 px
+   * tablet it still covered 402 px. These selectors match its specificity so
+   * the geometry is stated once, and clearly. */
+  html.settings-drawer-layout .app-shell .controls {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: 0;
+    width: min(86vw, 340px);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.25s ease, visibility 0s 0.25s,
+      background-color 0.25s ease, border-color 0.25s ease;
+  }
+
+  html.settings-drawer-layout .app-shell.sidebar-open .controls {
+    transform: translateX(0);
+    visibility: visible;
+    transition-delay: 0s;
+  }
+}
+
+/* ---------- Landscape phones ---------- */
+
+/* 844x390 is wider than the phone breakpoint but only 390 tall, so the width
+ * queries treat it as a tablet while there is no vertical room at all. Reclaim
+ * the chrome height instead of the width. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .topbar {
+    padding: 6px 12px;
+  }
+
+  .support-text {
+    display: none;
+  }
+
+  .brand h1 {
+    font-size: 13px;
+  }
+
+  .terminal-head {
+    min-height: 34px;
+    padding-block: 4px;
+  }
+
+  .terminal-card .terminal-key,
+  .terminal-card .terminal-keyboard {
+    height: 38px;
+    min-height: 38px;
+  }
+
+  #breakButton {
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .statusbar {
+    padding: 2px 6px;
+  }
+
+  /* The empty state needs less air than it can afford in portrait. */
+  .terminal-empty {
+    gap: 8px;
+  }
+
+  .te-mark {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-btn,
+  .status-dot.connected::after {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* ---------- About page ---------- */
+
+/* One section at a time, including About. The legacy sheet lists the other
+ * pages explicitly and this sheet only needed to add the new direction: when
+ * About is active, everything else goes. */
+.controls[data-settings-active="about"] [data-settings-page]:not([data-settings-page="about"]) {
+  display: none;
+}
+
+/* ...and the reverse for the bands where the legacy sheet's list is the only
+ * thing hiding pages. Both directions live here so the About page cannot show
+ * up beside another section at any width. */
+.controls[data-settings-active="connection"] [data-settings-page="about"],
+.controls[data-settings-active="terminal"] [data-settings-page="about"],
+.controls[data-settings-active="network"] [data-settings-page="about"],
+.controls[data-settings-active="ai"] [data-settings-page="about"] {
+  display: none;
+}
+
+.about-page .about-lead {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.about-page .about-meta {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.about-page .about-heading {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.about-page .about-group-title {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.about-page .about-group {
+  display: grid;
+  gap: 2px;
+}
+
+.about-page .about-component {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.about-page .about-component:last-child {
+  border-bottom: 0;
+}
+
+.about-page .about-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.about-page .about-name:hover {
+  color: var(--accent-strong);
+}
+
+.about-page .about-version {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.about-page .about-license,
+.about-page .about-license-link {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 10.5px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.about-page .about-license-link:hover {
+  color: var(--accent-strong);
+}
+
+.about-page .about-extra {
+  flex: 1 1 100%;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.about-page .about-compliance {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.about-page .about-compliance li {
+  margin: 4px 0;
+}
+
+.about-page .about-contributors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.about-page .about-contributor {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.about-page .about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.about-page .about-links a {
+  font-size: 12px;
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+
+.about-page .about-links a:hover {
+  text-decoration: underline;
+}

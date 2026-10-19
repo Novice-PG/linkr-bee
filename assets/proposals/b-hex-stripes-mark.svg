@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Hex Stripes mark</title>
+<desc>Single colour hexagon with prompt and three stripes.</desc>
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="currentColor" stroke-width="34" stroke-linejoin="round"/>
+<path d="M140 214 L212 256 L140 298" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M252 218 H372 M252 256 H372 M252 294 H372" stroke="currentColor" stroke-width="20" stroke-linecap="round"/>
+</svg>

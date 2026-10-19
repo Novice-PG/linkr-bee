@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Hive Node</title>
+<desc>Hexagonal hive cell with abdominal stripes in amber.</desc>
+<rect width="512" height="512" rx="112" fill="#101722"/>
+<path d="M256 100 L391 178 L391 334 L256 412 L121 334 L121 178 Z" fill="none" stroke="#F6B73C" stroke-width="28" stroke-linejoin="round"/>
+<path d="M200 210 H312 M186 256 H326 M200 302 H312" stroke="#F6B73C" stroke-width="24" stroke-linecap="round"/>
+</svg>

@@ -4,22 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Linkr Bee Terminal</title>
-    <meta name="theme-color" id="themeColorMeta" content="#090d14" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23FFFFFF'/%3E%3Cg fill='none' stroke='%233DD68C' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12.000,3.343 19.497,7.672 19.497,16.328 12.000,20.657 4.503,16.328 4.503,7.672' stroke-width='1.407'/%3E%3Cpolyline points='8.754,9.187 14.164,12.000 8.754,14.813' stroke-width='1.623'/%3E%3Cline x1='16.328' y1='8.970' x2='16.328' y2='15.030' stroke-width='1.623'/%3E%3C/g%3E%3C/svg%3E"
-    />
+    <meta name="theme-color" id="themeColorMeta" content="#05080D" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
     <link rel="stylesheet" href="./style.css?v=20260928-connect-entry" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261019-drawer-unified" />
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
         <div class="brand">
           <span class="logo" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7 7l10 10-4 4V3l4 4L7 17"></path>
+            <svg viewBox="30 30 452 452" width="32" height="32" aria-hidden="true">
+              <path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="currentColor" stroke-width="30" stroke-linejoin="round" />
+              <path d="M180 210 L270 256 L180 302" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+              <rect x="306" y="214" width="36" height="84" rx="7" fill="currentColor" />
             </svg>
           </span>
           <div>
@@ -64,6 +64,43 @@
         </div>
       </header>
 
+      <nav class="rail" aria-label="Sections" data-i18n-aria="sections">
+        <button class="rail-btn active" type="button" data-rail-target="connection" aria-label="Connect" data-i18n-aria="settingsConnection" data-i18n-title="settingsConnection">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.5 13.5l3-3"></path>
+            <path d="M13.4 7.2l1.4-1.4a3.6 3.6 0 015.1 5.1l-1.4 1.4"></path>
+            <path d="M10.6 16.8l-1.4 1.4a3.6 3.6 0 01-5.1-5.1l1.4-1.4"></path>
+          </svg>
+        </button>
+        <button class="rail-btn" type="button" data-rail-target="terminal" aria-label="Serial" data-i18n-aria="settingsTerminal" data-i18n-title="settingsTerminal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 7.5l4 4-4 4"></path>
+            <path d="M11.5 16h5.5"></path>
+          </svg>
+        </button>
+        <button class="rail-btn" type="button" data-rail-target="network" aria-label="Network" data-i18n-aria="settingsNetwork" data-i18n-title="settingsNetwork">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.6 8.6a14.5 14.5 0 0118.8 0"></path>
+            <path d="M6 12.1a9.5 9.5 0 0112 0"></path>
+            <path d="M9.5 15.6a4.8 4.8 0 015 0"></path>
+            <circle cx="12" cy="19" r="1.1" fill="currentColor" stroke="none"></circle>
+          </svg>
+        </button>
+        <button class="rail-btn" type="button" data-rail-target="ai" aria-label="Assistant" data-i18n-aria="assistant" data-i18n-title="assistant">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3.2l1.9 5 5 1.9-5 1.9-1.9 5-1.9-5-5-1.9 5-1.9z"></path>
+          </svg>
+        </button>
+        <span class="rail-spacer"></span>
+        <button class="rail-btn" type="button" data-rail-target="about" aria-label="About" data-i18n-aria="aboutNav" data-i18n-title="aboutNav">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.6"></circle>
+            <path d="M12 11v5"></path>
+            <circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none"></circle>
+          </svg>
+        </button>
+      </nav>
+
       <aside id="controlsPanel" class="controls window-surface" data-i18n-aria="controls" aria-label="Controls" data-settings-active="connection">
         <div class="drawer-head window-header">
           <span data-i18n="panel">Panel</span>
@@ -94,6 +131,7 @@
           <button class="settings-tab" type="button" data-settings-target="terminal" data-i18n="settingsTerminal" aria-selected="false">Serial</button>
           <button class="settings-tab" type="button" data-settings-target="network" data-i18n="settingsNetwork" aria-selected="false">Network</button>
           <button class="settings-tab" type="button" data-settings-target="ai" aria-selected="false" hidden>AI</button>
+          <button class="settings-tab" type="button" data-settings-target="about" data-i18n="aboutNav" aria-selected="false">About</button>
         </nav>
 
         <section class="card" data-i18n-aria="connectionControls" aria-label="Connection controls" data-settings-page="connection">
@@ -331,17 +369,35 @@
           <div class="card-title"><span class="dot"></span><span id="agentSettingsTitle" data-ai-setting="title">AI configuration</span></div>
           <form id="agentSettingsForm" novalidate>
             <fieldset id="agentSettingsFields">
+              <label class="field"><span class="field-label" data-ai-setting="vendor">AI provider</span>
+                <select id="agentVendor" aria-describedby="agentVendorHint agentSettingsStatus"></select>
+                <span id="agentVendorHint" class="field-hint" data-ai-setting="vendorHint"></span>
+              </label>
               <label class="field"><span class="field-label" data-ai-setting="endpoint">API base URL</span>
                 <input id="agentEndpoint" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="agentEndpointHint agentSettingsStatus">
                 <span id="agentEndpointHint" class="field-hint" data-ai-setting="endpointHint"></span>
               </label>
               <label class="field"><span class="field-label" data-ai-setting="model">Model ID</span>
-                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" aria-describedby="agentSettingsStatus">
+                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" list="agentModelOptions" aria-describedby="agentModelHint agentSettingsStatus">
+                <!-- Filled by "Fetch model list" once the address and key are in; the
+                     input stays editable because a service may not offer the endpoint. -->
+                <datalist id="agentModelOptions"></datalist>
+                <span id="agentModelHint" class="field-hint" data-ai-setting="modelHint"></span>
               </label>
               <label class="field"><span class="field-label" data-ai-setting="key">API key</span>
                 <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
                 <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
               </label>
+              <!-- Stored-key disclosure sits next to the field, not at the bottom of the
+                   card: the question "where does this go?" is asked while typing it. -->
+              <p class="key-note">
+                <svg class="key-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                <span data-ai-setting="keyStorage"></span>
+              </p>
+              <!-- The hard-coded ids in the presets go stale; this reads the real list
+                   once the address and key are in, and never replaces the manual field. -->
+              <button id="agentModelFetch" class="btn model-fetch" type="button" data-ai-setting="fetchModels">Fetch model list</button>
+              <p id="agentModelStatus" class="field-hint model-fetch-status" role="status" aria-live="polite"></p>
               <label class="field"><span class="field-label" data-ai-setting="headers">Extra request headers</span>
                 <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
                 <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
@@ -394,6 +450,31 @@
             <p id="targetBindingStatus" class="field-hint" role="status" aria-live="polite"></p>
           </section>
         </section>
+        <section id="aboutPage" class="card about-page" data-settings-page="about" aria-labelledby="aboutTitle">
+          <div class="card-title">
+            <span class="dot"></span><span id="aboutTitle" data-i18n="aboutNav">About</span>
+          </div>
+          <p class="about-lead" data-i18n="aboutLead">An open-source serial terminal for Linkr Bee bridges, with an assistant that talks to the model service you configure.</p>
+          <p id="aboutMeta" class="about-meta"></p>
+          <h3 class="about-heading" data-i18n="aboutComponentsHeading">Open source components</h3>
+          <p class="field-hint" data-i18n="aboutComponentsHint">Everything the app and its firmware ship, with the licence each one is distributed under. The full licence texts travel with the components.</p>
+          <div id="aboutComponents"></div>
+          <h3 class="about-heading" data-i18n="aboutComplianceHeading">Licences and compliance</h3>
+          <ul class="about-compliance">
+            <li data-i18n="aboutComplianceProject">This project is released under Apache-2.0.</li>
+            <li data-i18n="aboutComplianceThirdParty">Third-party components remain the property of their authors and are distributed under their own licences, listed above.</li>
+            <li data-i18n="aboutComplianceDual">DOMPurify is dual-licensed MPL-2.0 / Apache-2.0; this project uses it under Apache-2.0.</li>
+            <li data-i18n="aboutComplianceCcBy">The macaron cursors are CC-BY-4.0, © UnionTech Software Technology Co., Ltd.; three shapes were converted from XCursor to PNG. Attribution and the source revision are in vendor/macaron-cursors/README.md.</li>
+          </ul>
+          <h3 class="about-heading" data-i18n="aboutContributorsHeading">Contributors</h3>
+          <p class="field-hint" data-i18n="aboutContributorsHint">Taken from the git history of radxa/linkr-bee; duplicate identities are merged.</p>
+          <div id="aboutContributors" class="about-contributors"></div>
+          <div class="about-links">
+            <a id="aboutRepository" data-i18n="aboutRepository" target="_blank" rel="noreferrer">Repository</a>
+            <a id="aboutIssues" data-i18n="aboutIssues" target="_blank" rel="noreferrer">Report a problem</a>
+            <a id="aboutLicenseLink" data-i18n="aboutLicenseLink" target="_blank" rel="noreferrer">Licence text</a>
+          </div>
+        </section>
       </aside>
 
       <section class="workpanel">
@@ -427,25 +508,42 @@
             aria-label="Interactive serial terminal"
             data-i18n-aria="terminalAria"
             aria-describedby="terminalInputHint"
-          >          </div>
+          >
+            <div class="terminal-empty">
+              <svg class="te-mark" viewBox="30 30 452 452" aria-hidden="true">
+                <path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="currentColor" stroke-width="30" stroke-linejoin="round" />
+                <path d="M180 210 L270 256 L180 302" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+                <rect x="306" y="214" width="36" height="84" rx="7" fill="currentColor" />
+              </svg>
+              <p class="te-title" data-i18n="emptyTitle">No device yet</p>
+              <p class="te-hint" data-i18n="emptyHint">Tap Connect to scan for a nearby Linkr Bee</p>
+            </div>
+          </div>
           <p id="bootNotice" class="boot-notice" role="status" hidden>
             <span id="bootNoticeText"></span>
             <button id="bootNoticeReload" class="btn" type="button"></button>
           </p>
+          <div class="presets" id="presetChips" data-i18n-aria="quickSend" aria-label="Quick send">
+            <button class="preset-chip" type="button" data-cmd="help" disabled>help</button>
+            <button class="preset-chip" type="button" data-cmd="version" disabled>version</button>
+            <button class="preset-chip" type="button" data-cmd="uname -a" disabled>uname -a</button>
+            <button class="preset-chip" type="button" data-cmd="df -h" disabled>df -h</button>
+            <button class="preset-chip" type="button" data-cmd="reboot" data-confirm="confirmReboot" data-danger="true" disabled>reboot</button>
+          </div>
           <div class="terminal-input-bar">
             <span id="terminalInputHint" class="terminal-input-hint" data-i18n="terminalInputDisconnected">
               Connect a device to enable terminal input
             </span>
             <div id="terminalKeyBar" class="terminal-input-actions" role="group" data-i18n-aria="terminalKeys" aria-label="Terminal keys · swipe for more">
-              <div class="terminal-key-group terminal-modifiers">
-                <button id="focusTerminalButton" class="btn terminal-key terminal-keyboard" type="button" disabled data-i18n-title="keyboard" data-i18n-aria="keyboard" aria-label="Open keyboard"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M19 13h.01M8 16h8"></path></svg></button>
-                <button class="btn terminal-key" type="button" disabled data-terminal-key="Escape">Esc</button>
-                <button class="btn terminal-key" type="button" disabled data-terminal-key="Tab">Tab</button>
-                <button id="shiftKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="shift">Shift</button>
-                <button id="controlKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="ctrl">Ctrl</button>
-                <button id="altKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="alt">Alt</button>
-              </div>
               <div class="terminal-key-scroll">
+                <div class="terminal-key-group terminal-modifiers">
+                  <button id="focusTerminalButton" class="btn terminal-key terminal-keyboard" type="button" disabled data-i18n-title="keyboard" data-i18n-aria="keyboard" aria-label="Open keyboard"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M19 13h.01M8 16h8"></path></svg></button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Escape">Esc</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Tab">Tab</button>
+                  <button id="shiftKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="shift">Shift</button>
+                  <button id="controlKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="ctrl">Ctrl</button>
+                  <button id="altKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="alt">Alt</button>
+                </div>
                 <div class="terminal-key-group terminal-navigation">
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="Home">Home</button>
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="ArrowUp" data-i18n-aria="keyUp" aria-label="Up arrow">↑</button>
@@ -458,7 +556,6 @@
                   <button id="pasteTerminalButton" class="btn terminal-key" type="button" disabled data-i18n="paste">Paste</button>
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="PageUp">PgUp</button>
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="Enter">Enter</button>
-                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-C" id="breakButton">Ctrl-C</button>
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="PageDown">PgDn</button>
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="Backspace" data-i18n-aria="backspace" aria-label="Backspace">⌫</button>
                 </div>
@@ -483,17 +580,10 @@
                   <button class="btn terminal-key" type="button" disabled data-terminal-key="Delete">Del</button>
                 </div>
               </div>
+              <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-C" id="breakButton">Ctrl-C</button>
             </div>
           </div>
         </section>
-        </div>
-
-        <div class="presets" id="presetChips" data-i18n-aria="quickSend" aria-label="Quick send">
-          <button class="preset-chip" type="button" data-cmd="help" disabled="">help</button>
-          <button class="preset-chip" type="button" data-cmd="version" disabled="">version</button>
-          <button class="preset-chip" type="button" data-cmd="uname -a" disabled="">uname -a</button>
-          <button class="preset-chip" type="button" data-cmd="df -h" disabled="">df -h</button>
-          <button class="preset-chip" type="button" data-cmd="reboot" data-confirm="confirmReboot" data-danger="true" disabled="">reboot</button>
         </div>
 
         <div class="statusbar" data-i18n-aria="statusAria" aria-label="Status">
@@ -513,7 +603,8 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260910-agent-task-plan"></script>
+    <script type="module" src="./app.js?v=20261019-about"></script>
+    <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a
        * dropped connection, a proxy, a stale cache -- leaves this page blank

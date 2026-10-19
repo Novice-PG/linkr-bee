@@ -1,8 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#FFFFFF"/>
-  <g transform="translate(256 256) scale(2.30844) translate(-100 -100)" fill="none" stroke="#3DD68C" stroke-linecap="round" stroke-linejoin="round">
-    <polygon points="100,20 169.28,60 169.28,140 100,180 30.72,140 30.72,60" stroke-width="13"/>
-    <polyline points="70,74 120,100 70,126" stroke-width="15"/>
-    <line x1="140" y1="72" x2="140" y2="128" stroke-width="15"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee app icon</title>
+<rect width="512" height="512" fill="#0B1118"/>
+<g transform="translate(51.2 51.2) scale(0.8)">
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="#3FC88A" stroke-width="30" stroke-linejoin="round"/>
+<path d="M180 210 L270 256 L180 302" fill="none" stroke="#3FC88A" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="306" y="214" width="36" height="84" rx="7" fill="#3FC88A"/>
+</g>
 </svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - C Hex Negative</title>
+<desc>Solid hive with the prompt knocked out.</desc>
+<rect width="512" height="512" rx="112" fill="#0B1118"/>
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="#3FC88A"/>
+<path d="M196 208 L306 256 L196 304" fill="none" stroke="#0B1118" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

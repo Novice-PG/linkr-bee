@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Prompt Tail</title>
+<desc>Terminal prompt that reads as a bee abdomen.</desc>
+<rect width="512" height="512" rx="112" fill="#101722"/>
+<path d="M102 156 L198 256 L102 356" fill="none" stroke="#F6B73C" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M270 178 H410 M270 256 H410 M270 334 H410" stroke="#F6B73C" stroke-width="48" stroke-linecap="round"/>
+</svg>

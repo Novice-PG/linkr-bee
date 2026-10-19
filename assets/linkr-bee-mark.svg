@@ -1,29 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Linkr Bee mark">
-  <title>Linkr Bee mark</title>
-  <desc>Green hexagonal terminal mark: a "&gt;" prompt chevron and a cursor bar inside a rounded hexagonal outline.</desc>
-
-  <!-- hexagon (pointy-top), r = 80 centered at 100,100 -->
-  <polygon
-    points="100,20 169.28,60 169.28,140 100,180 30.72,140 30.72,60"
-    fill="none"
-    stroke="#3DD68C"
-    stroke-width="13"
-    stroke-linecap="round"
-    stroke-linejoin="round"/>
-
-  <!-- prompt chevron: > -->
-  <polyline
-    points="70,74 120,100 70,126"
-    fill="none"
-    stroke="#3DD68C"
-    stroke-width="15"
-    stroke-linecap="round"
-    stroke-linejoin="round"/>
-
-  <!-- cursor bar -->
-  <line
-    x1="140" y1="72" x2="140" y2="128"
-    stroke="#3DD68C"
-    stroke-width="15"
-    stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 30 452 452" width="512" height="512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee mark</title>
+<desc id="d">Hive hexagon holding a terminal prompt and a cursor.</desc>
+<path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="#3FC88A" stroke-width="30" stroke-linejoin="round"/>
+<path d="M180 210 L270 256 L180 302" fill="none" stroke="#3FC88A" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="306" y="214" width="36" height="84" rx="7" fill="#3FC88A"/>
 </svg>

@@ -22,7 +22,7 @@
   },
   "sources": {
     "web/device_profile.js": "a6f0926ee5fd79c86a0020db91605b40ac07383f632c842d5c07e0cfb6236929",
-    "web/agent_config.js": "9c5ec7c2b0538d714f59ce98d0780710d17bd4f68737e0d7f6c1de9c069697a2",
+    "web/agent_config.js": "34bfa931405e93546bae34c4649e016a0e567c93e1512e6deed251c104765cce",
     "web/serial_observation.js": "4033912cf0cde1bbde2906f3e8c2af67328685dba8ba3e30dd8d72ba13efde89",
     "web/command_policy.js": "940328bac02f22c29df6beb7d2d16bcc7654408ddac3bc5401c97b0539ebcad9",
     "web/agent_execution_policy.js": "b5109b721b5074101ca8a84de057747cd4ed524720322609059c1fb66541a6d2",
@@ -36,5 +36,5 @@
     "mobile/src/pi-agent.mjs": "5d8a18c3361917a6e4dbc9ea0f5e3821839998bbee8b4c4826ce3fb35d7abfd9",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "60dbdfa5683af92fc2d77234068bb1e8d3876b25cce166ef876aca96c2c94771"
+  "sha256": "80cb666b0168584ed4213bff17cb9da215bc488b533d70b02f91ff23000de254"
 }

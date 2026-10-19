@@ -92,5 +92,9 @@ test("one connect action remembers the device and switching can be cancelled", a
   expect(["Reconnect", "重新连接"]).toContain(result.label);
   expect(result).toMatchObject({ selections: 2, connections: ["saved", "other"], preserved: "saved", selected: "other" });
   await expect(page.locator("#reconnectButton")).toHaveCount(0);
+  // The rail layout starts with the drawer collapsed, so a control that lives
+  // in the panel needs the panel opened — the rail's first entry or the topbar
+  // toggle does it.
+  await page.locator("#panelToggle").click();
   await expect(page.locator("#switchDeviceButton")).toBeVisible();
 });

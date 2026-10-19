@@ -87,6 +87,73 @@ jobs:
       - name: Build HarmonyOS web assets
         run: npm run build:harmony
 
+  # A debug APK of the Capacitor shell. `mobile` above only proves the web
+  # assets compile; this is the half that catches a broken native resource, a
+  # Gradle/AGP mismatch or a `cap sync` that stopped copying the bundle.
+  # The APK is unsigned (Gradle's debug keystore): installable and testable,
+  # not publishable. A signed release needs a keystore in repository secrets.
+  apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # AGP 8.13 requires 17+; the toolchain compiles for 21.
+          java-version: "21"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the web assets Capacitor wraps
+        run: npm run build
+
+      - name: Copy them into the Android project
+        run: npx cap sync android
+
+      - name: Build the debug APK
+        run: ./gradlew --no-daemon assembleDebug
+        working-directory: mobile/android
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-bee-apk
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
   firmware:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest

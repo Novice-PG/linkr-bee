@@ -4,7 +4,7 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/app.js?*", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, body: await response.text() +
-      "\nwindow.__test = { state, setConnected, handleIncomingBytes, enqueueBytes, bleTransport, setBindingControl: fn => { sendControl = fn; } };" });
+      "\nwindow.__test = { state, setConnected, handleIncomingBytes, enqueueBytes, bleTransport, agentJournal, setBindingControl: fn => { sendControl = fn; } };" });
   });
   await page.goto("/");
   await page.waitForFunction(() => window.__test?.state.term);
@@ -503,11 +503,16 @@ for (const [width, height] of [[320, 740], [375, 812], [802, 867], [1194, 834]])
     await page.setViewportSize({ width, height });
     const heading = page.locator("#agentPanel .agent-header");
     await expect.poll(() => heading.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-    const header = await heading.boundingBox();
     const button = await page.locator("#agentModeButton").boundingBox();
     expect(button.height).toBeGreaterThanOrEqual(44);
     expect(button.width).toBeGreaterThanOrEqual(44);
-    expect(button.y + button.height).toBeLessThanOrEqual(header.y + header.height);
+    // Poll the invariant: the preceding drawer close leaves a 250 ms transition
+    // running, and a single read here can land mid-layout by a few pixels.
+    await expect.poll(async () => {
+      const header = await heading.boundingBox();
+      const box = await page.locator("#agentModeButton").boundingBox();
+      return box.y + box.height - (header.y + header.height);
+    }).toBeLessThanOrEqual(0);
     await page.screenshot({ path: `test-results/agent-gears-${width}.png` });
     await page.locator("#agentModeButton").tap();
     await expect(page.locator("#agentModePicker")).toBeVisible();
@@ -966,7 +971,14 @@ for (const desktop of [false,true]) test.describe(desktop?'desktop target bindin
    bleTransport.write=async (_id,_service,_characteristic,bytes)=>{
     pending+=new TextDecoder().decode(bytes);
     if(pending.endsWith('\r')){
-     const marker=pending.match(/LINKR_ID_[a-f0-9]+/)[0],exit=pending.match(/LINKR_EXIT_[a-f0-9]+/)[0];
+     const idMarker=pending.match(/LINKR_ID_[a-f0-9]+/),exitMarker=pending.match(/LINKR_EXIT_[a-f0-9]+/);
+     /* The app writes its own terminal control to the same transport (a
+      * geometry `stty rows … cols …` on connect). This stub only models tracked
+      * commands; anything else must be swallowed, not indexed into — a throw
+      * here fails the write, and a failed write latches `serialInputPending`,
+      * which then refuses every tracked command as "not an idle prompt". */
+     if(!idMarker || !exitMarker){ pending=''; return; }
+     const marker=idMarker[0],exit=exitMarker[0];
      if(window.bindingPasswordPrompt) { pending=''; window.bindingPasswordPrompt=false; setTimeout(()=>handleIncomingBytes(new TextEncoder().encode('\r\n[sudo] password: ')),30); return; }
      if(pending.includes('mv -f')) window.targetId=pending.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)[0];
      pending='';setTimeout(()=>handleIncomingBytes(new TextEncoder().encode(`\r\n${marker}:${window.targetId}\r\n${exit}:0\r\nroot@board:~# `)),30);
@@ -974,6 +986,12 @@ for (const desktop of [false,true]) test.describe(desktop?'desktop target bindin
    };
   });
   await page.locator('#agentSettingsButton').click();
+  // The "idle, observed POSIX shell prompt" guard is computed from the journal,
+  // which the injected bytes reach on the app's own tick; clicking before it
+  // lands fails with "Tracked commands require an idle, observed POSIX shell
+  // prompt" instead of opening the password prompt.
+  await expect.poll(() => page.evaluate(() =>
+    window.__test.agentJournal.read({ limit: 4000 }).text.includes("root@board:~#"))).toBe(true);
   await page.evaluate(()=>window.bindingPasswordPrompt=true);
   await page.locator('#targetBind').click();
   await expect(page.locator('#targetBindingStatus')).toContainText('Enter the target sudo password');

@@ -16,6 +16,25 @@ shells that support it. Paste uses the clipboard when available and otherwise
 prompts you to long-press the terminal. Both rows stay above the soft keyboard
 and are shared with the Web and HarmonyOS clients.
 
+## About page
+
+Settings -> **About** lists the open-source components the web and mobile builds
+ship (versions and licences taken from the installed tree, not from the
+`package.json` ranges), the firmware stack pinned by `west.yml`, the CC-BY-4.0
+cursor attribution with its author and statement of changes, this project's
+Apache-2.0 licence, and the contributors.
+
+The component data is generated into `web/about-data.js`:
+
+```sh
+node tools/gen_about.mjs
+```
+
+Run it after changing dependencies. `mobile/test/about.test.mjs` regenerates the
+data in memory and fails when the committed file differs, so a bumped package
+cannot ship an About page that names the old version. Contributors are curated in
+the generator: the real source is `git shortlog`, but CI checks out with depth 1.
+
 ## Built-in serial assistant (Pi)
 
 Tap **AI** in the terminal toolbar to enter Agent mode. Narrow windows show the
@@ -39,9 +58,19 @@ in addition to the browser regression tests.
 
 Open **Settings → AI** in the main controls panel (also available through
 **Settings** in the Agent header, without leaving the conversation).
-Configure a Chat Completions-compatible API
-base URL, a model ID with tool-calling support, and your own API key (optional
-for keyless local services), then select **Save configuration**. Saving does not
+Start with the **AI provider** list — OpenAI, Anthropic, Google Gemini, DeepSeek,
+Moonshot Kimi, Zhipu GLM, Alibaba Cloud Bailian (Qwen), SiliconFlow, Volcengine
+Ark (Doubao), Groq, OpenRouter, Mistral, xAI, or Ollama on this machine. Choosing
+one fills the base URL, the protocol and a starting model ID; every field stays
+editable, the model is only a suggestion, and **Custom** changes nothing so an
+endpoint can be typed by hand. Then add your own API key (optional for keyless
+local services) and select **Save configuration**.
+
+Because provider model IDs churn, **Fetch model list** reads the list the service
+currently offers, using the address, key and extra headers already in the form.
+The ids become suggestions in the model field, which stays editable — a service
+may not expose the endpoint, and a browser request can be blocked (CORS), in
+which case the panel says so and keeps what you typed. Saving does not
 send a model request. Endpoint, model and API key are restored after reloading
 or restarting the app. Re-saving unchanged settings retains the current diagnostic
 conversation; changing the endpoint, model or key resets its model context.
@@ -206,8 +235,11 @@ transcript is the one exception and is stored per device, as described below.
 
 Questions and requested serial logs are sent to the configured model endpoint.
 Endpoint, model ID and API key are saved in this app / browser origin's
-`localStorage`; this is not an encrypted OS credential vault. Clearing the
-configuration or app / site data removes them. A conversation is stored per
+`localStorage` under `linkr-agent-model`, in plaintext; this is not an encrypted
+OS credential vault. The key is **not uploaded to Linkr Bee, this site or any
+server** — the app has no cloud account or backend, so there is no cloud copy —
+and a request carries it from this device directly to the provider you chose.
+Clearing the configuration or app / site data removes it. A conversation is stored per
 device identity alongside the task summaries, so reloading the page brings the
 transcript back, labelled as unverified history, and continues the same model
 context. Restoring it sends nothing to the target: no command is replayed. **New

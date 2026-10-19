@@ -128,7 +128,9 @@ test("tablet drawer exposes a translated AI tab alongside connection, serial and
   await page.locator("#drawerLangButton").tap();
   await expect(page.locator("#agentSettingsTitle")).toHaveText("AI 配置");
   await expect(page.locator("#agentSettingsSave")).toHaveText("保存配置");
-  await expect(page.locator(".settings-tab:visible")).toHaveCount(4);
+  // Connection, serial, network, AI and About share the strip on touch devices.
+  await expect(page.locator(".settings-tab:visible")).toHaveCount(5);
+  await expect(page.locator('[data-settings-target="about"]')).toHaveText("关于");
   const drawer = await page.locator("#controlsPanel").boundingBox();
   expect(drawer.width).toBeLessThan(802);
   expect(drawer.x + drawer.width).toBeLessThanOrEqual(802);
@@ -158,13 +160,22 @@ test("desktop Agent can open shared settings after the normal sidebar was collap
   await page.locator("#drawerClose").click();
   await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator("#panelToggle")).toBeFocused();
-  // Narrow mouse-operated windows use the same right-hand sheet as tablets.
+  // Narrow mouse-operated windows use the same sheet as tablets. The sheet is
+  // left-anchored now — skin-v2 restates the geometry because style.css carried
+  // two conflicting right-anchored rules — so "on screen" is x >= 0 with the
+  // right edge inside the window, not x > 0.
   await page.setViewportSize({ width: 802, height: 867 });
+  // Crossing the 900px breakpoint fires a media-query change that resets the
+  // open state; wait for the shell to switch modes before toggling, or the
+  // click races that handler and the drawer it just opened is closed again.
+  await expect(page.locator("html")).toHaveClass(/settings-drawer-layout/);
   await page.locator("#panelToggle").click();
   await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-modal", "true");
+  // The sheet slides in over 250 ms, so its rect is still off-screen on the
+  // first frame; poll the settled geometry instead of reading it once.
+  await expect.poll(() => page.locator("#controlsPanel").evaluate((el) => Math.round(el.getBoundingClientRect().x))).toBeGreaterThanOrEqual(0);
   await expect.poll(() => page.locator("#controlsPanel").evaluate((el) => el.getBoundingClientRect().right)).toBeLessThanOrEqual(802);
   const sheet = await page.locator("#controlsPanel").boundingBox();
-  expect(sheet.x).toBeGreaterThan(0);
   expect(sheet.x + sheet.width).toBeLessThanOrEqual(802);
   await context.close();
 });
@@ -177,7 +188,9 @@ for (const expanded of [false, true]) {
     if (expanded) await page.locator("#panelToggle").click();
     // Wait for the sidebar transition before comparing the two workspaces.
     await expect.poll(() => page.locator("#controlsPanel").evaluate((el) => Math.round(el.getBoundingClientRect().width)))
-      .toBe(expanded ? 300 : 2);
+      // The rail layout widens the sidebar: clamp(312px, 23vw, 400px), and
+      // 23vw of 1285 is 295, so the lower bound wins.
+      .toBe(expanded ? 312 : 2);
     const terminal = page.locator("#terminalCard");
     const before = await terminal.boundingBox();
     const header = await page.locator(".topbar").boundingBox();
@@ -255,4 +268,101 @@ test("extra request headers reject malformed input and reach the model request",
   await page.locator("#agentAsk").click();
   await expect(page.locator("#agentMessages")).toContainText("Headers received.");
   expect(sentHeaders["anthropic-dangerous-direct-browser-access"]).toBe("true");
+});
+
+test("a provider preset fills the connection and the form says where the key lives", async ({ page }) => {
+  await openSettings(page);
+  const vendor = page.locator("#agentVendor");
+  // The disclosure is the deliverable: the storage key the app writes and the
+  // promise that the key is not uploaded must both be on screen.
+  const note = page.locator(".key-note");
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("linkr-agent-model");
+  await expect(note).toContainText(/不会上传|not uploaded/);
+
+  await vendor.selectOption("deepseek");
+  await expect(page.locator("#agentEndpoint")).toHaveValue("https://api.deepseek.com");
+  await expect(page.locator("#agentModel")).toHaveValue("deepseek-flash");
+  await expect(page.locator("#agentProvider")).toHaveValue("openai-completions");
+  await expect(page.locator("#agentSettingsStatus")).toContainText(/尚未保存|not been saved/);
+
+  await vendor.selectOption("anthropic");
+  await expect(page.locator("#agentEndpoint")).toHaveValue("https://api.anthropic.com/v1");
+  await expect(page.locator("#agentProvider")).toHaveValue("anthropic-messages");
+  await expect(page.locator("#agentHeaders")).toHaveValue("anthropic-dangerous-direct-browser-access: true");
+
+  // Switching away drops the header a preset wrote instead of sending it to a
+  // service that has nothing to do with it; Custom never rewrites the fields.
+  await vendor.selectOption("openai");
+  await expect(page.locator("#agentHeaders")).toHaveValue("");
+  await vendor.selectOption("custom");
+  await expect(page.locator("#agentEndpoint")).toHaveValue("https://api.openai.com/v1");
+
+  await vendor.selectOption("openai");
+  await page.locator("#agentApiKey").fill("preset-device-key");
+  await page.locator("#agentSettingsSave").tap();
+  await expect(page.locator("#agentSettingsStatus")).toContainText(/已保存|saved/);
+
+  // No stored vendor field: the selection is inferred from the saved endpoint.
+  await page.reload();
+  await openSettings(page);
+  await expect(page.locator("#agentVendor")).toHaveValue("openai");
+  await expect(page.locator("#agentEndpoint")).toHaveValue("https://api.openai.com/v1");
+  await expect(page.locator("#agentApiKey")).toHaveValue("preset-device-key");
+
+  await page.locator("#agentSettingsClear").tap();
+  await expect(page.locator("#agentVendor")).toHaveValue("custom");
+});
+
+/* The presets' model ids go stale, so the form reads the real list once the
+ * address and key are in. The key must go to the provider and nowhere else,
+ * which is why the test asserts the exact request as well as the result. */
+test("the model list is read from the service after the address and key are in", async ({ page }) => {
+  await openSettings(page);
+  const requests = [];
+  await page.route("https://models.test/v1/models", async (route) => {
+    const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers });
+      return;
+    }
+    requests.push({ url: route.request().url(), authorization: route.request().headers().authorization });
+    await route.fulfill({ status: 200, headers, contentType: "application/json",
+      body: JSON.stringify({ data: [{ id: "current-small" }, { id: "current-large" }] }) });
+  });
+
+  await page.locator("#agentEndpoint").fill("https://models.test/v1");
+  await page.locator("#agentApiKey").fill("preset-device-key");
+  await expect(page.locator("#agentModelStatus")).toBeHidden();
+  await page.locator("#agentModelFetch").tap();
+
+  await expect(page.locator("#agentModelStatus")).toContainText(/已获取 2 个模型|Found 2 models/);
+  const options = await page.locator("#agentModelOptions option").evaluateAll((els) => els.map((el) => el.value));
+  expect(options).toEqual(["current-large", "current-small"]);
+  expect(requests).toEqual([{ url: "https://models.test/v1/models", authorization: "Bearer preset-device-key" }]);
+
+  // The suggestion is still just text in an editable field until Save.
+  await page.locator("#agentModel").fill("current-large");
+  await page.locator("#agentSettingsSave").tap();
+  await expect(page.locator("#agentSettingsStatus")).toContainText(/已保存|saved/);
+});
+
+test("a refused model list is reported and leaves the model field editable", async ({ page }) => {
+  await openSettings(page);
+  await page.route("https://models.test/v1/models", (route) => route.fulfill({
+    status: 401, headers: { "access-control-allow-origin": "*" }, body: "{}" }));
+  await page.locator("#agentEndpoint").fill("https://models.test/v1");
+  await page.locator("#agentApiKey").fill("bad-key");
+  await page.locator("#agentModelFetch").tap();
+  await expect(page.locator("#agentModelStatus")).toContainText(/无效|invalid/);
+  await expect(page.locator("#agentModelStatus")).toHaveClass(/field-error/);
+  await expect(page.locator("#agentModel")).toBeEditable();
+
+  // A blocked request (CORS or offline) is a different failure, and the advice is
+  // the same: type the model yourself.
+  await page.route("https://blocked.test/v1/models", (route) => route.abort());
+  await page.locator("#agentEndpoint").fill("https://blocked.test/v1");
+  await page.locator("#agentModelFetch").tap();
+  await expect(page.locator("#agentModelStatus")).toContainText(/跨域|blocked/);
+  await expect(page.locator("#agentModel")).toBeEditable();
 });

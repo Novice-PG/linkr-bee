@@ -29,9 +29,16 @@ export default class EntryAbility extends UIAbility {
     try {
       const mainWindow = windowStage.getMainWindowSync();
       await mainWindow.setWindowLayoutFullScreen(true);
+      // Match web/skin-v2.css --bg so the window does not flash white before
+      // the WebView paints its first frame.
+      await mainWindow.setWindowBackgroundColor('#05080D');
       await mainWindow.setWindowSystemBarProperties({
         statusBarColor: '#00000000',
         navigationBarColor: '#00000000',
+        // Transparent bars over a dark page need light glyphs, otherwise the
+        // clock and the battery indicator vanish.
+        statusBarContentColor: '#E8EEF7',
+        navigationBarContentColor: '#E8EEF7',
       });
     } catch (error) {
       hilog.warn(

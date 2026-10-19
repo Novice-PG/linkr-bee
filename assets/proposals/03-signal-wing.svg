@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="t">
+<title id="t">Linkr Bee - Signal Wing</title>
+<desc>Hexagonal bee body emitting three signal arcs.</desc>
+<rect width="512" height="512" rx="112" fill="#101722"/>
+<g transform="translate(-25 0)">
+<path d="M200 152 L304 212 L304 332 L200 392 L96 332 L96 212 Z" fill="#F6B73C"/>
+<path d="M152 244 H248 M152 300 H248" stroke="#101722" stroke-width="22" stroke-linecap="round"/>
+<path d="M328 244 A56 56 0 0 1 384 300" fill="none" stroke="#6AA6F5" stroke-width="20" stroke-linecap="round"/>
+<path d="M328 208 A92 92 0 0 1 420 300" fill="none" stroke="#6AA6F5" stroke-width="20" stroke-linecap="round"/>
+<path d="M328 172 A128 128 0 0 1 456 300" fill="none" stroke="#6AA6F5" stroke-width="20" stroke-linecap="round"/>
+</g>
+</svg>
