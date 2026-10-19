@@ -34,7 +34,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{App, Focus};
-use crate::logo;
 use crate::text;
 use crate::theme::Theme;
 use crate::vt::{Ansi, Cell, CellStyle, Parser, Vt};
@@ -700,31 +699,26 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The pane with nothing to show: the mark where there is room for it, what
-/// is missing, and where a connection starts — centred, the way the design's
-/// empty states are.
+/// The pane with nothing to show: what is missing and where a connection
+/// starts — centred, the way the design's empty states are. The mark is the
+/// splash's alone now: the pane the user lands on opens with words, so no
+/// terminal draws a second logo at a size the first one was fitted for.
 ///
 /// Rows rather than a widget of its own: the serial terminal is a screen, and
 /// the caller renders a screenful of rows either way.
 fn empty_lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
     let s = app.strings();
-    let mut body: Vec<Line<'static>> = Vec::new();
-    // The mark takes only the room it can leave the four rows below: a blank,
-    // the title, a blank and the guidance.
-    let mark = logo::fitted_lines(app.capability, (area.width, area.height.saturating_sub(4)));
-    if !mark.is_empty() {
-        body.extend(mark);
-        body.push(Line::default());
-    }
-    body.push(Line::from(Span::styled(
-        theme.fold(s.term_empty_title).into_owned(),
-        theme.text().add_modifier(Modifier::BOLD),
-    )));
-    body.push(Line::default());
-    body.push(Line::from(Span::styled(
-        theme.fold(s.term_empty_hint).into_owned(),
-        theme.muted(),
-    )));
+    let body = vec![
+        Line::from(Span::styled(
+            theme.fold(s.term_empty_title).into_owned(),
+            theme.text().add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            theme.fold(s.term_empty_hint).into_owned(),
+            theme.muted(),
+        )),
+    ];
     centre(body, area.width as usize, area.height as usize)
 }
 
@@ -1024,6 +1018,13 @@ mod tests {
         let painted = joined(&app);
         assert!(painted.contains("还没有连接设备"), "{painted}");
         assert!(painted.contains("侧栏"), "{painted}");
+        // The pane holds words, not a second splash: the mark drew as half
+        // blocks here, and it leads the launch alone — this is the screen the
+        // launch hands over to.
+        assert!(
+            !painted.contains('▀') && !painted.contains('▄'),
+            "the empty pane carries a mark:\n{painted}"
+        );
 
         // A link this pane has said nothing on is a session, not an empty
         // state: the screen is blank because the device is quiet.

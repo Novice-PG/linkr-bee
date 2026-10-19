@@ -21,7 +21,6 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::logo;
 
 /// Height of the top and bottom bars, in rows.
 pub const BAR_HEIGHT: u16 = 1;
@@ -334,19 +333,10 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(DIVIDER_WIDTH),
         ..area
     };
-    let mut lines = sidebar::lines(app, &theme, text_area.width);
-    // The mark rides the rail's spare room at the top, and only there: it is
-    // not a row, and the one rule it must keep is that the column of rows
-    // below it still fits whole. A terminal that is already crowding the rail
-    // shows the rows and no mark.
-    let room = text_area.height.saturating_sub(lines.len() as u16 + 1);
-    let mark = logo::fitted_lines(app.capability, (text_area.width, room));
-    if !mark.is_empty() {
-        let mut with_mark = mark;
-        with_mark.push(Line::default());
-        with_mark.append(&mut lines);
-        lines = with_mark;
-    }
+    // The rail is the rows, and only the rows: the mark that used to ride the
+    // spare room at its top leads the splash now, so the column opens with the
+    // first row at every height.
+    let lines = sidebar::lines(app, &theme, text_area.width);
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
     draw_divider(frame, &theme, area);
 }
@@ -1037,33 +1027,28 @@ mod tests {
         assert_eq!(narrow.centre.width, 1);
     }
 
-    /// The rail's spare room carries the mark, and only spare room: a terminal
-    /// too short for the whole column plus the picture shows the column alone,
-    /// so the mark can never push a row off the rail. The mark is the only
-    /// thing on the rail that draws in half blocks, which is how the two
-    /// frames tell themselves apart.
+    /// The rail is its rows and nothing else: the mark that used to ride the
+    /// spare room at its top belongs to the splash now, so no rail at any
+    /// height opens with picture glyphs. The rows never carry half blocks
+    /// themselves — which is exactly what made the mark's `▀`/`▄` a mark a
+    /// person could see in the first place.
     #[test]
-    fn the_rail_carries_its_mark_only_in_spare_room() {
+    fn the_rail_is_rows_and_no_mark() {
         let app = App {
             lang: Lang::En,
             ..App::default()
         };
-        let rail_of = |text: &str| {
-            text.lines()
-                .map(|line| line.chars().take(SIDEBAR_TEXT_WIDTH as usize).collect())
-                .collect::<Vec<String>>()
-                .join("\n")
-        };
-        let tall = rail_of(&render_to_text(&app, 100, 60));
-        assert!(
-            tall.contains('▀') || tall.contains('▄'),
-            "the tall rail has no mark:\n{tall}"
-        );
-        let short = rail_of(&render_to_text(&app, 100, 24));
-        assert!(
-            !short.contains('▀') && !short.contains('▄'),
-            "the short rail squeezed a mark in:\n{short}"
-        );
+        for line in sidebar::lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH) {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(
+                !text.contains('▀') && !text.contains('▄'),
+                "the rail opened with a mark: {text:?}"
+            );
+        }
     }
 
     /// A degenerate area yields without panicking: zero-width and zero-height
