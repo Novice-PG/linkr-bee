@@ -34,19 +34,12 @@ config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
 	default 232
-	range 20 232
+	range 20 244
 	help
 	  UART data is accumulated up to this many bytes before it is handed to
 	  Reliable UART. The default plus its 12-byte frame header fits in one
 	  ATT value when the central negotiates the production MTU of 247. It is
 	  segmented automatically when the negotiated MTU is smaller.
-
-	  The range stops at 232 rather than at the 244-byte frame because this
-	  value counts payload only, while 244 counts the frame including that
-	  12-byte header. The send side answers a longer payload with -EINVAL,
-	  and the receive thread then retries the very same chunk every 10 ms
-	  without ever clearing its length, so a payload above 232 halts UART
-	  capture outright instead of falling back to a smaller write.
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"
@@ -71,33 +64,13 @@ config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
 	help
 	  Number of BLE or WebSocket RX packets that can wait for UART transmission.
 
-config LINKR_BLE_BRIDGE_UART_AUTOBAUD
-	bool "Follow the peer's UART line rate instead of demanding a match"
-	depends on SOC_SERIES_ESP32
-	default y
-	help
-	  Measure the shortest pulse on the bridge UART's RXD line with the
-	  ESP32's hardware detector and move the port to whatever rate the peer
-	  is actually using, rather than staying at UART_BAUD_RATE and going
-	  deaf if they differ.
-
-	  The peer wins: a board being debugged is not asked to change a line of
-	  its configuration to suit this bridge. The port still starts at
-	  UART_BAUD_RATE and only moves when several consecutive measurements
-	  agree, so nothing changes while the two already match.
-
-	  Rates are snapped to whole standard values within a few percent, and a
-	  line that measures something in between is left alone rather than
-	  moved to whichever neighbour happens to be listed first.
-
 config LINKR_BLE_BRIDGE_UART_BAUD_RATE
 	int "UART baud rate"
 	default 115200
 	range 300 3000000
 	help
 	  Default bridge UART baud rate. Typical SBC console values are 115200,
-	  1500000, 921600, and 1000000. With UART_AUTOBAUD enabled this is the
-	  rate the port starts at, not necessarily the one it keeps.
+	  1500000, 921600, and 1000000.
 
 choice LINKR_BLE_BRIDGE_UART_DATA_BITS
 	prompt "UART data bits"

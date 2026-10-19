@@ -76,9 +76,6 @@ struct ws_client {
 	atomic_t rx_bytes;
 	atomic_t tx_dropped;
 	bool rx_fragmented;
-	/* Set by ws_close_all_clients(); the client thread notices it between
-	 * polls and tears its own slot down. Nothing else touches the socket. */
-	atomic_t kicked;
 };
 
 static struct ws_client clients[WS_MAX_CLIENTS];
@@ -372,16 +369,8 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 {
 	char token[WS_TOKEN_HEX_LEN + 1];
 	struct zsock_pollfd fds[1];
-	/* Zeroed rather than left unset. websocket_recv_msg() can return with
-	 * data and without writing either out-parameter: when the socket has
-	 * no more bytes but a previous parse already produced a payload, it
-	 * breaks out of its loop and returns that payload with both pointers
-	 * untouched. The caller would then branch on stack garbage. Zero
-	 * means "no flags", so a mid-fragment chunk is continued by
-	 * rx_fragmented and anything unrecognised is dropped rather than acted
-	 * on. */
-	uint32_t message_type = 0;
-	uint64_t remaining = 0;
+	uint32_t message_type;
+	uint64_t remaining;
 	size_t token_len;
 	bool authenticated = false;
 	int received;
@@ -470,9 +459,8 @@ static bool ws_client_is_data_fragment(struct ws_client *client,
 static int ws_client_rx_drain_locked(struct ws_client *client, int slot)
 {
 	for (;;) {
-		/* Zeroed for the same reason as in ws_client_auth(); see there. */
-		uint32_t message_type = 0;
-		uint64_t remaining = 0;
+		uint32_t message_type;
+		uint64_t remaining;
 		int received = websocket_recv_msg(
 			client->sock, ws_rx_buf, sizeof(ws_rx_buf),
 			&message_type, &remaining, 0);
@@ -561,10 +549,6 @@ static void ws_client_thread(void *p1, void *p2, void *p3)
 				LOG_WRN("[%d] WS poll error: %d", slot, errno);
 				break;
 			}
-			if (atomic_get(&client->kicked)) {
-				LOG_INF("[%d] WS client revoked", slot);
-				break;
-			}
 			if (fds[0].revents &
 			    (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL)) {
 				break;
@@ -616,7 +600,6 @@ static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
 	k_mutex_lock(&client->tx_lock, K_FOREVER);
 	client->sock = ws_socket;
 	client->rx_fragmented = false;
-	atomic_clear(&client->kicked);
 	atomic_clear(&client->tx_bytes);
 	atomic_clear(&client->rx_bytes);
 	atomic_clear(&client->tx_dropped);
@@ -665,20 +648,15 @@ HTTP_RESOURCE_DEFINE(linkr_ws_resource, linkr_ws_service, "/ws",
 /* Server lifecycle                                                          */
 /* ------------------------------------------------------------------------ */
 
-/*
- * Ask every connected client to go away. It cannot close the socket itself: a
- * websocket fd has no shutdown operation (the fd op vtable implements none, so
- * zsock_shutdown() returns -ENOTSUP), and closing an fd a client thread is
- * polling would race with that thread's poll. So this sets a flag and leaves
- * the teardown to the thread that owns the socket, which sees it within
- * WS_POLL_MS.
- */
 static void ws_close_all_clients(void)
 {
 	for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-		if (atomic_get(&clients[i].state) != WS_CLIENT_FREE) {
-			atomic_set(&clients[i].kicked, 1);
+		k_mutex_lock(&clients[i].tx_lock, K_FOREVER);
+		if (atomic_get(&clients[i].state) != WS_CLIENT_FREE &&
+		    clients[i].sock >= 0) {
+			(void)zsock_shutdown(clients[i].sock, ZSOCK_SHUT_RDWR);
 		}
+		k_mutex_unlock(&clients[i].tx_lock);
 	}
 }
 
@@ -833,14 +811,7 @@ int linkr_ws_rotate_token(void)
 
 	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
 	if (err) {
-		/* Same as linkr_ws_set_token(): the rotation is already live,
-		 * so only persistence is at risk. Reporting it as a failure
-		 * would make the caller rotate again — generating yet another
-		 * token and invalidating the one the caller was just handed,
-		 * kicking its session a second time for a link that is
-		 * already working. */
-		LOG_WRN("WebSocket token not persisted: %d (applies now, not after reboot)",
-			err);
+		LOG_WRN("persisting WebSocket token failed: %d", err);
 	}
 
 	/* Revoke sessions that authenticated with the replaced token; see
@@ -853,7 +824,7 @@ int linkr_ws_rotate_token(void)
 		(void)ws_server_start();
 	}
 	LOG_INF("WebSocket LAN auth token generated");
-	return 0;
+	return err;
 }
 
 int linkr_ws_set_enabled(bool enabled)

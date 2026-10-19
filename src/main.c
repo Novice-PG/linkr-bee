@@ -33,7 +33,6 @@
 #include "target_binding.h"
 #include "ble_mgmt.h"
 #include "ble_uart_reliable.h"
-#include "uart_autobaud.h"
 #include "wifi.h"
 #include "ws_bridge.h"
 
@@ -67,8 +66,6 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
 BUILD_ASSERT(UART_RX_CHUNK <= BLE_TO_UART_MAX_LEN);
 BUILD_ASSERT(UART_RX_CHUNK <= UART_RX_BUFFER_SIZE);
-BUILD_ASSERT(UART_RX_CHUNK <= LINKR_UART_RELIABLE_MAX_PAYLOAD,
-	     "UART_RX_CHUNK must stay within what the reliable send accepts");
 BUILD_ASSERT(CONFIG_BT_ID_MAX >= 2,
 	     "Linkr requires a persistent non-default BLE identity");
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) && \
@@ -910,48 +907,6 @@ static int apply_uart_config(const struct uart_config *cfg)
 	return err;
 }
 
-/*
- * Adaptive baud detection needs two things only main.c can give it: the rate
- * this port is set to right now, and the one locked door through which it may
- * be changed. Reconfiguring resets the RX ring, so the driver above is the
- * only way in — reaching for uart_configure() here would drop whatever the
- * peer has mid-word.
- */
-#if LINKR_UART_AUTOBAUD
-
-uint32_t linkr_uart_config_current(void)
-{
-	struct uart_config cfg;
-
-	k_mutex_lock(&uart_config_lock, K_FOREVER);
-	cfg = active_uart_config;
-	k_mutex_unlock(&uart_config_lock);
-
-	return cfg.baudrate;
-}
-
-int linkr_uart_config_reconfigure(uint32_t baudrate)
-{
-	struct uart_config cfg;
-
-	k_mutex_lock(&uart_config_lock, K_FOREVER);
-	cfg = active_uart_config;
-	k_mutex_unlock(&uart_config_lock);
-
-	if (cfg.baudrate == baudrate) {
-		return 0;
-	}
-
-	/* Framing, parity and flow control are carried over untouched: the
-	 * detector measures a bit time, and that is the only thing it can speak
-	 * about. Guessing the rest would be a second guess with no evidence. */
-	cfg.baudrate = baudrate;
-
-	return apply_uart_config(&cfg);
-}
-
-#endif /* LINKR_UART_AUTOBAUD */
-
 static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
@@ -1087,11 +1042,6 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 						    err);
 			return true;
 		}
-
-		/* A rate somebody typed wins for the next few seconds. Without
-		 * this, detection would measure the peer and move the port back,
-		 * and "@u=..." would look like a command that does nothing. */
-		linkr_uart_autobaud_suspend();
 
 		(void)uart_status_response(conn, "OK");
 		return true;
@@ -1466,41 +1416,10 @@ static void ble_to_uart_thread(void)
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
 	for (;;) {
-		uint16_t sent = 0;
-
 		k_msgq_get(&ble_to_uart_queue, &packet, K_FOREVER);
 
-		/*
-		 * Fill the FIFO in one driver call, and fall back to the
-		 * single-byte writer only when the port has no room.
-		 *
-		 * A packet runs to 244 bytes, and uart_poll_out() charges a
-		 * driver call plus a FIFO-depth check for every single byte of
-		 * it. Going through uart_fifo_fill() first hands the driver as
-		 * much of the packet as the FIFO will hold in one call;
-		 * poll_out() is then only reached with a full FIFO, where it
-		 * waits for room before placing one byte, and the next pass of
-		 * this loop fills whatever space opened up in the meantime. The
-		 * batching is what keeps a long packet down to a handful of
-		 * driver calls instead of one per byte.
-		 *
-		 * The single-byte writer waits rather than sleeping — for this
-		 * driver it spins until the FIFO drains — and this loop is what
-		 * stops that from being a hot spin over an empty call, since it
-		 * refills the FIFO as soon as room exists.
-		 */
-		while (sent < packet.len) {
-			int wrote = uart_fifo_fill(bridge_uart,
-						   &packet.data[sent],
-						   packet.len - sent);
-
-			if (wrote > 0) {
-				sent += (uint16_t)wrote;
-				continue;
-			}
-
-			uart_poll_out(bridge_uart, packet.data[sent]);
-			sent++;
+		for (uint16_t i = 0; i < packet.len; i++) {
+			uart_poll_out(bridge_uart, packet.data[i]);
 		}
 
 		signal_uart_activity();
@@ -1509,13 +1428,7 @@ static void ble_to_uart_thread(void)
 
 static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
-	uint16_t mtu = bt_gatt_get_mtu(conn);
-	/* An unexchanged MTU reads back as 0, and `0 - 3` in uint16_t wraps to
-	 * 65533; clamp before subtracting so the chunk size is never taken from
-	 * the wrapped value. Without this the MIN below picks the wrapped one
-	 * against the ACL size, which is smaller but still several times the
-	 * ATT payload the peer has actually agreed to. */
-	uint16_t mtu_payload = mtu > 3 ? mtu - 3 : 1;
+	uint16_t mtu_payload = bt_gatt_get_mtu(conn) - 3;
 	uint16_t acl_payload = CONFIG_BT_BUF_ACL_TX_SIZE > 7 ?
 			       CONFIG_BT_BUF_ACL_TX_SIZE - 7 : 1;
 
@@ -1581,21 +1494,14 @@ static int reliable_send_chunk(const uint8_t *data, uint16_t len)
 }
 
 static int uart_forward_chunk(const uint8_t *data, uint16_t len,
-			      size_t *accounted)
+			      bool *accounted)
 {
 	int err;
 
-	/* Staged up to `*accounted` rather than "staged or not". A chunk the
-	 * reliable path could not deliver stays in the caller's buffer and the
-	 * drain loop appends the next bytes to it, so the part added since the
-	 * last successful stage still has to reach both sinks below. A yes/no
-	 * flag set once would strand exactly that part: the BLE peer would get
-	 * the whole buffer while the log ring and the LAN stream never saw its
-	 * tail, and nothing would count the loss. */
-	if (*accounted < len) {
-		linkr_log_feed(data + *accounted, len - *accounted);
-		linkr_ws_feed(data + *accounted, len - *accounted);
-		*accounted = len;
+	if (!*accounted) {
+		linkr_log_feed(data, len);
+		linkr_ws_feed(data, len);
+		*accounted = true;
 	}
 	if (!linkr_uart_reliable_mode()) {
 		/* NUS is the compatibility, best-effort path. Preserve its previous
@@ -1616,24 +1522,6 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 			 */
 			return 0;
 		}
-	} else if (err == -EINVAL || err == -EMSGSIZE) {
-		/* The reliable path refused the chunk itself rather than
-		 * failing to deliver it: -EINVAL for a payload past its limit,
-		 * -EMSGSIZE for an ATT payload too small to carry the header,
-		 * which is what an unexchanged MTU amounts to once it is
-		 * clamped instead of wrapping. Neither gets larger by being
-		 * retried — the chunk is fixed and so is the reason — and this
-		 * loop does retry a failed chunk in place: len is left at
-		 * sizeof(buf), so the very next pass re-enters this call with
-		 * the same arguments and the thread stops draining the ring
-		 * for the rest of the session. The log ring and the WebSocket
-		 * bridge were both already fed above, so only the BLE copy is
-		 * lost by dropping here, which is the same trade the
-		 * no-connection case already makes.
-		 */
-		LOG_WRN("Dropping %u UART bytes the reliable path cannot carry (%d)",
-			len, err);
-		return 0;
 	} else if (err) {
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}
@@ -1653,7 +1541,7 @@ static void uart_to_ble_thread(void)
 	uint8_t buf[UART_RX_CHUNK];
 	size_t len = 0;
 	int64_t last_rx = 0;
-	size_t accounted = 0;
+	bool accounted = false;
 
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
@@ -1671,7 +1559,7 @@ static void uart_to_ble_thread(void)
 		if (len == sizeof(buf)) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
-				accounted = 0;
+				accounted = false;
 			} else {
 				k_sleep(K_MSEC(10));
 			}
@@ -1694,7 +1582,7 @@ static void uart_to_ble_thread(void)
 		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
-				accounted = 0;
+				accounted = false;
 			}
 		}
 
@@ -1865,10 +1753,6 @@ int main(void)
 		LOG_ERR("Bridge UART configuration failed: %d", err);
 		return err;
 	}
-
-	/* Armed after the port is configured, never before: it calls back into
-	 * this file to move the rate, and there is no rate to move until now. */
-	linkr_uart_autobaud_init(DT_REG_ADDR(LINKR_UART_NODE));
 
 #if defined(ACTIVITY_LED_NODE)
 	if (!device_is_ready(activity_led.port)) {
