@@ -186,6 +186,122 @@ pub fn fitted_lines(capability: Capability, room: (u16, u16)) -> Vec<Line<'stati
         .unwrap_or_default()
 }
 
+/// The mark on a pure-white plate, for the one card that wants an icon tile.
+///
+/// The half-block raster is composited over black when the build script
+/// quantises it; a transparent edge pixel became a nearly black green. On a
+/// white plate that reads as a dark fringe around the stroke, so each colour
+/// is un-premultiplied with the alpha its green channel still carries and laid
+/// over white. The transparent cells are painted white, not left to the
+/// card's theme. The inkless variants have no plate: their ground is the
+/// terminal's, and a white rectangle behind a braille cell would only be a
+/// white rectangle.
+pub fn on_white(capability: Capability, room: (u16, u16)) -> Vec<Line<'static>> {
+    let variant = Variant::for_capability(capability);
+    let lines = fitted_lines(capability, room);
+    if !matches!(
+        variant,
+        Variant::TrueColor | Variant::Color256 | Variant::Color16
+    ) {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| {
+                        let mut style = span.style;
+                        style.bg = Some(match style.bg {
+                            Some(colour) if colour != Color::Reset => plate_colour(colour),
+                            _ => Color::Rgb(255, 255, 255),
+                        });
+                        if let Some(colour) = style.fg {
+                            if colour != Color::Reset {
+                                style.fg = Some(plate_colour(colour));
+                            }
+                        }
+                        Span::styled(span.content, style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// The brand green the mark is drawn in; its green channel is the alpha the
+/// build script premultiplied every edge pixel with.
+const BRAND_GREEN: (u8, u8, u8) = (61, 214, 140);
+
+/// One logo colour, lifted from its black ground to a white one.
+fn plate_colour(colour: Color) -> Color {
+    let (r, g, b) = match colour {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => xterm_rgb(index),
+        _ => return colour,
+    };
+    let alpha = (f32::from(g) / f32::from(BRAND_GREEN.1)).clamp(0.0, 1.0);
+    let over = |v: u8| {
+        (f32::from(v) + 255.0 * (1.0 - alpha))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    let (r, g, b) = (over(r), over(g), over(b));
+    match colour {
+        Color::Rgb(..) => Color::Rgb(r, g, b),
+        Color::Indexed(_) => Color::Indexed(xterm_index((r, g, b))),
+        _ => unreachable!("the colour was decoded from RGB or an index"),
+    }
+}
+
+/// The xterm 6×6×6 cube's levels.
+const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// The RGB an xterm 256-colour entry names.
+fn xterm_rgb(index: u8) -> (u8, u8, u8) {
+    match index {
+        16..=231 => {
+            let n = index - 16;
+            (
+                CUBE[(n / 36) as usize],
+                CUBE[((n / 6) % 6) as usize],
+                CUBE[(n % 6) as usize],
+            )
+        }
+        232..=255 => {
+            let v = 8 + 10 * (index - 232);
+            (v, v, v)
+        }
+        _ => (0, 0, 0),
+    }
+}
+
+/// The xterm entry nearest an RGB colour.
+fn xterm_index((r, g, b): (u8, u8, u8)) -> u8 {
+    let level = |v: u8| {
+        CUBE.iter()
+            .enumerate()
+            .min_by_key(|(_, step)| (**step).abs_diff(v))
+            .map(|(index, _)| index as u8)
+            .unwrap_or(0)
+    };
+    let cube = 16 + 36 * level(r) + 6 * level(g) + level(b);
+    let grey = 232
+        + (((u16::from(r) + u16::from(g) + u16::from(b)) / 3).saturating_sub(8) / 10).min(23) as u8;
+    let distance = |c: (u8, u8, u8)| {
+        let dr = i32::from(c.0) - i32::from(r);
+        let dg = i32::from(c.1) - i32::from(g);
+        let db = i32::from(c.2) - i32::from(b);
+        dr * dr + dg * dg + db * db
+    };
+    if distance(xterm_rgb(cube)) <= distance(xterm_rgb(grey)) {
+        cube
+    } else {
+        grey
+    }
+}
+
 /// Paint the largest mark that fits, centred in `area`.
 ///
 /// For the one caller that paints a frame of its own — the splash — rather
@@ -446,6 +562,57 @@ mod tests {
                 .count();
             assert!(inked > 20, "{variant:?} drew {inked} cells of a mark");
         }
+    }
+
+    /// The About card's plate is white, and the black ground the raster was
+    /// composited over is lifted out of every edge: on white a surviving
+    /// near-black pixel would be a speckle, not an anti-aliased edge.
+    #[test]
+    fn the_white_plate_lifts_the_black_edges() {
+        let lines = on_white(Capability::FULL, (24, 12));
+        assert_eq!(lines.len(), 12);
+        let mut white_ground = 0;
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            if span.style.bg == Some(Color::Rgb(255, 255, 255)) {
+                white_ground += 1;
+            }
+            for colour in [span.style.fg, span.style.bg].into_iter().flatten() {
+                if let Color::Rgb(r, g, b) = colour {
+                    assert!(
+                        g >= 200,
+                        "{:?} is a dark edge on the plate",
+                        Color::Rgb(r, g, b)
+                    );
+                }
+            }
+        }
+        assert!(white_ground > 0, "the plate is not white");
+    }
+
+    /// The indexed variant is lifted too: its dark edge is an xterm entry,
+    /// not an RGB triple, and it must come back as a light entry.
+    #[test]
+    fn the_white_plate_lifts_the_indexed_edges() {
+        let indexed = cap(ColorCap::Color256, GlyphSet::Unicode);
+        let lines = on_white(indexed, (24, 12));
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            for colour in [span.style.fg, span.style.bg].into_iter().flatten() {
+                if let Color::Indexed(index) = colour {
+                    let (_, g, _) = xterm_rgb(index);
+                    assert!(g >= 200, "index {index} is a dark edge on the plate");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_plate_colour_recomposites_an_edge() {
+        assert_eq!(plate_colour(Color::Rgb(2, 7, 5)), Color::Rgb(249, 254, 252));
+        assert_eq!(
+            plate_colour(Color::Rgb(61, 214, 140)),
+            Color::Rgb(61, 214, 140)
+        );
+        assert_eq!(plate_colour(Color::Green), Color::Green);
     }
 
     /// A room fits the largest size it can hold, and a room too small for even

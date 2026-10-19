@@ -194,9 +194,87 @@ pub fn meter_with(
     )
 }
 
+/// Fold prose into rows of at most `width` columns, breaking at a space before
+/// breaking inside a word.
+///
+/// Chinese has no spaces between words: a run with none is folded by display
+/// width, which is the only break available. A word longer than the column is
+/// folded the same way, so a URL or a compound never disappears. Spaces are
+/// the separator; a run of them reads as one, because this is prose and not a
+/// screen.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let mut row = String::new();
+        let mut used = 0usize;
+        for word in line.split_whitespace() {
+            let word_width = columns(word);
+            if word_width > width {
+                if !row.is_empty() {
+                    rows.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+                let mut folded = fold_word(word, width);
+                if let Some(last) = folded.pop() {
+                    rows.extend(folded);
+                    used = columns(&last);
+                    row = last;
+                }
+            } else if row.is_empty() {
+                row.push_str(word);
+                used = word_width;
+            } else if used + 1 + word_width <= width {
+                row.push(' ');
+                row.push_str(word);
+                used += 1 + word_width;
+            } else {
+                rows.push(std::mem::take(&mut row));
+                row.push_str(word);
+                used = word_width;
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// One word too wide for its column, folded by display width.
+fn fold_word(word: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0usize;
+    for ch in word.chars() {
+        let glyph = columns(&ch.to_string());
+        if used + glyph > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push(ch);
+        used += glyph;
+    }
+    rows.push(row);
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prose breaks at a space first and only then inside a word, while a run
+    /// with no spaces (Chinese, a URL, a compound) still folds to the width.
+    #[test]
+    fn prose_wraps_at_words() {
+        assert_eq!(
+            wrap_words("Move the keyboard: pane, rail, assistant", 36),
+            vec!["Move the keyboard: pane, rail,", "assistant"]
+        );
+        assert_eq!(wrap_words("aa bb cc", 5), vec!["aa bb", "cc"]);
+        assert_eq!(wrap_words("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_words("属于助手", 4), vec!["属于", "助手"]);
+        assert_eq!(wrap_words("", 4), vec![""]);
+        assert_eq!(wrap_words("a\nb", 4), vec!["a", "b"]);
+    }
 
     /// Sizes read the way a file manager writes them, and the threshold is the
     /// unit's own: 1023 bytes is bytes, 1024 is a kilobyte.

@@ -24,6 +24,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Alignment;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -303,23 +304,26 @@ pub enum Dialog {
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
 const THEME_TITLE: Entry = ["Theme", "主题"];
-/// The card about the program: its title, and the four facts on it. The
-/// version, the licence and the address come from the crate's own manifest,
-/// so they cannot drift from what was built; only the labels are words.
+/// The card about the program: its title, and the five facts on it. The
+/// version, the licence and the addresses come from the crate's own manifest
+/// and the project's people, so they cannot drift from what was built; only
+/// the labels are words.
 const ABOUT_TITLE: Entry = ["About", "关于"];
 const ABOUT_KEYS: Entry = ["Enter/Esc close", "回车/Esc 关闭"];
 const ABOUT_VERSION: Entry = ["Version", "版本"];
 const ABOUT_LICENSE: Entry = ["Licence", "许可证"];
+const ABOUT_CONTRIBUTOR: Entry = ["Contributor", "贡献者"];
 const ABOUT_PROJECT: Entry = ["Project", "项目"];
 const ABOUT_RENDER: Entry = ["Rendering", "渲染"];
-/// The label column the four facts are padded to, so their values line up
+/// The label column the five facts are padded to, so their values line up
 /// down the card in either language.
 const ABOUT_LABEL: usize = 12;
 
-/// The rows the facts need below the mark: a blank, and one per fact. The mark
-/// is painted only when it leaves these — a card that pushed its own version
-/// number out of a short window would be a logo about itself.
-const ABOUT_FACTS: u16 = 6;
+/// The rows the facts need below the mark: the blank, the name, another
+/// blank, and one row per fact. The mark is painted only when it leaves
+/// these — a card that pushed its own version number out of a short window
+/// would be a logo about itself.
+const ABOUT_FACTS: u16 = 8;
 /// The keys, in the order the window is used: move, keep, back out. "Keep"
 /// rather than "apply" because the preview has already applied — Enter is what
 /// makes the choice outlive the window.
@@ -1379,7 +1383,10 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 // meaning column does not move with the glyph set.
                 let key = theme.fold(key);
                 let meaning = theme.fold(entry(*meaning, lang));
-                for (row, line) in wrap_rows(meaning.as_ref(), room).into_iter().enumerate() {
+                for (row, line) in text::wrap_words(meaning.as_ref(), room)
+                    .into_iter()
+                    .enumerate()
+                {
                     let head = if row == 0 {
                         Span::styled(text::pad_to(key.as_ref(), HELP_KEY_WIDTH), theme.focus())
                     } else {
@@ -1390,7 +1397,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             }
             out.push(Line::default());
             out.extend(
-                wrap_rows(theme.fold(entry(HELP_NOTE, lang)).as_ref(), width.max(1))
+                text::wrap_words(theme.fold(entry(HELP_NOTE, lang)).as_ref(), width.max(1))
                     .into_iter()
                     .map(|row| Line::from(Span::styled(row, theme.muted()))),
             );
@@ -1595,18 +1602,26 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 app.panel_wanted(),
                 10_000,
             );
-            let mark = crate::logo::fitted_lines(
+            // The card sets the mark on a pure-white plate; the splash keeps
+            // its transparent ground. Only this card wants an icon tile.
+            let mark = crate::logo::on_white(
                 app.capability,
                 (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
             );
             if !mark.is_empty() {
-                out.extend(mark);
+                out.extend(mark.into_iter().map(|mut line| {
+                    line.alignment = Some(Alignment::Center);
+                    line
+                }));
                 out.push(Line::default());
             }
-            out.push(Line::from(Span::styled(
-                "linkr".to_string(),
-                theme.accent_strong().add_modifier(Modifier::BOLD),
-            )));
+            out.push(
+                Line::from(Span::styled(
+                    "linkr".to_string(),
+                    theme.accent_strong().add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Center),
+            );
             out.push(Line::default());
             let sep = app.strings().label_separator;
             let fact = |label: Entry, value: String| {
@@ -1618,21 +1633,38 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                     Span::styled(value, theme.text()),
                 ])
             };
-            out.push(fact(ABOUT_VERSION, env!("CARGO_PKG_VERSION").to_string()));
-            out.push(fact(ABOUT_LICENSE, env!("CARGO_PKG_LICENSE").to_string()));
-            out.push(fact(
-                ABOUT_PROJECT,
-                env!("CARGO_PKG_REPOSITORY").to_string(),
-            ));
-            out.push(fact(
-                ABOUT_RENDER,
-                format!(
-                    "{}{}{}",
-                    app.capability.color.name(),
-                    theme.glyphs().dot_sep(),
-                    app.capability.glyphs.name()
+            let facts = vec![
+                fact(ABOUT_VERSION, env!("CARGO_PKG_VERSION").to_string()),
+                fact(ABOUT_LICENSE, env!("CARGO_PKG_LICENSE").to_string()),
+                fact(
+                    ABOUT_CONTRIBUTOR,
+                    "https://github.com/Novice-PG".to_string(),
                 ),
-            ));
+                fact(ABOUT_PROJECT, env!("CARGO_PKG_REPOSITORY").to_string()),
+                fact(
+                    ABOUT_RENDER,
+                    format!(
+                        "{}{}{}",
+                        app.capability.color.name(),
+                        theme.glyphs().dot_sep(),
+                        app.capability.glyphs.name()
+                    ),
+                ),
+            ];
+            // The facts are one block, not five centred lines: their labels
+            // are a column, and a column only stays a column if the block
+            // moves as a whole. Centre the block, leave its insides alone.
+            let block = facts.iter().map(Line::width).max().unwrap_or(0);
+            let pad = width.saturating_sub(block) / 2;
+            out.extend(facts.into_iter().map(|line| {
+                if pad == 0 {
+                    return line;
+                }
+                let mut spans = Vec::with_capacity(line.spans.len() + 1);
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.extend(line.spans);
+                Line::from(spans)
+            }));
             out
         }
     }
@@ -2207,6 +2239,7 @@ mod tests {
     use crate::event::ConnectionState;
     use crate::theme::Theme;
     use crate::transport::testing::{answer, asked_frames, asked_id, asked_includes, MemoryLink};
+    use ratatui::style::Color;
 
     fn text_of(lines: &[Line<'static>]) -> String {
         lines
@@ -2304,6 +2337,7 @@ mod tests {
             ABOUT_KEYS,
             ABOUT_VERSION,
             ABOUT_LICENSE,
+            ABOUT_CONTRIBUTOR,
             ABOUT_PROJECT,
             ABOUT_RENDER,
         ];
@@ -2496,6 +2530,25 @@ mod tests {
             .expect("the longest chord is drawn");
         let row = text_of(std::slice::from_ref(row));
         assert_eq!(&row[12..16], "    ", "{row:?}");
+    }
+
+    /// A meaning wraps at a space before it wraps inside a word: a narrow
+    /// English box once drew `assis` and `tant` on two rows.
+    #[test]
+    fn the_help_does_not_split_english_words() {
+        let app = App {
+            lang: Lang::En,
+            screen: ratatui::layout::Rect::new(0, 0, 100, 24),
+            ..App::default()
+        };
+        let width = crate::ui::overlay::dialog_body_width(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+        );
+        let shown = text_of(&lines(&Dialog::Help(0), &app, width, 30));
+        assert!(!shown.contains("assis\n"), "{shown}");
+        assert!(shown.contains("assistant"), "{shown}");
     }
 
     /// The sheet carries every command in its group, in both languages —
@@ -3704,7 +3757,7 @@ mod tests {
     #[test]
     fn the_about_card_names_what_is_running() {
         let app = App {
-            screen: ratatui::layout::Rect::new(0, 0, 120, 30),
+            screen: ratatui::layout::Rect::new(0, 0, 120, 36),
             ..App::default()
         };
         let height = body_height(&app, &Dialog::About, 60);
@@ -3713,6 +3766,7 @@ mod tests {
         assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_LICENSE")), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_REPOSITORY")), "{shown}");
+        assert!(shown.contains("https://github.com/Novice-PG"), "{shown}");
         assert!(shown.contains("TrueColor"), "{shown}");
         assert!(shown.contains("Unicode"), "{shown}");
         // The mark is on the card — the small one is twelve rows of cells, so
@@ -3734,13 +3788,48 @@ mod tests {
         assert!(bare.contains(env!("CARGO_PKG_VERSION")), "{bare}");
     }
 
+    /// The card's mark is an icon tile: its transparent cells are painted
+    /// pure white, while the art's own lower-half colours stay.
+    #[test]
+    fn the_about_mark_sits_on_a_white_plate() {
+        let app = App {
+            screen: ratatui::layout::Rect::new(0, 0, 120, 36),
+            ..App::default()
+        };
+        let rows = body(&Dialog::About, &app, 60, &app.theme());
+        let white = Some(Color::Rgb(255, 255, 255));
+        let first = rows.first().expect("the card has a mark");
+        assert!(
+            first
+                .spans
+                .iter()
+                .any(|span| span.content == " " && span.style.bg == white),
+            "the mark has no white ground: {:?}",
+            first
+                .spans
+                .iter()
+                .map(|span| (span.content.as_ref(), span.style.bg))
+                .collect::<Vec<_>>()
+        );
+        // A coloured lower half is not repainted: the plate is the ground,
+        // not a wash over the art.
+        assert!(
+            rows.iter().flat_map(|line| line.spans.iter()).any(|span| {
+                span.style.bg.is_some()
+                    && span.style.bg != white
+                    && span.style.bg != Some(Color::Reset)
+            }),
+            "the art's own colours were washed out"
+        );
+    }
+
     /// The card is the same card in either language: the labels translate,
     /// the facts do not.
     #[test]
     fn the_about_card_is_bilingual() {
         let zh = App {
             lang: Lang::Zh,
-            screen: ratatui::layout::Rect::new(0, 0, 120, 30),
+            screen: ratatui::layout::Rect::new(0, 0, 120, 36),
             ..App::default()
         };
         let shown = text_of(&lines(
@@ -3751,6 +3840,7 @@ mod tests {
         ));
         assert!(shown.contains("版本"), "{shown}");
         assert!(shown.contains("许可证"), "{shown}");
+        assert!(shown.contains("贡献者"), "{shown}");
         assert!(shown.contains("项目"), "{shown}");
         assert!(shown.contains("渲染"), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
