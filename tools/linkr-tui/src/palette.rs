@@ -697,7 +697,6 @@ pub enum Level {
 /// it — and a test keeps every action reachable from the menu and listed once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    Focus,
     Connection,
     Terminal,
     App,
@@ -707,20 +706,20 @@ pub enum Section {
 
 impl Section {
     /// The sections in menu order: the order the registry first names each
-    /// category below the always-shown rows.
+    /// category below the always-shown rows, save the app's own window, which
+    /// closes the list — the device's windows stand together above the
+    /// program's own switches.
     pub const ALL: &[Section] = &[
-        Section::Focus,
         Section::Connection,
         Section::Terminal,
-        Section::App,
         Section::Network,
         Section::Agent,
+        Section::App,
     ];
 
     /// The category this window is the actions of.
     fn category(self) -> Entry {
         match self {
-            Section::Focus => CAT_FOCUS,
             Section::Connection => CAT_CONNECTION,
             Section::Terminal => CAT_TERMINAL,
             Section::App => CAT_APP,
@@ -747,15 +746,20 @@ pub enum Row {
     Section(Section),
 }
 
-/// The rows the menu always shows: the window commands, in the registry's own
-/// order. Everything the registry holds below them waits one row down — and
-/// typing searches it all anyway.
+/// The rows the menu always shows: the window commands and the focus rows, in
+/// the registry's own order. Everything the registry holds below them waits one
+/// row down — and typing searches it all anyway.
+///
+/// Both focus rows are here rather than behind a window: once the rail's row
+/// was shown here, the focus window held a single action, and a second level
+/// for one row is a door for a room with one chair.
 const ALWAYS: &[&str] = &[
     "view.terminal",
     "view.diagnostics",
     "view.network",
     "view.assistant",
     "focus.sidebar",
+    "focus.terminal",
 ];
 
 /// The open state of the palette.
@@ -1249,7 +1253,7 @@ mod tests {
     /// one of the rows the menu always shows or held by exactly one section —
     /// nothing is stranded behind a window that never lists it, and nothing is
     /// listed twice — and the windows stand in the order the registry first
-    /// names their categories.
+    /// names their categories, save the app's own, which closes the list.
     #[test]
     fn the_menu_partitions_the_registry() {
         for action in ACTIONS {
@@ -1271,7 +1275,10 @@ mod tests {
             .iter()
             .map(|section| section.category())
             .collect();
-        assert_eq!(seen, windows, "the menu order left the registry's");
+        let mut expected = seen;
+        expected.retain(|category| *category != CAT_APP);
+        expected.push(CAT_APP);
+        assert_eq!(expected, windows, "the menu order left the registry's");
     }
 
     /// A network action asks before it acts on the *link*, and asks nowhere
@@ -1731,9 +1738,9 @@ mod tests {
     }
 
     /// The list the palette opens on is the rows it always shows — the four
-    /// views and the rail — and one row per section for everything else: no
-    /// single "more" to descend through, and the whole menu fits the first
-    /// screen without a scroll.
+    /// views and the two focus rows — and one row per section for everything
+    /// else: no single "more" to descend through, and the whole menu fits the
+    /// first screen without a scroll.
     #[test]
     fn the_palette_opens_on_the_window_commands_and_their_sections() {
         let state = PaletteState::new();
@@ -1804,28 +1811,28 @@ mod tests {
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let state = app.palette.as_ref().expect("the palette is still up");
-        assert_eq!(state.level, Level::Section(Section::Agent));
+        assert_eq!(state.level, Level::Section(Section::App));
         assert!(state.query.is_empty(), "a new window starts unsearched");
         assert_eq!(state.selected, 0);
         assert_eq!(state.window, 0);
         assert_eq!(app.view, view, "a row ran on the way down");
 
         let en = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
-        assert!(en.contains("Ask the assistant"), "not the section: {en}");
+        assert!(en.contains("About linkr"), "not the section: {en}");
         assert!(
             !en.contains("Open terminal view"),
             "the menu leaked into the window: {en}"
         );
         let expected = ACTIONS
             .iter()
-            .filter(|action| Section::Agent.holds(action))
+            .filter(|action| Section::App.holds(action))
             .count();
         assert_eq!(
             rows_in(state.level, &state.query).len(),
             expected,
             "the window is not the section"
         );
-        let back = legend(Lang::En, &Theme::DARK, Level::Section(Section::Agent));
+        let back = legend(Lang::En, &Theme::DARK, Level::Section(Section::App));
         let back = back
             .spans
             .first()
