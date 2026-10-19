@@ -1602,9 +1602,9 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 app.panel_wanted(),
                 10_000,
             );
-            // The card sets the mark on the same pure-white plate the splash
-            // uses: both are icon tiles, and both want the white ground.
-            let mark = crate::logo::on_white(
+            // The mark is transparent on the card as it is on the splash:
+            // the dialog's own ground shows through its empty cells.
+            let mark = crate::logo::fitted_lines(
                 app.capability,
                 (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
             );
@@ -3788,38 +3788,41 @@ mod tests {
         assert!(bare.contains(env!("CARGO_PKG_VERSION")), "{bare}");
     }
 
-    /// The card's mark is an icon tile: its transparent cells are painted
-    /// pure white, while the art's own lower-half colours stay.
+    /// The card's mark is transparent: its empty cells carry no background,
+    /// so the card's own ground shows through; the art's lower-half colours
+    /// stay.
     #[test]
-    fn the_about_mark_sits_on_a_white_plate() {
+    fn the_about_mark_leaves_its_ground_transparent() {
         let app = App {
             screen: ratatui::layout::Rect::new(0, 0, 120, 36),
             ..App::default()
         };
         let rows = body(&Dialog::About, &app, 60, &app.theme());
-        let white = Some(Color::Rgb(255, 255, 255));
         let first = rows.first().expect("the card has a mark");
         assert!(
             first
                 .spans
                 .iter()
-                .any(|span| span.content == " " && span.style.bg == white),
-            "the mark has no white ground: {:?}",
+                .any(|span| span.content == " " && span.style.bg.is_none()),
+            "the mark has no transparent ground: {:?}",
             first
                 .spans
                 .iter()
                 .map(|span| (span.content.as_ref(), span.style.bg))
                 .collect::<Vec<_>>()
         );
-        // A coloured lower half is not repainted: the plate is the ground,
-        // not a wash over the art.
         assert!(
-            rows.iter().flat_map(|line| line.spans.iter()).any(|span| {
-                span.style.bg.is_some()
-                    && span.style.bg != white
-                    && span.style.bg != Some(Color::Reset)
-            }),
-            "the art's own colours were washed out"
+            !rows
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.style.bg == Some(Color::Rgb(255, 255, 255))),
+            "the mark was painted on a white plate"
+        );
+        assert!(
+            rows.iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.style.bg.is_some()),
+            "the art's own colours were lost"
         );
     }
 

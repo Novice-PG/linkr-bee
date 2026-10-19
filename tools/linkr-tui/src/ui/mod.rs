@@ -1038,11 +1038,11 @@ mod tests {
         );
     }
 
-    /// The splash mark is an icon tile too: the first frame a user sees has
-    /// the same white ground as the About card, while the name and hint below
-    /// stay on the terminal's own ground.
+    /// The splash mark is transparent: the first frame a user sees has no
+    /// white plate and no reset rectangle behind the picture, so the
+    /// terminal's own ground shows through just as it does on the About card.
     #[test]
-    fn the_splash_mark_sits_on_a_white_plate() {
+    fn the_splash_mark_has_no_plate() {
         let app = App {
             splash_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
             ..App::default()
@@ -1053,7 +1053,7 @@ mod tests {
             .iter()
             .filter(|cell| cell.bg == ratatui::style::Color::Rgb(255, 255, 255))
             .count();
-        assert!(white > 0, "the splash mark has no white ground");
+        assert_eq!(white, 0, "the splash mark has a white plate");
     }
 
     /// A window too narrow for both halves yields sidebar width to the centre:

@@ -9,9 +9,10 @@
 //! [`crate::logo`] supplies the picture, `linkr` and the version say what is
 //! running — and the theme comes from the capability the whole interface is
 //! drawn with, so a `LINKR_LOGO` or `LINKR_TUI_COLOR` override reaches this
-//! frame the same way it reaches every other one. The mark is an icon tile
-//! here too: it sits on the same pure-white plate as the About card's, while
-//! the name and the hint below stay on the terminal's own ground.
+//! frame the same way it reaches every other one. The mark is transparent,
+//! exactly as it is on the About card: no plate and no colour behind it, so
+//! the terminal's own ground shows through, and the name and the hint below
+//! sit on that same ground.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Modifier;
@@ -33,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     // Five rows of text hang under the mark — a blank, the name, the label, a
     // blank and the hint — and the mark only takes the room they leave it.
     let mut lines: Vec<Line<'static>> =
-        logo::on_white(app.capability, (area.width, area.height.saturating_sub(5)));
+        logo::fitted_lines(app.capability, (area.width, area.height.saturating_sub(5)));
     if !lines.is_empty() {
         lines.push(Line::default());
     }
