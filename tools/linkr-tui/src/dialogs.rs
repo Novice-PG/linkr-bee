@@ -1569,8 +1569,12 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
         // with, so none of them can drift from what is actually running.
         Dialog::About => {
             let mut out: Vec<Line<'static>> = Vec::new();
-            let room =
-                crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, 10_000);
+            let room = crate::ui::overlay::dialog_body_room(
+                app.screen,
+                app.sidebar_visible,
+                app.panel_wanted(),
+                10_000,
+            );
             let mark = crate::logo::fitted_lines(
                 app.capability,
                 (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
@@ -1716,12 +1720,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // the box, so the scroll counts the rows the paint will draw
                 // — through the painter's helpers, so the two cannot
                 // disagree about how tall the box is.
-                let width =
-                    crate::ui::overlay::dialog_body_width(app.screen, app.sidebar_visible) as usize;
+                let width = crate::ui::overlay::dialog_body_width(
+                    app.screen,
+                    app.sidebar_visible,
+                    app.panel_wanted(),
+                ) as usize;
                 let spans = pick.line_spans(width.max(1), app.glyph());
                 let rows = spans.iter().sum::<usize>().max(1);
-                let room =
-                    crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+                let room = crate::ui::overlay::dialog_body_room(
+                    app.screen,
+                    app.sidebar_visible,
+                    app.panel_wanted(),
+                    rows,
+                );
                 pick.follow(room, &spans);
                 app.dialog = Some(Dialog::DevicePick(pick));
             }
@@ -1953,7 +1964,12 @@ fn scrolled(app: &App, dialog: Dialog, offset: usize, key: KeyEvent) -> Option<D
 /// scroll is left where it was. The paging keys are the user moving the window
 /// themselves, so they never come through here.
 fn followed(app: &App, key: KeyCode, offset: usize, rows: usize) -> usize {
-    let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+    let room = crate::ui::overlay::dialog_body_room(
+        app.screen,
+        app.sidebar_visible,
+        app.panel_wanted(),
+        rows,
+    );
     if room == 0 {
         // No paint has said how tall the window is (a headless test, the first
         // tick), or the frame is too small for a modal at all: the scroll
@@ -2003,7 +2019,12 @@ fn cheat_line_of(selected: usize) -> usize {
 /// in place of its field.
 fn cheat_scrolled(app: &App, selected: usize, scroll: usize) -> usize {
     let rows: usize = CHEAT_GROUPS.iter().map(|(_, items)| items.len() + 2).sum();
-    let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+    let room = crate::ui::overlay::dialog_body_room(
+        app.screen,
+        app.sidebar_visible,
+        app.panel_wanted(),
+        rows,
+    );
     if room == 0 {
         // No paint has said how tall the window is (a headless test, the first
         // tick), or the frame is too small for a modal at all: the scroll
@@ -2540,7 +2561,12 @@ mod tests {
         assert_eq!(scroll(&app), 0, "the sheet opens on its first row");
         handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         let rows: usize = CHEAT_GROUPS.iter().map(|(_, items)| items.len() + 2).sum();
-        let room = crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
+        let room = crate::ui::overlay::dialog_body_room(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+            rows,
+        );
         assert!(room > 0, "the test frame is big enough for a modal");
         let line = cheat_line_of(cheat_count() - 1);
         assert!(

@@ -2824,6 +2824,10 @@ impl App {
             return;
         }
         let glyphs = self.capability.glyphs;
+        // The window's own arithmetic, taken before the picker is borrowed:
+        // `panel_wanted` reads the app that `&mut self.dialog` is about to
+        // hold, and a modal's geometry is the frame's, not the picker's.
+        let (screen, sidebar, panel) = (self.screen, self.sidebar_visible, self.panel_wanted());
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
             pick.devices = devices;
             pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
@@ -2833,12 +2837,10 @@ impl App {
             // The window's own arithmetic, asked the way the key handler asks
             // it: a row the box is too narrow for is more than one row tall,
             // and the scroll counts the rows the paint will draw.
-            let width =
-                crate::ui::overlay::dialog_body_width(self.screen, self.sidebar_visible) as usize;
+            let width = crate::ui::overlay::dialog_body_width(screen, sidebar, panel) as usize;
             let spans = pick.line_spans(width.max(1), glyphs);
             let rows = spans.iter().sum::<usize>().max(1);
-            let room =
-                crate::ui::overlay::dialog_body_room(self.screen, self.sidebar_visible, rows);
+            let room = crate::ui::overlay::dialog_body_room(screen, sidebar, panel, rows);
             pick.follow(room, &spans);
         }
     }

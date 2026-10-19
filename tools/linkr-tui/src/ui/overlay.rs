@@ -8,10 +8,12 @@
 //! the same whether or not an overlay is up, so the region under the box is
 //! cleared first and everything else is left exactly where it was.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::{dialogs, palette};
@@ -50,9 +52,12 @@ const MAX_WIDTH: u16 = 96;
 ///
 /// A modal is centred in the *centre column*, not over the whole frame: the
 /// rail, the counters and the key hints stay visible, which is the point of a
-/// palette that can be read while the session is still running.
+/// palette that can be read while the session is still running. The docked
+/// assistant panel yields the modal's rows the way the rail does: with the
+/// panel up, the centre column is what is left of it, and the box is centred
+/// in that.
 pub fn paint(frame: &mut Frame, app: &App, area: Rect) {
-    let region = super::regions(area, app.sidebar_visible).centre;
+    let region = super::regions_for(area, app.sidebar_visible, app.panel_wanted()).centre;
     if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
         return;
     }
@@ -76,6 +81,32 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
         y: area.y + (area.height - height) / 2,
         width,
         height,
+    }
+}
+
+/// Blank the half of a wide character that the modal's left edge would split.
+///
+/// A character that begins in the column left of `rect` is drawn by the
+/// terminal across both of its cells. The box's `Clear` then writes into the
+/// glyph's tail cell, the border over that — and the terminal keeps the glyph
+/// and drops what was written into the tail, so the box's edge breaks and half
+/// a character hangs beside it. The report was the empty pane's hint beside
+/// the device picker: its first character sat exactly there, and the row it
+/// crossed was the legend's, which is what made it read as `Esc` overhanging
+/// the border.
+///
+/// Half a character is unreadable anyway, so the box may have it; a whole
+/// border is not, so the half outside is blanked before the box is cleared.
+/// The device's own text gets the same treatment wherever it meets an edge.
+fn release_left_edge(buf: &mut Buffer, rect: Rect) {
+    if rect.x == 0 {
+        return;
+    }
+    for y in rect.top()..rect.bottom() {
+        let x = rect.x - 1;
+        if UnicodeWidthStr::width(buf[(x, y)].symbol()) >= 2 {
+            buf[(x, y)].set_symbol(" ");
+        }
     }
 }
 
@@ -115,11 +146,12 @@ fn wanted(area: Rect, share: u16, max_height: u16) -> (u16, u16) {
 ///
 /// For the one caller that has to ask *between* two paints: the settings
 /// window follows its caret, and a key is handled outside any frame. The
-/// arithmetic is `paint_dialog`'s own, through the same two helpers. Zero
-/// means the modal is not painted at this size — the region is below the
-/// minimum, or no frame has been drawn yet — and the caller keeps its scroll.
-pub fn dialog_body_room(screen: Rect, sidebar: bool, body_rows: usize) -> usize {
-    let region = super::regions(screen, sidebar).centre;
+/// arithmetic is `paint_dialog`'s own, through the same two helpers and the
+/// same regions. Zero means the modal is not painted at this size — the
+/// region is below the minimum, or no frame has been drawn yet — and the
+/// caller keeps its scroll.
+pub fn dialog_body_room(screen: Rect, sidebar: bool, panel: bool, body_rows: usize) -> usize {
+    let region = super::regions_for(screen, sidebar, panel).centre;
     if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
         return 0;
     }
@@ -133,8 +165,8 @@ pub fn dialog_body_room(screen: Rect, sidebar: bool, body_rows: usize) -> usize 
 /// will be wrapped at before the frame that wraps it is painted. The
 /// arithmetic is `paint_dialog`'s own; zero means the modal is not painted at
 /// this size, the same as the room above.
-pub fn dialog_body_width(screen: Rect, sidebar: bool) -> u16 {
-    let region = super::regions(screen, sidebar).centre;
+pub fn dialog_body_width(screen: Rect, sidebar: bool, panel: bool) -> u16 {
+    let region = super::regions_for(screen, sidebar, panel).centre;
     if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
         return 0;
     }
@@ -152,6 +184,7 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     let body = dialogs::body_height(app, dialog, width.saturating_sub(2));
     let height = box_height(body, ceiling);
     let rect = centred(area, width, height);
+    release_left_edge(frame.buffer_mut(), rect);
     frame.render_widget(Clear, rect);
 
     let block = theme.overlay_block(dialogs::title(dialog, app.lang));
@@ -195,6 +228,7 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
     let visible = palette::MAX_VISIBLE.min(room).max(1).min(rows.len().max(1));
     let (width, _) = wanted(area, PALETTE_WIDTH_PERCENT, area.height);
     let rect = centred(area, width, visible as u16 + CHROME_ROWS);
+    release_left_edge(frame.buffer_mut(), rect);
     frame.render_widget(Clear, rect);
 
     let block = theme.overlay_block(palette::panel_title(app.lang));
@@ -668,5 +702,137 @@ mod tests {
             .map(|line| line.chars().take(ui::SIDEBAR_TEXT_WIDTH as usize).collect())
             .collect();
         assert_eq!(without, with, "the rail is painted identically");
+    }
+
+    /// A glyph the modal's edge would split is released before the box is
+    /// cleared; one the edge does not reach is left exactly where it was.
+    #[test]
+    fn a_glyph_left_of_the_box_is_released_and_one_further_out_is_not() {
+        let mut buf = Buffer::empty(area(12, 3));
+        // Its tail lands in the box's first column.
+        buf[(3, 0)].set_symbol("中");
+        // A narrow glyph: the box does not touch it.
+        buf[(2, 1)].set_symbol("x");
+        // Whole, one column short of the edge: it stays.
+        buf[(1, 2)].set_symbol("中");
+        release_left_edge(&mut buf, Rect::new(4, 0, 6, 3));
+        assert_eq!(buf[(3, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 1)].symbol(), "x");
+        assert_eq!(buf[(1, 2)].symbol(), "中");
+    }
+
+    /// The report's geometry, made deliberate: a device line whose wide glyph
+    /// begins in the column left of the box's edge — the empty pane's hint
+    /// beside the device picker, except the device paints it. The box blanks
+    /// that half before it clears its rows, so its edge is drawn whole on
+    /// every row it covers, and the glyphs it does not cover are untouched.
+    #[test]
+    fn the_box_releases_the_glyph_its_edge_would_split() {
+        let mut app = App {
+            lang: Lang::En,
+            assistant_panel: false,
+            ..App::default()
+        };
+        // The box's own arithmetic, mirrored: the same helpers `paint_dialog`
+        // puts the edges where they are. The left column is what matters
+        // here, and it does not depend on the body.
+        let screen = area(205, 30);
+        let region = crate::ui::regions_for(screen, true, false).centre;
+        let (width, ceiling) = wanted(region, DIALOG_WIDTH_PERCENT, region.height);
+        let edge = centred(region, width, MIN_HEIGHT).x;
+        assert_eq!(edge, 69, "the report's frame, and its edge");
+
+        // The pane's text starts in the centre column's first cell, so the
+        // glyph that meets the edge begins at the column just left of it.
+        let mut text = String::new();
+        for _ in 0..20 {
+            text.push_str(&" ".repeat((edge - 1 - region.x) as usize));
+            text.push('中');
+            text.push_str("\r\n");
+        }
+        app.terminal.push_text(&text);
+        let before = ui::render_buffer(&app, 205, 30).expect("a frame");
+        let glyphs: Vec<u16> = (0..30u16)
+            .filter(|&y| before[(edge - 1, y)].symbol() == "中")
+            .collect();
+        assert!(!glyphs.is_empty(), "the text landed in the edge's column");
+
+        crate::dialogs::open_help(&mut app);
+        let dialog = app.dialog.as_ref().expect("the help is up");
+        let body = dialogs::body_height(&app, dialog, width.saturating_sub(2));
+        let rect = centred(region, width, box_height(body, ceiling));
+
+        let after = ui::render_buffer(&app, 205, 30).expect("a frame");
+        let covered: Vec<u16> = glyphs
+            .iter()
+            .copied()
+            .filter(|&y| rect.top() <= y && y < rect.bottom())
+            .collect();
+        assert!(!covered.is_empty(), "the box covers rows the text is on");
+        for y in covered {
+            assert_eq!(after[(edge - 1, y)].symbol(), " ", "row {y}");
+            let corner = if y == rect.top() {
+                "╭"
+            } else if y == rect.bottom() - 1 {
+                "╰"
+            } else {
+                "│"
+            };
+            assert_eq!(after[(edge, y)].symbol(), corner, "the edge at row {y}");
+        }
+        let above: Vec<u16> = glyphs.iter().copied().filter(|&y| y < rect.top()).collect();
+        assert!(!above.is_empty(), "some rows stay above the box");
+        for y in above {
+            assert_eq!(after[(edge - 1, y)].symbol(), "中", "row {y} is free");
+        }
+    }
+
+    /// A modal gives the docked panel its column the way it gives the rail
+    /// one: the box is centred in what the panel left of the centre column,
+    /// so it never covers the assistant — and the report's collision cannot
+    /// happen from this side either, because the whole hint is under the box.
+    #[test]
+    fn a_modal_yields_the_panels_column() {
+        let mut app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        assert!(app.panel_wanted(), "the panel is docked beside the console");
+
+        // The report's frame, and the hint's first character in it: found
+        // rather than guessed, so the assertion below is about this glyph.
+        let before = ui::render_buffer(&app, 205, 46).expect("a frame");
+        let row = (0..46u16)
+            .find(|&y| before[(68, y)].symbol() == "在")
+            .expect("the hint's first character, at the report's column");
+
+        crate::dialogs::open_help(&mut app);
+        let screen = area(205, 46);
+        let regions = crate::ui::regions_for(screen, true, true);
+        assert!(regions.assistant.width > 0, "the panel has a column here");
+        let (width, _) = wanted(regions.centre, DIALOG_WIDTH_PERCENT, regions.centre.height);
+        let dialog = app.dialog.as_ref().expect("the help is up");
+        let body = dialogs::body_height(&app, dialog, width.saturating_sub(2));
+        let rect = centred(
+            regions.centre,
+            width,
+            box_height(body, ceiling_height(regions.centre.height)),
+        );
+        assert_eq!(rect.x, 42, "the box is centred in the narrowed centre");
+        assert!(
+            rect.right() <= regions.assistant.x,
+            "the box ends where the panel begins"
+        );
+        assert!(
+            rect.top() <= row && row < rect.bottom(),
+            "the box covers the hint's row"
+        );
+
+        let after = ui::render_buffer(&app, 205, 46).expect("a frame");
+        assert_eq!(after[(68, row)].symbol(), " ", "the hint is under the box");
+        // The paint agrees with the arithmetic: the box's own corners, in the
+        // panel-aware column.
+        assert_eq!(after[(rect.x, rect.y)].symbol(), "╭");
+        assert_eq!(after[(rect.right() - 1, rect.y)].symbol(), "╮");
     }
 }
