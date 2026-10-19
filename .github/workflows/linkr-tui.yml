@@ -68,6 +68,13 @@ jobs:
           cargo --version
           rustc --version
 
+      # The licence page and the shipped notice are generated from Cargo.lock
+      # and cargo metadata. A dependency bump that forgets to regenerate them
+      # is a stale compliance artefact, so the gate fails here rather than
+      # after the archives are built.
+      - name: Check the generated licence page
+        run: python3 dev/gen-licenses.py --check
+
       # What the tests need before they run, so the gate measures the suite
       # rather than the runner: every test binary links the host's libdbus,
       # and the completion tests are written for fish and zsh — they skip

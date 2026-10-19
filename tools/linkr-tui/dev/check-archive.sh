@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Read one release archive back and say whether it is the archive it claims to
-# be: a folder named after the archive holding the binary and the two documents
-# it ships with, and nothing else.
+# be: a folder named after the archive holding the binary and the three
+# documents it ships with, and nothing else.
 #
 # Usage:
 #   dev/check-archive.sh <archive>
@@ -94,7 +94,8 @@ case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
 # ways because `tar` lists a directory with its trailing slash and a `find`
 # over an extracted zip does not.
 allowed=$(printf '%s\n' "$name" "$name/" "$name/$bin" "$name/$bin.exe" \
-                        "$name/README.md" "$name/LICENSE")
+                        "$name/README.md" "$name/LICENSE" \
+                        "$name/THIRD_PARTY_LICENSES.md")
 for entry in $listing; do
   printf '%s\n' "$allowed" | grep -qx "$entry" || {
     echo "unexpected entry in the archive: $entry" >&2

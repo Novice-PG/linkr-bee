@@ -19,6 +19,7 @@ pub mod exec;
 pub mod hangup;
 pub mod i18n;
 pub mod lan_token_store;
+pub mod licenses;
 pub mod logo;
 pub mod palette;
 pub mod private_file;

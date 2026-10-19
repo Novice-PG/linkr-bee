@@ -50,7 +50,8 @@ three rules:
 | `vt/mod.rs` | The emulator over the screen: which private modes do what, the alternate screen, the title, and the few sequences a host must *answer* |
 | `views/terminal.rs` | The pane: a streaming UTF-8 decoder and a streaming parser in front of the emulator, plus the painter |
 | `palette.rs` | The `Ctrl+P` command palette: twenty actions, each one a function pointer so the palette runs the same code the chord does |
-| `dialogs.rs` | Help, the notice log, the guarded-command confirmation, and the prompts that ask for a file, a network name, a password or an upload URL |
+| `dialogs.rs` | Help, the notice log, the guarded-command confirmation, the prompts that ask for a file, a network name, a password or an upload URL, the About card and the component page behind it |
+| `licenses.rs` | The third-party notice: the direct Rust dependencies the About window shows, the contributors, and the full generated `THIRD_PARTY_LICENSES.md` that `--licenses` prints |
 | `protocol.rs` | The management service's framing: request and response headers, the version and capability handshake, the Reliable UART scheme, and the reassembler that puts a fragmented answer back together |
 | `device.rs` | The request/response bookkeeping over that service: one question at a time, an answer claimed only by the id that asked for it, and a timeout that reports a slow bridge as slow rather than as silent |
 | `accessory.rs` | The bridge's own settings as commands and as parsed data: `@u=…`, `@w=…`, `@d=…`, their limits, and the redaction that keeps a password off every screen but the wire |
@@ -153,6 +154,23 @@ discipline wants, and `--enter` names what Enter actually puts on the wire
 (`raw`, `cr`, `lf`, `crlf`) — a target that wants `\r` and is given `\n`
 simply never answers, and the symptom looks exactly like a dead link.
 
+## Licences and third-party components
+
+`About` (`L`) lists the direct Rust crates the binary links, their licences and
+the project's contributors, and says where the full closure lives. The complete
+normal-dependency list is generated from `Cargo.lock` and `cargo metadata` into
+`THIRD_PARTY_LICENSES.md`, which is shipped in every archive and printed without
+a terminal:
+
+```sh
+linkr --licenses
+```
+
+The generator is `dev/gen-licenses.py`; CI runs it with `--check`, so a
+dependency bump that forgets to regenerate the notice fails the gates instead
+of shipping a stale page. Build and development dependencies are deliberately
+not listed: they are not linked into the released binary.
+
 ## Keeping a session open
 
 `--serve` holds one link and answers requests on standard input, one JSON object
@@ -202,6 +220,7 @@ is the caller hanging up, and the session exits `0`.
 ## Gates — all four must pass before a commit
 
 ```sh
+python3 dev/gen-licenses.py --check                 # the licence page is current
 cargo fmt --check                                   # style
 cargo clippy --all-targets -- -D warnings           # lints, warnings are errors
 cargo test                                          # headless
@@ -264,7 +283,8 @@ large, and everything in them is reproducible from the source.
 ## Releasing
 
 `dev/package.sh <target>` builds the release binary and lays the archive out —
-the binary, this README and the licence — in the format the target's platform
+the binary, this README, the licence and `THIRD_PARTY_LICENSES.md` — in the
+format the target's platform
 reaches for: a `.zip` on Windows, a `.dmg` **and** a `.tar.gz` on macOS (a volume
 image is a heavy thing to mount on a machine that only wants the binary), a
 `.tar.gz` on Linux. The Linux packages are `dev/package-deb.sh <target>`, in the

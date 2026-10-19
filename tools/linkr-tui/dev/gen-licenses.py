@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Generate the third-party component page for the host terminal.
+
+The About window shows the direct Rust dependencies and the contributors. The
+full closure of crates linked into a release is too long for that window, so it
+lives in THIRD_PARTY_LICENSES.md, which is shipped beside the binary and is what
+`linkr --licenses` prints. Both artefacts are generated from the same
+`cargo metadata` run, and CI runs this script with `--check`, so a dependency
+bump cannot leave the shipped notice naming an old version.
+
+Why Python: this is a development-time generator, not a runtime dependency.
+The crate already keeps its release tooling in `dev/` in Python and POSIX shell;
+this follows that convention. `cargo metadata` is the source of truth for the
+versions and licences, exactly as `node tools/gen_about.mjs` is for the web
+About page.
+
+Usage:
+    python3 dev/gen-licenses.py
+    python3 dev/gen-licenses.py --check
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+CRATE_DIR = Path(__file__).resolve().parent.parent
+DATA_FILE = CRATE_DIR / "src" / "licenses_data.rs"
+NOTICE_FILE = CRATE_DIR / "THIRD_PARTY_LICENSES.md"
+
+PROJECT_NAME = "Linkr Bee Terminal"
+# Kept in step with tools/gen_about.mjs. The real source is `git shortlog`, but
+# CI checks out with depth 1, so a generated-from-history list would be empty
+# there. Add a name when a new author lands their first commit.
+CONTRIBUTORS = [
+    "Novice-PG",
+    "xzl",
+    "HarryLoong",
+    "dfsjklw",
+    "Anupam Mediratta",
+    "rock",
+]
+
+
+def cargo_metadata() -> dict:
+    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=CRATE_DIR,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        sys.exit("error: cargo was not found on PATH")
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            sys.stderr.write(error.stderr)
+        sys.exit("error: cargo metadata failed")
+    return json.loads(result.stdout)
+
+
+def normalize_url(value: str | None, name: str) -> str:
+    """A source URL a person can read, rather than Cargo's git spelling."""
+    url = (value or "").strip()
+    if not url:
+        return f"https://crates.io/crates/{name}"
+    if url.startswith("git+"):
+        url = url[4:]
+    if url.startswith("git://"):
+        url = "https://" + url[6:]
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.rstrip("/")
+
+
+def package_component(package: dict, direct: bool) -> dict:
+    license_id = (package.get("license") or "").strip()
+    if not license_id:
+        license_id = "see licence file" if package.get("license_file") else "unknown"
+    return {
+        "name": package["name"],
+        "version": package["version"],
+        "license": license_id,
+        "url": normalize_url(package.get("repository"), package["name"]),
+        "direct": direct,
+    }
+
+
+def normal_closure(meta: dict) -> tuple[dict, set[str], list[dict]]:
+    """The normal-dependency closure of the crate, across every target.
+
+    Build and dev dependencies are deliberately excluded: they are not linked
+    into the binary a user downloads. A dependency reached through both a
+    normal and a build edge is included, because the normal edge is enough.
+    """
+    packages = {package["id"]: package for package in meta["packages"]}
+    root_id = meta["resolve"]["root"]
+    if not root_id:
+        sys.exit("error: cargo metadata named no workspace root")
+    root = packages[root_id]
+    nodes = {node["id"]: node for node in meta["resolve"]["nodes"]}
+
+    direct_names = {
+        dependency["name"]
+        for dependency in root.get("dependencies", [])
+        if dependency.get("kind") in (None, "normal")
+    }
+
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for dependency in nodes[current].get("deps", []):
+            kinds = {kind.get("kind") for kind in dependency.get("dep_kinds", [])}
+            if None in kinds or "normal" in kinds:
+                stack.append(dependency["pkg"])
+
+    components = [
+        package_component(packages[package_id], packages[package_id]["name"] in direct_names)
+        for package_id in seen
+        if package_id != root_id
+    ]
+    components.sort(key=lambda item: (item["name"].lower(), item["version"]))
+    return root, seen, components
+
+
+def rust_string(value: str) -> str:
+    return '"' + (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    ) + '"'
+
+
+def render_data(direct: list[dict], total: int) -> str:
+    lines = [
+        "// Generated by dev/gen-licenses.py — edit the generator, not this file.",
+        "//",
+        "// This is the direct-dependency half of THIRD_PARTY_LICENSES.md: the",
+        "// components the About window shows. The full transitive list lives in",
+        "// that file and is what `linkr --licenses` prints.",
+        "",
+        "pub const COMPONENTS: &[Component] = &[",
+    ]
+    for component in direct:
+        lines.extend(
+            [
+                "    Component {",
+                f"        name: {rust_string(component['name'])},",
+                f"        version: {rust_string(component['version'])},",
+                f"        license: {rust_string(component['license'])},",
+                f"        url: {rust_string(component['url'])},",
+                "    },",
+            ]
+        )
+    lines.extend(
+        [
+            "];",
+            "",
+            "pub const CONTRIBUTORS: &[&str] = &[",
+        ]
+    )
+    lines.extend(f"    {rust_string(name)}," for name in CONTRIBUTORS)
+    lines.extend(
+        [
+            "];",
+            "",
+            "/// The number of Rust crates in the full closure, direct included.",
+            f"pub const TOTAL: usize = {total};",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def markdown_cell(value: str) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def render_notice(root: dict, components: list[dict], contributors: list[str]) -> str:
+    direct = [component for component in components if component["direct"]]
+    transitive = [component for component in components if not component["direct"]]
+    repository = (root.get("repository") or "https://github.com/radxa/linkr-bee").rstrip("/")
+    license_id = root.get("license") or "Apache-2.0"
+    lines = [
+        "# Third-party components",
+        "",
+        f"{PROJECT_NAME} {root['version']} is licensed under {license_id}.",
+        "",
+        "This file is generated from the crate's `Cargo.lock` and `cargo metadata`.",
+        "It lists the Rust crates in the normal-dependency closure across the targets",
+        "this crate builds for. Build and development dependencies are not linked into",
+        "the released binary and are therefore not listed.",
+        "",
+        f"Project repository: {repository}",
+        f"Project licence: {repository}/blob/main/LICENSE",
+        "",
+        "## Direct dependencies",
+        "",
+        "| Component | Version | Licence | Source |",
+        "| --- | --- | --- | --- |",
+    ]
+    for component in direct:
+        lines.append(
+            "| {name} | {version} | {license} | {url} |".format(
+                name=markdown_cell(component["name"]),
+                version=markdown_cell(component["version"]),
+                license=markdown_cell(component["license"]),
+                url=markdown_cell(component["url"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            f"## Transitive dependencies ({len(transitive)})",
+            "",
+            "| Component | Version | Licence | Source |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for component in transitive:
+        lines.append(
+            "| {name} | {version} | {license} | {url} |".format(
+                name=markdown_cell(component["name"]),
+                version=markdown_cell(component["version"]),
+                license=markdown_cell(component["license"]),
+                url=markdown_cell(component["url"]),
+            )
+        )
+    lines.extend(["", "## Contributors", ""])
+    lines.extend(f"- {name}" for name in contributors)
+    lines.extend(
+        [
+            "",
+            "## Licence texts",
+            "",
+            "Each component remains the property of its authors and is distributed under",
+            "the licence named above. The full licence text is available in that",
+            "component's source distribution. The project's own licence is in `LICENSE`.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_or_check(data: str, notice: str, check: bool) -> int:
+    if check:
+        stale = []
+        for path, expected in ((DATA_FILE, data), (NOTICE_FILE, notice)):
+            try:
+                current = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                current = None
+            if current != expected:
+                stale.append(path)
+        if stale:
+            for path in stale:
+                print(f"stale: {path.relative_to(CRATE_DIR)}", file=sys.stderr)
+            print(
+                "run `python3 dev/gen-licenses.py` and commit the result",
+                file=sys.stderr,
+            )
+            return 1
+        print("licence data is current")
+        return 0
+
+    DATA_FILE.write_text(data, encoding="utf-8")
+    NOTICE_FILE.write_text(notice, encoding="utf-8")
+    print(f"wrote {DATA_FILE.relative_to(CRATE_DIR)}")
+    print(f"wrote {NOTICE_FILE.relative_to(CRATE_DIR)}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv not in ([], ["--check"]):
+        print("usage: dev/gen-licenses.py [--check]", file=sys.stderr)
+        return 2
+    meta = cargo_metadata()
+    root, _seen, components = normal_closure(meta)
+    direct = [component for component in components if component["direct"]]
+    data = render_data(direct, len(components))
+    notice = render_notice(root, components, CONTRIBUTORS)
+    return write_or_check(data, notice, argv == ["--check"])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

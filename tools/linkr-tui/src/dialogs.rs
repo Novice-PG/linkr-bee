@@ -298,8 +298,13 @@ pub enum Dialog {
     /// The conversations this device remembers, waiting for a pick to delete.
     ChatPick(ChatPick),
     /// The card about the program itself: the mark, the version, the licence
-    /// and the project's address. Nothing to answer, so any key puts it away.
+    /// and the project's address. Nothing to answer, so any key puts it away —
+    /// except `L`, which opens the component page.
     About,
+    /// The third-party components and the people who built the program,
+    /// scrolled to a row. The summary lives in About; this is the page a user
+    /// opens from it, and the command line's `--licenses` is its full tail.
+    Licenses(usize),
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
@@ -309,13 +314,18 @@ const THEME_TITLE: Entry = ["Theme", "主题"];
 /// and the project's people, so they cannot drift from what was built; only
 /// the labels are words.
 const ABOUT_TITLE: Entry = ["About", "关于"];
-const ABOUT_KEYS: Entry = ["Enter/Esc close", "回车/Esc 关闭"];
+const ABOUT_KEYS: Entry = [
+    "L components · Enter/Esc close",
+    "L 开源组件 · 回车/Esc 关闭",
+];
 const ABOUT_VERSION: Entry = ["Version", "版本"];
 const ABOUT_LICENSE: Entry = ["Licence", "许可证"];
 const ABOUT_CONTRIBUTOR: Entry = ["Contributor", "贡献者"];
 const ABOUT_PROJECT: Entry = ["Project", "项目"];
 const ABOUT_RENDER: Entry = ["Rendering", "渲染"];
-/// The label column the five facts are padded to, so their values line up
+const ABOUT_COMPONENTS: Entry = ["Components", "开源组件"];
+const ABOUT_COMPONENTS_VALUE: Entry = ["{} direct · {} total (L)", "直接 {} · 共 {}（L）"];
+/// The label column the six facts are padded to, so their values line up
 /// down the card in either language.
 const ABOUT_LABEL: usize = 12;
 
@@ -323,7 +333,24 @@ const ABOUT_LABEL: usize = 12;
 /// blank, and one row per fact. The mark is painted only when it leaves
 /// these — a card that pushed its own version number out of a short window
 /// would be a logo about itself.
-const ABOUT_FACTS: u16 = 8;
+const ABOUT_FACTS: u16 = 9;
+
+const LICENSES_TITLE: Entry = [" Open-source components ", " 开源组件 "];
+const LICENSES_KEYS: Entry = [
+    "↑↓ scroll · PgUp/PgDn page · Home/End · Esc close",
+    "↑↓ 滚动 · PgUp/PgDn 翻页 · Home/End · Esc 关闭",
+];
+const LICENSES_DIRECT: Entry = ["Direct dependencies ({})", "直接依赖（{}）"];
+const LICENSES_TRANSITIVE: Entry = [
+    "Plus {} transitive crates; the full list is in linkr --licenses and THIRD_PARTY_LICENSES.md.",
+    "另有 {} 个传递依赖；完整列表见 linkr --licenses 和 THIRD_PARTY_LICENSES.md。",
+];
+const LICENSES_CONTRIBUTORS: Entry = ["Contributors", "贡献者"];
+const LICENSES_LICENSE: Entry = ["Project licence", "项目许可证"];
+const LICENSES_NOTE: Entry = [
+    "Licence texts are in each component's source; the project licence is in LICENSE.",
+    "许可证全文见各组件源码；本项目许可证见 LICENSE。",
+];
 /// The keys, in the order the window is used: move, keep, back out. "Keep"
 /// rather than "apply" because the preview has already applied — Enter is what
 /// makes the choice outlive the window.
@@ -806,6 +833,7 @@ impl Dialog {
             Dialog::Help(offset)
             | Dialog::Notices(offset)
             | Dialog::Settings(offset)
+            | Dialog::Licenses(offset)
             | Dialog::Cheat(Cheat { scroll: offset, .. }) => *offset,
             // The list's window is its own: the cursor walks the devices and
             // the scroll keeps up with it, which a dialog-wide offset has no
@@ -835,6 +863,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::ThemePick(_) => entry(THEME_TITLE, lang),
         Dialog::ChatPick(_) => entry(CHAT_PICK_TITLE, lang),
         Dialog::About => entry(ABOUT_TITLE, lang),
+        Dialog::Licenses(_) => entry(LICENSES_TITLE, lang),
     }
 }
 
@@ -860,6 +889,7 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         Dialog::ThemePick(_) => entry(THEME_KEYS, lang),
         Dialog::ChatPick(_) => entry(CHAT_PICK_KEYS, lang),
         Dialog::About => entry(ABOUT_KEYS, lang),
+        Dialog::Licenses(_) => entry(LICENSES_KEYS, lang),
     };
     // The legend is the interface's own line: ` · ` between two keys, `↑↓` in
     // one, `…` after a verb — all folded for a terminal whose font is ASCII.
@@ -989,6 +1019,15 @@ pub fn toggle_theme_pick(app: &mut App) {
 /// see anywhere else: what this is, and where to say something about it.
 pub fn open_about(app: &mut App) {
     raise(app, Dialog::About);
+}
+
+/// Raise the component page, at its first row.
+///
+/// The About card and the palette both open it; `L` on the card is the short
+/// road. It is a plain scrolled document, so the keyboard's paging keys are the
+/// same ones the help and the notice log answer to.
+pub fn open_licenses(app: &mut App) {
+    raise(app, Dialog::Licenses(0));
 }
 
 /// Ask which network to join. The password is asked for next, by the prompt
@@ -1651,6 +1690,16 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                         app.capability.glyphs.name()
                     ),
                 ),
+                fact(
+                    ABOUT_COMPONENTS,
+                    fill(
+                        entry(ABOUT_COMPONENTS_VALUE, lang),
+                        &[
+                            crate::licenses::COMPONENTS.len().to_string(),
+                            crate::licenses::TOTAL.to_string(),
+                        ],
+                    ),
+                ),
             ];
             // The facts are one block, not five centred lines: their labels
             // are a column, and a column only stays a column if the block
@@ -1668,6 +1717,90 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             }));
             out
         }
+        // The component page: the direct dependencies, the count of the
+        // transitive tail, and the people who built the program. It is a
+        // document rather than a form, so it scrolls; the full tail is kept in
+        // `THIRD_PARTY_LICENSES.md` and printed by `linkr --licenses`, because
+        // a terminal modal should not pretend three hundred rows are a page a
+        // person can read at a glance.
+        Dialog::Licenses(_) => {
+            let mut out: Vec<Line<'static>> = vec![
+                Line::from(Span::styled(
+                    "Linkr Bee Terminal".to_string(),
+                    theme.accent_strong().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "{} · {}",
+                        env!("CARGO_PKG_VERSION"),
+                        crate::licenses::PROJECT_LICENSE
+                    ),
+                    theme.muted(),
+                )),
+                Line::from(Span::styled(
+                    env!("CARGO_PKG_REPOSITORY").to_string(),
+                    theme.muted(),
+                )),
+                Line::default(),
+                Line::from(Span::styled(
+                    fill(
+                        entry(LICENSES_DIRECT, lang),
+                        &[crate::licenses::COMPONENTS.len().to_string()],
+                    ),
+                    theme.focus(),
+                )),
+            ];
+            for component in crate::licenses::COMPONENTS {
+                out.extend(
+                    wrap_rows(
+                        &format!(
+                            "{} {}  {}",
+                            component.name, component.version, component.license
+                        ),
+                        width.max(1),
+                    )
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, theme.text()))),
+                );
+            }
+            out.push(Line::default());
+            out.extend(
+                wrap_rows(
+                    &fill(
+                        entry(LICENSES_TRANSITIVE, lang),
+                        &[crate::licenses::transitive_count().to_string()],
+                    ),
+                    width.max(1),
+                )
+                .into_iter()
+                .map(|row| Line::from(Span::styled(row, theme.muted()))),
+            );
+            out.push(Line::default());
+            out.push(Line::from(Span::styled(
+                entry(LICENSES_CONTRIBUTORS, lang),
+                theme.focus(),
+            )));
+            out.extend(
+                wrap_rows(&crate::licenses::CONTRIBUTORS.join(" · "), width.max(1))
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, theme.text()))),
+            );
+            out.push(Line::default());
+            out.push(Line::from(Span::styled(
+                format!(
+                    "{}: {}",
+                    entry(LICENSES_LICENSE, lang),
+                    crate::licenses::PROJECT_LICENSE
+                ),
+                theme.muted(),
+            )));
+            out.extend(
+                wrap_rows(entry(LICENSES_NOTE, lang), width.max(1))
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, theme.muted()))),
+            );
+            out
+        }
     }
 }
 
@@ -1679,7 +1812,7 @@ fn row_count(app: &App, dialog: &Dialog) -> usize {
     // helper, the way the device picker does, or End would stop short of the
     // tail the window cannot show. Before a paint has measured a screen
     // (a headless test), a width no line reaches keeps one row per item.
-    let width = if matches!(dialog, Dialog::Help(_)) {
+    let width = if matches!(dialog, Dialog::Help(_) | Dialog::Licenses(_)) {
         let width = crate::ui::overlay::dialog_body_width(
             app.screen,
             app.sidebar_visible,
@@ -1871,10 +2004,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         Dialog::Uart(uart) => uart_key(app, uart, key),
-        // The card about the program answers no question, so every key is the
-        // same key: it puts the card away. The dialog was taken out of the app
-        // above and nothing puts it back, which is exactly that.
-        Dialog::About => {}
+        // The card about the program answers no question, so every key puts it
+        // away — except `L`, which opens the component page. The dialog was
+        // taken out of the app above; putting a new one back is the one
+        // exception, and doing nothing is exactly "close".
+        Dialog::About => {
+            if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L')) {
+                app.dialog = Some(Dialog::Licenses(0));
+            }
+        }
+        Dialog::Licenses(offset) => {
+            app.dialog = scrolled(app, Dialog::Licenses(offset), offset, key)
+        }
         Dialog::Help(offset) => app.dialog = scrolled(app, Dialog::Help(offset), offset, key),
         Dialog::Notices(offset) => app.dialog = scrolled(app, Dialog::Notices(offset), offset, key),
         Dialog::Cheat(cheat) => cheat_key(app, cheat, key),
@@ -2021,6 +2162,7 @@ fn scrolled(app: &App, dialog: Dialog, offset: usize, key: KeyEvent) -> Option<D
     let moved = moved.min(last);
     Some(match dialog {
         Dialog::Notices(_) => Dialog::Notices(moved),
+        Dialog::Licenses(_) => Dialog::Licenses(moved),
         _ => Dialog::Help(moved),
     })
 }
@@ -2341,6 +2483,15 @@ mod tests {
             ABOUT_CONTRIBUTOR,
             ABOUT_PROJECT,
             ABOUT_RENDER,
+            ABOUT_COMPONENTS,
+            ABOUT_COMPONENTS_VALUE,
+            LICENSES_TITLE,
+            LICENSES_KEYS,
+            LICENSES_DIRECT,
+            LICENSES_TRANSITIVE,
+            LICENSES_CONTRIBUTORS,
+            LICENSES_LICENSE,
+            LICENSES_NOTE,
         ];
         entries.extend(CHEAT_GROUPS.iter().map(|(group, _)| *group));
         entries.extend(
@@ -3758,6 +3909,7 @@ mod tests {
     #[test]
     fn the_about_card_names_what_is_running() {
         let app = App {
+            lang: Lang::En,
             screen: ratatui::layout::Rect::new(0, 0, 120, 36),
             ..App::default()
         };
@@ -3770,6 +3922,11 @@ mod tests {
         assert!(shown.contains("https://github.com/Novice-PG"), "{shown}");
         assert!(shown.contains("TrueColor"), "{shown}");
         assert!(shown.contains("Unicode"), "{shown}");
+        assert!(shown.contains("Components"), "{shown}");
+        assert!(
+            shown.contains(&format!("{} direct", crate::licenses::COMPONENTS.len())),
+            "{shown}"
+        );
         // The mark is on the card — the small one is twelve rows of cells, so
         // the body is taller than the facts alone.
         assert!(
@@ -3847,6 +4004,7 @@ mod tests {
         assert!(shown.contains("贡献者"), "{shown}");
         assert!(shown.contains("项目"), "{shown}");
         assert!(shown.contains("渲染"), "{shown}");
+        assert!(shown.contains("开源组件"), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
         assert_eq!(title(&Dialog::About, Lang::Zh), "关于");
         assert_eq!(title(&Dialog::About, Lang::En), "About");
@@ -3870,6 +4028,18 @@ mod tests {
         assert!(app.dialog.is_none(), "Escape left the card up");
 
         open_about(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(app.dialog, Some(Dialog::Licenses(0))),
+            "L did not open the component page"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape left the component page up");
+
+        open_about(&mut app);
         assert!(!handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
@@ -3878,6 +4048,62 @@ mod tests {
             matches!(app.dialog, Some(Dialog::About)),
             "a chord ate the card"
         );
+    }
+
+    /// The component page is the direct-dependency half of the generated
+    /// notice: it names the build, the crates the binary links, and the
+    /// contributors, and it says where the full transitive tail lives.
+    #[test]
+    fn the_licence_page_names_the_direct_components_and_contributors() {
+        let app = App {
+            lang: Lang::En,
+            screen: ratatui::layout::Rect::new(0, 0, 120, 40),
+            ..App::default()
+        };
+        let shown = text_of(&lines(
+            &Dialog::Licenses(0),
+            &app,
+            70,
+            body_height(&app, &Dialog::Licenses(0), 70),
+        ));
+        assert!(shown.contains("Linkr Bee Terminal"), "{shown}");
+        assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
+        assert!(shown.contains("ratatui"), "{shown}");
+        assert!(
+            shown.contains(&format!(
+                "Direct dependencies ({})",
+                crate::licenses::COMPONENTS.len()
+            )),
+            "{shown}"
+        );
+        assert!(shown.contains("transitive"), "{shown}");
+        assert!(shown.contains("Novice-PG"), "{shown}");
+        assert!(shown.contains("linkr --licenses"), "{shown}");
+        assert_eq!(
+            title(&Dialog::Licenses(0), Lang::En),
+            " Open-source components "
+        );
+        assert_eq!(title(&Dialog::Licenses(0), Lang::Zh), " 开源组件 ");
+    }
+
+    /// The page is a document, so the paging keys move its own offset rather
+    /// than the help's — the old scroll helper knew only two window kinds.
+    #[test]
+    fn the_licence_page_scrolls_and_keeps_its_own_kind() {
+        let mut app = App::default();
+        open_licenses(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        let Some(Dialog::Licenses(offset)) = app.dialog else {
+            panic!("the page closed on a paging key: {:?}", app.dialog);
+        };
+        assert!(offset > 0, "PageDown did not move the page");
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(Dialog::Licenses(0))));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape kept the page");
     }
 }
 

@@ -86,6 +86,11 @@ pub const FLAGS: &[Flag] = &[
     Flag::new("-V", Value::None, "print the version and exit"),
     Flag::new("--version", Value::None, "print the version and exit"),
     Flag::new(
+        "--licenses",
+        Value::None,
+        "print third-party components and licences, and exit",
+    ),
+    Flag::new(
         "--print-completion",
         Value::Choice,
         "print a shell completion script and exit",
@@ -105,7 +110,10 @@ pub const FLAGS: &[Flag] = &[
     ),
     Flag::with_choices(
         "--overlay",
-        &["palette", "help", "notices", "confirm", "send", "receive"],
+        &[
+            "palette", "help", "notices", "confirm", "wifi", "settings", "about", "licenses",
+            "splash",
+        ],
         "open on this modal",
     ),
     Flag::with_choices(

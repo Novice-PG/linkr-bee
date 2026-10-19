@@ -53,6 +53,7 @@ use linkr_tui::device;
 use linkr_tui::event::{ConnectionState, View};
 use linkr_tui::i18n::Lang;
 use linkr_tui::lan_token_store::{self, TokenStore};
+use linkr_tui::licenses;
 use linkr_tui::serial::keys::EnterMode;
 #[cfg(any(feature = "tui", test))]
 use linkr_tui::serial::keys::{self, KeyModifiers as TerminalModifiers};
@@ -117,6 +118,9 @@ enum OverlayPreview {
     /// The card about the program, whose mark depends on the frame's capability
     /// — the one surface that can only be reviewed with a frame to render in.
     About,
+    /// The component page: the direct crates, the transitive count and the
+    /// contributors, previewable like every other modal.
+    Licenses,
     /// The startup splash, held open so a frame can show it: normally it is
     /// gone a moment after the first paint, and no flag can catch it in time.
     Splash,
@@ -134,6 +138,7 @@ impl OverlayPreview {
             "wifi" => Some(OverlayPreview::WifiSsid),
             "settings" => Some(OverlayPreview::Settings),
             "about" => Some(OverlayPreview::About),
+            "licenses" => Some(OverlayPreview::Licenses),
             "splash" => Some(OverlayPreview::Splash),
             _ => None,
         }
@@ -164,6 +169,7 @@ impl OverlayPreview {
                 views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
             }
             OverlayPreview::About => dialogs::open_about(app),
+            OverlayPreview::Licenses => dialogs::open_licenses(app),
             // Held for an hour rather than a moment: a preview has to be
             // looking at the splash when the frame is printed, and the clock
             // that would have taken it down is not running yet. Any key still
@@ -187,6 +193,8 @@ struct Args {
     state: Option<ConnectionState>,
     /// The view to open on, when the command line named one.
     view: Option<View>,
+    /// Print the third-party components and exit, without opening anything.
+    licenses: bool,
     print_frame: Option<(u16, u16)>,
     /// Dump the frame with true-colour escapes instead of plain text.
     ansi: bool,
@@ -566,6 +574,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         theme: None,
         state: None,
         view: None,
+        licenses: false,
         print_frame: None,
         ansi: false,
         sample: false,
@@ -628,6 +637,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 println!("linkr {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
+            "--licenses" => args.licenses = true,
             "--print-completion" => {
                 let raw = value("--print-completion");
                 let script = match cli::completion_script(&raw, prog) {
@@ -1256,6 +1266,13 @@ fn main() -> io::Result<()> {
     };
 
     let mut args = parse_args(&prog, &argv);
+    // A licence page is an answer about the build, like `--version`: it needs
+    // no link, no settings and no terminal, and it is printed before any of
+    // the checks that would otherwise refuse a run a caller did not ask for.
+    if args.licenses {
+        print!("{}", licenses::cli_report());
+        return Ok(());
+    }
     // A session is refused here, *before* the flags that answer and exit: a
     // `--serve --capabilities` would otherwise print a capability list and
     // leave, and the caller would never learn that no session was opened.
@@ -3405,6 +3422,18 @@ mod tests {
         );
     }
 
+    /// `--licenses` is an answer about the build, not a run: it parses in both
+    /// faces and its report is the generated notice rather than a second list.
+    #[test]
+    fn the_licence_flag_asks_for_no_link() {
+        assert!(!args(&[]).licenses, "licences are asked for, never assumed");
+        assert!(args(&["--licenses"]).licenses);
+        let report = licenses::cli_report();
+        assert!(report.contains("ratatui"), "{report}");
+        assert!(report.contains("Contributors"), "{report}");
+        assert!(report.contains("Transitive dependencies"), "{report}");
+    }
+
     /// Flags parse to the state they name.
     #[test]
     fn flags_parse_to_their_state() {
@@ -4551,6 +4580,7 @@ mod tests {
             ("wifi", OverlayPreview::WifiSsid),
             ("settings", OverlayPreview::Settings),
             ("about", OverlayPreview::About),
+            ("licenses", OverlayPreview::Licenses),
             ("splash", OverlayPreview::Splash),
         ] {
             assert_eq!(args(&["--overlay", name]).overlay, Some(expected), "{name}");
@@ -4638,6 +4668,7 @@ mod tests {
             (OverlayPreview::Confirm, "请确认"),
             (OverlayPreview::WifiSsid, "加入 WiFi 网络"),
             (OverlayPreview::Settings, "助手设置"),
+            (OverlayPreview::Licenses, "开源组件"),
             (OverlayPreview::Splash, "按任意键跳过"),
         ] {
             let mut app = App::default();

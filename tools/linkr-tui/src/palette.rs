@@ -92,6 +92,7 @@ const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
 const T_THEME: Entry = ["Choose theme", "选择主题"];
 const T_ABOUT: Entry = ["About linkr", "关于 linkr"];
+const T_LICENSES: Entry = ["Open-source components", "开源组件"];
 const T_SPLASH: Entry = ["Toggle the startup splash", "切换启动闪屏"];
 const T_QUIT: Entry = ["Quit the TUI", "退出 TUI"];
 
@@ -245,6 +246,12 @@ fn choose_theme(app: &mut App) {
 /// The card about the program, the same one `--overlay about` paints.
 fn show_about(app: &mut App) {
     crate::dialogs::open_about(app);
+}
+
+/// The component page `L` opens from the About card and `--licenses` prints in
+/// full on a command line.
+fn show_licenses(app: &mut App) {
+    crate::dialogs::open_licenses(app);
 }
 
 /// The assistant's settings window, on the row that configures it.
@@ -536,6 +543,13 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_APP,
         shortcut: "",
         run: show_about,
+    },
+    Action {
+        id: "app.licenses",
+        title: T_LICENSES,
+        category: CAT_APP,
+        shortcut: "",
+        run: show_licenses,
     },
     Action {
         id: "app.splash",
@@ -1178,6 +1192,7 @@ mod tests {
         "app.language",
         "app.theme",
         "app.about",
+        "app.licenses",
         "app.splash",
         "net.wifi_config",
         "net.wifi_scan",

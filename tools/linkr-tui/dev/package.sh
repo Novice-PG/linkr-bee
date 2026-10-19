@@ -14,11 +14,13 @@
 #   linkr-<version>-<target>/linkr[.exe]      the binary
 #   linkr-<version>-<target>/README.md        what it is and how to run it
 #   linkr-<version>-<target>/LICENSE          the licence it ships under
+#   linkr-<version>-<target>/THIRD_PARTY_LICENSES.md  the components it links
 # With `--cli` it is the same program built without the interface — the build
 # an agent harness wants, and a smaller one:
 #   linkr-cli-<version>-<target>/linkr-cli[.exe]
 #   linkr-cli-<version>-<target>/README.md    as above
 #   linkr-cli-<version>-<target>/LICENSE      as above
+#   linkr-cli-<version>-<target>/THIRD_PARTY_LICENSES.md  as above
 #
 # The archive format is the one the platform's own users reach for: a `.zip` on
 # Windows, a `.dmg` on macOS, a `.tar.gz` on Linux — and a `.tar.gz` beside the
@@ -77,6 +79,10 @@ cp "$crate_dir/README.md" "$stage/$name/README.md"
 if [ -f "$repo_dir/LICENSE" ]; then
   cp "$repo_dir/LICENSE" "$stage/$name/LICENSE"
 fi
+# The generated notice names every crate in the binary. It is committed and
+# checked by the gates, so a missing file here is a broken tree, not a reason
+# to ship an archive that says less.
+cp "$crate_dir/THIRD_PARTY_LICENSES.md" "$stage/$name/THIRD_PARTY_LICENSES.md"
 
 mkdir -p "$outdir"
 outdir=$(CDPATH='' cd -- "$outdir" && pwd)

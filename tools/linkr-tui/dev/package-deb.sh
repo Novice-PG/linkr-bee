@@ -14,6 +14,7 @@
 #   usr/bin/linkr                  the binary
 #   usr/share/doc/linkr/README.md  what it is and how to run it
 #   usr/share/doc/linkr/LICENSE    the licence it ships under
+#   usr/share/doc/linkr/THIRD_PARTY_LICENSES.md  the components it links
 #
 # A cross target on a different host gets the matching linker, `CC_<target>`
 # and the target's own pkg-config directory (where the cross `libdbus-1-dev`
@@ -86,6 +87,8 @@ install -D -m 644 "$crate_dir/README.md" "$stage/usr/share/doc/linkr/README.md"
 if [ -f "$repo_dir/LICENSE" ]; then
   install -D -m 644 "$repo_dir/LICENSE" "$stage/usr/share/doc/linkr/LICENSE"
 fi
+install -D -m 644 "$crate_dir/THIRD_PARTY_LICENSES.md" \
+  "$stage/usr/share/doc/linkr/THIRD_PARTY_LICENSES.md"
 
 installed_size=$(du -sk "$stage" | cut -f1)
 mkdir -p "$stage/DEBIAN"
