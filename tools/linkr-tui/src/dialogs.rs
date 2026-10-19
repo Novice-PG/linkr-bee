@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Alignment;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
@@ -1604,9 +1604,10 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             );
             // The mark is transparent on the card as it is on the splash:
             // the dialog's own ground shows through its empty cells.
-            let mark = crate::logo::fitted_lines(
+            let mark = crate::logo::fitted_lines_on(
                 app.capability,
                 (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
+                theme.card().bg.unwrap_or(Color::Reset),
             );
             if !mark.is_empty() {
                 out.extend(mark.into_iter().map(|mut line| {

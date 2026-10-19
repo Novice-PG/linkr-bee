@@ -33,8 +33,11 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
     // Five rows of text hang under the mark — a blank, the name, the label, a
     // blank and the hint — and the mark only takes the room they leave it.
-    let mut lines: Vec<Line<'static>> =
-        logo::fitted_lines(app.capability, (area.width, area.height.saturating_sub(5)));
+    let mut lines: Vec<Line<'static>> = logo::fitted_lines_on(
+        app.capability,
+        (area.width, area.height.saturating_sub(5)),
+        theme.bg,
+    );
     if !lines.is_empty() {
         lines.push(Line::default());
     }

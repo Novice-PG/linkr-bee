@@ -19,7 +19,7 @@
 //! version number out of a window would be a logo about itself.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -146,12 +146,40 @@ pub fn size_in_cells(capability: Capability, size: LogoSize) -> (u16, u16) {
     )
 }
 
+/// A cell colour with its coverage laid over the ground it sits on.
+///
+/// A terminal cell has no alpha channel. The only way to keep the rasteriser's
+/// anti-aliased edge — without turning it into a dark fringe on a light ground
+/// — is to mix it with the surface the mark is drawn on. A ground the caller
+/// did not name (`Color::Reset`) leaves the colour whole rather than guessing
+/// a background.
+fn blend(color: Color, alpha: u8, ground: Color) -> Color {
+    if alpha == 0 {
+        return Color::Reset;
+    }
+    let (Color::Rgb(r, g, b), Color::Rgb(gr, gg, gb)) = (color, ground) else {
+        return color;
+    };
+    if alpha == 255 {
+        return color;
+    }
+    let a = u16::from(alpha);
+    let inv = 255 - a;
+    let mix = |c: u8, ground: u8| ((u16::from(c) * a + u16::from(ground) * inv + 127) / 255) as u8;
+    Color::Rgb(mix(r, gr), mix(g, gg), mix(b, gb))
+}
+
 /// The mark at `size`, as paintable lines: one span per cell, so the picture
 /// carries its own colours whatever theme is in force. A cell the raster left
 /// transparent carries no background style — the caller's ground shows through
 /// — while an inked lower half keeps its colour.
-pub fn lines(capability: Capability, size: LogoSize) -> Vec<Line<'static>> {
-    Variant::for_capability(capability)
+///
+/// `ground` is that caller's surface: truecolour edges are blended into it so
+/// the mark stays smooth there instead of carrying a black fringe. The other
+/// variants have no blendable edge and ignore it.
+pub fn lines_on(capability: Capability, size: LogoSize, ground: Color) -> Vec<Line<'static>> {
+    let variant = Variant::for_capability(capability);
+    variant
         .rows(size)
         .iter()
         .map(|row| {
@@ -159,9 +187,17 @@ pub fn lines(capability: Capability, size: LogoSize) -> Vec<Line<'static>> {
                 row.cells
                     .iter()
                     .map(|cell| {
-                        let mut style = Style::default().fg(cell.fg);
-                        if cell.bg != Color::Reset {
-                            style = style.bg(cell.bg);
+                        let (fg, bg) = if variant == Variant::TrueColor {
+                            (
+                                blend(cell.fg, cell.fg_a, ground),
+                                blend(cell.bg, cell.bg_a, ground),
+                            )
+                        } else {
+                            (cell.fg, cell.bg)
+                        };
+                        let mut style = Style::default().fg(fg);
+                        if bg != Color::Reset {
+                            style = style.bg(bg);
                         }
                         Span::styled(cell.ch.to_string(), style)
                     })
@@ -171,20 +207,46 @@ pub fn lines(capability: Capability, size: LogoSize) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The largest size whose picture fits in `room`, or nothing when even the
-/// small one is too big.
-pub fn fitted(capability: Capability, room: (u16, u16)) -> Option<(LogoSize, Vec<Line<'static>>)> {
+/// [`lines_on`] without a named ground, for callers and tests that only need
+/// the picture's own colours.
+pub fn lines(capability: Capability, size: LogoSize) -> Vec<Line<'static>> {
+    lines_on(capability, size, Color::Reset)
+}
+
+fn fitted_in(
+    capability: Capability,
+    room: (u16, u16),
+    ground: Color,
+) -> Option<(LogoSize, Vec<Line<'static>>)> {
     [LogoSize::Lg, LogoSize::Md, LogoSize::Sm]
         .into_iter()
         .find_map(|size| {
             let (width, height) = size_in_cells(capability, size);
-            (width <= room.0 && height <= room.1).then(|| (size, lines(capability, size)))
+            (width <= room.0 && height <= room.1)
+                .then(|| (size, lines_on(capability, size, ground)))
         })
+}
+
+/// The largest size whose picture fits in `room`, or nothing when even the
+/// small one is too big.
+pub fn fitted(capability: Capability, room: (u16, u16)) -> Option<(LogoSize, Vec<Line<'static>>)> {
+    fitted_in(capability, room, Color::Reset)
 }
 
 /// [`fitted`]'s lines, or an empty body when nothing fits.
 pub fn fitted_lines(capability: Capability, room: (u16, u16)) -> Vec<Line<'static>> {
     fitted(capability, room)
+        .map(|(_, lines)| lines)
+        .unwrap_or_default()
+}
+
+/// [`fitted_lines`] blended into the ground the mark will sit on.
+pub fn fitted_lines_on(
+    capability: Capability,
+    room: (u16, u16),
+    ground: Color,
+) -> Vec<Line<'static>> {
+    fitted_in(capability, room, ground)
         .map(|(_, lines)| lines)
         .unwrap_or_default()
 }
@@ -416,6 +478,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The transparent mark has no black fringe. The rasteriser stores
+    /// coverage premultiplied into its colours; painting that coverage on a
+    /// terminal cell turns it into a dark edge, which is a black block on a
+    /// light ground. The cells must carry the brand green — or the two palette
+    /// greens — and nothing near black.
+    #[test]
+    fn the_mark_has_no_black_ink() {
+        use ratatui::style::Color;
+        for variant in [Variant::TrueColor, Variant::Color256, Variant::Color16] {
+            for size in [LogoSize::Sm, LogoSize::Md, LogoSize::Lg] {
+                for row in variant.rows(size) {
+                    for cell in row.cells {
+                        for colour in [cell.fg, cell.bg] {
+                            match colour {
+                                Color::Rgb(r, g, b) => assert!(
+                                    u16::from(r).max(u16::from(g)).max(u16::from(b)) >= 60,
+                                    "{variant:?}/{size:?} has black ink {colour:?}"
+                                ),
+                                Color::Indexed(i) => assert!(
+                                    i != 16 && !(232..=239).contains(&i),
+                                    "{variant:?}/{size:?} has black ink {colour:?}"
+                                ),
+                                Color::Black => {
+                                    panic!("{variant:?}/{size:?} has black ink")
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The truecolour edge is mixed with the ground it is painted on: the same
+    /// picture stays green on a light card and on a dark one, never a black
+    /// fringe on either.
+    #[test]
+    fn a_truecolour_edge_takes_the_ground() {
+        use ratatui::style::Color;
+        let green = Color::Rgb(61, 214, 140);
+        let light = Color::Rgb(248, 250, 252);
+        let dark = Color::Rgb(5, 8, 13);
+        assert_eq!(blend(green, 0, light), Color::Reset);
+        assert_eq!(blend(green, 255, light), green);
+        let light_edge = blend(green, 96, light);
+        let dark_edge = blend(green, 96, dark);
+        for edge in [light_edge, dark_edge] {
+            let Color::Rgb(r, g, b) = edge else {
+                panic!("{edge:?} is not an RGB edge");
+            };
+            assert!(
+                u16::from(r).max(u16::from(g)).max(u16::from(b)) >= 60,
+                "a black edge: {edge:?}"
+            );
+        }
+        assert!(matches!(light_edge, Color::Rgb(r, _, _) if r > 61));
+        assert!(matches!(dark_edge, Color::Rgb(r, _, _) if r < 61));
     }
 
     /// The mark is a mark and not a blank: the coloured variants paint the
