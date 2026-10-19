@@ -1038,6 +1038,24 @@ mod tests {
         );
     }
 
+    /// The splash mark is an icon tile too: the first frame a user sees has
+    /// the same white ground as the About card, while the name and hint below
+    /// stay on the terminal's own ground.
+    #[test]
+    fn the_splash_mark_sits_on_a_white_plate() {
+        let app = App {
+            splash_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            ..App::default()
+        };
+        let buffer = render_buffer(&app, 120, 40).expect("a frame paints");
+        let white = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.bg == ratatui::style::Color::Rgb(255, 255, 255))
+            .count();
+        assert!(white > 0, "the splash mark has no white ground");
+    }
+
     /// A window too narrow for both halves yields sidebar width to the centre:
     /// a view is never squeezed to nothing to keep an empty strip.
     #[test]

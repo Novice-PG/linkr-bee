@@ -186,7 +186,8 @@ pub fn fitted_lines(capability: Capability, room: (u16, u16)) -> Vec<Line<'stati
         .unwrap_or_default()
 }
 
-/// The mark on a pure-white plate, for the one card that wants an icon tile.
+/// The mark on a pure-white plate, for the two places that want an icon tile:
+/// the startup splash and the About card.
 ///
 /// The half-block raster is composited over black when the build script
 /// quantises it; a transparent edge pixel became a nearly black green. On a

@@ -1602,8 +1602,8 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 app.panel_wanted(),
                 10_000,
             );
-            // The card sets the mark on a pure-white plate; the splash keeps
-            // its transparent ground. Only this card wants an icon tile.
+            // The card sets the mark on the same pure-white plate the splash
+            // uses: both are icon tiles, and both want the white ground.
             let mark = crate::logo::on_white(
                 app.capability,
                 (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
