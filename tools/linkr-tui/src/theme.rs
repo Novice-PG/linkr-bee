@@ -19,6 +19,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Borders};
 
+use std::borrow::Cow;
+
+use crate::capability::{self, Capability, ColorCap, GlyphSet, Role};
 use crate::event::{ConnectionState, NoticeLevel};
 
 /// Every colour the interface paints. Both themes carry the same roles; only
@@ -65,6 +68,15 @@ pub struct Theme {
     /// one it *does* override, `brightBlack`, is the one carried here — it is
     /// what a great many tools paint their comments and separators in.
     pub ansi: [Color; 16],
+    /// What the terminal this frame is painted for can draw.
+    ///
+    /// Carried on the theme because the theme is the one thing every view
+    /// already has: a mark is asked for the way a colour is, and a style whose
+    /// distinction the colours can no longer make — a selected row under
+    /// [`ColorCap::Mono`] — takes it from an attribute here rather than in
+    /// every view. Set through [`Theme::with_capability`], which also resolves
+    /// the colours it applies to.
+    capability: Capability,
 }
 
 impl Theme {
@@ -104,6 +116,10 @@ impl Theme {
             Color::Rgb(0x34, 0xe2, 0xe2),
             Color::Rgb(0xee, 0xee, 0xec),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// The web client's `[data-theme="light"]`. The terminal pair is the
@@ -149,6 +165,10 @@ impl Theme {
             Color::Rgb(0x34, 0xe2, 0xe2),
             Color::Rgb(0xee, 0xee, 0xec),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// The constants of the user's terminal classics, carried in as *roles*:
@@ -190,6 +210,10 @@ impl Theme {
             Color::Rgb(0x8f, 0xbc, 0xbb),
             Color::Rgb(0xec, 0xef, 0xf4),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// Warm and low-contrast, the way the Gruvbox project keeps it: the lime
@@ -229,6 +253,10 @@ impl Theme {
             Color::Rgb(0x8e, 0xc0, 0x7c),
             Color::Rgb(0xeb, 0xdb, 0xb2),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// The Solarized dark set: one neutral ramp, one accent per meaning. The
@@ -268,6 +296,10 @@ impl Theme {
             Color::Rgb(0x93, 0xa1, 0xa1),
             Color::Rgb(0xfd, 0xf6, 0xe3),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// Dracula: a violet night with the project's own neon streaks, its
@@ -307,6 +339,10 @@ impl Theme {
             Color::Rgb(0xa4, 0xff, 0xff),
             Color::Rgb(0xff, 0xff, 0xff),
         ],
+        // What the terminal can draw: replaced by
+        // [`Theme::with_capability`] at start-up. The
+        // constants themselves are the full design.
+        capability: Capability::FULL,
     };
 
     /// Resolve a 256-colour palette index.
@@ -345,6 +381,127 @@ impl Theme {
         }
     }
 
+    /// [`Theme::for_choice`], resolved for what the terminal can draw: what
+    /// the app asks for when it paints.
+    pub fn for_capability(choice: ThemeChoice, capability: Capability) -> Theme {
+        Theme::for_choice(choice).with_capability(capability)
+    }
+
+    /// The same theme, told what the terminal can show.
+    ///
+    /// A view keeps asking for *roles* — accent, muted, danger — and gets the
+    /// nearest thing the terminal has, so nothing in the interface has to know
+    /// that it is running on sixteen colours. What a role resolves to is
+    /// decided by what it is *for* (`crate::capability::Role`): a surface takes
+    /// its place in the grey ladder, text takes the readable ink, an accent
+    /// keeps its hue. Under [`ColorCap::Mono`] every role becomes the
+    /// terminal's own ink and the distinctions move into the styles below.
+    ///
+    /// The device's own sixteen ([`Theme::ansi`]) are never resolved: the pane
+    /// passes the device's colours through, and a program that asked for bright
+    /// red is owed the terminal's idea of bright red, not a neighbour of this
+    /// theme's palette.
+    pub fn with_capability(self, capability: Capability) -> Theme {
+        if capability == self.capability {
+            return self;
+        }
+        let cap = capability.color;
+        let resolve = |color: Color, role: Role| capability::resolve(color, role, cap);
+
+        let panel = resolve(self.panel, Role::Grey);
+        // The borders are greys too, then lifted off the surface they are drawn
+        // on: at sixteen colours every dark theme's hairline rounds to the same
+        // grey as its own panel, and a frame drawn in the colour of its ground
+        // is not a frame. Higher up the palettes keep the two apart by
+        // themselves; in mono both are the terminal's ink, and there the glyph
+        // is the frame.
+        let resting = resolve(self.line, Role::Grey);
+        let (line, line_strong) = if cap == ColorCap::Color16 {
+            let dark = self.is_dark();
+            let resting = capability::grey_step(resting, panel, dark);
+            let focused = resolve(self.line_strong, Role::Grey);
+            (resting, capability::grey_step(focused, resting, dark))
+        } else {
+            (resting, resolve(self.line_strong, Role::Grey))
+        };
+
+        Theme {
+            bg: resolve(self.bg, Role::Grey),
+            panel,
+            panel_2: resolve(self.panel_2, Role::Grey),
+            panel_3: resolve(self.panel_3, Role::Grey),
+            text: resolve(self.text, Role::Ink),
+            muted: resolve(self.muted, Role::Grey),
+            line,
+            line_strong,
+            accent: resolve(self.accent, Role::Accent),
+            accent_strong: resolve(self.accent_strong, Role::Accent),
+            accent_ink: resolve(self.accent_ink, Role::Ink),
+            focus: resolve(self.focus, Role::Accent),
+            danger: resolve(self.danger, Role::Accent),
+            warn: resolve(self.warn, Role::Accent),
+            terminal_bg: resolve(self.terminal_bg, Role::Grey),
+            terminal_fg: resolve(self.terminal_fg, Role::Ink),
+            ansi: self.ansi,
+            capability,
+        }
+    }
+
+    /// What this theme was resolved for.
+    pub fn capability(&self) -> Capability {
+        self.capability
+    }
+
+    /// The glyph set this theme draws with: the marks a view places itself are
+    /// asked for here, rather than chosen by the view.
+    pub fn glyphs(&self) -> GlyphSet {
+        self.capability.glyphs
+    }
+
+    /// [`crate::capability::fold`], in the set this theme draws with.
+    ///
+    /// The interface's own lines carry marks — ` · ` between two fields, `…` at
+    /// the end of a truncated title, `↑↓` in a key hint — and a terminal
+    /// without those glyphs gets the stand-ins the rest of the frame draws
+    /// with. What the *device* prints never goes through here: folding it would
+    /// be this program editing someone else's output.
+    pub fn fold<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        crate::capability::fold(text, self.glyphs())
+    }
+
+    /// Whether this is one of the dark themes: the direction the borders step
+    /// along the grey ladder, read from the ground the design itself declares.
+    fn is_dark(&self) -> bool {
+        match self.bg {
+            Color::Rgb(red, green, blue) => capability::lightness(red, green, blue) < 0.5,
+            _ => true,
+        }
+    }
+
+    /// `style`, with `fallback` added when the terminal has no colour to carry
+    /// the distinction.
+    ///
+    /// Under [`ColorCap::Mono`] every role resolves to the terminal's own ink,
+    /// so what the design says with colour has to be said with an attribute:
+    /// reverse for anything selected or filled, bold for the live colour and
+    /// whatever must be seen, dim for whatever must not compete.
+    fn when_mono(&self, style: Style, fallback: Modifier) -> Style {
+        if self.capability.color == ColorCap::Mono {
+            style.add_modifier(fallback)
+        } else {
+            style
+        }
+    }
+
+    /// `block`, framed the way this terminal draws frames: rounded where the
+    /// font has the arcs, plain `+-|` where it does not.
+    pub fn framed(&self, block: Block<'static>) -> Block<'static> {
+        match self.glyphs().border() {
+            Some(set) => block.border_set(set),
+            None => block.border_type(BorderType::Rounded),
+        }
+    }
+
     // --- base styles --------------------------------------------------------
 
     /// Body text on any surface.
@@ -354,27 +511,27 @@ impl Theme {
 
     /// Secondary text: hints, counters, anything that must not compete.
     pub fn muted(&self) -> Style {
-        Style::default().fg(self.muted)
+        self.when_mono(Style::default().fg(self.muted), Modifier::DIM)
     }
 
     /// The live colour, for what the user can act on right now.
     pub fn accent(&self) -> Style {
-        Style::default().fg(self.accent)
+        self.when_mono(Style::default().fg(self.accent), Modifier::BOLD)
     }
 
     /// Bright accent, for emphasis inside accent-coloured text.
     pub fn accent_strong(&self) -> Style {
-        Style::default().fg(self.accent_strong)
+        self.when_mono(Style::default().fg(self.accent_strong), Modifier::BOLD)
     }
 
     /// Focus colour: labels, prompts, the caret.
     pub fn focus(&self) -> Style {
-        Style::default().fg(self.focus)
+        self.when_mono(Style::default().fg(self.focus), Modifier::BOLD)
     }
 
     /// Errors and destructive actions.
     pub fn danger(&self) -> Style {
-        Style::default().fg(self.danger)
+        self.when_mono(Style::default().fg(self.danger), Modifier::BOLD)
     }
 
     /// Warnings.
@@ -384,13 +541,13 @@ impl Theme {
 
     /// Resting borders and separators.
     pub fn line(&self) -> Style {
-        Style::default().fg(self.line)
+        self.when_mono(Style::default().fg(self.line), Modifier::DIM)
     }
 
     /// The scrollbar's thumb: a touch stronger than the resting hairlines,
     /// because the bar has to be findable on a ground that is not a border.
     pub fn scrollbar(&self) -> Style {
-        Style::default().fg(self.line_strong)
+        self.when_mono(Style::default().fg(self.line_strong), Modifier::BOLD)
     }
 
     /// A panel surface (`--panel`), the ground bars and the sidebar sit on.
@@ -418,10 +575,13 @@ impl Theme {
     /// primary buttons. Used for the sidebar selection, list cursors and the
     /// command palette's highlighted action.
     pub fn selected(&self) -> Style {
-        Style::default()
-            .bg(self.accent)
-            .fg(self.accent_ink)
-            .add_modifier(Modifier::BOLD)
+        self.when_mono(
+            Style::default()
+                .bg(self.accent)
+                .fg(self.accent_ink)
+                .add_modifier(Modifier::BOLD),
+            Modifier::REVERSED,
+        )
     }
 
     /// A mouse selection over painted text: the same accent ground as the
@@ -430,7 +590,10 @@ impl Theme {
     /// their style, which is what keeps bold and underline in the text the
     /// selection covers.
     pub fn selection(&self) -> Style {
-        Style::default().bg(self.accent).fg(self.accent_ink)
+        self.when_mono(
+            Style::default().bg(self.accent).fg(self.accent_ink),
+            Modifier::REVERSED,
+        )
     }
 
     /// A sidebar / panel section header: the web's uppercase drawer heads.
@@ -507,30 +670,32 @@ impl Theme {
     /// view's name as an accent title. The serial terminal view does not take a
     /// frame — it is the pane the device writes into.
     pub fn view_block(&self, title: impl Into<String>) -> Block<'static> {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(self.line())
-            .style(self.panel())
-            .title(Span::styled(
-                format!(" {} ", title.into()),
-                self.section_header(),
-            ))
+        self.framed(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(self.line())
+                .style(self.panel())
+                .title(Span::styled(
+                    format!(" {} ", title.into()),
+                    self.section_header(),
+                )),
+        )
     }
 
     /// A window that took the keyboard (command palette, dialogs): the stronger
     /// border the web gives a focused surface, a ground raised a step above the
     /// pane behind it, accent title.
     pub fn overlay_block(&self, title: impl Into<String>) -> Block<'static> {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(self.line_strong))
-            .style(self.card())
-            .title(Span::styled(
-                format!(" {} ", title.into()),
-                self.section_header(),
-            ))
+        self.framed(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.line_strong))
+                .style(self.card())
+                .title(Span::styled(
+                    format!(" {} ", title.into()),
+                    self.section_header(),
+                )),
+        )
     }
 
     /// A toast's border: the web outlines `.toast` with the accent and
@@ -546,14 +711,20 @@ impl Theme {
     /// A toast's text: panel-3 ground, primary text. The notice's colour is
     /// carried by [`Theme::toast_border`], the way the web borders its toasts.
     pub fn toast(&self) -> Style {
-        Style::default().bg(self.panel_3).fg(self.text)
+        self.when_mono(
+            Style::default().bg(self.panel_3).fg(self.text),
+            Modifier::REVERSED,
+        )
     }
 
     /// The status pill on the centre pane's head row: a `--panel-3` chip with
     /// primary text, so it reads as a surface laid over the pane's own ground
     /// rather than as another line of the pane.
     pub fn pill(&self) -> Style {
-        Style::default().bg(self.panel_3).fg(self.text)
+        self.when_mono(
+            Style::default().bg(self.panel_3).fg(self.text),
+            Modifier::REVERSED,
+        )
     }
 
     /// The pill's dot: a filled circle in the state's own colour, on the pill's

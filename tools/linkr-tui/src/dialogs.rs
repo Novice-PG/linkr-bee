@@ -28,6 +28,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::App;
+use crate::capability::GlyphSet;
 use crate::event::NoticeLevel;
 use crate::i18n::{entry, Entry, Lang};
 use crate::text::{self, fill};
@@ -291,10 +292,30 @@ pub enum Dialog {
     ThemePick(ThemePick),
     /// The conversations this device remembers, waiting for a pick to delete.
     ChatPick(ChatPick),
+    /// The card about the program itself: the mark, the version, the licence
+    /// and the project's address. Nothing to answer, so any key puts it away.
+    About,
 }
 
 const T_PICK: Entry = ["Choose a board", "选择设备"];
 const THEME_TITLE: Entry = ["Theme", "主题"];
+/// The card about the program: its title, and the four facts on it. The
+/// version, the licence and the address come from the crate's own manifest,
+/// so they cannot drift from what was built; only the labels are words.
+const ABOUT_TITLE: Entry = ["About", "关于"];
+const ABOUT_KEYS: Entry = ["Enter/Esc close", "回车/Esc 关闭"];
+const ABOUT_VERSION: Entry = ["Version", "版本"];
+const ABOUT_LICENSE: Entry = ["Licence", "许可证"];
+const ABOUT_PROJECT: Entry = ["Project", "项目"];
+const ABOUT_RENDER: Entry = ["Rendering", "渲染"];
+/// The label column the four facts are padded to, so their values line up
+/// down the card in either language.
+const ABOUT_LABEL: usize = 12;
+
+/// The rows the facts need below the mark: a blank, and one per fact. The mark
+/// is painted only when it leaves these — a card that pushed its own version
+/// number out of a short window would be a logo about itself.
+const ABOUT_FACTS: u16 = 6;
 /// The keys, in the order the window is used: move, keep, back out. "Keep"
 /// rather than "apply" because the preview has already applied — Enter is what
 /// makes the choice outlive the window.
@@ -366,16 +387,18 @@ impl DevicePick {
         self.devices.len()
     }
 
-    /// How many rows each device takes at `width`.
+    /// How many rows each device takes at `width`, in the glyph set the paint
+    /// will use: the meter is four cells in either set, so the count is the
+    /// painter's own.
     ///
     /// One when its row fits the box whole, more when the window is too
     /// narrow for it and the row wraps. The scroll counts *rows*, and this is
     /// the count the painter will use — the same helper, so the two cannot
     /// disagree about how tall one device is.
-    pub fn line_spans(&self, width: usize) -> Vec<usize> {
+    pub fn line_spans(&self, width: usize, glyphs: GlyphSet) -> Vec<usize> {
         self.devices
             .iter()
-            .map(|device| device_rows(device, width).len())
+            .map(|device| device_rows(device, width, glyphs).len())
             .collect()
     }
 
@@ -784,7 +807,8 @@ impl Dialog {
             | Dialog::Prompt(_)
             | Dialog::Uart(_)
             | Dialog::ThemePick(_)
-            | Dialog::ChatPick(_) => 0,
+            | Dialog::ChatPick(_)
+            | Dialog::About => 0,
         }
     }
 }
@@ -802,6 +826,7 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
         Dialog::Settings(_) => entry(SETTINGS_TITLE, lang),
         Dialog::ThemePick(_) => entry(THEME_TITLE, lang),
         Dialog::ChatPick(_) => entry(CHAT_PICK_TITLE, lang),
+        Dialog::About => entry(ABOUT_TITLE, lang),
     }
 }
 
@@ -826,8 +851,11 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
         Dialog::Settings(_) => entry(SETTINGS_KEYS, lang),
         Dialog::ThemePick(_) => entry(THEME_KEYS, lang),
         Dialog::ChatPick(_) => entry(CHAT_PICK_KEYS, lang),
+        Dialog::About => entry(ABOUT_KEYS, lang),
     };
-    Line::from(Span::styled(text, theme.muted()))
+    // The legend is the interface's own line: ` · ` between two keys, `↑↓` in
+    // one, `…` after a verb — all folded for a terminal whose font is ASCII.
+    Line::from(Span::styled(theme.fold(text), theme.muted()))
 }
 
 // --- opening -----------------------------------------------------------------
@@ -873,7 +901,11 @@ pub fn open_cheat(app: &mut App) {
 pub fn open_uart(app: &mut App) {
     let mut uart = Uart {
         field: Field::new(UART_DEFAULT),
-        status: Some(entry(UART_QUERYING, app.lang).to_string()),
+        status: Some(
+            app.theme()
+                .fold(entry(UART_QUERYING, app.lang))
+                .into_owned(),
+        ),
         error: None,
     };
     if let Err(why) = app.ask_device(crate::device::Query::Uart) {
@@ -938,6 +970,17 @@ pub fn toggle_theme_pick(app: &mut App) {
         Some(_) => {}
         None => open_theme_pick(app),
     }
+}
+
+/// Raise the card about the program.
+///
+/// It answers no question, so it takes no state beyond itself: the version,
+/// the licence and the project's address all come from the crate's manifest
+/// at compile time, and the mark from the terminal's own capability. What it
+/// is *for* is the two things a user asks a terminal program for and cannot
+/// see anywhere else: what this is, and where to say something about it.
+pub fn open_about(app: &mut App) {
+    raise(app, Dialog::About);
 }
 
 /// Ask which network to join. The password is asked for next, by the prompt
@@ -1038,11 +1081,18 @@ pub fn ask(app: &mut App, action: ConfirmAction) {
 // --- the body ----------------------------------------------------------------
 
 /// The glyph and the word standing for a notice's level.
-fn level_badge(level: NoticeLevel) -> (&'static str, Entry) {
+///
+/// The three marks are drawn in the terminal's own set: a middle dot for news,
+/// an ASCII `!` for a warning, and a cross — the one every font has, in one
+/// spelling or the other — for an error.
+fn level_badge(level: NoticeLevel, glyphs: GlyphSet) -> (&'static str, Entry) {
     match level {
-        NoticeLevel::Info => ("·", LEVEL_INFO),
+        NoticeLevel::Info => (glyphs.dot(), LEVEL_INFO),
         NoticeLevel::Warn => ("!", LEVEL_WARN),
-        NoticeLevel::Error => ("×", LEVEL_ERROR),
+        NoticeLevel::Error => match glyphs {
+            GlyphSet::Unicode => ("×", LEVEL_ERROR),
+            GlyphSet::Ascii => ("x", LEVEL_ERROR),
+        },
     }
 }
 
@@ -1116,7 +1166,7 @@ fn field_box(spans: Vec<Span<'static>>, theme: &Theme, width: usize) -> Vec<Line
     let interior = width.saturating_sub(text::columns(INDENT) + 2);
     let mut row = vec![
         Span::styled(INDENT.to_string(), theme.card()),
-        Span::styled("│".to_string(), field_line(theme)),
+        Span::styled(theme.glyphs().divider().to_string(), field_line(theme)),
     ];
     let mut room = interior;
     for span in spans {
@@ -1135,24 +1185,39 @@ fn field_box(spans: Vec<Span<'static>>, theme: &Theme, width: usize) -> Vec<Line
     if room > 0 {
         row.push(Span::styled(" ".repeat(room), theme.card()));
     }
-    row.push(Span::styled("│".to_string(), field_line(theme)));
+    row.push(Span::styled(
+        theme.glyphs().divider().to_string(),
+        field_line(theme),
+    ));
     vec![
-        field_edge(theme, width, '╭', '╮'),
+        field_edge(theme, width, true),
         Line::from(row),
-        field_edge(theme, width, '╰', '╯'),
+        field_edge(theme, width, false),
     ]
 }
 
 /// One of a field box's horizontal edges: a corner, the rule between, a corner.
 /// Its indent is the card's own ground, so the edge does not sit on two columns
 /// of another surface.
-fn field_edge(theme: &Theme, width: usize, left: char, right: char) -> Line<'static> {
+///
+/// The corners are rounded where the font has arcs and `+` where it does not
+/// ([`crate::capability::GlyphSet::border`]): a stand-in that keeps the box
+/// closed, which is the one thing the shape is saying.
+fn field_edge(theme: &Theme, width: usize, top: bool) -> Line<'static> {
     const INDENT: &str = "  ";
     let rule = width.saturating_sub(text::columns(INDENT) + 2);
+    let (left, right) = match (theme.glyphs(), top) {
+        (GlyphSet::Unicode, true) => ('╭', '╮'),
+        (GlyphSet::Unicode, false) => ('╰', '╯'),
+        (GlyphSet::Ascii, _) => ('+', '+'),
+    };
     Line::from(vec![
         Span::styled(INDENT.to_string(), theme.card()),
         Span::styled(
-            format!("{left}{}{right}", "─".repeat(rule)),
+            format!(
+                "{left}{}{right}",
+                theme.glyphs().rule().to_string().repeat(rule)
+            ),
             field_line(theme),
         ),
     ])
@@ -1201,10 +1266,22 @@ fn cheat_body(cheat: &Cheat, lang: Lang, theme: &Theme, width: usize) -> Vec<Lin
             } else {
                 (theme.accent(), theme.text(), theme.muted())
             };
+            // The key names are the keyboard's own — `↑↓`, `PgUp` — so they are
+            // folded with the rest of the interface: a font with no arrows gets
+            // the `v` form the sidebar's hints already use.
+            let command = theme.fold(command);
+            let meaning = theme.fold(entry(*meaning, lang));
             out.push(Line::from(vec![
-                Span::styled(if here { "▸ " } else { "  " }, marker),
-                Span::styled(text::pad_to(command, command_col), ink),
-                Span::styled(format!("  {}", entry(*meaning, lang)), hint),
+                Span::styled(
+                    if here {
+                        theme.glyphs().cursor()
+                    } else {
+                        theme.glyphs().cursor_blank()
+                    },
+                    marker,
+                ),
+                Span::styled(text::pad_to(command.as_ref(), command_col), ink),
+                Span::styled(format!("  {}", meaning), hint),
             ]));
         }
         out.push(Line::default());
@@ -1225,15 +1302,19 @@ fn cheat_body(cheat: &Cheat, lang: Lang, theme: &Theme, width: usize) -> Vec<Lin
 /// row of its own, under the name column: a MAC split across two lines is
 /// neither readable nor copyable, which is what a plain wrap of the whole row
 /// produces.
-fn device_rows(device: &crate::cli::FoundDevice, width: usize) -> Vec<String> {
+fn device_rows(device: &crate::cli::FoundDevice, width: usize, glyphs: GlyphSet) -> Vec<String> {
     let name = device.name.as_deref().unwrap_or("(no name)");
     let board = if device.board { "bee" } else { "-" };
     // The signal the scan heard it at, ranked by dots and named by the
     // number: a full column even when the adapter had no reading for a device
     // it heard, so the names stay in one line down the box.
     let signal = match device.rssi {
-        Some(dbm) => format!("{} {:>4}dBm", text::signal_bars(i32::from(dbm)), dbm),
-        None => format!("{:>12}", "—"),
+        Some(dbm) => format!(
+            "{} {:>4}dBm",
+            text::signal_bars_with(i32::from(dbm), glyphs.dots()),
+            dbm
+        ),
+        None => format!("{:>12}", glyphs.dash()),
     };
     // Padded by columns, not by characters: a name in a wide script is wider
     // than it is long, and the id column is what would move.
@@ -1280,15 +1361,20 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             let mut out: Vec<Line<'static>> = HELP_ROWS
                 .iter()
                 .map(|(key, meaning)| {
+                    // The key names are the keyboard's own: `↑↓` folds to `^v`
+                    // for a terminal whose font has no arrows, like the hints
+                    // under every view. Folded before it is padded, so the
+                    // meaning column does not move with the glyph set.
+                    let key = theme.fold(key);
                     Line::from(vec![
-                        Span::styled(text::pad_to(key, HELP_KEY_WIDTH), theme.focus()),
-                        Span::styled(entry(*meaning, lang), theme.text()),
+                        Span::styled(text::pad_to(key.as_ref(), HELP_KEY_WIDTH), theme.focus()),
+                        Span::styled(theme.fold(entry(*meaning, lang)), theme.text()),
                     ])
                 })
                 .collect();
             out.push(Line::default());
             out.push(Line::from(Span::styled(
-                entry(HELP_NOTE, lang),
+                theme.fold(entry(HELP_NOTE, lang)),
                 theme.muted(),
             )));
             out
@@ -1296,7 +1382,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
         Dialog::DevicePick(pick) => {
             if pick.scanning {
                 return vec![Line::from(Span::styled(
-                    entry(PICK_SCANNING, lang),
+                    theme.fold(entry(PICK_SCANNING, lang)),
                     theme.muted(),
                 ))];
             }
@@ -1304,9 +1390,10 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 // What the scan said, when it said anything: "no adapter" and
                 // "nothing answered" are different news, and painting the
                 // generic line over the first is how a user comes to chase a
-                // board that was never being listened for.
+                // board that was never being listened for. The generic line is
+                // the interface's, so it folds; the scan's own words do not.
                 let why = if pick.message.is_empty() {
-                    entry(PICK_EMPTY, lang).to_string()
+                    theme.fold(entry(PICK_EMPTY, lang)).into_owned()
                 } else {
                     pick.message.clone()
                 };
@@ -1325,7 +1412,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                     } else {
                         theme.text()
                     };
-                    device_rows(device, width)
+                    device_rows(device, width, theme.glyphs())
                         .into_iter()
                         .map(move |row| Line::from(Span::styled(row, style)))
                 })
@@ -1368,9 +1455,11 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                     chat.title.trim().to_string()
                 };
                 let mark = if index == app.assistant.active {
-                    entry(CHAT_SHOWN, lang)
+                    // The ` · ` in the mark is the interface's, so it folds
+                    // like every other separator in the frame.
+                    theme.fold(entry(CHAT_SHOWN, lang)).into_owned()
                 } else {
-                    ""
+                    String::new()
                 };
                 Line::from(Span::styled(
                     text::clip_to(&format!("{}. {name}{mark}", index + 1), width),
@@ -1382,7 +1471,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
         Dialog::Notices(_) => {
             if app.log.is_empty() {
                 return vec![Line::from(Span::styled(
-                    entry(NOTICES_EMPTY, lang),
+                    theme.fold(entry(NOTICES_EMPTY, lang)),
                     theme.muted(),
                 ))];
             }
@@ -1393,12 +1482,19 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             app.log
                 .iter()
                 .map(|notice| {
-                    let (glyph, word) = level_badge(notice.level);
+                    let (glyph, word) = level_badge(notice.level, theme.glyphs());
                     let head = format!("{glyph} {} ", entry(word, lang));
+                    // Folded before it is measured: the notice is painted
+                    // chrome, and the folded form is what the row actually
+                    // holds.
+                    let body = theme.fold(&notice.text);
                     Line::from(vec![
                         Span::styled(head.clone(), theme.level_style(notice.level)),
                         Span::styled(
-                            text::clip_to(&notice.text, width.saturating_sub(text::columns(&head))),
+                            text::clip_to(
+                                body.as_ref(),
+                                width.saturating_sub(text::columns(&head)),
+                            ),
                             theme.text(),
                         ),
                     ])
@@ -1468,6 +1564,53 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
         // the hidden key and the note cursor all live in `assistant` state, and
         // a second painter would be a second opinion about what a field holds.
         Dialog::Settings(_) => crate::views::assistant::settings_lines(app, theme, width as u16),
+        // The card about the program. Every fact on it comes either from the
+        // crate's own manifest or from the capability this frame is painted
+        // with, so none of them can drift from what is actually running.
+        Dialog::About => {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            let room =
+                crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, 10_000);
+            let mark = crate::logo::fitted_lines(
+                app.capability,
+                (width as u16, (room as u16).saturating_sub(ABOUT_FACTS)),
+            );
+            if !mark.is_empty() {
+                out.extend(mark);
+                out.push(Line::default());
+            }
+            out.push(Line::from(Span::styled(
+                "linkr".to_string(),
+                theme.accent_strong().add_modifier(Modifier::BOLD),
+            )));
+            out.push(Line::default());
+            let sep = app.strings().label_separator;
+            let fact = |label: Entry, value: String| {
+                Line::from(vec![
+                    Span::styled(
+                        text::pad_to(&format!("{}{sep}", entry(label, lang)), ABOUT_LABEL),
+                        theme.muted(),
+                    ),
+                    Span::styled(value, theme.text()),
+                ])
+            };
+            out.push(fact(ABOUT_VERSION, env!("CARGO_PKG_VERSION").to_string()));
+            out.push(fact(ABOUT_LICENSE, env!("CARGO_PKG_LICENSE").to_string()));
+            out.push(fact(
+                ABOUT_PROJECT,
+                env!("CARGO_PKG_REPOSITORY").to_string(),
+            ));
+            out.push(fact(
+                ABOUT_RENDER,
+                format!(
+                    "{}{}{}",
+                    app.capability.color.name(),
+                    theme.glyphs().dot_sep(),
+                    app.capability.glyphs.name()
+                ),
+            ));
+            out
+        }
     }
 }
 
@@ -1575,7 +1718,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 // disagree about how tall the box is.
                 let width =
                     crate::ui::overlay::dialog_body_width(app.screen, app.sidebar_visible) as usize;
-                let spans = pick.line_spans(width.max(1));
+                let spans = pick.line_spans(width.max(1), app.glyph());
                 let rows = spans.iter().sum::<usize>().max(1);
                 let room =
                     crate::ui::overlay::dialog_body_room(app.screen, app.sidebar_visible, rows);
@@ -1646,6 +1789,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         Dialog::Uart(uart) => uart_key(app, uart, key),
+        // The card about the program answers no question, so every key is the
+        // same key: it puts the card away. The dialog was taken out of the app
+        // above and nothing puts it back, which is exactly that.
+        Dialog::About => {}
         Dialog::Help(offset) => app.dialog = scrolled(app, Dialog::Help(offset), offset, key),
         Dialog::Notices(offset) => app.dialog = scrolled(app, Dialog::Notices(offset), offset, key),
         Dialog::Cheat(cheat) => cheat_key(app, cheat, key),
@@ -1937,7 +2084,10 @@ fn send_uart_spec(app: &mut App, uart: &mut Uart) {
             Err(why) => uart.error = Some(why),
             Ok(()) => {
                 uart.error = None;
-                uart.status = Some(fill(entry(UART_SETTING, app.lang), &[settings.spec()]));
+                // The interface's own `setting uart=…` line, folded; the bridge's
+                // answer that replaces it is the bridge's and is left as it is.
+                let setting = fill(entry(UART_SETTING, app.lang), &[settings.spec()]);
+                uart.status = Some(app.theme().fold(&setting).into_owned());
             }
         },
     }
@@ -2091,6 +2241,12 @@ mod tests {
             UART_KEYS,
             UART_QUERYING,
             UART_SETTING,
+            ABOUT_TITLE,
+            ABOUT_KEYS,
+            ABOUT_VERSION,
+            ABOUT_LICENSE,
+            ABOUT_PROJECT,
+            ABOUT_RENDER,
         ];
         entries.extend(CHEAT_GROUPS.iter().map(|(group, _)| *group));
         entries.extend(
@@ -3423,6 +3579,95 @@ mod tests {
             app.notices.last().map(|notice| &notice.text)
         );
     }
+
+    /// The card about the program names what is actually running: the facts
+    /// come from the crate's own manifest, the rendering line from the frame's
+    /// capability, and the mark from the same — never from a string that could
+    /// go stale.
+    #[test]
+    fn the_about_card_names_what_is_running() {
+        let app = App {
+            screen: ratatui::layout::Rect::new(0, 0, 120, 30),
+            ..App::default()
+        };
+        let height = body_height(&app, &Dialog::About, 60);
+        let shown = text_of(&lines(&Dialog::About, &app, 60, height));
+        assert!(shown.contains("linkr"), "{shown}");
+        assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
+        assert!(shown.contains(env!("CARGO_PKG_LICENSE")), "{shown}");
+        assert!(shown.contains(env!("CARGO_PKG_REPOSITORY")), "{shown}");
+        assert!(shown.contains("TrueColor"), "{shown}");
+        assert!(shown.contains("Unicode"), "{shown}");
+        // The mark is on the card — the small one is twelve rows of cells, so
+        // the body is taller than the facts alone.
+        assert!(
+            height > ABOUT_FACTS as usize,
+            "no mark on the card:\n{shown}"
+        );
+
+        // Free of a frame — `--print-frame` before the first paint — there is
+        // no room to measure, so the card is the facts and nothing else.
+        let headless = App::default();
+        let bare = text_of(&lines(
+            &Dialog::About,
+            &headless,
+            60,
+            body_height(&headless, &Dialog::About, 60),
+        ));
+        assert!(bare.contains(env!("CARGO_PKG_VERSION")), "{bare}");
+    }
+
+    /// The card is the same card in either language: the labels translate,
+    /// the facts do not.
+    #[test]
+    fn the_about_card_is_bilingual() {
+        let zh = App {
+            lang: Lang::Zh,
+            screen: ratatui::layout::Rect::new(0, 0, 120, 30),
+            ..App::default()
+        };
+        let shown = text_of(&lines(
+            &Dialog::About,
+            &zh,
+            60,
+            body_height(&zh, &Dialog::About, 60),
+        ));
+        assert!(shown.contains("版本"), "{shown}");
+        assert!(shown.contains("许可证"), "{shown}");
+        assert!(shown.contains("项目"), "{shown}");
+        assert!(shown.contains("渲染"), "{shown}");
+        assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
+        assert_eq!(title(&Dialog::About, Lang::Zh), "关于");
+        assert_eq!(title(&Dialog::About, Lang::En), "About");
+    }
+
+    /// Any key puts the card away: it is a card, not a form. A control chord
+    /// is still the loop's, which is what keeps `Ctrl+Q` working over it.
+    #[test]
+    fn any_key_closes_the_about_card() {
+        let mut app = App::default();
+        open_about(&mut app);
+        assert!(matches!(app.dialog, Some(Dialog::About)));
+        assert!(handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)
+        ));
+        assert!(app.dialog.is_none(), "the card stayed up");
+
+        open_about(&mut app);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "Escape left the card up");
+
+        open_about(&mut app);
+        assert!(!handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+        ));
+        assert!(
+            matches!(app.dialog, Some(Dialog::About)),
+            "a chord ate the card"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3555,7 +3800,7 @@ mod pick_tests {
         };
         // The width the rows fit at: one line each, so the window moves in
         // device-sized steps, the way it always has.
-        let spans = pick.line_spans(70);
+        let spans = pick.line_spans(70, GlyphSet::Unicode);
         assert_eq!(spans, vec![1; 10]);
         for _ in 0..4 {
             pick.move_cursor(true);
@@ -3627,7 +3872,7 @@ mod pick_tests {
         };
         // At this width each row wraps onto two lines; a window of three rows
         // can show one device and a half of the next.
-        let spans = pick.line_spans(36);
+        let spans = pick.line_spans(36, GlyphSet::Unicode);
         assert_eq!(spans, vec![2, 2, 2]);
         pick.move_cursor(true);
         pick.move_cursor(true);

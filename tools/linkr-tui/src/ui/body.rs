@@ -131,9 +131,10 @@ mod tests {
         }
     }
 
-    /// The terminal pane is a screen: it paints every row of its area, blank
-    /// until the device writes. Every other view is a document that has
-    /// something to say.
+    /// The terminal pane is a screen: it paints every row of its area. With a
+    /// link open that is the device's screen; with nothing connected and
+    /// nothing on the pane it is the empty state, which points at the
+    /// sidebar. Every other view is a document that has something to say.
     #[test]
     fn the_terminal_pane_paints_a_screen_and_the_others_paint_documents() {
         let theme = Theme::DARK;
@@ -146,8 +147,9 @@ mod tests {
             if view == View::Terminal {
                 assert_eq!(rows.len(), 6, "{view:?} did not paint a screenful");
                 assert!(
-                    text_of(&rows).trim().is_empty(),
-                    "{view:?} painted a placeholder instead of a blank screen"
+                    text_of(&rows).contains("还没有连接设备"),
+                    "{view:?} painted neither a screen nor the empty state: {:?}",
+                    text_of(&rows)
                 );
             } else {
                 assert!(

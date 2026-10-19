@@ -41,9 +41,15 @@ const ITEM_INDENT: u8 = 2;
 /// The watch section sits one column deeper, as the design has it.
 const WATCH_INDENT: u8 = 3;
 
-/// The cursor's marker: a small triangle, so the accent chip reading as a
-/// button still shows which row the keyboard is on.
-pub const CURSOR_MARKER: &str = "▸ ";
+/// The cursor's marker, in this terminal's set: a small triangle, so the accent
+/// chip reading as a button still shows which row the keyboard is on — and
+/// `> ` where the font has no triangle ([`crate::capability::GlyphSet::cursor`]).
+///
+/// The marker is two columns wide in both sets, which is what lets
+/// [`painted`] reserve its columns before fitting the text.
+fn cursor(theme: &Theme) -> &'static str {
+    theme.glyphs().cursor()
+}
 
 /// What follows a shortcut that asks before it runs. The design marks `reboot`
 /// with it, and it is the difference between a red row and a row the user can
@@ -357,7 +363,11 @@ pub fn rows(app: &App) -> Vec<Row> {
     ));
     // The state row is read, not chosen: it is not a cursor target, which is
     // why it takes no cursor index.
-    rows.push(Row::at(app.state_name(), RowStyle::State, HEADER_INDENT));
+    rows.push(Row::at(
+        app.theme().fold(app.state_name()),
+        RowStyle::State,
+        HEADER_INDENT,
+    ));
 
     let transport = next_cursor();
     rows.push(Row::at(
@@ -464,7 +474,13 @@ pub fn rows(app: &App) -> Vec<Row> {
         RowStyle::Header,
         HEADER_INDENT,
     ));
-    rows.push(Row::at(s.quick_send_hint, RowStyle::Hint, HEADER_INDENT));
+    // The hint is the interface's own line — `Enter sends · reboot asks first`
+    // — so its marks fold for a terminal whose font has no ` · `.
+    rows.push(Row::at(
+        app.theme().fold(s.quick_send_hint),
+        RowStyle::Hint,
+        HEADER_INDENT,
+    ));
     for quick in &app.quick_send {
         let index = next_cursor();
         let style = if selected(index) {
@@ -540,7 +556,7 @@ fn painted(row: Row, app: &App, theme: &Theme, width: usize) -> Vec<Line<'static
             // warning that made the row worth selecting.
             let tail = row.marker.map(|m| format!(" {m}")).unwrap_or_default();
             let room = width.saturating_sub(columns(&tail));
-            let text = format!("{CURSOR_MARKER}{}", row.text);
+            let text = format!("{}{}", cursor(theme), row.text);
             // A wrapping row under the cursor keeps the chip on its first line
             // and carries the selection down its value. The marker holds the
             // indent the row would have had — the two are the same width —
@@ -549,7 +565,7 @@ fn painted(row: Row, app: &App, theme: &Theme, width: usize) -> Vec<Line<'static
                 if let Some(hang) = row.wrap_indent {
                     if columns(&text) > room {
                         let hang = (hang.saturating_sub(ITEM_INDENT) as usize
-                            + columns(CURSOR_MARKER)) as u8;
+                            + columns(cursor(theme))) as u8;
                         return broken(&text, room, hang as usize)
                             .into_iter()
                             .map(|line| Line::from(Span::styled(line, theme.selected())))
@@ -602,6 +618,7 @@ fn style_for(style: RowStyle, theme: &Theme) -> ratatui::style::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::GlyphSet;
     use crate::i18n::Lang;
     use crate::text::columns;
     use crate::ui::SIDEBAR_TEXT_WIDTH;
@@ -703,7 +720,7 @@ mod tests {
                     + columns(&row.text)
                     + row.tail.as_ref().map(|t| columns(t)).unwrap_or(0)
                     + if row.style == RowStyle::Selected {
-                        columns(CURSOR_MARKER)
+                        columns(GlyphSet::Unicode.cursor())
                     } else if row.style == RowStyle::State {
                         2
                     } else {
@@ -899,7 +916,7 @@ mod tests {
         let marked: Vec<String> = painted
             .iter()
             .map(text_of)
-            .filter(|t| t.starts_with(CURSOR_MARKER))
+            .filter(|t| t.starts_with(GlyphSet::Unicode.cursor()))
             .collect();
         assert_eq!(marked.len(), 1);
         assert!(marked[0].starts_with("▸ Transport:"), "{:?}", marked[0]);
@@ -981,11 +998,11 @@ mod tests {
         let theme = Theme::DARK;
         let chip = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
             .into_iter()
-            .find(|l| text_of(l).starts_with(CURSOR_MARKER))
+            .find(|l| text_of(l).starts_with(GlyphSet::Unicode.cursor()))
             .expect("the chip");
         assert_eq!(
             text_of(&chip),
-            format!("{CURSOR_MARKER}reboot {DANGER_MARKER}")
+            format!("{}reboot {DANGER_MARKER}", GlyphSet::Unicode.cursor())
         );
         assert_eq!(chip.spans.len(), 1, "the chip is broken into two spans");
         assert_eq!(chip.spans[0].style, theme.selected());
@@ -1009,7 +1026,7 @@ mod tests {
         let theme = Theme::DARK;
         let chip = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
             .into_iter()
-            .find(|l| text_of(l).starts_with(CURSOR_MARKER))
+            .find(|l| text_of(l).starts_with(GlyphSet::Unicode.cursor()))
             .expect("the chip");
         let text = text_of(&chip);
         assert!(
@@ -1033,13 +1050,13 @@ mod tests {
             let chip = painted
                 .iter()
                 .map(text_of)
-                .find(|t| t.starts_with(CURSOR_MARKER))
+                .find(|t| t.starts_with(GlyphSet::Unicode.cursor()))
                 .expect("a selected row");
             let row = rows(&app)
                 .into_iter()
                 .find(|r| r.style == RowStyle::Selected)
                 .unwrap();
-            assert_eq!(chip, format!("{CURSOR_MARKER}{}", row.text));
+            assert_eq!(chip, format!("{}{}", GlyphSet::Unicode.cursor(), row.text));
             assert!(
                 columns(&chip) < SIDEBAR_TEXT_WIDTH as usize,
                 "{lang:?} chip {chip:?} spans the whole column"
@@ -1205,7 +1222,7 @@ mod tests {
                         "row {text:?} lost the state's glyph"
                     ),
                     RowStyle::Selected => {
-                        assert!(text.starts_with(CURSOR_MARKER), "{text:?}");
+                        assert!(text.starts_with(GlyphSet::Unicode.cursor()), "{text:?}");
                     }
                     _ => {
                         let indent = " ".repeat(row.indent as usize);

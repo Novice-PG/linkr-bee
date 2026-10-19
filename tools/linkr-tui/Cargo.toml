@@ -58,8 +58,15 @@ bluez-async = "0.9"
 # *host*; the embedding itself happens only when the target is Windows, and
 # cross-compiled Windows builds go through windres, which the mingw packages
 # already provide wherever the mingw linker is.
+#
+# `resvg`/`usvg` are the other half of the build script's work: they rasterise
+# `assets/logo.svg` into the cell data `src/logo.rs` includes. Both are pure
+# Rust and run on the host only — a cross-compile pays for them once, and the
+# shipped binary carries the picture, not the renderer.
 [build-dependencies]
 winresource = "0.1"
+resvg = "0.48"
+usvg = "0.48"
 
 
 [profile.release]

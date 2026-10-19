@@ -646,7 +646,7 @@ fn mode_word(mode: Mode, app: &App) -> &'static str {
 /// One read per frame, rounded up like the panel this comes from: the frame
 /// loop repaints on every tick, so the arithmetic is the timer, and a window
 /// that has just been armed reads `15:00` rather than `14:59`.
-fn full_auto_countdown(app: &App) -> String {
+fn full_auto_countdown(app: &App, glyphs: crate::capability::GlyphSet) -> String {
     let Some(until) = app.assistant.full_auto_until else {
         return String::new();
     };
@@ -654,7 +654,7 @@ fn full_auto_countdown(app: &App) -> String {
         .saturating_duration_since(Instant::now())
         .as_millis()
         .div_ceil(1000);
-    format!(" · {}:{:02}", seconds / 60, seconds % 60)
+    format!("{}{}:{:02}", glyphs.dot_sep(), seconds / 60, seconds % 60)
 }
 
 /// A section heading in the accent colour.
@@ -711,7 +711,7 @@ fn field_row(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'stati
 
 /// A task row: `- goal — status`, goal in body text, status muted.
 fn task_row(task: &TaskRecord, width: u16, theme: &Theme) -> Line<'static> {
-    let row = format!("  {} — {}", task.goal, task.status);
+    let row = format!("  {} {} {}", task.goal, theme.glyphs().dash(), task.status);
     Line::from(Span::styled(
         text::clip_to(&row, width as usize),
         theme.text(),
@@ -1507,7 +1507,13 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     } else {
         let mode = state
             .mode
-            .map(|m| format!("{}{}", mode_word(m, app), full_auto_countdown(app)))
+            .map(|m| {
+                format!(
+                    "{}{}",
+                    mode_word(m, app),
+                    full_auto_countdown(app, theme.glyphs())
+                )
+            })
             .unwrap_or_else(|| s.asst_mode_auto.to_string());
         lines.push(field_row(
             &format!("  {}{}", s.asst_mode_label, s.label_separator),
@@ -1524,13 +1530,21 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         ));
         lines.push(field_row(
             &format!("  {}{}", s.asst_chat_label, s.label_separator),
-            &chat_label(state),
+            &chat_label(state, theme.glyphs()),
             width,
             theme,
         ));
         if let Some(goal) = &state.awaiting {
             lines.push(Line::from(Span::styled(
-                text::clip_to(&format!("  ⚠ {goal} — {}", s.asst_awaiting), width as usize),
+                text::clip_to(
+                    &format!(
+                        "  {}{goal} {} {}",
+                        theme.glyphs().warn_mark(),
+                        theme.glyphs().dash(),
+                        s.asst_awaiting
+                    ),
+                    width as usize,
+                ),
                 theme.warn(),
             )));
         }
@@ -1618,14 +1632,14 @@ fn the_thread_ends_with(state: &AssistantState, task: &TaskRecord) -> bool {
 
 /// What the header calls a conversation: its place in the list and the name
 /// its first question gave it.
-fn chat_label(state: &AssistantState) -> String {
+fn chat_label(state: &AssistantState, glyphs: crate::capability::GlyphSet) -> String {
     let index = state.active.min(state.chats.len().saturating_sub(1));
     let total = state.chats.len().max(1);
     let title = state.chat().title.trim();
     if title.is_empty() {
         format!("{}/{}", index + 1, total)
     } else {
-        format!("{}/{} · {}", index + 1, total, title)
+        format!("{}/{}{}{}", index + 1, total, glyphs.dot_sep(), title)
     }
 }
 
@@ -1701,30 +1715,39 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
     // place.
     let title = state.chat().title.trim();
     let label = if state.chats.len() > 1 {
-        chat_label(state)
+        chat_label(state, theme.glyphs())
     } else {
         title.to_string()
     };
     let name = app.lang.view_name(crate::event::View::Assistant);
+    // The thread mark and the ` · ` before the label are the interface's own
+    // two marks, drawn in the set the terminal has.
+    let mark = theme.fold("⌁");
     let head = if label.is_empty() {
-        format!(" ⌁ {name}")
+        format!(" {mark} {name}")
     } else {
-        format!(" ⌁ {name} · {label}")
+        format!(" {mark} {name}{}{label}", theme.glyphs().dot_sep())
     };
     let head_title = Line::from(Span::styled(text::clip_to(&head, room), theme.accent()));
     let head_status = if state.configured {
         let mode = state
             .mode
-            .map(|m| format!("{}{}", mode_word(m, app), full_auto_countdown(app)))
+            .map(|m| {
+                format!(
+                    "{}{}",
+                    mode_word(m, app),
+                    full_auto_countdown(app, theme.glyphs())
+                )
+            })
             .unwrap_or_else(|| s.asst_mode_auto.to_string());
         let usage = state.chat().usage.0 + state.chat().usage.1;
+        let dot = theme.glyphs().dot_sep();
         let text = if usage == 0 {
-            format!(" {} · {}", s.asst_mode_label, mode)
+            format!(" {}{dot}{mode}", s.asst_mode_label)
         } else {
             format!(
-                " {} · {} · {} {}",
+                " {}{dot}{mode}{dot}{} {}",
                 s.asst_mode_label,
-                mode,
                 format_tokens(usage),
                 s.asst_usage_label
             )
@@ -1741,19 +1764,20 @@ pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Lin
     let typed = text::clip_to(&state.chat().composer, room.saturating_sub(3));
     // A caret at the end of the draft: the panel is where the keyboard is when
     // it has focus, and a composer that cannot be told from a label is one the
-    // user wonders whether their keys are reaching.
-    let caret = if app.assistant_panel_focused() {
-        "▏"
+    // user wonders whether their keys are reaching. The thin bar the design
+    // uses has an ASCII stand-in of its own, so the mark folds.
+    let caret: std::borrow::Cow<'static, str> = if app.assistant_panel_focused() {
+        theme.fold("▏")
     } else {
-        ""
+        std::borrow::Cow::Borrowed("")
     };
     let composer = Line::from(vec![
         Span::styled(marker.to_string(), theme.accent()),
         Span::styled(typed, theme.text()),
-        Span::styled(caret.to_string(), theme.accent()),
+        Span::styled(caret, theme.accent()),
     ]);
     let hint = Line::from(Span::styled(
-        text::clip_to(&format!(" {}", s.asst_panel_keys), room),
+        text::clip_to(&format!(" {}", theme.fold(s.asst_panel_keys)), room),
         theme.muted(),
     ));
 
@@ -1862,7 +1886,7 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
     ];
     for field in SETTINGS {
         let focused = state.focus == field;
-        let caret = if focused { "▌" } else { " " };
+        let caret = if focused { theme.glyphs().caret() } else { " " };
         // The key field paints stars rather than its value — a shoulder-surfed
         // key is a rotated key — except the character that was just typed,
         // which is still in the clear so the keystroke can be seen to land.
@@ -1874,8 +1898,9 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
             if value.is_empty() {
                 // An empty text field still paints a row: the placeholder is
                 // what says the caret is on a field at all. A select is never
-                // empty — it paints the choice it holds.
-                s.value_unknown.to_string()
+                // empty — it paints the choice it holds. The placeholder is the
+                // same dash the bars use, in the set the terminal has.
+                app.unknown().to_string()
             } else {
                 value
             }
@@ -2069,13 +2094,21 @@ mod tests {
     /// is the timer.
     #[test]
     fn the_mode_row_counts_the_unattended_window_down() {
+        use crate::capability::GlyphSet;
         let theme = Theme::DARK;
         let mut a = app(Lang::En);
-        assert_eq!(full_auto_countdown(&a), "", "no window is armed");
+        assert_eq!(
+            full_auto_countdown(&a, GlyphSet::Unicode),
+            "",
+            "no window is armed"
+        );
 
         // The window starts at the pick, and a whole one reads `15:00`.
         cycle_mode(&mut a);
-        assert_eq!(full_auto_countdown(&a), " · 15:00");
+        assert_eq!(full_auto_countdown(&a, GlyphSet::Unicode), " · 15:00");
+        // In the ASCII set the separator is its own, and the row is laid out
+        // from the folded text.
+        assert_eq!(full_auto_countdown(&a, GlyphSet::Ascii), " . 15:00");
         a.assistant.configured = true;
         let text = body_text(&lines(&a, &theme, 90));
         assert!(text.contains(" · 15:00"), "{text}");
@@ -2084,7 +2117,11 @@ mod tests {
         // words alone.
         cycle_mode(&mut a);
         assert_eq!(a.assistant.mode, Some(Mode::Manual));
-        assert_eq!(full_auto_countdown(&a), "", "…and gone with the mode");
+        assert_eq!(
+            full_auto_countdown(&a, GlyphSet::Unicode),
+            "",
+            "…and gone with the mode"
+        );
     }
 
     /// The view shows the conversation; the settings have their own window. A
@@ -3112,7 +3149,7 @@ pub fn switch_conversation(app: &mut App, delta: isize) {
     let text = format!(
         "{} {}",
         app.strings().agent_chat_switched,
-        chat_label(&app.assistant)
+        chat_label(&app.assistant, app.glyph())
     );
     app.push_notice(crate::app::Notice {
         text,

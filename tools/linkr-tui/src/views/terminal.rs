@@ -34,6 +34,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{App, Focus};
+use crate::logo;
 use crate::text;
 use crate::theme::Theme;
 use crate::vt::{Ansi, Cell, CellStyle, Parser, Vt};
@@ -669,6 +670,14 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
+    // Nothing from the device and no link for it to come down: the pane has
+    // nothing to show, so it shows what to do about that rather than a blank
+    // screen. Once a link is up the pane is the device's screen again, blank
+    // or not — a session that has not spoken yet is a session, not an empty
+    // state.
+    if app.terminal.is_empty() && !app.session.is_live() {
+        return empty_lines(app, theme, area);
+    }
     let pane = &app.terminal;
     let width = area.width as usize;
     let height = area.height as usize;
@@ -689,6 +698,58 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
             None => Line::default(),
         })
         .collect()
+}
+
+/// The pane with nothing to show: the mark where there is room for it, what
+/// is missing, and where a connection starts — centred, the way the design's
+/// empty states are.
+///
+/// Rows rather than a widget of its own: the serial terminal is a screen, and
+/// the caller renders a screenful of rows either way.
+fn empty_lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
+    let s = app.strings();
+    let mut body: Vec<Line<'static>> = Vec::new();
+    // The mark takes only the room it can leave the four rows below: a blank,
+    // the title, a blank and the guidance.
+    let mark = logo::fitted_lines(app.capability, (area.width, area.height.saturating_sub(4)));
+    if !mark.is_empty() {
+        body.extend(mark);
+        body.push(Line::default());
+    }
+    body.push(Line::from(Span::styled(
+        theme.fold(s.term_empty_title).into_owned(),
+        theme.text().add_modifier(Modifier::BOLD),
+    )));
+    body.push(Line::default());
+    body.push(Line::from(Span::styled(
+        theme.fold(s.term_empty_hint).into_owned(),
+        theme.muted(),
+    )));
+    centre(body, area.width as usize, area.height as usize)
+}
+
+/// A body centred in a screen of `width` × `height` cells: blank rows above
+/// and below it, and the pad left of each row measured in display columns.
+fn centre(mut body: Vec<Line<'static>>, width: usize, height: usize) -> Vec<Line<'static>> {
+    body.truncate(height);
+    let top = height.saturating_sub(body.len()) / 2;
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(height);
+    for _ in 0..top {
+        out.push(Line::default());
+    }
+    for line in body {
+        let pad = width.saturating_sub(line.width()) / 2;
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    while out.len() < height {
+        out.push(Line::default());
+    }
+    out
 }
 
 /// The rows the pane shows as plain text — what the tests assert on, without a
@@ -923,8 +984,8 @@ mod tests {
         }
     }
 
-    /// An empty pane is blank rows, not no rows: the design's first frame shows
-    /// a pane with its ground and nothing in it.
+    /// An empty pane is blank rows, not no rows: the pane's own body is what
+    /// [`rows`] reports, whatever the view around it paints.
     #[test]
     fn an_empty_pane_is_blank_rows() {
         let pane = sized(20, 3);
@@ -933,6 +994,61 @@ mod tests {
         assert!(pane.is_empty());
         // A zero-height pane paints nothing at all, which is the resize storm.
         assert!(lines(&App::default(), &Theme::DARK, Rect::new(0, 0, 20, 0)).is_empty());
+    }
+
+    /// The empty state stands only for a disconnected pane with nothing on it:
+    /// once a link is open the pane is the device's screen, blank as it may
+    /// be, and output the device left behind stays a screen when the link
+    /// drops — neither is a "no board connected" screen.
+    #[test]
+    fn the_empty_state_yields_to_a_session_or_to_output() {
+        let theme = Theme::DARK;
+        let area = Rect::new(0, 0, 80, 24);
+        let joined = |app: &App| {
+            lines(app, &theme, area)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let app = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        let painted = joined(&app);
+        assert!(painted.contains("还没有连接设备"), "{painted}");
+        assert!(painted.contains("侧栏"), "{painted}");
+
+        // A link this pane has said nothing on is a session, not an empty
+        // state: the screen is blank because the device is quiet.
+        let mut live = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        let link = crate::transport::testing::MemoryLink::new();
+        live.session
+            .connect(link.link())
+            .expect("the memory link opens");
+        assert!(live.session.is_live());
+        let painted = joined(&live);
+        assert!(!painted.contains("还没有连接设备"), "{painted}");
+
+        // Output the device left behind stays a screen after the link drops.
+        let mut left = App {
+            lang: Lang::Zh,
+            ..App::default()
+        };
+        left.terminal.set_size(80, 24);
+        left.terminal.push_text("help\r\n");
+        let painted = joined(&left);
+        assert!(painted.contains("help"), "{painted}");
+        assert!(!painted.contains("还没有连接设备"), "{painted}");
     }
 
     /// A screen on a taller area is anchored at the top, the way a terminal is:

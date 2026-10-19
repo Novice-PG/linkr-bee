@@ -146,6 +146,21 @@ pub fn signal_bars(dbm: i32) -> &'static str {
     }
 }
 
+/// The same ranking, in the dot pair this terminal has
+/// ([`crate::capability::GlyphSet::dots`]): `*o` where there are no circles, so
+/// the ranking survives a font that has neither.
+pub fn signal_bars_with(dbm: i32, (filled, empty): (char, char)) -> String {
+    let strength = match dbm {
+        -55.. => 4,
+        -65..=-56 => 3,
+        -75..=-66 => 2,
+        _ => 1,
+    };
+    (0..4)
+        .map(|dot| if dot < strength { filled } else { empty })
+        .collect()
+}
+
 /// A `width`-cell meter, split into filled and empty halves so a caller can
 /// colour them apart: `█` for the share of `used` in `total`, `░` for the
 /// rest — the glyph pair ratatui's own `Gauge` draws, for the rows that live
@@ -154,13 +169,29 @@ pub fn signal_bars(dbm: i32) -> &'static str {
 /// `used` is clamped to `total`; a zero `total` is all track, because a share
 /// with no denominator is not a share.
 pub fn meter(used: u64, total: u64, width: usize) -> (String, String) {
+    meter_with(used, total, width, ('█', '░'))
+}
+
+/// The same meter, drawn with the pair this terminal has
+/// ([`crate::capability::GlyphSet::meter`]): `#` and `.` where the font has no
+/// blocks, which is the pair the compatibility pass would narrow the blocks to
+/// anyway.
+pub fn meter_with(
+    used: u64,
+    total: u64,
+    width: usize,
+    (filled, track): (char, char),
+) -> (String, String) {
     // Wide arithmetic: a hostile `used/total` off the wire must not overflow,
     // and half-up is what lets a share just past the middle fill the middle
     // cell. A zero denominator is all track, hence the 1.
     let used = u128::from(used.min(total));
     let total = u128::from(total);
-    let filled = ((used * width as u128 + total / 2) / total.max(1)) as usize;
-    ("█".repeat(filled), "░".repeat(width - filled))
+    let filled_cells = ((used * width as u128 + total / 2) / total.max(1)) as usize;
+    (
+        std::iter::repeat_n(filled, filled_cells).collect(),
+        std::iter::repeat_n(track, width - filled_cells).collect(),
+    )
 }
 
 #[cfg(test)]

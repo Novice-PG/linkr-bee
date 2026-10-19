@@ -172,14 +172,22 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
         ..inner
     };
     let top = dialog.scroll().min(body.saturating_sub(body_height));
-    scroll::draw(frame, window, body, top, body_height, theme.scrollbar());
+    scroll::draw(
+        frame,
+        window,
+        body,
+        top,
+        body_height,
+        theme.scrollbar(),
+        theme.glyphs(),
+    );
 }
 
 fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, area: Rect) {
     let theme = app.theme();
     // prompt + separator + blank + legend, plus the box's own two rows: the
     // window is whatever is left, capped at the registry's own maximum — and
-    // at the rows the level has, so the quick list is a short box rather than
+    // at the rows the level has, so the menu is a short box rather than
     // a tall one with empty air under it.
     const CHROME_ROWS: u16 = 6;
     let room = area.height.saturating_sub(CHROME_ROWS) as usize;
@@ -207,7 +215,15 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
         ..inner
     };
     let top = palette::window_start(state, rows.len(), visible);
-    scroll::draw(frame, list, rows.len(), top, visible, theme.scrollbar());
+    scroll::draw(
+        frame,
+        list,
+        rows.len(),
+        top,
+        visible,
+        theme.scrollbar(),
+        theme.glyphs(),
+    );
 }
 
 #[cfg(test)]
@@ -319,14 +335,18 @@ mod tests {
             ..App::default()
         };
         crate::palette::open(&mut app);
-        // The list the palette opens on is short enough to fit as it is.
+        // The menu fits its box as it opens: no bar, no scroll.
         let text = ui::render_to_text(&app, 100, 30);
         assert!(!text.contains('┃'), "a bar down a list that fits:\n{text}");
-        assert!(text.contains("More actions"), "{text}");
+        assert!(text.contains("Connection…"), "{text}");
 
-        // The second level is the registry: rows past the window, a bar.
+        // A query wide enough to answer with more rows than the window holds:
+        // a bar. A section's window is one category and cannot overflow — the
+        // search is where the list grows past the box.
         let state = app.palette.as_mut().expect("the palette is up");
-        state.set_level(crate::palette::Level::All);
+        state.query = "e".to_string();
+        state.selected = 0;
+        state.window = 0;
         let text = ui::render_to_text(&app, 100, 30);
         assert!(text.contains('┃'), "no bar down the full list:\n{text}");
 

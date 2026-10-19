@@ -10,26 +10,15 @@ pub enum ConnectionState {
     Failed,
 }
 
-/// The four glyphs that stand for the states, as the design draws them: a ring
-/// at rest, a half-filled disc while dialling, a filled one when the link is
-/// up, and a diamond when it broke.
+/// The glyphs that stand for the states, as the design draws them: a ring at
+/// rest, a half-filled disc while dialling, a filled one when the link is up,
+/// and a diamond when it broke.
 ///
-/// One glyph per state and one place it is decided, so the top bar, the sidebar
-/// row and the bottom bar can never disagree about what the session is doing.
+/// Which mark goes with which state, in the set the terminal actually has, is
+/// [`crate::capability::GlyphSet::state`] — the one place the bars ask, so the
+/// top bar, the sidebar row and the bottom bar cannot disagree about what the
+/// session is doing.
 pub const STATE_GLYPHS: [&str; 4] = ["○", "◐", "●", "◆"];
-
-impl ConnectionState {
-    /// The glyph for this state. All four are one column wide, so the row that
-    /// carries one is laid out the same in either language.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ConnectionState::Disconnected => STATE_GLYPHS[0],
-            ConnectionState::Connecting => STATE_GLYPHS[1],
-            ConnectionState::Connected => STATE_GLYPHS[2],
-            ConnectionState::Failed => STATE_GLYPHS[3],
-        }
-    }
-}
 
 /// How loud a notice is. Toasts, the notice log and inline messages all colour
 /// themselves from this.
@@ -143,33 +132,20 @@ mod tests {
         assert_eq!(View::from_name(""), None);
     }
 
-    /// Every state has its own glyph, each is exactly one column wide, and none
-    /// of them is blank — the properties the bars depend on when they place one
-    /// at column zero and the state's name after it.
+    /// Every state mark is exactly one column wide and none of them is blank —
+    /// the properties the bars depend on when they place one at column zero and
+    /// the state's name after it. Which mark goes with which state is the glyph
+    /// set's, and [`crate::capability::GlyphSet::state`] is tested there.
     #[test]
-    fn every_state_has_its_own_one_column_glyph() {
-        for state in [
-            ConnectionState::Disconnected,
-            ConnectionState::Connecting,
-            ConnectionState::Connected,
-            ConnectionState::Failed,
-        ] {
-            let glyph = state.glyph();
+    fn every_state_mark_is_one_column_and_its_own() {
+        for glyph in STATE_GLYPHS {
             assert_eq!(
                 crate::text::columns(glyph),
                 1,
-                "{state:?} draws {glyph:?}, which is not one column"
+                "{glyph:?} is not one column"
             );
         }
-        let mut glyphs: Vec<&str> = [
-            ConnectionState::Disconnected,
-            ConnectionState::Connecting,
-            ConnectionState::Connected,
-            ConnectionState::Failed,
-        ]
-        .into_iter()
-        .map(|state| state.glyph())
-        .collect();
+        let mut glyphs = STATE_GLYPHS.to_vec();
         glyphs.sort_unstable();
         let count = glyphs.len();
         glyphs.dedup();

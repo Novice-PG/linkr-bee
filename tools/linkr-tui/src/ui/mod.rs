@@ -11,6 +11,7 @@ pub mod legacy;
 pub mod overlay;
 pub mod scroll;
 pub mod sidebar;
+pub mod splash;
 pub mod toast;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -20,6 +21,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::logo;
 
 /// Height of the top and bottom bars, in rows.
 pub const BAR_HEIGHT: u16 = 1;
@@ -31,11 +33,10 @@ pub const BAR_HEIGHT: u16 = 1;
 pub const SIDEBAR_WIDTH: u16 = 30;
 
 /// The rail's edge: one column of rule, so the sidebar reads as a column of its
-/// own rather than as the left margin of the centre pane.
+/// own rather than as the left margin of the centre pane. The glyph is the
+/// theme's ([`crate::capability::GlyphSet::divider`]), so a terminal without
+/// box drawing gets the `|` it does have.
 pub const DIVIDER_WIDTH: u16 = 1;
-
-/// The glyph that edge is drawn with.
-pub const DIVIDER_GLYPH: &str = "│";
 
 /// Columns the sidebar's own rows may use.
 pub const SIDEBAR_TEXT_WIDTH: u16 = SIDEBAR_WIDTH - DIVIDER_WIDTH;
@@ -187,6 +188,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // The page ground first, so no cell keeps the emulator's default background.
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
+    // The splash is a screen of its own while it stands: nothing else is
+    // painted under it, so the interface's first frame is a whole one rather
+    // than one with a splash peeled off it. The compatibility pass still has
+    // the last word — on the old console there is no other way to paint.
+    if app.splash_active() {
+        splash::draw(frame, app, area);
+        if app.legacy_console {
+            legacy::prepare(frame.buffer_mut());
+        }
+        return;
+    }
+
     let regions = regions_for(area, app.sidebar_visible, app.panel_wanted());
 
     draw_top_bar(frame, app, regions.top_bar);
@@ -321,7 +334,19 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(DIVIDER_WIDTH),
         ..area
     };
-    let lines = sidebar::lines(app, &theme, text_area.width);
+    let mut lines = sidebar::lines(app, &theme, text_area.width);
+    // The mark rides the rail's spare room at the top, and only there: it is
+    // not a row, and the one rule it must keep is that the column of rows
+    // below it still fits whole. A terminal that is already crowding the rail
+    // shows the rows and no mark.
+    let room = text_area.height.saturating_sub(lines.len() as u16 + 1);
+    let mark = logo::fitted_lines(app.capability, (text_area.width, room));
+    if !mark.is_empty() {
+        let mut with_mark = mark;
+        with_mark.push(Line::default());
+        with_mark.append(&mut lines);
+        lines = with_mark;
+    }
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
     draw_divider(frame, &theme, area);
 }
@@ -343,9 +368,15 @@ fn draw_divider(frame: &mut Frame, theme: &crate::theme::Theme, area: Rect) {
         height: area.height,
     };
     let rule: Vec<Line<'static>> = (0..column.height)
-        .map(|_| Line::from(Span::styled(DIVIDER_GLYPH, theme.line())))
+        .map(|_| Line::from(Span::styled(dividers(theme), theme.line())))
         .collect();
     frame.render_widget(Paragraph::new(rule).style(theme.panel()), column);
+}
+
+/// The glyph a column's edge is drawn with, in this terminal's set: one cell of
+/// rule either way.
+fn dividers(theme: &crate::theme::Theme) -> String {
+    theme.glyphs().divider().to_string()
 }
 
 /// The docked assistant panel: the thread on the right of the pane.
@@ -439,7 +470,7 @@ fn draw_assistant(frame: &mut Frame, app: &App, area: Rect) {
             ..area
         };
         let rule: Vec<Line<'static>> = (0..column.height)
-            .map(|_| Line::from(Span::styled(DIVIDER_GLYPH, theme.line())))
+            .map(|_| Line::from(Span::styled(dividers(&theme), theme.line())))
             .collect();
         frame.render_widget(Paragraph::new(rule).style(theme.panel()), column);
     }
@@ -472,7 +503,15 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
         // that is empty most of the time.
         let (total, top, viewport) =
             crate::views::terminal::scroll_position(&app.terminal, area.height as usize);
-        scroll::draw(frame, area, total, top, viewport, theme.scrollbar());
+        scroll::draw(
+            frame,
+            area,
+            total,
+            top,
+            viewport,
+            theme.scrollbar(),
+            theme.glyphs(),
+        );
     }
 }
 
@@ -512,7 +551,7 @@ fn draw_toasts(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let theme = app.theme();
-    let width = toast::width(&app.notices).min(area.width);
+    let width = toast::width(&app.notices, theme.glyphs()).min(area.width);
     let height = app.notices.len() as u16 + 2;
     if width < 3 || area.height < BAR_HEIGHT + height {
         return;
@@ -770,7 +809,7 @@ mod tests {
         let buffer = render_buffer(&app, 140, 30).expect("a frame");
         assert_eq!(
             buffer[(regions.assistant.x, 10)].symbol(),
-            DIVIDER_GLYPH,
+            dividers(&app.theme()),
             "no rule on the panel's edge"
         );
         // The composer and its key hint are painted: a panel with nowhere to
@@ -998,6 +1037,35 @@ mod tests {
         assert_eq!(narrow.centre.width, 1);
     }
 
+    /// The rail's spare room carries the mark, and only spare room: a terminal
+    /// too short for the whole column plus the picture shows the column alone,
+    /// so the mark can never push a row off the rail. The mark is the only
+    /// thing on the rail that draws in half blocks, which is how the two
+    /// frames tell themselves apart.
+    #[test]
+    fn the_rail_carries_its_mark_only_in_spare_room() {
+        let app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let rail_of = |text: &str| {
+            text.lines()
+                .map(|line| line.chars().take(SIDEBAR_TEXT_WIDTH as usize).collect())
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let tall = rail_of(&render_to_text(&app, 100, 60));
+        assert!(
+            tall.contains('▀') || tall.contains('▄'),
+            "the tall rail has no mark:\n{tall}"
+        );
+        let short = rail_of(&render_to_text(&app, 100, 24));
+        assert!(
+            !short.contains('▀') && !short.contains('▄'),
+            "the short rail squeezed a mark in:\n{short}"
+        );
+    }
+
     /// A degenerate area yields without panicking: zero-width and zero-height
     /// terminals happen while a window is being resized.
     #[test]
@@ -1029,13 +1097,14 @@ mod tests {
         let text = render_to_text(&app, 110, 30);
         let rows: Vec<&str> = text.lines().collect();
         assert_eq!(rows.len(), 30);
+        let divider = dividers(&app.theme());
         for (y, row) in rows.iter().enumerate() {
-            let carries = row.contains(DIVIDER_GLYPH);
+            let carries = row.contains(&divider);
             if y == 0 || y == 29 {
                 assert!(!carries, "row {y} runs the rule through a bar: {row:?}");
             } else {
                 assert!(carries, "row {y} is missing the rule: {row:?}");
-                let before = row.split(DIVIDER_GLYPH).next().unwrap();
+                let before = row.split(&divider).next().unwrap();
                 assert_eq!(
                     crate::text::columns(before),
                     SIDEBAR_TEXT_WIDTH as usize,
@@ -1445,7 +1514,7 @@ mod tests {
                         .to_string(),
                 level: NoticeLevel::Info,
             });
-            let toast_width = toast::width(&app.notices).min(width);
+            let toast_width = toast::width(&app.notices, app.glyph()).min(width);
             let height = app.notices.len() as u16 + 2;
             let edge = width - toast_width;
             let Some(buffer) = render_buffer(&app, width, 24) else {

@@ -16,6 +16,11 @@ const PADDING: usize = 2;
 const FADE: std::time::Duration = std::time::Duration::from_millis(700);
 
 /// A toast's body: the notice text, one line per notice, in the current theme.
+///
+/// This is where a notice's text is folded: the stack is painted chrome, and
+/// a notice built from an interface string — `connecting…`, `Not connected —
+/// nothing was sent.` — carries marks a terminal without them cannot show. The
+/// log keeps the words the notice was pushed with; only the box translates.
 pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let now = std::time::Instant::now();
     app.notices
@@ -29,7 +34,7 @@ pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
                 Some(until) if until.saturating_duration_since(now) < FADE => theme.muted(),
                 _ => theme.toast(),
             };
-            Line::from(Span::styled(notice.text.clone(), style))
+            Line::from(Span::styled(theme.fold(&notice.text).into_owned(), style))
         })
         .collect()
 }
@@ -37,13 +42,20 @@ pub fn lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
 /// The width a toast needs for its text, border and padding included, so the
 /// box hugs its content instead of taking a guessed slice of the screen. An
 /// empty stack needs no box at all, and says so with zero.
-pub fn width(notices: &[Notice]) -> u16 {
+///
+/// Measured on the folded text, which is what [`lines`] paints: `…` stands for
+/// three cells once it is folded, and a box sized on the unfolded string would
+/// be three columns short.
+pub fn width(notices: &[Notice], glyphs: crate::capability::GlyphSet) -> u16 {
     if notices.is_empty() {
         return 0;
     }
     let widest = notices
         .iter()
-        .map(|notice| unicode_width::UnicodeWidthStr::width(notice.text.as_str()))
+        .map(|notice| {
+            let text = crate::capability::fold(&notice.text, glyphs);
+            unicode_width::UnicodeWidthStr::width(text.as_ref())
+        })
         .max()
         .unwrap_or(0);
     // Two border columns plus the padding on each side.
@@ -109,7 +121,7 @@ mod tests {
     fn an_empty_stack_paints_nothing() {
         let app = App::default();
         assert!(lines(&app, &Theme::DARK).is_empty());
-        assert_eq!(width(&[]), 0);
+        assert_eq!(width(&[], crate::capability::GlyphSet::Unicode), 0);
         assert_eq!(border_level(&[]), None);
     }
 
@@ -158,13 +170,21 @@ mod tests {
     /// notice must not be clipped by a box sized for a narrow one.
     #[test]
     fn the_box_hugs_the_widest_notice() {
+        use crate::capability::GlyphSet;
         let narrow = notice("hi", NoticeLevel::Info);
         let wide = notice("主题: 浅色", NoticeLevel::Info);
-        let narrow_width = width(&[narrow]);
-        let wide_width = width(std::slice::from_ref(&wide));
+        let narrow_width = width(&[narrow], GlyphSet::Unicode);
+        let wide_width = width(std::slice::from_ref(&wide), GlyphSet::Unicode);
         assert!(wide_width > narrow_width);
         let widest = unicode_width::UnicodeWidthStr::width(wide.text.as_str()) as u16;
         assert_eq!(wide_width, widest + 6);
+        // The folded text is what the box is measured on: `…` stands for three
+        // cells in the ASCII set, and a box sized on one would be two short.
+        let dotted = notice("connecting…", NoticeLevel::Info);
+        assert_eq!(
+            width(std::slice::from_ref(&dotted), GlyphSet::Ascii),
+            width(std::slice::from_ref(&dotted), GlyphSet::Unicode) + 2
+        );
     }
 
     /// The border wears the loudest level in the stack, so an error is never

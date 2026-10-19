@@ -1,9 +1,10 @@
 //! The interface's own choices, remembered between runs.
 //!
-//! Nine small facts a user would resent retyping: which transport the sidebar
+//! Ten small facts a user would resent retyping: which transport the sidebar
 //! stood on, the LAN host they dial, the address and the name of the board they
 //! last dialled, the view they were reading, the theme, the language, how the
-//! Enter key is spelled on the wire and whether both directions are traced.
+//! Enter key is spelled on the wire, whether both directions are traced, and
+//! whether the startup splash shows.
 //! They live in the shared JSON shelf the agent stores already use — the
 //! `tui.*` keys — because that file already has the one thing this needs and
 //! would otherwise have to grow: an atomic write.
@@ -33,6 +34,7 @@ const THEME: &str = "tui.theme";
 const LANG: &str = "tui.lang";
 const ENTER: &str = "tui.enter";
 const DEBUG_IO: &str = "tui.debug_io";
+const NO_SPLASH: &str = "tui.no_splash";
 
 /// What the last run left behind. All optional: `None` means the user has
 /// never chosen, and the caller's own default stands.
@@ -62,6 +64,11 @@ pub struct Settings {
     /// trace turned on to watch a problem is still on when it is reproduced
     /// after a restart.
     pub debug_io: bool,
+    /// Whether the startup splash is skipped. Persisted, so a user who put it
+    /// away once is not made to put it away every morning — and stored the
+    /// second, unusual way round so that the default (a missing key) is the
+    /// splash showing.
+    pub no_splash: bool,
 }
 
 /// The settings, on disk.
@@ -114,6 +121,7 @@ impl SettingsStore {
                 .as_deref()
                 .and_then(EnterMode::from_name),
             debug_io: self.file.get(DEBUG_IO).as_deref() == Some("true"),
+            no_splash: self.file.get(NO_SPLASH).as_deref() == Some("true"),
         }
     }
 
@@ -149,9 +157,10 @@ impl SettingsStore {
                 ENTER,
                 settings.enter.map(EnterMode::as_name).unwrap_or_default(),
             );
-            // The one boolean, spelled the one way: anything else, a hand edit
+            // The booleans, spelled the one way: anything else, a hand edit
             // included, reads as off rather than as an error.
             put(DEBUG_IO, if settings.debug_io { "true" } else { "" });
+            put(NO_SPLASH, if settings.no_splash { "true" } else { "" });
         });
     }
 }
@@ -184,6 +193,7 @@ mod tests {
             lang: Some(Lang::En),
             enter: Some(EnterMode::Crlf),
             debug_io: true,
+            no_splash: true,
         };
         store.write(&settings);
         assert_eq!(store.read(), settings);
@@ -209,7 +219,7 @@ mod tests {
             &path,
             r#"{"tui.transport":"hovercraft","tui.lan_host":"192.168.0.100",
                 "tui.view":"nowhere","tui.theme":"purple","tui.lang":"klingon",
-                "tui.enter":"cr-lf","tui.debug_io":"yes"}"#,
+                "tui.enter":"cr-lf","tui.debug_io":"yes","tui.no_splash":"yes"}"#,
         )
         .expect("the test writes its own file");
         let read = SettingsStore::at(&path).read();
@@ -219,6 +229,7 @@ mod tests {
         assert_eq!(read.lang, None);
         assert_eq!(read.enter, None);
         assert!(!read.debug_io, "an unrecognised word is not an on");
+        assert!(!read.no_splash, "an unrecognised word is not an on");
         assert_eq!(read.lan_host, "192.168.0.100");
         let _ = std::fs::remove_file(&path);
     }

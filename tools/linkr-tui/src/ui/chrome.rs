@@ -10,10 +10,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{RenderDirection, Sparkline};
 
 use crate::app::App;
+use crate::capability::GlyphSet;
+use crate::event::ConnectionState;
 use crate::theme::Theme;
 
-/// The separator between the top bar's groups.
-const DOT: &str = " · ";
+/// The separator between the top bar's groups: ` · ` where the terminal has a
+/// middle dot, ` . ` where it does not ([`GlyphSet::dot_sep`]).
+fn dot(theme: &Theme) -> &'static str {
+    theme.glyphs().dot_sep()
+}
 
 /// The top bar's left half: the state's glyph, the state's name, and the signal
 /// the link is carrying. The signal is the only fact the device reports about
@@ -26,8 +31,8 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
             format!("{} ", app.state_glyph()),
             theme.state_dot(app.state),
         ),
-        Span::styled(app.state_name().to_string(), theme.text()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(theme.fold(app.state_name()), theme.text()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         // The reading wears the strength ladder rather than the strip's dim
         // grey — the same reason the meters do: in three of the six themes
         // that grey is all but the panel behind it, and a reading nobody can
@@ -53,13 +58,13 @@ pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
     let s = app.strings();
     Line::from(vec![
         Span::styled(format!("{} {}", s.rx, app.rx), theme.accent()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(format!("{} {}", s.tx, app.tx), theme.focus()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(app.baud_text(), theme.muted()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(s.autoscroll.to_string(), theme.muted()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(app.clock.clone(), theme.muted()),
     ])
 }
@@ -117,6 +122,7 @@ pub fn rx_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
         app.traffic.rx_window.iter().rev().copied(),
         app.traffic.scale(),
         theme.accent(),
+        theme.glyphs().bar(),
     )
 }
 
@@ -126,41 +132,35 @@ pub fn tx_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
         app.traffic.tx_window.iter().rev().copied(),
         app.traffic.scale(),
         theme.focus(),
+        theme.glyphs().bar(),
     )
 }
 
 /// One direction's samples as the widget both graphs are built from, on the
-/// one scale the two share.
-fn samples(data: impl IntoIterator<Item = u64>, scale: u64, style: Style) -> Sparkline<'static> {
+/// one scale the two share and in the bars this terminal has
+/// ([`GlyphSet::bar`]).
+fn samples(
+    data: impl IntoIterator<Item = u64>,
+    scale: u64,
+    style: Style,
+    bars: symbols::bar::Set<'static>,
+) -> Sparkline<'static> {
     Sparkline::default()
         .data(data)
         .max(scale)
         .direction(RenderDirection::RightToLeft)
-        .bar_set(GRAPH_BARS)
+        .bar_set(bars)
         .style(style)
 }
 
-/// The bars both graphs are drawn with: ratatui's nine levels with the zero
-/// level made visible.
-///
-/// The stock set leaves a zero sample blank, which drew an idle link as an
-/// empty strip beside its `0 B/s` — a fresh session read as a broken
-/// instrument rather than a quiet one — and left the pauses between bursts
-/// invisible too. The lowest block draws the line the graph stands on, and
-/// the graphs are the only thing on the screen using these glyphs.
-const GRAPH_BARS: symbols::bar::Set<'static> = symbols::bar::Set {
-    empty: "▁",
-    ..symbols::bar::NINE_LEVELS
-};
-
 /// The glyph that heads the RX graph, in the colour that graph is drawn in.
 pub fn rx_arrow(theme: &Theme) -> Span<'static> {
-    Span::styled("↓", theme.accent())
+    Span::styled(theme.glyphs().arrow_down(), theme.accent())
 }
 
 /// The glyph that heads the TX graph; see [`rx_arrow`].
 pub fn tx_arrow(theme: &Theme) -> Span<'static> {
-    Span::styled("↑", theme.focus())
+    Span::styled(theme.glyphs().arrow_up(), theme.focus())
 }
 
 /// The bottom bar's left half: which region has the keyboard, which view is
@@ -184,15 +184,15 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
         format!(" / {}", focus_detail(app, s)),
         theme.muted(),
     ));
-    spans.push(Span::styled(DOT.to_string(), theme.muted()));
-    spans.push(Span::styled(app.state_name().to_string(), state_style));
+    spans.push(Span::styled(dot(theme).to_string(), theme.muted()));
+    spans.push(Span::styled(theme.fold(app.state_name()), state_style));
     // The latch, while one is armed: the announcement times out, the chip
     // does not, so a user who looked away still sees what the next key will
     // carry. One span with its own separator, so the bar can give the whole
     // chip up when it runs out of room rather than leaving ` · ` behind.
     if app.latch.is_armed() {
         spans.push(Span::styled(
-            format!("{DOT}{} {}", app.latch.names(), s.latch_pending),
+            format!("{}{} {}", dot(theme), app.latch.names(), s.latch_pending),
             theme.warn(),
         ));
     }
@@ -205,7 +205,7 @@ pub fn bottom_left(app: &App, theme: &Theme) -> Line<'static> {
     let lost = app.terminal.decode_lost();
     if lost > 0 {
         spans.push(Span::styled(
-            format!("{DOT}{} {lost}B", s.decode_loss),
+            format!("{}{} {lost}B", dot(theme), s.decode_loss),
             theme.warn(),
         ));
     }
@@ -227,11 +227,12 @@ pub fn trim_to_width(line: Line<'static>, width: u16) -> Line<'static> {
     }
     // A separator with nothing after it is not a fact either: `… · 已连接` had
     // its state given up, and the ` · ` in front of it is a mark with no word.
+    // Both spellings count: the bar is drawn with the one this terminal has.
     while line.spans.len() > 1
         && line
             .spans
             .last()
-            .is_some_and(|span| span.content.trim() == "·")
+            .is_some_and(|span| matches!(span.content.trim(), "·" | "."))
     {
         line.spans.pop();
     }
@@ -263,11 +264,11 @@ pub fn bottom_right(app: &App, theme: &Theme) -> Line<'static> {
     let s = app.strings();
     Line::from(vec![
         Span::styled(s.hint_palette.to_string(), theme.muted()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(s.hint_help.to_string(), theme.muted()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(s.hint_views.to_string(), theme.muted()),
-        Span::styled(DOT.to_string(), theme.muted()),
+        Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(s.hint_quit.to_string(), theme.muted()),
     ])
 }
@@ -277,9 +278,16 @@ pub fn bar_style(theme: &Theme) -> Style {
     theme.panel()
 }
 
-/// The dot the status pill opens with. A filled circle in every state, so the
-/// pill reads as a state light and the colour is what carries the state.
-const PILL_DOT: &str = "●";
+/// The dot the status pill opens with. A filled circle in every state where the
+/// font has one, so the pill reads as a state light and the colour is what
+/// carries the state; where it does not, the state's own mark — the only thing
+/// left to carry it.
+fn pill_dot(glyphs: GlyphSet, state: ConnectionState) -> &'static str {
+    match glyphs {
+        GlyphSet::Unicode => "●",
+        GlyphSet::Ascii => glyphs.state(state),
+    }
+}
 
 /// The terminal pane's status pill: the live state, on a chip, for the pane's
 /// head row.
@@ -296,8 +304,11 @@ const PILL_DOT: &str = "●";
 pub fn status_pill(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         // The padding is part of the chip, so it carries the chip's ground.
-        Span::styled(format!(" {PILL_DOT} "), theme.pill_dot(app.state)),
-        Span::styled(app.state_name().to_string(), theme.pill()),
+        Span::styled(
+            format!(" {} ", pill_dot(theme.glyphs(), app.state)),
+            theme.pill_dot(app.state),
+        ),
+        Span::styled(theme.fold(app.state_name()), theme.pill()),
         Span::styled(" ", theme.pill()),
     ])
 }

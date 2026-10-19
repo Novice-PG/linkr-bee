@@ -134,6 +134,17 @@ pub struct Strings {
     pub view_assistant: &'static str,
     /// Placeholder in a view whose body has no content yet.
     pub view_empty: &'static str,
+    /// The empty terminal's title: no board is connected and the pane has
+    /// nothing to show.
+    pub term_empty_title: &'static str,
+    /// The empty terminal's guidance: where a connection is started from.
+    pub term_empty_hint: &'static str,
+    /// The splash's line under the mark: what this program is.
+    pub splash_label: &'static str,
+    /// The name the startup-splash switch is announced under.
+    pub splash_setting: &'static str,
+    /// The splash's way out: any key.
+    pub splash_hint: &'static str,
 
     // --- diagnostics view -------------------------------------------------
     /// Prefix of the "last read" stamp (`@i? · updated 19:08:06`).
@@ -442,6 +453,11 @@ const ZH: Strings = Strings {
     view_network: "网络",
     view_assistant: "助手",
     view_empty: "此视图尚未实现",
+    term_empty_title: "还没有连接设备",
+    term_empty_hint: "在侧栏「连接」扫描附近的 Linkr Bee",
+    splash_label: "Linkr Bee 串口控制台",
+    splash_setting: "启动闪屏",
+    splash_hint: "按任意键跳过",
     diag_updated: "@i? · 已更新",
     diag_not_read: "@i? 尚未读取",
     diag_no_ble: "通过 BLE 连接后才能读取诊断（管理命令仅限 BLE）。",
@@ -610,6 +626,11 @@ const EN: Strings = Strings {
     view_network: "Network",
     view_assistant: "Assistant",
     view_empty: "This view is not implemented yet",
+    term_empty_title: "No board connected",
+    term_empty_hint: "Connect from the sidebar to scan for a Linkr Bee",
+    splash_label: "Linkr Bee serial console",
+    splash_setting: "Startup splash",
+    splash_hint: "Press any key to skip",
     diag_updated: "@i? · updated",
     diag_not_read: "@i? not read yet",
     diag_no_ble: "Connect over BLE to read diagnostics (management commands are BLE-only).",
@@ -985,6 +1006,11 @@ mod tests {
                 s.view_network,
                 s.view_assistant,
                 s.view_empty,
+                s.term_empty_title,
+                s.term_empty_hint,
+                s.splash_label,
+                s.splash_setting,
+                s.splash_hint,
                 s.diag_updated,
                 s.diag_not_read,
                 s.diag_no_ble,

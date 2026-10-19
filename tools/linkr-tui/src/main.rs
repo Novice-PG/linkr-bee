@@ -64,6 +64,9 @@ use linkr_tui::ui;
 use linkr_tui::views;
 use linkr_tui::{dialogs, palette};
 
+#[cfg(feature = "tui")]
+mod console;
+
 /// How often a frame is repainted with no input: the clock and the busy
 /// indicator move on this beat, and it is slow enough to cost nothing.
 /// The interface's beat. Only the build with a renderer pings it: the CLI half
@@ -111,6 +114,12 @@ enum OverlayPreview {
     /// The assistant's settings: fields, a note list and a caret that has
     /// nowhere else to be looked at.
     Settings,
+    /// The card about the program, whose mark depends on the frame's capability
+    /// — the one surface that can only be reviewed with a frame to render in.
+    About,
+    /// The startup splash, held open so a frame can show it: normally it is
+    /// gone a moment after the first paint, and no flag can catch it in time.
+    Splash,
 }
 
 impl OverlayPreview {
@@ -124,6 +133,8 @@ impl OverlayPreview {
             "confirm" => Some(OverlayPreview::Confirm),
             "wifi" => Some(OverlayPreview::WifiSsid),
             "settings" => Some(OverlayPreview::Settings),
+            "about" => Some(OverlayPreview::About),
+            "splash" => Some(OverlayPreview::Splash),
             _ => None,
         }
     }
@@ -151,6 +162,14 @@ impl OverlayPreview {
             // On the endpoint, which is the row a first-time user lands on.
             OverlayPreview::Settings => {
                 views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
+            }
+            OverlayPreview::About => dialogs::open_about(app),
+            // Held for an hour rather than a moment: a preview has to be
+            // looking at the splash when the frame is printed, and the clock
+            // that would have taken it down is not running yet. Any key still
+            // ends it, so the interactive preview behaves like a launch.
+            OverlayPreview::Splash => {
+                app.splash_until = Some(std::time::Instant::now() + Duration::from_secs(3600));
             }
         }
     }
@@ -1123,6 +1142,11 @@ impl TerminalGuard {
             return Err(err);
         }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        // The console's own encoding, taken last so that every early exit
+        // above happens without having touched it: on a Chinese `cmd.exe`
+        // this is the difference between the frame and a wall of mojibake, and
+        // the value goes back when the guard is dropped.
+        console::utf8();
         Ok(TerminalGuard { terminal })
     }
 
@@ -1133,6 +1157,7 @@ impl TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
+        console::restore();
     }
 }
 
@@ -1172,6 +1197,7 @@ fn restore_best_effort() {
     let _ = execute!(stdout, DisableMouseCapture);
     let _ = execute!(stdout, DisableBracketedPaste);
     let _ = execute!(stdout, LeaveAlternateScreen);
+    console::restore();
 }
 
 /// Rust starts every process with SIGPIPE ignored, which turns a reader that
@@ -1424,6 +1450,11 @@ fn main() -> io::Result<()> {
         transport_pinned: args.transport.is_some(),
         ..App::default()
     };
+    // What this terminal can draw, read once from the environment before the
+    // first frame: the answer does not change while the program runs, and a
+    // frame must not be painted two ways. `--print-frame` reads it too, which
+    // is how a frame is printed for evidence of a lower capability.
+    app.capability = linkr_tui::capability::Capability::detect();
     // The agent's durable state, opened once here rather than lazily per call:
     // one store file for tasks, notes and the session, so a task written by
     // this run and a note written by the last one are the same file.
@@ -1474,6 +1505,10 @@ fn main() -> io::Result<()> {
         // reach the machine's clipboard at all.
         app.desktop_clipboard = true;
     }
+    // The splash is the design, so a missing key means it shows; the switch is
+    // read here so the palette can turn it, and remembered for the launches
+    // after this one.
+    app.no_splash = stored.no_splash;
     app.clock = local_clock();
     if args.sample {
         app.diagnostics.apply(&views::sample_reply(), local_clock());
@@ -1842,6 +1877,14 @@ fn main() -> io::Result<()> {
         // only place the compatibility pass is decided: `--print-frame` and
         // every test paint the frame the design asks for, on every platform.
         app.legacy_console = ui::legacy::legacy_console();
+        // The splash stands for a moment, unless the user turned it off — and
+        // only on this path: a frame printed for evidence is not a launch, and
+        // a splash over it would cover the surface that was asked for. An
+        // `--overlay splash` preview has already raised its own and is left
+        // alone.
+        if !app.no_splash && app.splash_until.is_none() {
+            app.splash_until = Some(std::time::Instant::now() + linkr_tui::app::SPLASH);
+        }
         run(&mut app)
     };
     // The interface is over whichever way it ended — the quit key, Ctrl+C,
@@ -2076,10 +2119,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
         if event::poll(TICK)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    // A quit can arrive two ways: the chord says so directly,
-                    // and a palette action sets the flag — both end the loop,
-                    // so the two routes cannot diverge.
-                    if handle_key(app, key) || app.quit {
+                    // The splash is a screen, not a modal: any key puts it
+                    // away and is spent doing that, so the key that dismissed
+                    // the splash does not also reach the device behind it.
+                    if app.splash_active() {
+                        app.skip_splash();
+                    } else if handle_key(app, key) || app.quit {
+                        // A quit can arrive two ways: the chord says so
+                        // directly, and a palette action sets the flag — both
+                        // end the loop, so the two routes cannot diverge.
                         return Ok(());
                     }
                 }
@@ -2095,7 +2143,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     // device's own view is the one on screen without one. The
                     // terminal's paste and the terminal being pasted *into*
                     // are different things, and only the second is this.
-                    if !paste_into_shown_field(app, &text)
+                    //
+                    // A paste arriving at the splash is addressed to the
+                    // splash: it puts it away and goes no further, the way a
+                    // key does.
+                    if app.splash_active() {
+                        app.skip_splash();
+                    } else if !paste_into_shown_field(app, &text)
                         && !app.overlay_open()
                         && app.focus == Focus::Terminal
                         && app.view == View::Terminal
@@ -2120,8 +2174,18 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     if app.quit {
                         return Ok(());
                     }
-                    let size = terminal.size().unwrap_or_default();
-                    handle_mouse(app, mouse, size.width, size.height);
+                    if app.splash_active() {
+                        // A click, a drag or a notch is a gesture and puts the
+                        // splash away; a bare hover is not — most terminals
+                        // report motion, and the splash must not be lost to a
+                        // desk bump.
+                        if !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved) {
+                            app.skip_splash();
+                        }
+                    } else {
+                        let size = terminal.size().unwrap_or_default();
+                        handle_mouse(app, mouse, size.width, size.height);
+                    }
                 }
                 // A resize is picked up by the next draw; nothing to do.
                 Event::Resize(_, _) => {}
@@ -4486,6 +4550,8 @@ mod tests {
             ("confirm", OverlayPreview::Confirm),
             ("wifi", OverlayPreview::WifiSsid),
             ("settings", OverlayPreview::Settings),
+            ("about", OverlayPreview::About),
+            ("splash", OverlayPreview::Splash),
         ] {
             assert_eq!(args(&["--overlay", name]).overlay, Some(expected), "{name}");
         }
@@ -4572,6 +4638,7 @@ mod tests {
             (OverlayPreview::Confirm, "请确认"),
             (OverlayPreview::WifiSsid, "加入 WiFi 网络"),
             (OverlayPreview::Settings, "助手设置"),
+            (OverlayPreview::Splash, "按任意键跳过"),
         ] {
             let mut app = App::default();
             overlay.raise(&mut app);

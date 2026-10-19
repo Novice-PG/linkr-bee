@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ratatui::layout::Rect;
 
 use crate::accessory::{self, UartSettings};
+use crate::capability::{self, Capability, GlyphSet};
 use crate::clipboard::osc52_copy;
 use crate::device::{Conversation, Query, Reply};
 use crate::event::{ConnectionState, NoticeLevel, View};
@@ -328,6 +329,12 @@ pub const MAX_NOTICES: usize = 3;
 /// time and the box disappears with the last of them.
 pub const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_millis(2200);
 
+/// How long the startup splash stands before the interface takes the screen.
+///
+/// A moment, not a ceremony: long enough to read the mark, short enough that
+/// nobody waits for it — and any key, click or paste ends it early anyway.
+pub const SPLASH: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// What a token in hand reads as in the sidebar: that one is there, never
 /// which.
 ///
@@ -561,6 +568,24 @@ pub struct App {
     /// else — the tests and `--print-frame` paint the frame the design asks
     /// for. What the pass then does is [`crate::ui::legacy`]'s to say.
     pub legacy_console: bool,
+    /// Whether the startup splash is skipped. Off by default — the splash is
+    /// the design — and remembered between runs through the settings file.
+    /// `main` reads it before the first frame; the palette's own switch
+    /// toggles it for the next launch.
+    pub no_splash: bool,
+    /// When the splash stops standing, while it is up. Set by `main` at
+    /// startup, and only where a screen is being drawn: `--print-frame` and
+    /// the other batch modes never paint one. A deadline rather than a flag,
+    /// so a loop that missed the keystroke still takes the splash down.
+    pub splash_until: Option<Instant>,
+    /// What this terminal can draw: how much colour, and which glyph set.
+    ///
+    /// Set once by `main` before the first frame, from the environment and
+    /// nothing else — the tests and `--print-frame` keep the design
+    /// ([`Capability::FULL`]) unless the environment says otherwise, which is
+    /// also how a frame of evidence is printed. Read through [`App::theme`],
+    /// which resolves the palette for it, and [`App::glyph`].
+    pub capability: Capability,
     pub transport: Transport,
     /// True while switching the transport is refused: a dial took the link out
     /// on one kind, or a command-line flag named it.
@@ -792,6 +817,9 @@ impl Default for App {
             sidebar_visible: true,
             assistant_panel: true,
             legacy_console: false,
+            no_splash: false,
+            splash_until: None,
+            capability: Capability::FULL,
             transport: Transport::default(),
             transport_locked: false,
             transport_pinned: false,
@@ -863,9 +891,16 @@ impl Default for App {
 }
 
 impl App {
-    /// The theme in force.
+    /// The theme in force, resolved for what this terminal can show.
     pub fn theme(&self) -> Theme {
-        Theme::for_choice(self.theme)
+        Theme::for_capability(self.theme, self.capability)
+    }
+
+    /// The glyph set in force: the marks a view that has only an [`App`] asks
+    /// for. A view that already has the theme asks `theme.glyphs()` instead —
+    /// the two answer the same thing, from the same field.
+    pub fn glyph(&self) -> GlyphSet {
+        self.capability.glyphs
     }
 
     /// The current language's table.
@@ -932,13 +967,22 @@ impl App {
         if self.transport_locked {
             format!("{} {}", self.transport.label(), s.transport_locked)
         } else {
-            format!("{} {}", self.transport.label(), s.transport_switch_hint)
+            format!(
+                "{} {}",
+                self.transport.label(),
+                capability::fold(s.transport_switch_hint, self.glyph())
+            )
         }
     }
 
     /// The placeholder a slot shows while the device has not reported a value.
     pub fn unknown(&self) -> &'static str {
-        self.strings().value_unknown
+        match self.glyph() {
+            GlyphSet::Unicode => self.strings().value_unknown,
+            // The placeholder is a rule; where the font has no rule, a hyphen
+            // is the same idea in the ASCII set.
+            GlyphSet::Ascii => "-",
+        }
     }
 
     /// The baud slot: the speed once known, the placeholder before that.
@@ -959,8 +1003,9 @@ impl App {
 
     /// The glyph for the current state. The chrome and the sidebar row both ask
     /// this, so one frame can never show two different glyphs for one state.
+    /// The glyph for the current connection state, in this terminal's set.
     pub fn state_glyph(&self) -> &'static str {
-        self.state.glyph()
+        self.glyph().state(self.state)
     }
 
     /// The theme's name in the interface language, so a notice, a picker row
@@ -1141,6 +1186,39 @@ impl App {
     /// key to the overlay instead of the pane.
     pub fn overlay_open(&self) -> bool {
         self.dialog.is_some() || self.palette.is_some()
+    }
+
+    /// Whether the startup splash is still standing.
+    ///
+    /// A wall-clock read rather than a pumped flag, because the question is
+    /// asked by the paint — and a splash whose moment passed between two
+    /// keystrokes has to be gone on the next frame whether or not the pump
+    /// noticed. `splash_until` stays put once its time is up; nothing else
+    /// reads it but this.
+    pub fn splash_active(&self) -> bool {
+        self.splash_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Put the splash away: the user pressed a key, or its moment is over.
+    pub fn skip_splash(&mut self) {
+        self.splash_until = None;
+    }
+
+    /// Turn the startup splash on or off, and remember it.
+    pub fn toggle_splash(&mut self) -> Notice {
+        self.no_splash = !self.no_splash;
+        self.save_settings();
+        let s = self.strings();
+        let word = if self.no_splash {
+            s.net_state_off
+        } else {
+            s.net_state_on
+        };
+        Notice {
+            text: format!("{}: {word}", s.splash_setting),
+            level: NoticeLevel::Info,
+        }
     }
 
     /// Switch the interface language, and return the notice announcing it.
@@ -1395,6 +1473,7 @@ impl App {
             lang: Some(self.lang),
             enter: Some(self.enter),
             debug_io: self.trace.tracing(),
+            no_splash: self.no_splash,
         });
     }
 
@@ -2744,6 +2823,7 @@ impl App {
             }
             return;
         }
+        let glyphs = self.capability.glyphs;
         if let Some(crate::dialogs::Dialog::DevicePick(pick)) = &mut self.dialog {
             pick.devices = devices;
             pick.cursor = pick.cursor.min(pick.devices.len().saturating_sub(1));
@@ -2755,7 +2835,7 @@ impl App {
             // and the scroll counts the rows the paint will draw.
             let width =
                 crate::ui::overlay::dialog_body_width(self.screen, self.sidebar_visible) as usize;
-            let spans = pick.line_spans(width.max(1));
+            let spans = pick.line_spans(width.max(1), glyphs);
             let rows = spans.iter().sum::<usize>().max(1);
             let room =
                 crate::ui::overlay::dialog_body_room(self.screen, self.sidebar_visible, rows);
@@ -4196,6 +4276,24 @@ mod tests {
             "and the box has nothing left to hold"
         );
         assert_eq!(app.log.len(), 2, "the log keeps them all");
+    }
+
+    /// The splash stands until its moment passes or input takes it down early;
+    /// a default app never paints one, which is what keeps the tests and every
+    /// printed frame splash-free.
+    #[test]
+    fn the_splash_ends_on_input_or_on_time() {
+        let mut app = App::default();
+        assert!(!app.splash_active(), "a default app never paints one");
+        app.splash_until = Some(Instant::now() + SPLASH);
+        assert!(app.splash_active(), "a deadline in the future stands");
+        app.skip_splash();
+        assert!(!app.splash_active(), "a key takes it down");
+        app.splash_until = Some(Instant::now() - std::time::Duration::from_millis(1));
+        assert!(
+            !app.splash_active(),
+            "a deadline that passed ends it with nobody asking"
+        );
     }
 
     /// Full Auto is a window, not a mode: when its time is up the mode falls

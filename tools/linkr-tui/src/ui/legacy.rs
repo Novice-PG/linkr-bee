@@ -143,7 +143,7 @@ fn narrow_symbol(symbol: &str) -> Option<&'static str> {
 /// glyph this interface draws, found by walking the source; a glyph the
 /// console renders wide that is not here is a line that walks right on the
 /// old console, and adding it is one row.
-const STAND_INS: [(char, &str); 32] = [
+const STAND_INS: [(char, &str); 35] = [
     // Dashes and the small punctuation the layout uses as separators.
     ('\u{2014}', "-"),  // — em dash
     ('\u{2013}', "-"),  // – en dash
@@ -175,11 +175,14 @@ const STAND_INS: [(char, &str); 32] = [
     ('\u{2587}', "#"), // ▇ seven eighths
     ('\u{2588}', "#"), // █ full
     ('\u{258c}', "|"), // ▌ left half
+    ('\u{258f}', "|"), // ▏ left one eighth
+    ('\u{2591}', "."), // ░ light shade
     // Box drawing: the divider and the corners around it.
     ('\u{2500}', "-"), // ─ horizontal
     ('\u{2502}', "|"), // │ vertical
     ('\u{2503}', "|"), // ┃ heavy vertical
     ('\u{256d}', ","), // ╭ top-left arc
+    ('\u{256e}', "."), // ╮ top-right arc
     ('\u{256f}', "'"), // ╯ bottom-right arc
     ('\u{2570}', "`"), // ╰ bottom-left arc
 ];

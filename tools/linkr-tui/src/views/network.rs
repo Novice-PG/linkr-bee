@@ -189,7 +189,7 @@ fn field_row(label: &str, value: &str, selected: bool, width: u16, theme: &Theme
     let s = text_of_label_value(label, value);
     if selected {
         // The design paints the selected row as a full chip, marker included.
-        let chip = format!("▸ {s}");
+        let chip = format!("{}{s}", theme.glyphs().cursor());
         return Line::from(Span::styled(
             text::clip_to(&chip, width as usize),
             theme.selected(),
@@ -235,7 +235,8 @@ fn action_row(
         // The chip itself is clipped to the pane in turn, because two columns
         // of marker in a one-column pane are a row wider than its column.
         let chip = format!(
-            "▸ {}",
+            "{}{}",
+            theme.glyphs().cursor(),
             text::clip_to(&row, width.saturating_sub(2) as usize)
         );
         return Line::from(Span::styled(
@@ -292,7 +293,7 @@ struct ScanRow {
 /// the one piece that does not wear the muted grey: see
 /// [`Theme::signal_style`] for why a meter in the dim colour disappears in
 /// half the themes a user can pick.
-fn scan_row(result: &str) -> ScanRow {
+fn scan_row(result: &str, glyphs: crate::capability::GlyphSet) -> ScanRow {
     let crate::accessory::WifiResult {
         name,
         signal_dbm,
@@ -306,7 +307,11 @@ fn scan_row(result: &str) -> ScanRow {
     match signal_dbm {
         Some(dbm) => ScanRow {
             dbm: Some(dbm),
-            meter: format!("{} {:>4}dBm", text::signal_bars(dbm), dbm),
+            meter: format!(
+                "{} {:>4}dBm",
+                text::signal_bars_with(dbm, glyphs.dots()),
+                dbm
+            ),
             gap: "  ",
             tail,
         },
@@ -337,7 +342,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     ];
 
     if state.loading {
-        lines.push(note(s.diag_loading, width, theme));
+        lines.push(note(&theme.fold(s.diag_loading), width, theme));
     }
     if let Some(error) = &state.error {
         lines.push(Line::from(Span::styled(
@@ -351,20 +356,23 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let connected = state.wifi_connected();
     let results = state.scan_results.len();
     let on = |row: NetworkRow| state.focus == row && row.reachable(connected, results);
+    // The placeholder is the rule the interface uses for "nothing here", in the
+    // set the terminal has — the same mark the diagnostics grid shows.
+    let empty = theme.glyphs().dash();
     let ssid_value = if connected {
         state
             .wifi
             .as_ref()
             .map(|w| {
                 if w.ssid.is_empty() {
-                    s.net_empty_value
+                    empty
                 } else {
                     w.ssid.as_str()
                 }
             })
-            .unwrap_or(s.net_empty_value)
+            .unwrap_or(empty)
     } else if state.ssid_input.is_empty() {
-        s.net_empty_value
+        empty
     } else {
         state.ssid_input.as_str()
     };
@@ -394,7 +402,11 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             &wifi.state
         };
         let ip = if wifi.ip.is_empty() { "-" } else { &wifi.ip };
-        lines.push(note(&format!("WiFi: {state_word} · IP {ip}"), width, theme));
+        lines.push(note(
+            &format!("WiFi: {state_word}{}IP {ip}", theme.glyphs().dot_sep()),
+            width,
+            theme,
+        ));
     }
 
     lines.push(Line::from(""));
@@ -403,14 +415,20 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(note(&format!("  {}", s.net_no_results), width, theme));
     } else {
         for (index, result) in state.scan_results.iter().enumerate() {
-            let row = scan_row(result);
+            let row = scan_row(result, theme.glyphs());
             if on(NetworkRow::ScanResult(index)) {
                 // The chip, as the form's fields wear it: the keyboard is
                 // here, and what pressing Enter takes is the name inside the
                 // line. One style throughout, selected: a chip is one surface,
                 // and a meter painted a strength colour on it would be a smudge
                 // on the highlight.
-                let chip = format!("▸ {}{}{}", row.meter, row.gap, row.tail);
+                let chip = format!(
+                    "{}{}{}{}",
+                    theme.glyphs().cursor(),
+                    row.meter,
+                    row.gap,
+                    row.tail
+                );
                 lines.push(Line::from(Span::styled(
                     text::clip_to(&chip, width as usize),
                     theme.selected(),
@@ -437,7 +455,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(note(s.net_keys_hint, width, theme));
+    lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
     lines
 }
 

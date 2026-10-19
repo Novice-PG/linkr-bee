@@ -13,9 +13,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
-/// The glyph the thumb is drawn with: half a box rule, so the bar reads as
-/// chrome rather than as text the device sent.
-const THUMB: &str = "┃";
+use crate::capability::GlyphSet;
 
 /// Draw a thumb-only scrollbar down `area`'s right column.
 ///
@@ -23,6 +21,10 @@ const THUMB: &str = "┃";
 /// shows, and `viewport` how many rows it shows. Nothing is drawn when
 /// everything fits: ratatui's widget fills the whole track in that case, which
 /// reads as "there is more", the one thing it must never mean.
+///
+/// The thumb is half a box rule, so the bar reads as chrome rather than as
+/// text the device sent — and `|` where the font has no half rules
+/// ([`GlyphSet::thumb`]).
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -30,6 +32,7 @@ pub fn draw(
     top: usize,
     viewport: usize,
     style: Style,
+    glyphs: GlyphSet,
 ) {
     if total <= viewport || viewport == 0 || area.width == 0 || area.height == 0 {
         return;
@@ -47,7 +50,7 @@ pub fn draw(
         .position(top.min(total - viewport))
         .viewport_content_length(viewport);
     let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_symbol(THUMB)
+        .thumb_symbol(glyphs.thumb())
         .track_symbol(None)
         .begin_symbol(None)
         .end_symbol(None)
@@ -66,7 +69,17 @@ mod tests {
         let mut terminal =
             Terminal::new(TestBackend::new(3, height)).expect("a test terminal paints");
         terminal
-            .draw(|frame| draw(frame, frame.area(), total, top, viewport, Style::default()))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    frame.area(),
+                    total,
+                    top,
+                    viewport,
+                    Style::default(),
+                    GlyphSet::Unicode,
+                );
+            })
             .expect("the bar draws");
         let buffer = terminal.backend().buffer().clone();
         (0..height)
@@ -80,12 +93,23 @@ mod tests {
     #[test]
     fn the_thumb_walks_down_the_track_with_the_window() {
         let top = column(100, 0, 10, 10);
-        assert!(top.iter().any(|cell| cell == THUMB), "{top:?}");
-        assert_eq!(top[0], THUMB, "the window starts at the first row");
+        assert!(
+            top.iter().any(|cell| cell == GlyphSet::Unicode.thumb()),
+            "{top:?}"
+        );
+        assert_eq!(
+            top[0],
+            GlyphSet::Unicode.thumb(),
+            "the window starts at the first row"
+        );
 
         let bottom = column(100, 90, 10, 10);
-        assert_eq!(bottom[9], THUMB, "and ends on the last one");
-        assert_ne!(bottom[0], THUMB);
+        assert_eq!(
+            bottom[9],
+            GlyphSet::Unicode.thumb(),
+            "and ends on the last one"
+        );
+        assert_ne!(bottom[0], GlyphSet::Unicode.thumb());
     }
 
     /// Everything fits: no bar at all. A full track would read as "there is
@@ -95,14 +119,24 @@ mod tests {
         for (total, viewport) in [(10, 10), (4, 10), (10, 0)] {
             let drawn = column(total, 0, viewport, 10);
             assert!(
-                drawn.iter().all(|cell| cell != THUMB),
+                drawn.iter().all(|cell| cell != GlyphSet::Unicode.thumb()),
                 "{total}/{viewport} drew a bar: {drawn:?}"
             );
         }
         // And a degenerate area is not a panic.
         let mut terminal = Terminal::new(TestBackend::new(1, 1)).expect("a test terminal paints");
         terminal
-            .draw(|frame| draw(frame, Rect::new(0, 0, 1, 0), 100, 0, 10, Style::default()))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    Rect::new(0, 0, 1, 0),
+                    100,
+                    0,
+                    10,
+                    Style::default(),
+                    GlyphSet::Unicode,
+                );
+            })
             .expect("a zero-height area draws nothing");
     }
 }

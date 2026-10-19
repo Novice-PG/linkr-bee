@@ -1,6 +1,7 @@
 //! The command palette (`Ctrl+P`): everything the interface can do, in one
-//! searchable list — opened on the handful of rows the user reaches for all
-//! day, with the rest one row and one keystroke behind them.
+//! searchable list — opened on the rows the user reaches for all day, with the
+//! rest gathered into a window per category rather than buried under a single
+//! "more".
 //!
 //! The registry is a plain `&'static [Action]`, so a test can assert its
 //! completeness and its order without building an `App`. An action is a
@@ -11,6 +12,8 @@
 //! Only actions that do something are listed. A registry padded out with
 //! features that are not built is worse than a short one: the user cannot tell
 //! a stubbed entry from a broken one.
+
+use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Modifier;
@@ -29,7 +32,7 @@ const KEYS: Entry = [
     "↑↓ choose · Enter run · Esc close",
     "↑↓ 选择 · Enter 执行 · Esc 关闭",
 ];
-/// The legend one level down, where Esc steps back up rather than out.
+/// The legend in a section's window, where Esc steps back up rather than out.
 const KEYS_BACK: Entry = [
     "↑↓ choose · Enter run · Esc back",
     "↑↓ 选择 · Enter 执行 · Esc 返回",
@@ -45,7 +48,6 @@ const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
 const CAT_AGENT: Entry = ["Assistant", "助手"];
 const CAT_NETWORK: Entry = ["Network", "网络"];
-const CAT_PALETTE: Entry = ["Palette", "面板"];
 
 const T_WIFI_CONFIG: Entry = ["Set the WiFi network", "设置无线网络"];
 const T_WIFI_SCAN: Entry = ["Scan for WiFi networks", "扫描无线网络"];
@@ -65,7 +67,6 @@ const T_AGENT_DELETE: Entry = ["Delete the conversation", "删除对话"];
 const T_AGENT_COPY: Entry = ["Copy the conversation", "复制对话"];
 const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
 const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
-const T_MORE: Entry = ["More actions…", "更多动作…"];
 
 // Titles.
 const T_VIEW_TERMINAL: Entry = ["Open terminal view", "打开终端视图"];
@@ -90,6 +91,8 @@ const T_CHEAT: Entry = ["Cheat sheet", "速查参考"];
 const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
 const T_THEME: Entry = ["Choose theme", "选择主题"];
+const T_ABOUT: Entry = ["About linkr", "关于 linkr"];
+const T_SPLASH: Entry = ["Toggle the startup splash", "切换启动闪屏"];
 const T_QUIT: Entry = ["Quit the TUI", "退出 TUI"];
 
 /// One entry in the palette.
@@ -180,6 +183,13 @@ fn toggle_debug_io(app: &mut App) {
     app.push_notice(notice);
 }
 
+/// The startup splash: off means the interface takes the screen at once, on is
+/// the design's brief mark. Stored, so the answer outlives the run.
+fn toggle_splash(app: &mut App) {
+    let notice = app.toggle_splash();
+    app.push_notice(notice);
+}
+
 fn clear_terminal(app: &mut App) {
     app.clear_terminal();
 }
@@ -230,6 +240,11 @@ fn toggle_language(app: &mut App) {
 /// The theme picker, the same window `Ctrl+T` opens.
 fn choose_theme(app: &mut App) {
     crate::dialogs::open_theme_pick(app);
+}
+
+/// The card about the program, the same one `--overlay about` paints.
+fn show_about(app: &mut App) {
+    crate::dialogs::open_about(app);
 }
 
 /// The assistant's settings window, on the row that configures it.
@@ -516,6 +531,20 @@ pub const ACTIONS: &[Action] = &[
         run: choose_theme,
     },
     Action {
+        id: "app.about",
+        title: T_ABOUT,
+        category: CAT_APP,
+        shortcut: "",
+        run: show_about,
+    },
+    Action {
+        id: "app.splash",
+        title: T_SPLASH,
+        category: CAT_APP,
+        shortcut: "",
+        run: toggle_splash,
+    },
+    Action {
         id: "net.wifi_config",
         title: T_WIFI_CONFIG,
         category: CAT_NETWORK,
@@ -643,19 +672,69 @@ pub const ACTIONS: &[Action] = &[
     },
 ];
 
-/// How deep the palette's list is.
+/// Which window of the palette's list is on screen.
 ///
 /// The registry is forty-odd rows and a user opens the palette to reach one of
-/// six of them. The rest are one row away rather than gone, and a query
-/// searches every level: these are depths of the *list*, not of the search.
+/// a handful. Two levels keep that handful under the cursor: the menu, which
+/// always shows the rows the window commands fill and one row per section, and
+/// a section's own window. A query searches every level: these are depths of
+/// the *list*, not of the search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Level {
-    /// What the palette opens on: the window commands the design leads with,
-    /// and the row that opens the rest.
+    /// What the palette opens on: the rows the user reaches for all day, and
+    /// the sections the rest are gathered into.
     #[default]
-    Quick,
-    /// Every action the registry holds.
-    All,
+    Menu,
+    /// One section's own window: the actions of one category.
+    Section(Section),
+}
+
+/// The categories the menu leads to.
+///
+/// Every action the menu does not always show belongs to exactly one, and its
+/// window is the category's own: [`Section::category`] is the label the rows
+/// already wear, so an action edited into another category moves window with
+/// it — and a test keeps every action reachable from the menu and listed once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Focus,
+    Connection,
+    Terminal,
+    App,
+    Network,
+    Agent,
+}
+
+impl Section {
+    /// The sections in menu order: the order the registry first names each
+    /// category below the always-shown rows.
+    pub const ALL: &[Section] = &[
+        Section::Focus,
+        Section::Connection,
+        Section::Terminal,
+        Section::App,
+        Section::Network,
+        Section::Agent,
+    ];
+
+    /// The category this window is the actions of.
+    fn category(self) -> Entry {
+        match self {
+            Section::Focus => CAT_FOCUS,
+            Section::Connection => CAT_CONNECTION,
+            Section::Terminal => CAT_TERMINAL,
+            Section::App => CAT_APP,
+            Section::Network => CAT_NETWORK,
+            Section::Agent => CAT_AGENT,
+        }
+    }
+
+    /// Whether this window lists the action: its category is the window's, and
+    /// it is not one of the rows the menu always shows — a row one keystroke
+    /// from the menu is not also a row behind a window.
+    fn holds(self, action: &Action) -> bool {
+        !ALWAYS.contains(&action.id) && action.category == self.category()
+    }
 }
 
 /// One row of the list a level shows.
@@ -663,21 +742,20 @@ pub enum Level {
 pub enum Row {
     /// An index into [`ACTIONS`].
     Action(usize),
-    /// The palette's own row: it opens [`Level::All`] rather than doing
-    /// something and closing the overlay.
-    More,
+    /// A menu row: it opens this section's window rather than doing something
+    /// and closing the overlay.
+    Section(Section),
 }
 
-/// The rows [`Level::Quick`] opens with: the window commands, in the
-/// registry's own order. Everything else waits a keystroke down — and typing
-/// searches it all anyway.
-const QUICK: &[&str] = &[
+/// The rows the menu always shows: the window commands, in the registry's own
+/// order. Everything the registry holds below them waits one row down — and
+/// typing searches it all anyway.
+const ALWAYS: &[&str] = &[
     "view.terminal",
     "view.diagnostics",
     "view.network",
     "view.assistant",
     "focus.sidebar",
-    "focus.terminal",
 ];
 
 /// The open state of the palette.
@@ -782,22 +860,41 @@ pub fn matches(query: &str) -> Vec<usize> {
 /// The rows a level shows for a query.
 ///
 /// A query is a search of *everything*, whichever level it is typed at: the
-/// quick list is how the palette opens, not a fence around the registry, and
-/// typing is how an action nobody keeps on the first screen is reached. With
-/// nothing typed, the quick level shows its own rows and one row that opens
-/// the rest; the full level shows the whole registry.
+/// menu is how the palette opens, not a fence around the registry, and typing
+/// is how an action no window keeps near the cursor is reached. With nothing
+/// typed, the menu shows the rows it always shows and one row per section, and
+/// a section's window shows that section's actions.
 pub fn rows_in(level: Level, query: &str) -> Vec<Row> {
     let found = matches(query);
-    if level == Level::All || !query.trim().is_empty() {
+    if !query.trim().is_empty() {
         return found.into_iter().map(Row::Action).collect();
     }
-    let mut rows: Vec<Row> = found
-        .into_iter()
-        .filter(|index| QUICK.contains(&ACTIONS[*index].id))
-        .map(Row::Action)
-        .collect();
-    rows.push(Row::More);
-    rows
+    match level {
+        Level::Menu => {
+            let mut rows: Vec<Row> = found
+                .iter()
+                .copied()
+                .filter(|index| ALWAYS.contains(&ACTIONS[*index].id))
+                .map(Row::Action)
+                .collect();
+            // The menu asks the registry rather than trusting the enum: a
+            // section whose actions the always-shown rows already carry opens
+            // no window, instead of one that would be empty.
+            rows.extend(
+                Section::ALL
+                    .iter()
+                    .copied()
+                    .filter(|section| found.iter().any(|index| section.holds(&ACTIONS[*index])))
+                    .map(Row::Section),
+            );
+            rows
+        }
+        Level::Section(section) => found
+            .into_iter()
+            .filter(|index| section.holds(&ACTIONS[*index]))
+            .map(Row::Action)
+            .collect(),
+    }
 }
 
 /// How many rows the overlay paints at once.
@@ -840,13 +937,19 @@ pub fn lines_in(
     theme: &crate::theme::Theme,
 ) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(vec![
-        Span::styled("› ", theme.focus().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            theme.glyphs().prompt(),
+            theme.focus().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             state.query.clone(),
             theme.text().add_modifier(Modifier::BOLD),
         ),
     ])];
-    out.push(Line::from(Span::styled("─".repeat(56), theme.muted())));
+    out.push(Line::from(Span::styled(
+        theme.glyphs().rule().to_string().repeat(56),
+        theme.muted(),
+    )));
     let rows = rows_in(state.level, &state.query);
     if rows.is_empty() {
         out.push(Line::from(Span::styled(
@@ -867,7 +970,7 @@ pub fn lines_in(
         } else {
             (theme.text(), theme.focus(), theme.focus(), theme.accent())
         };
-        let (label, group, shortcut) = match slot {
+        let (label, group, shortcut): (Cow<'static, str>, &'static str, String) = match slot {
             Row::Action(index) => {
                 let action = &ACTIONS[*index];
                 let shortcut = if action.shortcut.is_empty() {
@@ -876,24 +979,43 @@ pub fn lines_in(
                     format!("  {}", action.shortcut)
                 };
                 (
-                    entry(action.title, lang),
+                    Cow::Borrowed(entry(action.title, lang)),
                     entry(action.category, lang),
                     shortcut,
                 )
             }
-            // The row that opens the rest belongs to the palette rather than
-            // to any one feature, and it carries no chord: Enter is how it is
-            // run, and Enter always is.
-            Row::More => (entry(T_MORE, lang), entry(CAT_PALETTE, lang), String::new()),
+            // A section row opens a window rather than running anything: it
+            // wears its category's name with the ellipsis that says "there is
+            // more" and carries no chord — Enter is how it is run, and Enter
+            // always is. Its category column stays empty: the name is already
+            // the label, and six rows repeating "Palette" is a column of noise.
+            Row::Section(section) => (
+                Cow::Owned(format!("{}…", entry(section.category(), lang))),
+                "",
+                String::new(),
+            ),
         };
         // The id is the *search key*, not a column: the centre column of a
         // real terminal is about fifty columns, and a title, a category, a
         // shortcut and a protocol id do not fit in it. The title and the
         // shortcut are what a user reads; the id is what they can type.
         out.push(Line::from(vec![
-            Span::styled(if here { "▸ " } else { "  " }, marker),
-            Span::styled(text::pad_to(label, TITLE_WIDTH), title),
-            Span::styled(text::pad_to(group, CATEGORY_WIDTH), category),
+            Span::styled(
+                if here {
+                    theme.glyphs().cursor()
+                } else {
+                    theme.glyphs().cursor_blank()
+                },
+                marker,
+            ),
+            Span::styled(
+                text::pad_to(theme.fold(label.as_ref()).as_ref(), TITLE_WIDTH),
+                title,
+            ),
+            Span::styled(
+                text::pad_to(theme.fold(group).as_ref(), CATEGORY_WIDTH),
+                category,
+            ),
             Span::styled(shortcut, key),
         ]));
     }
@@ -905,13 +1027,18 @@ pub fn lines_in(
 /// first level and steps back from the second.
 pub fn legend(lang: Lang, theme: &crate::theme::Theme, level: Level) -> Line<'static> {
     let keys = match level {
-        Level::Quick => KEYS,
-        Level::All => KEYS_BACK,
+        Level::Menu => KEYS,
+        Level::Section(_) => KEYS_BACK,
     };
-    Line::from(Span::styled(
-        format!("{} · {}", entry(SHORTCUT_HINT, lang), entry(keys, lang)),
-        theme.muted(),
-    ))
+    // The legend is the interface's own line: `↑↓`, ` · ` and the `…` after a
+    // verb fold for a terminal whose font is ASCII, like every other hint.
+    let text = format!(
+        "{}{}{}",
+        entry(SHORTCUT_HINT, lang),
+        theme.glyphs().dot_sep(),
+        entry(keys, lang)
+    );
+    Line::from(Span::styled(theme.fold(&text).into_owned(), theme.muted()))
 }
 
 /// Handle a key while the palette is open. Returns true when the key was
@@ -940,11 +1067,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     let rows = rows_in(state.level, &state.query);
     let total = rows.len();
     match key.code {
-        // The way out is the first level's: from the full list, Esc steps back
-        // up to the quick one, which is where the palette was opened from.
+        // The way out is the menu's: from a section's window, Esc steps back
+        // up to the menu, which is where the palette was opened from.
         KeyCode::Esc => {
-            if state.level == Level::All {
-                state.set_level(Level::Quick);
+            if matches!(state.level, Level::Section(_)) {
+                state.set_level(Level::Menu);
             } else {
                 app.palette = None;
             }
@@ -954,9 +1081,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.palette = None;
                 (ACTIONS[index].run)(app);
             }
-            // The palette's own row: it opens the full list from its head
-            // rather than doing something and closing the overlay.
-            Some(Row::More) => state.set_level(Level::All),
+            // A section's row: it opens that window from its head rather than
+            // doing something and closing the overlay.
+            Some(Row::Section(section)) => state.set_level(Level::Section(section)),
             None => app.palette = None,
         },
         KeyCode::Up | KeyCode::BackTab => state.step_up(total),
@@ -1046,6 +1173,8 @@ mod tests {
         "app.notices",
         "app.language",
         "app.theme",
+        "app.about",
+        "app.splash",
         "net.wifi_config",
         "net.wifi_scan",
         "net.wifi_status",
@@ -1087,6 +1216,62 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "two actions share an id");
+    }
+
+    /// The palette's view rows and the views themselves are the same list:
+    /// every view has exactly one row that opens it, and every row that opens
+    /// a view names one. The counts agreeing is the point — a view with no way
+    /// in from the palette is an orphan, and a row that opens nothing is a
+    /// dead key.
+    #[test]
+    fn every_view_has_its_palette_row() {
+        for view in View::ALL {
+            let wanted = format!("view.{}", view.as_str());
+            let found: Vec<&str> = ACTIONS
+                .iter()
+                .filter(|action| action.id == wanted)
+                .map(|action| action.id)
+                .collect();
+            assert_eq!(found, vec![wanted.as_str()], "{view:?} has {found:?}");
+        }
+        let view_rows = ACTIONS
+            .iter()
+            .filter(|action| action.id.starts_with("view."))
+            .count();
+        assert_eq!(
+            view_rows,
+            View::ALL.len(),
+            "a `view.` row names no view in `View::ALL`"
+        );
+    }
+
+    /// The menu's tree is a partition of the registry: every action is either
+    /// one of the rows the menu always shows or held by exactly one section —
+    /// nothing is stranded behind a window that never lists it, and nothing is
+    /// listed twice — and the windows stand in the order the registry first
+    /// names their categories.
+    #[test]
+    fn the_menu_partitions_the_registry() {
+        for action in ACTIONS {
+            let always = ALWAYS.contains(&action.id);
+            let holders = Section::ALL.iter().filter(|s| s.holds(action)).count();
+            assert!(
+                always ^ (holders == 1),
+                "{}: always={always}, in {holders} windows",
+                action.id
+            );
+        }
+        let mut seen: Vec<Entry> = Vec::new();
+        for action in ACTIONS.iter().filter(|action| !ALWAYS.contains(&action.id)) {
+            if !seen.contains(&action.category) {
+                seen.push(action.category);
+            }
+        }
+        let windows: Vec<Entry> = Section::ALL
+            .iter()
+            .map(|section| section.category())
+            .collect();
+        assert_eq!(seen, windows, "the menu order left the registry's");
     }
 
     /// A network action asks before it acts on the *link*, and asks nowhere
@@ -1228,11 +1413,11 @@ mod tests {
         assert!(last.text.contains(s.net_state_off), "{:?}", last.text);
     }
 
-    /// Both terminal switches outlive the run: a trace turned on to catch a
-    /// problem that only shows up on the next dial has to still be on when it
-    /// is dialled.
+    /// The switches outlive the run: a trace turned on to catch a problem that
+    /// only shows up on the next dial has to still be on when it is dialled,
+    /// and a splash put away once must stay away.
     #[test]
-    fn the_terminal_switches_are_remembered() {
+    fn the_switches_are_remembered() {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "linkr-palette-switches-{}.json",
@@ -1245,10 +1430,41 @@ mod tests {
         };
         cycle_enter(&mut app);
         toggle_debug_io(&mut app);
+        toggle_splash(&mut app);
         let stored = crate::settings::SettingsStore::at(&path).read();
         assert_eq!(stored.enter, Some(app.enter));
         assert!(stored.debug_io);
+        assert!(stored.no_splash, "the splash switch is remembered too");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The splash switch is announced, and flipping it does not raise or drop
+    /// a splash that is already up: the setting is about the next launch, the
+    /// one on screen is a fact about this run.
+    #[test]
+    fn the_splash_switch_is_announced() {
+        let mut app = App {
+            splash_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            ..App::default()
+        };
+        let action = ACTIONS
+            .iter()
+            .find(|action| action.id == "app.splash")
+            .expect("the switch is registered");
+        (action.run)(&mut app);
+        assert!(app.no_splash, "flipped off");
+        let s = app.strings();
+        let last = app.notices.last().expect("it announced itself");
+        assert!(
+            last.text.contains(s.splash_setting) && last.text.contains(s.net_state_off),
+            "{:?}",
+            last.text
+        );
+        assert!(app.splash_active(), "the switch is about the next launch");
+        (action.run)(&mut app);
+        assert!(!app.no_splash, "and on again");
+        let last = app.notices.last().expect("it announced itself");
+        assert!(last.text.contains(s.net_state_on), "{:?}", last.text);
     }
 
     /// Conversations come and go durably: a new one is a fresh page that keeps
@@ -1368,8 +1584,6 @@ mod tests {
             CAT_CONNECTION,
             CAT_TERMINAL,
             CAT_APP,
-            CAT_PALETTE,
-            T_MORE,
         ]);
     }
 
@@ -1488,17 +1702,21 @@ mod tests {
     }
 
     /// The rendered body has the prompt first (that is where the cursor goes),
-    /// one marked row, and the same height at the top, middle and bottom.
+    /// one marked row, and the same height at the top, middle and bottom — of a
+    /// list longer than the window, which is where the shape can break.
     #[test]
     fn the_body_keeps_its_shape_and_marks_exactly_one_row() {
+        let query = "e";
+        let total = matches(query).len();
+        assert!(total > MAX_VISIBLE, "the list must overflow the window");
         let mut state = PaletteState {
-            level: Level::All,
+            query: query.to_string(),
             ..PaletteState::new()
         };
         let top = lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK);
-        state.selected = ACTIONS.len() / 2;
+        state.selected = total / 2;
         let middle = lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK);
-        state.selected = ACTIONS.len() - 1;
+        state.selected = total - 1;
         let bottom = lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK);
 
         // prompt, separator, then a full window (the list is longer than one).
@@ -1512,39 +1730,52 @@ mod tests {
         }
     }
 
-    /// The list the palette opens on is the window commands and the row that
-    /// opens the rest: the forty rows behind them are what the second level is
-    /// for, and the first screen fits without a scroll.
+    /// The list the palette opens on is the rows it always shows — the four
+    /// views and the rail — and one row per section for everything else: no
+    /// single "more" to descend through, and the whole menu fits the first
+    /// screen without a scroll.
     #[test]
-    fn the_palette_opens_on_the_window_commands() {
+    fn the_palette_opens_on_the_window_commands_and_their_sections() {
         let state = PaletteState::new();
         let rows = rows_in(state.level, &state.query);
-        assert_eq!(rows.len(), QUICK.len() + 1);
+        assert!(
+            rows.len() <= MAX_VISIBLE,
+            "the menu needs a scroll: {} rows",
+            rows.len()
+        );
         let ids: Vec<&str> = rows
             .iter()
             .filter_map(|row| match row {
                 Row::Action(index) => Some(ACTIONS[*index].id),
-                Row::More => None,
+                Row::Section(_) => None,
             })
             .collect();
-        assert_eq!(ids, QUICK.to_vec());
-        assert_eq!(
-            rows.last(),
-            Some(&Row::More),
-            "the way down is the last row"
-        );
+        assert_eq!(ids, ALWAYS.to_vec());
+        let windows: Vec<Section> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Section(section) => Some(*section),
+                Row::Action(_) => None,
+            })
+            .collect();
+        assert_eq!(windows.as_slice(), Section::ALL);
 
         let zh = text_of(&lines_in(&state, Lang::Zh, MAX_VISIBLE, &Theme::DARK));
         assert!(zh.contains("打开终端视图"), "{zh}");
-        assert!(zh.contains("更多动作…"), "{zh}");
+        assert!(zh.contains("连接…"), "a window row is not labelled: {zh}");
         assert!(
             !zh.contains("保存终端日志"),
-            "the second level leaked onto the first screen: {zh}"
+            "a section's rows leaked onto the menu: {zh}"
         );
         let en = text_of(&lines_in(&state, Lang::En, MAX_VISIBLE, &Theme::DARK));
-        assert!(en.contains("More actions…"), "{en}");
+        assert!(en.contains("Connection…"), "{en}");
+        assert!(en.contains("Assistant…"), "{en}");
         assert!(
-            legend(Lang::En, &Theme::DARK, Level::Quick)
+            !en.contains("Save the terminal log"),
+            "a section's rows leaked onto the menu: {en}"
+        );
+        assert!(
+            legend(Lang::En, &Theme::DARK, Level::Menu)
                 .spans
                 .first()
                 .map(|span| span.content.as_ref())
@@ -1554,42 +1785,47 @@ mod tests {
         );
     }
 
-    /// The row that opens the full list does that and nothing else, Esc steps
-    /// back up from it, and the first level's Esc still closes the palette.
+    /// A menu row opens its section's window and does nothing else; Esc steps
+    /// back up from the window, and the menu's own Esc closes the palette.
     #[test]
-    fn the_row_that_opens_the_rest_and_the_way_back() {
+    fn a_section_row_opens_its_window_and_esc_steps_back() {
         let mut app = App::default();
         let view = app.view;
         open(&mut app);
-        let quick = rows_in(Level::Quick, "").len();
-        for _ in 0..quick - 1 {
+        let menu = rows_in(Level::Menu, "").len();
+        for _ in 0..menu - 1 {
             handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         assert_eq!(
             app.palette.as_ref().map(|s| s.selected),
-            Some(quick - 1),
+            Some(menu - 1),
             "the cursor sits on the last row"
         );
 
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let state = app.palette.as_ref().expect("the palette is still up");
-        assert_eq!(state.level, Level::All);
-        assert!(state.query.is_empty(), "a new list starts unsearched");
+        assert_eq!(state.level, Level::Section(Section::Agent));
+        assert!(state.query.is_empty(), "a new window starts unsearched");
         assert_eq!(state.selected, 0);
-        assert!(state.window == 0);
-        assert_eq!(app.view, view, "nothing ran on the way down");
+        assert_eq!(state.window, 0);
+        assert_eq!(app.view, view, "a row ran on the way down");
 
         let en = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
+        assert!(en.contains("Ask the assistant"), "not the section: {en}");
         assert!(
-            en.contains("Connect"),
-            "the full list is not the registry: {en}"
+            !en.contains("Open terminal view"),
+            "the menu leaked into the window: {en}"
         );
+        let expected = ACTIONS
+            .iter()
+            .filter(|action| Section::Agent.holds(action))
+            .count();
         assert_eq!(
             rows_in(state.level, &state.query).len(),
-            ACTIONS.len(),
-            "the second level is not the whole registry"
+            expected,
+            "the window is not the section"
         );
-        let back = legend(Lang::En, &Theme::DARK, Level::All);
+        let back = legend(Lang::En, &Theme::DARK, Level::Section(Section::Agent));
         let back = back
             .spans
             .first()
@@ -1601,16 +1837,16 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(
             app.palette.as_ref().map(|s| s.level),
-            Some(Level::Quick),
+            Some(Level::Menu),
             "Esc did not step back up"
         );
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.palette.is_none(), "the first level's Esc closes");
+        assert!(app.palette.is_none(), "the menu's Esc closes");
     }
 
-    /// A query is a search of everything at either level — the quick list is
-    /// how the palette opens, not a fence around the registry — and it does
-    /// not change what Esc does.
+    /// A query is a search of everything at either level — the menu is how the
+    /// palette opens, not a fence around the registry — and it does not change
+    /// what Esc does.
     #[test]
     fn a_query_searches_everything_from_the_first_level() {
         let mut app = App::default();
@@ -1622,7 +1858,7 @@ mod tests {
             );
         }
         let state = app.palette.as_ref().expect("the palette is up");
-        assert_eq!(state.level, Level::Quick);
+        assert_eq!(state.level, Level::Menu);
         assert_eq!(
             rows_in(state.level, &state.query).len(),
             matches("wifi").len()
@@ -1630,7 +1866,7 @@ mod tests {
         let text = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
         assert!(text.contains("Scan for WiFi networks"), "{text}");
         assert!(
-            !text.contains("More actions"),
+            !text.contains("Connection…"),
             "the rows are the query's own: {text}"
         );
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1640,14 +1876,14 @@ mod tests {
         );
     }
 
-    /// Enter on the second level runs the row and closes the whole palette,
+    /// Enter in a section's window runs the row and closes the whole palette,
     /// rather than leaving the user a level down with nothing to run.
     #[test]
-    fn enter_on_the_second_level_runs_and_closes() {
+    fn enter_in_a_section_window_runs_and_closes() {
         let mut app = App::default();
         open(&mut app);
         let state = app.palette.as_mut().expect("the palette is up");
-        state.set_level(Level::All);
+        state.set_level(Level::Section(Section::App));
         for c in "Keyboard help".chars() {
             handle_key(
                 &mut app,
@@ -1656,7 +1892,7 @@ mod tests {
         }
         assert_eq!(
             app.palette.as_ref().map(|s| s.level),
-            Some(Level::All),
+            Some(Level::Section(Section::App)),
             "a query does not step back up"
         );
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

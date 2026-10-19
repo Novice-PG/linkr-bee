@@ -32,8 +32,12 @@ pub const SAMPLE: [&str; 6] = [
 /// glyph, so this field is built with [`text::pad_to`] and never `{:<14}`.
 const LABEL_COLUMNS: usize = 14;
 
-/// What sits between the two fields of a grid row.
-const SEPARATOR: &str = "│ ";
+/// What sits between the two fields of a grid row: the rule between a row's
+/// label field and its value, in this terminal's set — `│ ` where the font has
+/// a box rule, `| ` where it does not ([`crate::capability::GlyphSet::divider`]).
+fn separator(theme: &Theme) -> String {
+    format!("{} ", theme.glyphs().divider())
+}
 
 /// The groups the six designed rows already show; any other group the firmware
 /// reports is appended below them rather than dropped.
@@ -282,15 +286,21 @@ fn message(text: &str, style: ratatui::style::Style, width: u16) -> Line<'static
 /// wider than its pane wraps, and a wrapped row shifts every row below it.
 fn row_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
     let budget = width as usize;
-    let (label, head_columns) = label_field(label);
+    let (label, head_columns) = label_field(label, theme);
+    // The value is a line of the interface even when the numbers in it came
+    // off the wire: the ` · ` this program put between two fields is folded for
+    // a terminal that cannot show it, like every other mark in the frame. The
+    // pane's own output is never folded — that text is the device's — but a
+    // grid row is chrome, and it is clipped to the pane either way.
+    let value = theme.fold(value);
     if head_columns >= budget {
-        let head = format!("{label}{SEPARATOR}");
+        let head = format!("{label}{}", separator(theme));
         return Line::from(Span::styled(text::clip_to(&head, budget), theme.focus()));
     }
-    let value = text::clip_to(value, budget - head_columns);
+    let value = text::clip_to(value.as_ref(), budget - head_columns);
     Line::from(vec![
         Span::styled(label, theme.focus()),
-        Span::styled(SEPARATOR, theme.muted()),
+        Span::styled(separator(theme), theme.muted()),
         Span::styled(value, theme.text()),
     ])
 }
@@ -299,9 +309,9 @@ fn row_line(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static
 /// CJK label pads the same as an English one — with the column count of the
 /// field and the separator that follows it: what a value has left of the
 /// pane's width.
-fn label_field(label: &str) -> (String, usize) {
+fn label_field(label: &str, theme: &Theme) -> (String, usize) {
     let padded = text::pad_to(&text::clip_to(label, LABEL_COLUMNS), LABEL_COLUMNS);
-    let head_columns = text::columns(&padded) + text::columns(SEPARATOR);
+    let head_columns = text::columns(&padded) + text::columns(&separator(theme));
     (padded, head_columns)
 }
 
@@ -332,12 +342,12 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
     };
 
     let budget = width as usize;
-    let (label, head_columns) = label_field(label);
+    let (label, head_columns) = label_field(label, theme);
     if head_columns >= budget {
         return row_line(&label, &raw, width, theme);
     }
 
-    let (fill, track) = text::meter(used, total, METER_CELLS);
+    let (fill, track) = text::meter_with(used, total, METER_CELLS, theme.glyphs().meter());
     // The share as the reader's own percentage: the meter shows it, the
     // number states it, and both come from the pair the device sent. In wide
     // arithmetic, like `text::meter` itself — the pair arrives verbatim from
@@ -347,7 +357,10 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
     let wide_total = u128::from(total);
     let percent = (wide_used * 100 + wide_total / 2) / wide_total.max(1);
     let dropped = get(groups, "uart", "dropped").unwrap_or("0");
-    let value = format!("{used}/{total} {fill}{track} {percent}% · drop {dropped}");
+    let value = format!(
+        "{used}/{total} {fill}{track} {percent}%{}drop {dropped}",
+        theme.glyphs().dot_sep()
+    );
     if text::columns(&value) > budget - head_columns {
         // No room for the meter: the row is the documented one, unshrunk.
         return row_line(&label, &raw, width, theme);
@@ -360,12 +373,15 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
     };
     Line::from(vec![
         Span::styled(label, theme.focus()),
-        Span::styled(SEPARATOR, theme.muted()),
+        Span::styled(separator(theme), theme.muted()),
         Span::styled(format!("{used}/{total} "), theme.text()),
         Span::styled(fill, ink),
         Span::styled(track, theme.muted()),
         Span::styled(format!(" {percent}%"), theme.muted()),
-        Span::styled(format!(" · drop {dropped}"), theme.text()),
+        Span::styled(
+            format!("{}drop {dropped}", theme.glyphs().dot_sep()),
+            theme.text(),
+        ),
     ])
 }
 
@@ -381,10 +397,12 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             width,
         ),
         message(
-            &match &state.updated {
-                Some(at) => format!("{} {at}", s.diag_updated),
-                None => s.diag_not_read.to_string(),
-            },
+            theme
+                .fold(&match &state.updated {
+                    Some(at) => format!("{} {at}", s.diag_updated),
+                    None => s.diag_not_read.to_string(),
+                })
+                .as_ref(),
             theme.muted(),
             width,
         ),
@@ -419,13 +437,21 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             }
         }
     } else if state.loading {
-        lines.push(message(s.diag_loading, theme.muted(), width));
+        lines.push(message(
+            theme.fold(s.diag_loading).as_ref(),
+            theme.muted(),
+            width,
+        ));
     } else {
         lines.push(message(s.diag_empty, theme.muted(), width));
     }
 
     lines.push(Line::from(""));
-    lines.push(message(s.diag_keys_hint, theme.muted(), width));
+    lines.push(message(
+        theme.fold(s.diag_keys_hint).as_ref(),
+        theme.muted(),
+        width,
+    ));
     lines
 }
 
