@@ -197,7 +197,7 @@ int main(int argc, char **argv)
     if (!strcmp(scenario, "forward")) {
         uint8_t data[232] = {0};
         for (int i = 0; i < 100; ++i) {
-            bool accounted = false;
+            size_t accounted = 0;
             if (uart_forward_chunk(data, sizeof(data), &accounted) != 0) {
                 return 3;
             }
@@ -207,7 +207,7 @@ int main(int argc, char **argv)
         }
         /* A connected peer's transient failure must still be retried without
          * duplicating bytes in the LAN or log sinks. */
-        bool accounted = false;
+        size_t accounted = 0;
         ble_result = -EIO;
         if (uart_forward_chunk(data, sizeof(data), &accounted) != -EIO) {
             return 5;
