@@ -114,16 +114,8 @@ jobs:
       - name: Tests of the interface build
         run: cargo test --locked --no-default-features --features tui
 
-      - name: Firmware rate arithmetic
-        # No Zephyr, no toolchain: src/uart_autobaud_math.h is plain integers,
-        # and this is the only part of the firmware a host compiler can judge.
-        # The test lives with the firmware, not in the crate, so this step —
-        # and only this step — runs from the repository root.
-        working-directory: .
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror \
-            -o /tmp/test_uart_autobaud tests/test_uart_autobaud.c
-          /tmp/test_uart_autobaud
+      # Firmware is tested by the firmware workflow; this workflow is TUI/CLI
+      # only and does not compile or test src/ or tests/.
 
   targets:
     name: Cross targets
