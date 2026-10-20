@@ -1,5 +1,7 @@
 # HarmonyOS NEXT client
 
+[User guide](../docs/USAGE.md) | [Project overview](../README.md) | [Documentation](../docs/README.md)
+
 This directory contains a HarmonyOS Stage application for the Linkr Bee BLE
 terminal. ArkWeb renders the shared terminal UI, while the ArkTS host implements
 BLE access and exposes it through the JSON-RPC contract in

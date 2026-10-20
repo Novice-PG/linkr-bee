@@ -1,5 +1,7 @@
 # bee — the host terminal for Linkr Bee
 
+[Project overview](../../README.md) | [Documentation](../../docs/README.md) | [Web/mobile user guide](../../docs/USAGE.md)
+
 A cross-platform host client for the Linkr Bee bridge: one binary, a CLI and a
 TUI over a shared core. This crate is a **from-scratch rebuild** of the TUI that
 PR #9 carried, built against the same interface design and the same web-client

@@ -11,7 +11,8 @@
 
 <p align="center">
   <a href="README.md">English</a> ·
-  <a href="docs/README.md">文档索引</a> ·
+  <a href="docs/USAGE.zh-CN.md">使用指南</a> ·
+  <a href="docs/README.zh-CN.md">文档索引</a> ·
   <a href="docs/DEVELOPMENT.zh-CN.md">开发指南</a>
 </p>
 
@@ -29,9 +30,24 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 回车可按 raw、CR、LF、CRLF 发送，适配 Bootloader 和不同 Shell。
 - 日志导出、WebDAV 上传，诊断面板可查固件、UART 缓冲、WiFi 和收发计数。
 - 接入 2.4 GHz 网络后走局域网，不再需要蓝牙。
-- 浏览器和手机 App 内置助手：检索串口日志、在你批准后向目标机执行命令，并以同样的
-  方式修改桥接器自身的 UART、WiFi 和日志上传设置。它会记住每台目标设备的事实、统计
+- 浏览器和手机 App 内置助手：检索串口日志，按所选审批策略执行目标命令；修改桥接器
+  自身的 UART、WiFi 和日志上传设置前需确认。它会记住每台目标设备的事实、统计
   本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
+
+## 选择客户端
+
+各客户端访问的是同一个配件，按主机和工作方式选择即可。
+
+| 客户端 | 适合场景 | 说明 |
+| --- | --- | --- |
+| Web 终端 | 桌面浏览器直接使用，无需安装客户端 | [使用指南](docs/USAGE.zh-CN.md) |
+| Rust CLI / TUI | 键盘操作、桌面终端、脚本与 Agent 会话 | [主机终端](tools/linkr-tui/README.md)（英文） |
+| Android / iOS App | 原生 BLE 与共享触控终端 | [移动端](mobile/README.md)（英文） |
+| HarmonyOS NEXT App | 手机和平板布局、原生 BLE 宿主 | [鸿蒙客户端](harmonyos/README.md)（英文） |
+| Python / C 终端 | 现有桌面脚本与 Linux / Buildroot 集成 | [终端工具](docs/DEVELOPMENT.zh-CN.md#ble-终端) |
+
+下方手机截图展示共享 Web 界面的响应式布局，不代表已完成对应平台的真机验证；各端
+验证范围见平台文档。
 
 ## 需要什么
 
@@ -50,8 +66,7 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 一台 Linkr Bee 配件：ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC
   或 ESP32-C5 DevKitC。
 - 一台带 UART 控制台的目标设备，三根线：目标 TX 接配件 RX、目标 RX 接配件 TX、共地。
-- 一台主机：桌面 Chrome/Chromium 用 Web 终端，或手机 App，或 macOS、Linux 上的
-  Python / C 终端。
+- 一台运行兼容浏览器、桌面终端客户端或手机 App 的主机，按上表选择。
 
 UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 [硬件需求](docs/HARDWARE.md)。
@@ -90,10 +105,20 @@ UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 
 ![Linkr Bee 桌面终端](assets/screenshots/linkr-bee-terminal-desktop.jpg)
 
-- 顶部栏：连接状态、连接/重连、面板开关、主题、语言。
-- 终端：点进去直接输入，工具条上有字号、全屏、自动滚动、复制、清屏。
-- 控制面板：连接方式、UART 参数、回车格式、本地回显、分片大小、诊断、WiFi、WebDAV
-  和日志操作。
+*中文界面预览，终端内容为示例 UART 输出，未连接真实设备。*
+
+- 顶部栏：连接状态、连接 / 断开、面板开关、主题、语言。
+- 终端：点进去直接输入，工具栏提供助手入口、字号、全屏、滚动到底部与复制；清屏和
+  日志导出在设置中。
+- 设置面板：左侧导航分别打开连接、串口、网络、助手与关于页面；关闭面板可把空间
+  留给终端。
+
+<details>
+  <summary>展开查看终端旁的串口设置</summary>
+
+![Linkr Bee 中文串口设置与终端预览](assets/screenshots/linkr-bee-terminal-controls.jpg)
+
+</details>
 
 UART 参数改完立即生效，目标机用非标准波特率启动时不用重新刷固件。终端还会在登录后和
 窗口变化时同步目标机的窗口大小，全屏程序依赖这个。如果有输出但输入没反应，先确认目标
@@ -103,11 +128,20 @@ RX 接的是配件 TX，并且除非 CTS 和 RTS 都接了，否则关掉硬件�
   <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee 手机终端" width="360">
 </p>
 
-手机上终端优先占用空间，次要设置收进抽屉。浏览器和手机 App 都有助手面板。浏览器里的
-模型请求由页面直接发出，需要端点允许来自页面的请求——多数云端服务和本地模型服务都
-支持。Anthropic 需要额外加一个请求头，配置方法见
-[串口助手说明](mobile/README.md#built-in-serial-assistant-pi)。协议可选 OpenAI 兼容、
-Anthropic 或 Gemini，对话按板子存在本机，刷新页面接着上次继续。
+手机和平板上终端优先占用空间，设置收进抽屉；终端附加按键提供 Esc、Tab、方向键和
+Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
+
+## 串口助手
+
+使用自己的模型端点检索日志、收集目标证据并提出命令。默认 **Auto**：检测到 Shell
+提示符时可直接执行识别出的低风险查询，其他输入需要审批；**手动** 对每次输入确认；
+**Full Auto** 有时间限制，识别出的破坏性命令仍需确认。这些检查不是 Shell 沙箱。
+
+模型请求从主机直接发往所选接入商。API Key 明文保存在本地存储，按需发送给该接入商，
+不会交给配件或 Linkr 中转服务。开启前请确认端点，并检查串口日志中是否含敏感信息。
+
+配置、执行档位、日志与隐私说明见[使用指南](docs/USAGE.zh-CN.md#串口助手)。构建与
+实现细节保留在平台文档和开发指南中。
 
 ## 局域网模式
 
@@ -151,12 +185,14 @@ Anthropic 或 Gemini，对话按板子存在本机，刷新页面接着上次继
 
 ## 文档
 
+- [使用指南](docs/USAGE.zh-CN.md)：界面、串口输入、助手、局域网与日志
+- [Rust CLI / TUI](tools/linkr-tui/README.md)：桌面终端与自动化（英文）
 - [开发指南](docs/DEVELOPMENT.zh-CN.md)：构建、刷写、打包、Kconfig、协议
 - [硬件需求](docs/HARDWARE.md)：引脚、电气要求、量产注意事项
 - [蓝牙配对与恢复](docs/BLE_PAIRING.md)：授权、绑定与恢复
 - [BLE 配件 API](docs/LINKR_BLE_API.zh-CN.md)：服务与分帧，面向集成方
 - 手机客户端：[Android / iOS](mobile/README.md) · [HarmonyOS](harmonyos/README.md)
-- [文档索引](docs/README.md) · [English README](README.md)
+- [文档索引](docs/README.zh-CN.md) · [English README](README.md)
 
 ## 许可证
 

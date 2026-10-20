@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="README.zh-CN.md">中文</a> ·
+  <a href="docs/USAGE.md">User guide</a> ·
   <a href="docs/README.md">Documentation</a> ·
   <a href="docs/DEVELOPMENT.md">Development guide</a>
 </p>
@@ -34,10 +35,25 @@ target's own UART bytes and does not replace the target shell.
   transfer counters from the diagnostics panel.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
 - Assistant in the browser and the phone apps: searches the serial log, runs
-  commands on the target once you approve them, and changes the bridge's own
-  UART, WiFi and log-upload settings under the same approval. It remembers facts
+  target commands under a selectable approval policy, and asks before changing
+  the bridge's UART, WiFi or log-upload settings. It remembers facts
   about each target between sessions, counts the tokens it used, and can export
   the whole diagnosis as a Markdown report.
+
+## Choose a client
+
+All clients reach the same accessory; choose the workflow that suits your host.
+
+| Client | Best for | Guide |
+| --- | --- | --- |
+| Web terminal | A desktop browser, without installing a client | [User guide](docs/USAGE.md) |
+| Rust CLI / TUI | A keyboard-first desktop console, scripts, and agent sessions | [Host terminal](tools/linkr-tui/README.md) |
+| Android / iOS app | Native BLE with the shared touch terminal | [Mobile app](mobile/README.md) |
+| HarmonyOS NEXT app | Phone and tablet layouts with a native BLE host | [HarmonyOS client](harmonyos/README.md) |
+| Python / C terminal | Existing desktop scripts and Linux / Buildroot integration | [Terminal tools](docs/DEVELOPMENT.md#ble-terminal) |
+
+The mobile screenshots below show the shared responsive web UI, not proof of a
+physical-device test. See each platform guide for its validation status.
 
 ## What you need
 
@@ -57,8 +73,8 @@ Browser / desktop / mobile / Linkr
   or ESP32-C5 DevKitC.
 - A target with a UART console, and three wires: target TX to accessory RX, target RX
   to accessory TX, and a shared ground.
-- A host: Chrome or Chromium for the web terminal, one of the phone apps, or the
-  Python / C terminal on macOS and Linux.
+- A host running a compatible browser, a desktop terminal client, or a phone app
+  from the table above.
 
 The UART side is 3.3 V logic, not RS-232. See the
 [hardware requirements](docs/HARDWARE.md) before wiring a custom board.
@@ -97,13 +113,22 @@ The UART side is 3.3 V logic, not RS-232. See the
 
 ## Using the terminal
 
-![Linkr Bee desktop terminal](assets/screenshots/linkr-bee-terminal-desktop.jpg)
+![English desktop terminal with the settings panel collapsed](assets/screenshots/linkr-bee-terminal-desktop-en.jpg)
 
-- Top bar: connection state, connect/reconnect, panel toggle, theme, language.
-- Terminal: click and type; font size, fullscreen, auto-scroll, copy, and clear are
-  in its toolbar.
-- Control panel: transport, UART settings, Enter mode, local echo, chunk size,
-  diagnostics, WiFi, WebDAV, and log actions.
+*English UI preview with sample UART output; no hardware connection is shown.*
+
+- Top bar: connection state, connect/disconnect, panel toggle, theme, language.
+- Terminal: click and type; its toolbar opens the assistant and provides font
+  size, fullscreen, scroll-to-bottom, and copy. Clear and log export are in settings.
+- Settings: the left rail opens connection, serial, network, assistant, and About
+  sections. Close the panel to give the terminal more space.
+
+<details>
+  <summary>Serial settings beside the terminal</summary>
+
+![English serial settings and terminal preview](assets/screenshots/linkr-bee-terminal-controls-en.jpg)
+
+</details>
 
 UART settings apply immediately, so a target that boots at an unusual baud rate
 needs no reflash. The terminal also keeps the target's window size in sync after
@@ -112,29 +137,29 @@ typing does nothing, check that the target RX goes to the accessory TX, and turn
 hardware flow control off unless CTS and RTS are both wired.
 
 <p align="center">
-  <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee terminal on a phone" width="360">
+  <img src="assets/screenshots/linkr-bee-terminal-mobile-en.jpg" alt="English responsive terminal preview at phone width" width="360">
 </p>
 
-On phones the terminal takes the available space and secondary settings move into a
-drawer. The assistant is available in the browser and in the phone apps. A browser
-page calls the model endpoint directly, so the endpoint has to accept requests from
-the page — most hosted providers and local model servers do. Anthropic needs one
-extra header; see the
-[serial assistant notes](mobile/README.md#built-in-serial-assistant-pi) for setup.
-Pick a provider from the list (OpenAI, Anthropic, Google Gemini, DeepSeek,
-Moonshot, Zhipu, Alibaba Cloud Bailian, SiliconFlow, Volcengine Ark, Groq,
-OpenRouter, Mistral, xAI or a local Ollama) and the base URL, protocol and
-suggested model are filled in for you; OpenAI-compatible, Anthropic and Gemini
-protocols are all selectable. **Fetch model list** then reads the IDs the service
-currently offers (the hard-coded ones go stale) and leaves the field editable for
-services that do not expose the endpoint. The API key is stored only in this browser's
-`localStorage` (`linkr-agent-model`) and is never uploaded to Linkr Bee or any
-server — there is no cloud account — so requests go from this device straight to
-your provider. The conversation is kept per board on the device, so a reload
-continues where it stopped instead of starting over. The settings drawer also has
-an **About** page: the open-source components each build ships with their versions
-and licences, the firmware stack, the CC-BY-4.0 cursor attribution, this
-project's Apache-2.0 licence, and the contributors.
+On phones and tablets the terminal stays central, settings open in a drawer, and
+the accessory key row provides Esc, Tab, arrows, and Ctrl combinations. The
+assistant adapts between stacked and side-by-side layouts as space allows.
+
+## Serial assistant
+
+Use your own model endpoint to inspect logs, collect target evidence, and propose
+commands. **Auto** is the default: recognized low-risk queries can run at a detected
+shell prompt, while other input needs approval. **Manual** asks for every input;
+**Full Auto** is time-limited and still guards recognized destructive commands.
+These checks are not a shell sandbox.
+
+Model requests go directly from your host to the provider you choose. The API key
+is stored in plaintext local storage and sent to that provider when required, not
+to the accessory or a Linkr-operated relay. Review the endpoint and any sensitive
+serial output before enabling the assistant.
+
+See the [user guide](docs/USAGE.md#serial-assistant) for setup, execution modes,
+logging, and privacy. Build and implementation details stay in the platform and
+development guides.
 
 ## LAN mode
 
@@ -184,8 +209,10 @@ network. Use LAN mode on a network you trust.
 
 ## Documentation
 
+- [User guide](docs/USAGE.md): interface tour, serial input, assistant, LAN, and logging
+- [Rust CLI / TUI](tools/linkr-tui/README.md): desktop terminal and automation
 - [Development guide](docs/DEVELOPMENT.md): build, flash, packaging, Kconfig, protocol
-- [Hardware requirements](docs/HARDWARE.md): pinout, electrical, production notes
+- [Hardware requirements](docs/HARDWARE.md): pinout, electrical, production notes (Chinese)
 - [Bluetooth pairing](docs/BLE_PAIRING.md): authorization and recovery (Chinese)
 - [BLE accessory API](docs/LINKR_BLE_API.zh-CN.md): services and framing for integrators (Chinese)
 - [Android / iOS](mobile/README.md) and [HarmonyOS](harmonyos/README.md) clients

@@ -1,5 +1,7 @@
 # Linkr Bee mobile app
 
+[User guide](../docs/USAGE.md) | [Project overview](../README.md) | [Documentation](../docs/README.md)
+
 This directory packages the shared `web/` terminal for Android and iOS. The UI,
 Management v1 protocol, and Reliable UART v1 implementation remain shared; only
 the BLE transport is native.
@@ -88,7 +90,7 @@ boot?” The app runs the Pi agent loop locally; model inference uses the config
 service. This is not an on-device/offline language model.
 
 The implementation uses pi-mono's `@earendil-works/pi-agent-core` and `pi-ai`,
-pinned to 0.85.1. It exposes these tools:
+at the versions pinned in `package-lock.json`. It exposes these tools:
 
 - `read_web_page`: reads an HTTP(S) text page and returns text plus links, without
   cookies or model credentials. Limited to 512 KiB per response, 16,000 characters
@@ -136,7 +138,7 @@ there to keep both themes, headers and controls consistent across window sizes.
 
 | Mode | Serial input behavior |
 | --- | --- |
-| Full Auto | Sends commands directly, without confirmation. |
+| Full Auto | Sends routine commands directly for up to 15 minutes; recognized destructive commands and Always ask rules still require approval. |
 | Auto (recommended, default) | Sends recognized low-risk queries at a detected shell prompt; asks for approval for everything else. |
 | Manual | Shows proposed input and waits for the user to click Send. |
 

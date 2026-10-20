@@ -1,6 +1,6 @@
 # Linkr Bee development guide
 
-> [Project overview](../README.md) | [中文开发指南](DEVELOPMENT.zh-CN.md) | [BLE accessory API guide (Chinese)](LINKR_BLE_API.zh-CN.md)
+> [Project overview](../README.md) | [User guide](USAGE.md) | [Documentation](README.md) | [中文开发指南](DEVELOPMENT.zh-CN.md) | [BLE accessory API guide (Chinese)](LINKR_BLE_API.zh-CN.md)
 
 This guide covers firmware builds, flashing, UART integration, control commands,
 test modes, client tooling, protocols, and Kconfig options.

@@ -1,6 +1,6 @@
 # Linkr Bee 开发指南
 
-> [项目首页](../README.zh-CN.md) | [English](DEVELOPMENT.md) | [BLE 配件 API 对接文档](LINKR_BLE_API.zh-CN.md)
+> [项目首页](../README.zh-CN.md) | [使用指南](USAGE.zh-CN.md) | [文档索引](README.zh-CN.md) | [English](DEVELOPMENT.md) | [BLE 配件 API 对接文档](LINKR_BLE_API.zh-CN.md)
 
 本文集中说明固件构建与刷写、UART 集成、控制命令、测试模式、客户端工具、
 通信协议和 Kconfig 配置。
