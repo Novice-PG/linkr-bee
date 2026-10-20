@@ -62,33 +62,9 @@ config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	  notifications are being sent. Larger values reduce dropped boot-log
 	  bytes when the SBC emits a burst faster than BLE can transmit.
 
-	  Past LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT the bridge stops draining
-	  this buffer, which is what makes a larger value useful for anything
-	  beyond absorbing a short burst.
-
-config LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT
-	int "Drain-gate high watermark, percent of the UART RX buffer"
-	default 80
-	range 20 100
-	help
-	  Percentage of UART RX buffering at which the bridge stops pulling bytes
-	  out of it. Holding the buffer full lets the driver's FIFO fill and apply
-	  whatever flow control the peer honours, instead of the ring silently
-	  discarding every byte that arrives while the backlog lasts.
-
-	  This is not a lossless guarantee: a link wired RX/TX/GND only has no RTS
-	  to lower, so a peer that keeps sending still overruns the FIFO. It changes
-	  how much is lost, not whether any is. 100 disables the gate.
-
-config LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT
-	int "Drain-gate release watermark, percent of the UART RX buffer"
-	default 50
-	range 0 99
-	help
-	  Percentage at or below which draining resumes after the gate has tripped.
-	  The gap between this and the high watermark is the hysteresis that keeps
-	  the gate from chattering around a single threshold. Must be lower than
-	  LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT.
+	  The consumer keeps draining even when this buffer is full. Without
+	  hardware flow control, sustained input faster than the transports can
+	  still overflow it; stopping the consumer cannot throttle the producer.
 
 config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
 	int "Transport to UART packet queue depth"
@@ -126,9 +102,10 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 
 	  It acts only when the line is measured three ways: the capture must
 	  sit on whole multiples of its own estimate, two consecutive windows
-	  must agree on the same rate, and the result must fall outside 2% of
-	  the current rate (inside that, the UART already tolerates it and
-	  reconfiguring would only reset the ring and throw away good data).
+	  must agree within 2%, and the result must fall outside the current
+	  rate's hold band. Within 2% it is a match; within 5% of a verified
+	  or standard configured rate it is held to avoid an unnecessary
+	  reconfiguration that resets the ring and discards buffered data.
 	  A capture that fits no whole multiple (a rate that moved
 	  mid-capture, noise, a torn edge) is refused as no measurement.
 
@@ -138,9 +115,10 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 	  so a peer that slow has to be matched by hand. Traffic whose runs
 	  never include a one-bit run rates as our own rate divided by the
 	  multiple its shortest run is — two
-	  or five for whole framed bytes (a repeated 0x9E reads current/2,
-	  0xF0 reads current/5); 6..9 cannot be faked by whole frames at all,
-	  and mixed shapes fit no multiple and are refused outright. That
+	  or five for 8N1 framed bytes (a repeated 0x9E reads current/2,
+	  0xF0 reads current/5). Other frame formats can reach further: 8E2
+	  has twelve bit times, and repeated 0xE0 reads current/6. Mixed
+	  shapes that fit no multiple are refused outright. That
 	  reading cannot be corrected by waiting: the run lengths belong to
 	  RXD and not to our divisor, so once the port moves there the same
 	  lengths match at the new rate and every later window agrees.
@@ -150,9 +128,10 @@ config LINKR_BLE_BRIDGE_UART_AUTOBAUD
 	  our own rate over k is refused and logged for every k in 2..9.
 	  Eight windows without a capture (3.2 s of silence) drop the
 	  verified state and hand the larger divisors back: after the quiet,
-	  a real drop to a whole fraction of our rate with divisor 6..9
-	  (921600 to 115200 is k = 8) is followed. The 2..5 shapes are
-	  refused in every state, silence included, because a quiet line that
+	  a real drop outside the active frame's artifact range is followed
+	  (921600 to 115200 is k = 8). The artifact bound is at least five,
+	  extended to half the frame length where needed (six for 8E2).
+	  Its divisor shapes are refused in every state because a quiet line that
 	  comes back carrying a binary file reads as exactly one of them. So
 	  a peer switching 115200 to 57600 (k = 2) is never followed: not
 	  while it keeps sending, and not after any amount of silence — that

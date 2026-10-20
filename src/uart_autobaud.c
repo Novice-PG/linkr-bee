@@ -45,7 +45,9 @@
  * windows out — its two polarities timed runs of nine and one — and no longer
  * being thrown out changes nothing: a match is a match.)
  *
- * Two windows must agree before the port is touched. A single window can be
+ * Two windows must agree within 2% before the port is touched. Comparing
+ * integer baud values exactly would reject ordinary edge quantisation at
+ * rates outside the snap table. A single window can be
  * wrong: a glitch that survives the filter, or a byte with no single-bit run
  * (only bytes >= 0x80 with a zero LSB manage that, so it needs a whole window
  * of them), would report half or a third of the real rate. The line does not
@@ -126,11 +128,12 @@
  * — so while the link is carrying traffic no reading tells them apart, and
  * holding the port that works is the cheaper of the mistakes. A line quiet
  * for long enough is a link we no longer hold any evidence about, and a
- * divisor of six or more — one no framed byte leaves on its own: ten bit
- * times do not split into whole runs of six to nine, and the capture's own
- * consistency check rejects the mixed shapes (see uart_rmt_span.c) — is then
- * believed, which is what makes 921600 -> 115200 reachable. A divisor inside
- * two to five is refused in every state, silence or not: that is exactly what
+ * divisor beyond the current frame's artifact bound is then believed,
+ * which makes 921600 -> 115200 reachable. The bound is at least five for
+ * 8N1 and grows to six for 8E2: repeated 0xE0 in 8E2 has six low and six
+ * high bit times and must not be followed as a real /6 slowdown.
+ * Divisors inside that bound are refused in every state, silence or not:
+ * that is exactly what
  * an idle line followed by a binary file reads as, and following it would take
  * the port to a rate the line never carried with no later window left to undo
  * it. The refusal is a delay for the divisors only the line can produce, and
@@ -172,16 +175,14 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 /*
  * The refusal's bound while the link is trusted: every divisor from two to
  * nine is refused, whether or not a byte stream could have produced it. Only
- * the two-to-five half is a stream's doing (a whole-multiple fit lands on two
- * or five — see the file header); the rest is refused because a busy line
+ * the frame-dependent lower part is a stream's doing (see the file header);
+ * the rest is refused because a busy line
  * that suddenly reads current/8 is a stutter, not a peer.
  */
 #define AUTOBAUD_MAX_FACTOR	9
 /*
- * The largest divisor a byte stream can fit itself at — ten bit times per
- * frame, split into whole runs, allow two or five and nothing else — and so
- * the bound a divisor is refused by in every state, silence included. See the
- * file header.
+ * Conservative minimum artifact bound. The active frame format can extend
+ * it: a 12-bit 8E2 frame can leave six-bit low and high runs, unlike 8N1.
  */
 #define AUTOBAUD_ARTIFACT_MAX_FACTOR 5
 #define AUTOBAUD_TOLERANCE_PCT	2 /* UART itself is good for ~2-3% */
@@ -296,7 +297,7 @@ static bool autobaud_within_pct(uint32_t rate, uint32_t base, uint32_t pct)
  * A reading below ours *has* to come from a missing single-bit run: that is
  * the only thing that makes a matching line read low, and this is the shape it
  * reads low in. max_factor decides how far to disbelieve it — the whole range
- * while the link is trusted, only the two-to-five a stream can reach once the
+ * while the link is trusted, only the frame-dependent artifact range once the
  * silence has handed the larger divisors back. A reading that is none of these
  * is not something a missing run can produce, so if it repeats the line really
  * did move.
@@ -338,6 +339,7 @@ static void autobaud_tick(struct k_work *work)
 	uart_dev_t *hw = autobaud_hw();
 	uint32_t now = k_uptime_get_32();
 	uint32_t old_baud, div_meas8, div_cur, next, lo, hi, dmin_rate;
+	uint32_t artifact_max_factor, max_factor;
 	struct linkr_uart_span span;
 	bool captured;
 	int line_level;
@@ -451,6 +453,12 @@ static void autobaud_tick(struct k_work *work)
 	}
 
 	next = autobaud_snap((uint32_t)measured);
+	/* Both a low and a high run must fit in one frame. 8N1 bounds the
+	 * shorter run at five bits, but 8E2 can carry six (repeated 0xE0).
+	 * Keep the existing conservative five-bit floor for shorter formats. */
+	artifact_max_factor = MAX(AUTOBAUD_ARTIFACT_MAX_FACTOR,
+				 linkr_uart_config_frame_half_bits() / 4u);
+	max_factor = autobaud_verified ? AUTOBAUD_MAX_FACTOR : artifact_max_factor;
 	lo = old_baud - old_baud / 100u * AUTOBAUD_TOLERANCE_PCT;
 	hi = old_baud + old_baud / 100u * AUTOBAUD_TOLERANCE_PCT;
 
@@ -509,7 +517,7 @@ static void autobaud_tick(struct k_work *work)
 	 * Low by a whole factor of ourselves: the shape of a stream with no
 	 * single-bit run in it, not of a peer that moved — see the file header
 	 * for the measurement behind that. Every divisor a byte stream can
-	 * reach (two to five) is refused whatever the link's state, because
+	 * reach is refused whatever the link's state, because
 	 * following one would take the port to a rate the line never carried
 	 * and it could not be put back: the pulse width that produced this
 	 * number belongs to RXD rather than to our divisor, so the port would
@@ -519,10 +527,7 @@ static void autobaud_tick(struct k_work *work)
 	 * suddenly reads current/8 is a stutter, not a peer — and it is the
 	 * silence that hands those back.
 	 */
-	if (autobaud_reads_like_a_missing_bit(
-		    next, old_baud,
-		    autobaud_verified ? AUTOBAUD_MAX_FACTOR
-				      : AUTOBAUD_ARTIFACT_MAX_FACTOR)) {
+	if (autobaud_reads_like_a_missing_bit(next, old_baud, max_factor)) {
 		autobaud_forget();
 		if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
 			autobaud_warned_at = now;
@@ -551,10 +556,7 @@ static void autobaud_tick(struct k_work *work)
 	if (span.dmin > 0u) {
 		dmin_rate = (uint32_t)(((uint64_t)old_baud * div_cur) /
 				       (16u * (uint64_t)span.dmin));
-		if (autobaud_reads_like_a_missing_bit(
-			    dmin_rate, old_baud,
-			    autobaud_verified ? AUTOBAUD_MAX_FACTOR
-					      : AUTOBAUD_ARTIFACT_MAX_FACTOR)) {
+		if (autobaud_reads_like_a_missing_bit(dmin_rate, old_baud, max_factor)) {
 			autobaud_forget();
 			if (now - autobaud_warned_at >= AUTOBAUD_WARN_MS) {
 				autobaud_warned_at = now;
@@ -568,7 +570,8 @@ static void autobaud_tick(struct k_work *work)
 		}
 	}
 
-	if (next != autobaud_candidate) {
+	if (autobaud_candidate == 0 ||
+	    !autobaud_within_pct(next, autobaud_candidate, AUTOBAUD_TOLERANCE_PCT)) {
 		autobaud_candidate = next;
 		autobaud_confirm = 1;
 		return;

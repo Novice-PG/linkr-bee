@@ -1,12 +1,9 @@
 """Run with python3 -m unittest discover -s tests -v (Python + host C compiler).
 
-The span a capture reports is the *only* thing the autobaud decision gets to
-look at, so it is the only thing a host test has to supply: the harness runs
-the production tick against a span computed from a chosen line rate, and asks
-what the port ended up configured to. The span classifier itself
-(src/uart_rmt_span.c) reads RMTMEM and is validated on the bench; everything
-the follower decides — verify, hold, refuse, confirm, cooldown — is arithmetic
-a host can drive.
+The harness runs the production classifier against quantized RMT words and
+the production follower against those captures. Hardware register access is
+faked; classification, confirmation and the configured frame-length reader
+are the actual production functions.
 """
 
 import os
@@ -51,6 +48,15 @@ class AutobaudTests(unittest.TestCase):
              "linkr_uart_autobaud_init"],
         )
         (directory / "autobaud_functions.inc").write_text(block)
+        main = (ROOT / "src/main.c").read_text()
+        frame = extract(main, "uint32_t linkr_uart_config_frame_half_bits(void)",
+                        "\nint linkr_uart_config_reconfigure(",
+                        ["linkr_uart_config_frame_half_bits"])
+        (directory / "uart_frame_functions.inc").write_text(frame)
+        rmt = (ROOT / "src/uart_rmt_span.c").read_text()
+        span = extract(rmt, "static void span_measure(",
+                       "\nvoid linkr_uart_rmt_span_init(", ["span_measure"])
+        (directory / "span_functions.inc").write_text(span)
         cls.binary = directory / "autobaud-tests"
         subprocess.run([
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall",
@@ -63,6 +69,35 @@ class AutobaudTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=5)
         return dict(line.split("=", 1)
                     for line in result.stdout.splitlines() if "=" in line)
+
+    def test_raw_captures_with_one_tick_jitter_confirm_an_odd_rate(self):
+        result = self.run_scenario("raw_rmt_jitter")
+        self.assertEqual(result["reconfigs"], "1")
+        self.assertLess(abs(int(result["rate"]) - 150000), 1500)
+
+    def test_captures_outside_the_confirmation_tolerance_do_not_confirm(self):
+        result = self.run_scenario("raw_rmt_disagrees")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["rate"], "115200")
+
+    def test_raw_8e2_six_bit_runs_do_not_move_a_quiet_port(self):
+        result = self.run_scenario("raw_8e2")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["rate"], "115200")
+
+    def test_raw_8n1_binary_from_reset_is_rejected_by_the_classifier(self):
+        result = self.run_scenario("raw_cc")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["rate"], "115200")
+
+    def test_frame_bound_reads_data_parity_and_fractional_stop_bits(self):
+        result = self.run_scenario("frame_formats")
+        self.assertEqual(result["8n1"], "20")
+        self.assertEqual(result["8e2"], "24")
+        self.assertEqual(result["7e2"], "22")
+        self.assertEqual(result["8n1_5"], "21")
+        self.assertEqual(result["5n0_5"], "13")
+        self.assertEqual(result["9o2"], "26")
 
     def test_a_verified_link_is_not_moved_by_a_stream_without_single_bit_runs(self):
         """The one this exists for: 0xCC must not reach 57600.

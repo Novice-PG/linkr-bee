@@ -34,6 +34,8 @@
  * system workqueue only — never from the UART interrupt.
  */
 uint32_t linkr_uart_config_current(void);
+/* Frame length including start, parity and stop, in half-bit units. */
+uint32_t linkr_uart_config_frame_half_bits(void);
 int linkr_uart_config_reconfigure(uint32_t baudrate);
 
 /**

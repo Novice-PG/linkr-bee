@@ -57,17 +57,6 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define UART_RX_CHUNK CONFIG_LINKR_BLE_BRIDGE_UART_RX_CHUNK
 #define UART_RX_BUFFER_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 
-/* Where the RX ring stops being drained so the peer is held off. Percent of
- * UART_RX_BUFFER_SIZE; the gate trips at the high mark and releases at the low
- * one so it does not chatter. See uart_to_ble_thread(). */
-#define UART_RX_HIGH_WATERMARK \
-	((UART_RX_BUFFER_SIZE * CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT) / 100)
-#define UART_RX_LOW_WATERMARK \
-	((UART_RX_BUFFER_SIZE * CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT) / 100)
-
-BUILD_ASSERT(CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_PCT >
-	     CONFIG_LINKR_BLE_BRIDGE_UART_RX_WATERMARK_LOW_PCT);
-
 #define CONTROL_CMD_PREFIX "@linkr "
 #define CONTROL_CMD_MAX_LEN 416
 #define FACTORY_RESET_CONFIRM_MS 2000
@@ -952,10 +941,8 @@ static int apply_uart_config(const struct uart_config *cfg)
 #if LINKR_UART_AUTOBAUD
 /*
  * uart_autobaud.c is a separate translation unit and must not reach into this
- * file's state, so the only two things it needs — the port's configured rate
- * and the one reconfigure path — are handed over instead. Both are additions:
- * nothing that exists here moves or changes signature, which is what keeps this
- * file mergeable against every other board that compiles it.
+ * file's state. The configuration readers and reconfigure path below keep
+ * access to the active port configuration under its owning mutex.
  */
 uint32_t linkr_uart_config_current(void)
 {
@@ -973,6 +960,51 @@ uint32_t linkr_uart_config_current(void)
 	k_mutex_unlock(&uart_config_lock);
 
 	return baudrate;
+}
+
+uint32_t linkr_uart_config_frame_half_bits(void)
+{
+	struct uart_config cfg;
+	uint32_t data_bits, stop_half_bits;
+
+	k_mutex_lock(&uart_config_lock, K_FOREVER);
+	cfg = active_uart_config;
+	k_mutex_unlock(&uart_config_lock);
+
+	switch (cfg.data_bits) {
+	case UART_CFG_DATA_BITS_5:
+		data_bits = 5;
+		break;
+	case UART_CFG_DATA_BITS_6:
+		data_bits = 6;
+		break;
+	case UART_CFG_DATA_BITS_7:
+		data_bits = 7;
+		break;
+	case UART_CFG_DATA_BITS_8:
+		data_bits = 8;
+		break;
+	default:
+		data_bits = 9;
+		break;
+	}
+	switch (cfg.stop_bits) {
+	case UART_CFG_STOP_BITS_0_5:
+		stop_half_bits = 1;
+		break;
+	case UART_CFG_STOP_BITS_1:
+		stop_half_bits = 2;
+		break;
+	case UART_CFG_STOP_BITS_1_5:
+		stop_half_bits = 3;
+		break;
+	default:
+		stop_half_bits = 4;
+		break;
+	}
+
+	return 2u * (1u + data_bits + (cfg.parity != UART_CFG_PARITY_NONE)) +
+	       stop_half_bits;
 }
 
 int linkr_uart_config_reconfigure(uint32_t baudrate)
@@ -1711,18 +1743,12 @@ static void uart_to_ble_thread(void)
 	size_t len = 0;
 	int64_t last_rx = 0;
 	bool accounted = false;
-	/* Backpressure hysteresis. Once the RX ring crosses the high watermark we
-	 * stop pulling from it, which lets the driver's own FIFO fill and throttle
-	 * the peer. We only resume below the low mark so the gate does not chatter
-	 * at the threshold. `gated` is thread-local state, not shared. */
-	bool gated = false;
 
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
 	for (;;) {
 		uint32_t dropped;
 		uint32_t got;
-		uint32_t buffered;
 		unsigned int key;
 
 		dropped = atomic_set(&uart_rx_dropped, 0);
@@ -1731,32 +1757,9 @@ static void uart_to_ble_thread(void)
 				dropped);
 		}
 
-		/* Watermark gate. Software backpressure cannot make the link
-		 * lossless on its own: with RX/TX/GND only there is no RTS to lower,
-		 * so a peer that keeps sending eventually overruns the FIFO. What
-		 * this does buy is the *shape* of the loss — without it, a full ring
-		 * drops every byte that arrives for as long as the backlog lasts;
-		 * with it, the ring stops filling and the peer is held off by the
-		 * (far smaller) hardware FIFO instead. Fewer bytes lost, not none.
-		 *
-		 * The gate only stops the *pull* (len == 0). A half-filled chunk is
-		 * always forwarded first: holding it back would keep the ring full
-		 * and latch the gate on forever, and a peer that is quiet because it
-		 * waits for those very bytes would stall instead of being throttled. */
-		buffered = ring_buf_size_get(&uart_rx_ring);
-		if (buffered >= UART_RX_HIGH_WATERMARK) {
-			gated = true;
-		} else if (buffered <= UART_RX_LOW_WATERMARK) {
-			gated = false;
-		}
-		if (gated && len == 0) {
-			/* Nothing in hand, so stopping here really does stop pulling.
-			 * The peer is now held off by the driver FIFO instead of the
-			 * ring dropping whatever arrives. */
-			(void)k_sem_take(&uart_rx_sem, K_MSEC(2));
-			continue;
-		}
-
+		/* Keep the only consumer running even when the ring is full.
+		 * Pausing it cannot backpressure the producer: the RX interrupt
+		 * still drains the hardware FIFO into this ring. */
 		if (len == sizeof(buf)) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
@@ -1780,13 +1783,7 @@ static void uart_to_ble_thread(void)
 		}
 
 		if (len > 0 &&
-		    (gated ||
-		     k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS)) {
-			/* While gated this is the only way the in-hand bytes leave the
-			 * thread, and draining them is what lets the ring fall to the
-			 * low watermark and reopen the gate. Waiting for the idle
-			 * timeout here would stall a peer that is quiet because it is
-			 * waiting for these very bytes. */
+		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
 			if (!uart_forward_chunk(buf, len, &accounted)) {
 				len = 0;
 				accounted = false;

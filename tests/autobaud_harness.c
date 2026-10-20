@@ -4,11 +4,8 @@
  * divider is computed the way src/main.c programs it, so every number the
  * decision sees has been through the real arithmetic.
  *
- * The measurement is faked at the span's output (struct linkr_uart_span),
- * the same seam the latch era faked the pulse counters at: the span
- * classifier itself (src/uart_rmt_span.c) reads RMTMEM and is validated on
- * the bench, while everything the follower decides — verify, hold, refuse,
- * confirm, cooldown — is arithmetic a host can drive. */
+ * Raw-capture scenarios run the production span classifier against fake
+ * RMT memory; the older focused decision scenarios supply a span directly. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -37,6 +34,25 @@ static void log_discard(const char *fmt, ...)
  * turn a bit-time into cycles the way the receiver would count them.
  */
 #define SOURCE_HZ 80000000ull
+#define K_FOREVER -1
+
+enum { UART_CFG_PARITY_NONE, UART_CFG_PARITY_ODD, UART_CFG_PARITY_EVEN };
+enum { UART_CFG_STOP_BITS_0_5, UART_CFG_STOP_BITS_1,
+       UART_CFG_STOP_BITS_1_5, UART_CFG_STOP_BITS_2 };
+enum { UART_CFG_DATA_BITS_5, UART_CFG_DATA_BITS_6, UART_CFG_DATA_BITS_7,
+       UART_CFG_DATA_BITS_8, UART_CFG_DATA_BITS_9 };
+struct uart_config {
+	uint32_t data_bits, parity, stop_bits;
+};
+static struct uart_config active_uart_config = {
+	.data_bits = UART_CFG_DATA_BITS_8,
+	.parity = UART_CFG_PARITY_NONE,
+	.stop_bits = UART_CFG_STOP_BITS_1,
+};
+static int uart_config_lock;
+static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; }
+static void k_mutex_unlock(int *lock) { (void)lock; }
+#include "uart_frame_functions.inc"
 
 struct k_work {
 	int unused;
@@ -154,6 +170,37 @@ int linkr_uart_rmt_span_line_level(void);
 
 /* From uart_rmt_span.h; the block's burst-tail test uses it. */
 #define LINKR_UART_SPAN_MIN_RUNS 4u
+
+#define SPAN_CH 0u
+#define SPAN_MEM_WORDS 64u
+#define SPAN_DIV 4u
+static uint32_t span_memory[SPAN_MEM_WORDS];
+#define SPAN_MEM span_memory
+#include "span_functions.inc"
+
+/* Quantize absolute edges at the receiver's APB/4 clock, then let the
+ * production classifier interpret the resulting 128 run durations. */
+static struct linkr_uart_span raw_span(uint32_t baud, const uint8_t *pattern,
+				      size_t pattern_len, uint32_t phase)
+{
+	uint64_t bits = phase;
+	struct linkr_uart_span span = {0};
+
+	for (uint32_t w = 0; w < SPAN_MEM_WORDS; w++) {
+		uint32_t pair[2];
+
+		for (uint32_t j = 0; j < 2; j++) {
+			uint64_t next = bits + pattern[(2u * w + j) % pattern_len];
+
+			pair[j] = (uint32_t)((next * (SOURCE_HZ / SPAN_DIV) / baud) -
+					    (bits * (SOURCE_HZ / SPAN_DIV) / baud));
+			bits = next;
+		}
+		span_memory[w] = pair[0] | (pair[1] << 16);
+	}
+	span_measure(SPAN_MEM_WORDS, &span);
+	return span;
+}
 
 #include "autobaud_functions.inc"
 
@@ -402,6 +449,69 @@ static void scenario_a_busy_line_is_not_silent(void)
 	}
 }
 
+static void scenario_raw_rmt_jitter(bool disagrees)
+{
+	static const uint8_t runs[] = {1}; /* 8N1 0x55 */
+	struct linkr_uart_span a = raw_span(150000, runs, ARRAY_SIZE(runs), 0);
+	struct linkr_uart_span b = raw_span(disagrees ? 170000 : 150000,
+					  runs, ARRAY_SIZE(runs), 1);
+
+	if (!a.trustworthy || !b.trustworthy || a.est_q8 == b.est_q8) {
+		abort();
+	}
+	for (int i = 0; i < 20; i++) {
+		window_span(i % 2 ? b : a, 1);
+	}
+}
+
+static void scenario_raw_binary(bool extended_frame)
+{
+	static const uint8_t cc[] = {3, 2, 2, 3};
+	static const uint8_t e0[] = {6, 6};
+	struct linkr_uart_span span;
+
+	if (extended_frame) {
+		active_uart_config.parity = UART_CFG_PARITY_EVEN;
+		active_uart_config.stop_bits = UART_CFG_STOP_BITS_2;
+		for (int i = 0; i < 10; i++) {
+			window_quiet(1);
+		}
+		span = raw_span(115200, e0, ARRAY_SIZE(e0), 0);
+		if (!span.trustworthy) {
+			abort();
+		}
+	} else {
+		span = raw_span(115200, cc, ARRAY_SIZE(cc), 0);
+		if (span.trustworthy) {
+			abort();
+		}
+	}
+	for (int i = 0; i < 20; i++) {
+		window_span(span, 1);
+	}
+}
+
+static void scenario_frame_formats(void)
+{
+	printf("8n1=%u\n", linkr_uart_config_frame_half_bits());
+	active_uart_config.parity = UART_CFG_PARITY_EVEN;
+	active_uart_config.stop_bits = UART_CFG_STOP_BITS_2;
+	printf("8e2=%u\n", linkr_uart_config_frame_half_bits());
+	active_uart_config.data_bits = UART_CFG_DATA_BITS_7;
+	printf("7e2=%u\n", linkr_uart_config_frame_half_bits());
+	active_uart_config.data_bits = UART_CFG_DATA_BITS_8;
+	active_uart_config.parity = UART_CFG_PARITY_NONE;
+	active_uart_config.stop_bits = UART_CFG_STOP_BITS_1_5;
+	printf("8n1_5=%u\n", linkr_uart_config_frame_half_bits());
+	active_uart_config.data_bits = UART_CFG_DATA_BITS_5;
+	active_uart_config.stop_bits = UART_CFG_STOP_BITS_0_5;
+	printf("5n0_5=%u\n", linkr_uart_config_frame_half_bits());
+	active_uart_config.data_bits = UART_CFG_DATA_BITS_9;
+	active_uart_config.parity = UART_CFG_PARITY_ODD;
+	active_uart_config.stop_bits = UART_CFG_STOP_BITS_2;
+	printf("9o2=%u\n", linkr_uart_config_frame_half_bits());
+}
+
 int main(int argc, char **argv)
 {
 	const char *scenario = argc > 1 ? argv[1] : "";
@@ -411,7 +521,17 @@ int main(int argc, char **argv)
 	set_divider(configured_baud);
 	linkr_uart_autobaud_init((uintptr_t)&fake_uart);
 
-	if (strcmp(scenario, "verified_then_binary") == 0) {
+	if (strcmp(scenario, "raw_rmt_jitter") == 0) {
+		scenario_raw_rmt_jitter(false);
+	} else if (strcmp(scenario, "raw_rmt_disagrees") == 0) {
+		scenario_raw_rmt_jitter(true);
+	} else if (strcmp(scenario, "raw_8e2") == 0) {
+		scenario_raw_binary(true);
+	} else if (strcmp(scenario, "raw_cc") == 0) {
+		scenario_raw_binary(false);
+	} else if (strcmp(scenario, "frame_formats") == 0) {
+		scenario_frame_formats();
+	} else if (strcmp(scenario, "verified_then_binary") == 0) {
 		scenario_verified_then_binary();
 	} else if (strcmp(scenario, "startup_follows_a_slower_peer") == 0) {
 		scenario_startup_follows_a_slower_peer();
