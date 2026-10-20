@@ -5,7 +5,7 @@
 
 程序名是 `bee-cli`（`--help` 的 Usage 行也这么印）。它和上一级 `linux/`、`macos/`、`windows/`
 里的界面版是**同一份实现**：界面版也包含这里全部的命令行能力（程序名 `bee`）；本包的差别只是
-没有那个交互界面——裸跑 `bee-cli` 会打印用法并以 2 退出（先说要做什么），除此之外只有配置
+没有那个交互界面——裸跑 `bee-cli` 会说明本构建没有界面并以 2 退出（先说要做什么），除此之外只有配置
 界面的那几个 flag 会被明确拒绝（第二节），其余动作参数与输出格式与界面版完全一致。
 完整教程（含界面用法）见上一级《使用教程.md》，校验和见 `../SHA256SUMS`。
 
@@ -56,17 +56,23 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 | 读板子诊断 `@i?` | `bee-cli --query-info` |
 | 读串口参数 `@u?` | `bee-cli --query-uart` |
 | 读 WiFi 状态 `@w?` | `bee-cli --query-wifi` |
+| 读 WebDAV 状态 `@d?` | `bee-cli --query-webdav` |
 | 读桥的 LAN 状态 `@s?` | `bee-cli --query-lan`（`ws=` 与 token 是否已捕获） |
 | 设置串口 | `bee-cli --uart 115200,8,n,1,none`　`baud,data,parity,stop,flow` |
 | 连 WiFi | `bee-cli --wifi "MySSID,MyPassword"` |
 | 连 WiFi（密码不进参数） | `bee-cli --wifi "MySSID" --wifi-key-file pw.txt`（读文件第一行） |
 | 扫描 WiFi | `bee-cli --wifi-scan` |
 | 忘记 WiFi | `bee-cli --wifi-off` |
+| 设置 WebDAV 上传 | `bee-cli --webdav https://dav.example/logs/` |
+| 关闭 WebDAV 上传 | `bee-cli --webdav-off` |
 | 回环自测（发什么收什么） | `bee-cli --loopback-test 414243`（发的是字面字节 `4 1 4 2 4 3`） |
 | 看这条链路的状态与计数 | `bee-cli --link-state`（与 `--serve` 的 `state` 同构；不问板子任何问题） |
 | 一次体检（链路 + 诊断 + 串口 + 回环 + 目标 shell） | `bee-cli --doctor`（四个词给出结论，见第九节） |
 | 把手头的东西发过去，不等结束 | `bee-cli --send line`（把 stdin 逐行送出）或 `bee-cli --send raw`（原样送出） |
 | 在板子的目标上跑 shell 命令 | `bee-cli --exec "uname -a"`，见下节 |
+
+> WebDAV 属于设备协议；ESP32-WROOM 构建因 DRAM 关闭了该功能，查询或设置会显示板子自己的
+> `ERR unknown command`，程序不会把命令藏起来。
 
 > 读诊断（`@i?` 等管理命令）仅限 BLE：LAN / stdio 下会返回一行说明并以 1 退出，这不是故障。
 >
@@ -158,7 +164,7 @@ JSON 请求，适合脚本与 Agent 连续问很多件事：
 
 ```sh
 bee-cli --ble-address EE:C7:42:34:48:CF --serve
-{"event":"ready","program":"bee","version":"0.5.0","link":"ble:EE:…","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.5.0","link":"ble:EE:…","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -175,7 +181,7 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 
 | 行 | 字段 | 说明 |
 |---|---|---|
-| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是这个会话当下能服务的请求（随传输变化：LAN / stdio 下不含 `info`/`uart`/`wifi`/`wifi-off`/`wifi-scan`/`lan` 这些仅限 BLE 的项；`--capabilities` 才是本构建的全表） |
+| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是这个会话当下能服务的请求（随传输变化：LAN / stdio 下不含 `info`/`uart`/`wifi`/`wifi-off`/`wifi-scan`/`webdav`/`webdav-off`/`lan` 这些仅限 BLE 的项；`--capabilities` 才是本构建的全表） |
 | `begin` | `id` `op` | 每个请求的开口；`id` 是可选数字，原样回显（不给就是 `null`） |
 | `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第六节） |
 
@@ -188,6 +194,8 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 | `wifi` | 给 `ssid`（+可选 `pass`）：连；不给：读 | `--wifi` / `--query-wifi` |
 | `wifi-off` | —— | `--wifi-off` |
 | `wifi-scan` | —— | `--wifi-scan` |
+| `webdav` | 给 `url`：设置并开启；不给：读 | `--webdav` / `--query-webdav` |
+| `webdav-off` | —— | `--webdav-off` |
 | `lan` | —— | 读桥的局域网状态（`@s?`）：`ws=` 与 token 是否已捕获；界面里是连接区的一行 |
 | `exec` | `cmd`（必填）、`timeout_ms`、`idle_ms`、`retry` | `--exec` 全部参数 |
 | `loopback-test` | `data`（字面字节，非十六进制）、`timeout_ms`（默认 3000） | `--loopback-test` |
@@ -230,19 +238,20 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 |---|---|
 | `bee-cli scan` | `--scan` |
 | `bee-cli doctor` | `--doctor` |
-| `bee-cli query info\|uart\|wifi\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-lan` |
+| `bee-cli query info\|uart\|wifi\|webdav\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-webdav` / `--query-lan` |
 | `bee-cli set uart "115200,8,n,1,none"` | `--uart "115200,8,n,1,none"` |
 | `bee-cli set wifi "MySSID,MyPassword"` | `--wifi "MySSID,MyPassword"` |
+| `bee-cli set webdav https://dav.example/logs/` | `--webdav https://dav.example/logs/` |
+| `bee-cli set webdav off` | `--webdav-off` |
 | `bee-cli exec -- df -h` | `--exec "df -h"`（`--` 之后全是命令本身，`-h` 之类不会被当 flag） |
 | `bee-cli send --line` / `--raw` | `--send line` / `--send raw` |
 | `bee-cli loopback AB` | `--loopback-test AB` |
-| `bee-cli tui` | `--cli-then-tui`（做完别的事再开界面） |
 | `bee-cli capabilities` | `--capabilities` |
 
 全局 flag（`--ble-name`、`--json` 等）写在子命令**前或后**都行：`bee-cli --json scan`、
 `bee-cli scan --json`、`bee-cli --ble-name UART-1 exec --json -- uname -a` 都可以；老脚本一个都不用改。
 一次命令行写一个子命令（`exec` 的命令部分除外）；写错时程序会点名它要的词，例如
-`query reads one of info, uart, wifi or lan; 'webdav' is not one`。
+`query reads one of info, uart, wifi, webdav or lan; 'nope' is not one`。
 
 ### `doctor`：一次体检，四个词
 
