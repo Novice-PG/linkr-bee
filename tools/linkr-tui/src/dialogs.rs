@@ -174,6 +174,7 @@ const PROMPT_REVEAL: Duration = Duration::from_millis(1500);
 
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
+const WEBDAV_TITLE: Entry = [" WebDAV log upload ", " WebDAV 日志上传 "];
 const LAN_HOST_TITLE: Entry = [" LAN host ", " 局域网主机 "];
 const LAN_TOKEN_TITLE: Entry = [" LAN token ", " 局域网令牌 "];
 
@@ -719,6 +720,9 @@ pub enum PromptAction {
     /// The password for the network just named. Held nowhere: it goes straight
     /// from the field into the command and out of the process.
     WifiPassword,
+    /// Where the bridge uploads its logs. A URL may embed credentials, so it
+    /// is shown only in the URL row and the approval card is redacted.
+    WebdavUrl,
     /// The address a LAN dial goes to, kept in the sidebar row it edits.
     LanHost,
     /// The token that dial carries. Held in the sidebar row and in the dial,
@@ -801,6 +805,10 @@ impl Prompt {
                 "Its password (may be empty; Ctrl+R shows it)",
                 "该网络的密码（可留空；Ctrl+R 显示）",
             ],
+            PromptAction::WebdavUrl => [
+                "The upload URL (http:// or https://)",
+                "上传地址（http:// 或 https://）",
+            ],
             PromptAction::LanHost => [
                 "The bridge's LAN address (the board's WiFi IP)",
                 "桥接的局域网地址（板子的 WiFi IP）",
@@ -818,6 +826,10 @@ impl Prompt {
         match action {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
+            PromptAction::WebdavUrl => [
+                "for example https://dav.example.com/logs/",
+                "例如 https://dav.example.com/logs/",
+            ],
             PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
             PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
         }
@@ -1052,6 +1064,20 @@ pub fn prompt_wifi_password(app: &mut App) {
         app,
         Dialog::Prompt(Prompt::new(WIFI_PASSWORD_TITLE, PromptAction::WifiPassword)),
     );
+}
+
+/// Ask where the bridge should upload its logs. The field starts with the URL
+/// already reported by `@d?`, so changing one part of it does not mean typing
+/// the whole thing again.
+pub fn prompt_webdav_url(app: &mut App) {
+    let current = app
+        .network
+        .webdav
+        .as_ref()
+        .map(|status| status.url.as_str())
+        .unwrap_or("");
+    let prompt = Prompt::with_text(WEBDAV_TITLE, PromptAction::WebdavUrl, current);
+    raise(app, Dialog::Prompt(prompt));
 }
 
 /// Ask for the address a LAN dial goes to. The sidebar row shows what the
@@ -2136,6 +2162,30 @@ fn start(app: &mut App, prompt: Prompt) {
                         return;
                     }
                 };
+            ask(app, ConfirmAction::Accessory(command));
+        }
+        // The URL is quoted in the approval card with any embedded
+        // credentials redacted; the command sent to the bridge keeps them,
+        // because the bridge needs them to authenticate.
+        PromptAction::WebdavUrl => {
+            if answer.trim().is_empty() {
+                let text = app.strings().net_no_url.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: NoticeLevel::Warn,
+                });
+                return;
+            }
+            let command = match crate::accessory::webdav_command("on", answer.trim()) {
+                Ok(command) => command,
+                Err(why) => {
+                    app.push_notice(crate::app::Notice {
+                        text: why,
+                        level: NoticeLevel::Error,
+                    });
+                    return;
+                }
+            };
             ask(app, ConfirmAction::Accessory(command));
         }
         // The address is a value the user came to set, so an empty answer is

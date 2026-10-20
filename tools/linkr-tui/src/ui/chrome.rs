@@ -139,14 +139,26 @@ pub fn tx_graph(app: &App, theme: &Theme) -> Sparkline<'static> {
 /// One direction's samples as the widget both graphs are built from, on the
 /// one scale the two share and in the bars this terminal has
 /// ([`GlyphSet::bar`]).
+///
+/// Any nonzero sample is lifted to at least one eighth of the shared scale.
+/// The graph keeps one ruler so a torrent still stands above a trickle, but a
+/// trickle no longer rounds all the way down to zero: the smallest bar is the
+/// one-eighth mark, distinct from the baseline the idle graph draws. Without
+/// that floor a TX rate a few bytes a second beside a large RX stream painted
+/// exactly like an idle TX direction — the graph said the link had nothing to
+/// send while the counters said it did.
 fn samples(
     data: impl IntoIterator<Item = u64>,
     scale: u64,
     style: Style,
     bars: symbols::bar::Set<'static>,
 ) -> Sparkline<'static> {
+    let floor = scale.saturating_add(7) / 8;
     Sparkline::default()
-        .data(data)
+        .data(
+            data.into_iter()
+                .map(move |value| if value == 0 { 0 } else { value.max(floor) }),
+        )
         .max(scale)
         .direction(RenderDirection::RightToLeft)
         .bar_set(bars)

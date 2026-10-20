@@ -431,16 +431,31 @@ impl GlyphSet {
 
     /// The ninth-height bars a sparkline draws with, in this set.
     ///
-    /// The zero level is *visible* in both sets — the lowest block, the
-    /// underscore — rather than blank as ratatui's stock set leaves it: an idle
-    /// link then draws as a line beside its `0 B/s` instead of as an empty
-    /// strip, which a fresh session reads as a broken instrument rather than a
-    /// quiet one, and the pauses between bursts stay visible too.
+    /// The zero level is *visible* in both sets — the underscore — rather than
+    /// blank as ratatui's stock set leaves it: an idle link then draws as a
+    /// baseline beside its `0 B/s` instead of as an empty strip, which a fresh
+    /// session reads as a broken instrument rather than a quiet one, and the
+    /// pauses between bursts stay visible too.
+    ///
+    /// The zero mark is deliberately *not* the lowest block. A row of only
+    /// eight block glyphs is one short of nine levels, so using `▁` for both
+    /// zero and one-eighth makes the first visible positive bar appear at a
+    /// quarter of the scale. A baseline underscore and the eight blocks give
+    /// every level its own mark: any positive sample at or above one-eighth of
+    /// the scale is visible, which is what the TX graph needs beside a larger
+    /// RX one.
     pub fn bar(self) -> symbols::bar::Set<'static> {
         match self {
             GlyphSet::Unicode => symbols::bar::Set {
-                empty: "▁",
-                ..symbols::bar::NINE_LEVELS
+                empty: "_",
+                one_eighth: "▁",
+                one_quarter: "▂",
+                three_eighths: "▃",
+                half: "▄",
+                five_eighths: "▅",
+                three_quarters: "▆",
+                seven_eighths: "▇",
+                full: "█",
             },
             GlyphSet::Ascii => symbols::bar::Set {
                 full: "#",
@@ -1033,6 +1048,37 @@ mod tests {
                 4,
                 "two states share a mark in {set:?}: {seen:?}"
             );
+        }
+    }
+
+    /// Every sparkline level has its own mark, including zero. Sharing one
+    /// between zero and one-eighth is what made a small TX rate paint as the
+    /// idle baseline — the first visible positive bar was a quarter of the
+    /// shared scale away, not an eighth.
+    #[test]
+    fn every_sparkline_level_has_its_own_mark() {
+        // Unicode has a block for every level; ASCII intentionally reuses
+        // marks because there are only so many printable characters, but it
+        // still separates idle from the lowest positive bar.
+        let bar = GlyphSet::Unicode.bar();
+        let marks = [
+            bar.empty,
+            bar.one_eighth,
+            bar.one_quarter,
+            bar.three_eighths,
+            bar.half,
+            bar.five_eighths,
+            bar.three_quarters,
+            bar.seven_eighths,
+            bar.full,
+        ];
+        let mut seen: Vec<&str> = marks.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 9, "two levels share a mark: {marks:?}");
+        for set in [GlyphSet::Unicode, GlyphSet::Ascii] {
+            let bar = set.bar();
+            assert_ne!(bar.empty, bar.one_eighth, "{set:?}");
         }
     }
 

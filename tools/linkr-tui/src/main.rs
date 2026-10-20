@@ -112,6 +112,8 @@ enum OverlayPreview {
     /// caret can be looked at without a device — which is the only way to look
     /// at a dialog that is normally raised to *do* something.
     WifiSsid,
+    /// The WebDAV URL prompt, for the same reason.
+    WebdavUrl,
     /// The assistant's settings: fields, a note list and a caret that has
     /// nowhere else to be looked at.
     Settings,
@@ -136,6 +138,7 @@ impl OverlayPreview {
             "notices" => Some(OverlayPreview::Notices),
             "confirm" => Some(OverlayPreview::Confirm),
             "wifi" => Some(OverlayPreview::WifiSsid),
+            "webdav" => Some(OverlayPreview::WebdavUrl),
             "settings" => Some(OverlayPreview::Settings),
             "about" => Some(OverlayPreview::About),
             "licenses" => Some(OverlayPreview::Licenses),
@@ -164,6 +167,7 @@ impl OverlayPreview {
                 dialogs::ask(app, dialogs::ConfirmAction::Send(command));
             }
             OverlayPreview::WifiSsid => dialogs::prompt_wifi_ssid(app),
+            OverlayPreview::WebdavUrl => dialogs::prompt_webdav_url(app),
             // On the endpoint, which is the row a first-time user lands on.
             OverlayPreview::Settings => {
                 views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
@@ -635,7 +639,10 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 std::process::exit(0);
             }
             "-V" | "--version" => {
-                println!("bee {}", env!("CARGO_PKG_VERSION"));
+                // The name the caller invoked, not a compile-time product
+                // name: the same build is installed as `bee` with the
+                // interface and as `bee-cli` without it.
+                println!("{prog} {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--licenses" => args.licenses = true,
@@ -685,6 +692,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-info" => args.requests.queries.push(device::Query::Diagnostics),
             "--query-uart" => args.requests.queries.push(device::Query::Uart),
             "--query-wifi" => args.requests.queries.push(device::Query::Wifi),
+            "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
@@ -700,6 +708,8 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--wifi-key-file" => args.wifi_key_file = Some(PathBuf::from(value("--wifi-key-file"))),
             "--wifi-off" => args.requests.wifi_off = true,
             "--wifi-scan" => args.requests.wifi_scan = true,
+            "--webdav" => args.requests.webdav = Some(value("--webdav")),
+            "--webdav-off" => args.requests.webdav_off = true,
             "--loopback-test" => {
                 // `nargs="?"` in the reference client: `--loopback-test` alone
                 // sends `A`, which is the shortest thing that can fail in an
@@ -984,12 +994,15 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"query-webdav\",\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"webdav\",\"webdav-off\",",
                 "\"exec\",\"send\",\"doctor\",\"loopback-test\",\"link-state\"{}],",
                 // The subcommands are the same runs written as words, and a
                 // caller that reads them here can write either form: the list
-                // is the model as much as it is a list of names.
-                "\"subcommands\":[{}],",
+                // is the model as much as it is a list of names. `subcommands_json`
+                // already brackets the array; another pair here would advertise
+                // a list containing one list.
+                "\"subcommands\":{},",
                 "\"defaults\":{{\"scan_timeout_ms\":{},\"connect_timeout_ms\":{},",
                 "\"exec_timeout_ms\":{}}},",
                 "\"exec\":{{\"endings\":[\"rc-marker\",\"idle\"],",
@@ -1022,9 +1035,10 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\n",
                 "scan        --scan                     list what is on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
-                "            --query-wifi --wifi-scan --query-lan\n",
+                "            --query-wifi --query-webdav --wifi-scan --query-lan\n",
                 "state       --link-state               this link: live, counters, transport\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
+                "            --webdav --webdav-off\n",
                 "execute     --exec COMMAND             run a shell command on the target\n",
                 "            --idle WINDOW              end it when the output goes quiet\n",
                 "            --retry N                  resend it after a timeout\n",
@@ -1280,7 +1294,7 @@ fn main() -> io::Result<()> {
     // needs no link, no settings and no terminal, but it does not get to hide
     // a `--serve` that could not open a session.
     if args.licenses {
-        print!("{}", licenses::cli_report());
+        print!("{}", licenses::cli_report(&prog));
         return Ok(());
     }
     // Two answers need no link, and both ask to be given before anything is
@@ -1738,7 +1752,7 @@ fn main() -> io::Result<()> {
         // answer as it arrives. It returns when its input ends or a request
         // asks it to quit, and that answer is the exit code.
         if mode == Mode::Serve {
-            let code = linkr_tui::serve::run(&mut app, dial, args.connect_window());
+            let code = linkr_tui::serve::run(&mut app, dial, args.connect_window(), &prog);
             // The session held the link for as long as its input asked it to;
             // the board is told it is over before the process is gone.
             app.hang_up(linkr_tui::hangup::EXIT_GRACE);
@@ -3136,7 +3150,13 @@ mod tests {
         // reads either form here can write both.
         assert!(json.contains("\"doctor\""), "{json}");
         assert!(json.contains("\"send\""), "{json}");
-        assert!(json.contains("\"subcommands\""), "{json}");
+        assert!(
+            json.contains(&format!(
+                "\"subcommands\":{},",
+                linkr_tui::cli::subcommands_json()
+            )),
+            "the subcommand list is not a flat JSON array: {json}"
+        );
         assert!(json.contains("\"loopback\""), "{json}");
         assert!(json.contains("\"capabilities\""), "{json}");
         // The interface is an operation of the build that has one, and not of
@@ -3406,7 +3426,7 @@ mod tests {
     fn the_licence_flag_asks_for_no_link() {
         assert!(!args(&[]).licenses, "licences are asked for, never assumed");
         assert!(args(&["--licenses"]).licenses);
-        let report = licenses::cli_report();
+        let report = licenses::cli_report("bee");
         assert!(report.contains("ratatui"), "{report}");
         assert!(report.contains("Contributors"), "{report}");
         assert!(report.contains("Transitive dependencies"), "{report}");

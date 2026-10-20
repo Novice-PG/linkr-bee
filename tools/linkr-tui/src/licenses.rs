@@ -40,9 +40,12 @@ pub fn report() -> &'static str {
 /// The project's licence, repeated here for the window and the report.
 pub const PROJECT_LICENSE: &str = env!("CARGO_PKG_LICENSE");
 
-/// A short line naming the project and the build, for the top of the window.
-pub fn heading() -> String {
-    format!("bee {}", env!("CARGO_PKG_VERSION"))
+/// A short line naming the command and the build, for the top of the window.
+///
+/// The caller passes the name it was invoked as: the same build is installed
+/// as `bee` with the interface and as `bee-cli` without it.
+pub fn heading(prog: &str) -> String {
+    format!("{prog} {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// The number of transitive crates, which the window names rather than lists.
@@ -53,9 +56,9 @@ pub fn transitive_count() -> usize {
 /// The full notice as a terminal report. Kept here so `--licenses` can be read
 /// without opening a Markdown viewer, while still being the generated text
 /// rather than a second list.
-pub fn cli_report() -> String {
+pub fn cli_report(prog: &str) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "{}", heading());
+    let _ = writeln!(out, "{}", heading(prog));
     let _ = writeln!(out, "Project licence: {PROJECT_LICENSE}");
     let _ = writeln!(out, "Repository: {}", env!("CARGO_PKG_REPOSITORY"));
     let _ = writeln!(out);
@@ -138,10 +141,16 @@ mod tests {
 
     #[test]
     fn the_cli_report_names_the_build_and_the_generated_page() {
-        let report = cli_report();
-        assert!(report.starts_with(&heading()));
+        let report = cli_report("bee");
+        assert!(report.starts_with(&heading("bee")));
         assert!(report.contains(PROJECT_LICENSE));
         assert!(report.contains(env!("CARGO_PKG_REPOSITORY")));
         assert!(report.contains("ratatui"));
+
+        // The CLI-only archive invokes the same code as `bee-cli`; the page
+        // must name the command the reader can run, not the other face.
+        let cli = cli_report("bee-cli");
+        assert!(cli.starts_with("bee-cli "), "{cli}");
+        assert!(!cli.lines().next().unwrap_or("").starts_with("bee "));
     }
 }

@@ -58,7 +58,7 @@ three rules:
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
 | `serve.rs` | The resident session: the request grammar, the one-link loop, and the begin/end frame a caller correlates its answers by |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
-| `views/network.rs` | The WiFi and WebDAV form: ten rows the keyboard walks, each action raising an approval card that names the change rather than the command |
+| `views/network.rs` | The WiFi and WebDAV form: nine rows the keyboard walks, each action raising an approval card that names the change rather than the command |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -226,8 +226,11 @@ The operations are the request flags, spelled as JSON: `info`, `uart` (a
 and optional `"pass"` write, none reads), `wifi-off`, `wifi-scan`, `webdav` (a
 `"url"` writes, none reads), `webdav-off`, `lan`, `exec` (`"cmd"`, and optional
 `"timeout_ms"`, `"idle_ms"`, `"retry"`), `loopback-test` (`"data"`, and optional
-`"timeout_ms"`), `state` and `quit`. Nothing needs the link until a request that
-does: `state`, `quit` and a line that is not a request are answered without one,
+`"timeout_ms"`), `state` and `quit`. WebDAV is part of the protocol even though
+a particular firmware build may leave it out (the ESP32-WROOM build disables it
+for DRAM); that board answers the request with its own error, and the host
+reports the error instead of hiding the operation. Nothing needs the link until
+a request that does: `state`, `quit` and a line that is not a request are answered without one,
 and the first request that needs a board dials it once and keeps it. A dial that
 cannot be made answers `{"event":"error","code":"not_connected"}` with the code
 `255` and leaves the session up, so a caller can wait for the board and ask
@@ -301,8 +304,8 @@ large, and everything in them is reproducible from the source.
 ## Releasing
 
 `dev/package.sh <target>` builds the release binary and lays the archive out —
-the binary, this README, the licence and `THIRD_PARTY_LICENSES.md` — in the
-format the target's platform
+the binary, the guide for that face (`README.md` here, or `README-cli.md` for a
+CLI build), the licence and `THIRD_PARTY_LICENSES.md` — in the format the target's platform
 reaches for: a `.zip` on Windows, a `.dmg` **and** a `.tar.gz` on macOS (a volume
 image is a heavy thing to mount on a machine that only wants the binary), a
 `.tar.gz` on Linux. The Linux packages are `dev/package-deb.sh <target>`, in the

@@ -53,6 +53,9 @@ const T_WIFI_CONFIG: Entry = ["Set the WiFi network", "设置无线网络"];
 const T_WIFI_SCAN: Entry = ["Scan for WiFi networks", "扫描无线网络"];
 const T_WIFI_STATUS: Entry = ["Read the WiFi status", "读取无线状态"];
 const T_WIFI_OFF: Entry = ["Forget the WiFi network", "断开无线网络"];
+const T_WEBDAV_CONFIG: Entry = ["Set the WebDAV upload URL", "设置 WebDAV 上传地址"];
+const T_WEBDAV_STATUS: Entry = ["Read the WebDAV status", "读取 WebDAV 状态"];
+const T_WEBDAV_OFF: Entry = ["Turn WebDAV upload off", "关闭 WebDAV 上传"];
 
 const T_AGENT_CONFIG: Entry = ["Configure the assistant", "配置助手"];
 const T_AGENT_ASK: Entry = ["Ask the assistant", "向助手提问"];
@@ -361,6 +364,29 @@ fn wifi_off(app: &mut App) {
     );
 }
 
+fn webdav_config(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::prompt_webdav_url(app);
+}
+
+fn webdav_status(app: &mut App) {
+    app.set_view(View::Network);
+    if let Err(why) = app.ask_device(crate::device::Query::Webdav) {
+        app.push_notice(crate::app::Notice {
+            text: why,
+            level: crate::event::NoticeLevel::Error,
+        });
+    }
+}
+
+fn webdav_off(app: &mut App) {
+    app.set_view(View::Network);
+    crate::dialogs::ask(
+        app,
+        crate::dialogs::ConfirmAction::Accessory("@d off".to_string()),
+    );
+}
+
 fn toggle_sidebar(app: &mut App) {
     let notice = app.toggle_sidebar();
     app.push_notice(notice);
@@ -585,6 +611,27 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_NETWORK,
         shortcut: "",
         run: wifi_off,
+    },
+    Action {
+        id: "net.webdav_config",
+        title: T_WEBDAV_CONFIG,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_config,
+    },
+    Action {
+        id: "net.webdav_status",
+        title: T_WEBDAV_STATUS,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_status,
+    },
+    Action {
+        id: "net.webdav_off",
+        title: T_WEBDAV_OFF,
+        category: CAT_NETWORK,
+        shortcut: "",
+        run: webdav_off,
     },
     Action {
         id: "agent.configure",
@@ -1198,6 +1245,9 @@ mod tests {
         "net.wifi_scan",
         "net.wifi_status",
         "net.wifi_off",
+        "net.webdav_config",
+        "net.webdav_status",
+        "net.webdav_off",
         "agent.configure",
         "agent.ask",
         "agent.note",

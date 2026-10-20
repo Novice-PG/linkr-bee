@@ -70,8 +70,11 @@ tools/serve_web.sh  # Open http://127.0.0.1:8765/
 
 - Firmware: ESP32-C3 DevKitM, DevKitC, Super Mini, and ESP32-C5 DevKitC
 - Zephyr: **v4.4.1**
-- Single firmware feature set: BLE UART bridge, WiFi station control,
-  anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access
+- One firmware source tree with BLE UART bridge, WiFi station control,
+  anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access.
+  WebDAV is enabled in the default C3/C5 builds; the ESP32-WROOM build disables
+  it for DRAM (`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`), and the host reports the
+  device's refusal on that board instead of hiding the command.
 
 ## Build
 
@@ -208,10 +211,13 @@ ERR format: @u=115200,8,n,1,n
 
 ## WiFi and WebDAV log upload
 
-The single supported firmware always includes WiFi, WebDAV, and WebSocket
-support. The WiFi radio stays off until the user sends `@w=ssid,pass`, so an
-unprovisioned unit still behaves as a BLE UART bridge without requiring a
-separate image.
+The firmware source includes WiFi, WebDAV, and WebSocket support. WebDAV is
+enabled in the default ESP32-C3/C5 builds; the ESP32-WROOM build disables it
+because its DRAM budget is too small (`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`). The
+feature is still part of the protocol, so the host keeps the command and shows
+the board's own refusal on a build where it is absent. The WiFi radio stays off
+until the user sends `@w=ssid,pass`, so an unprovisioned unit still behaves as a
+BLE UART bridge without requiring a separate image.
 
 WiFi credentials are RAM-only by default and are discarded on reboot. Set
 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` only on production devices
@@ -221,7 +227,7 @@ explicit option, saved credentials reconnect on boot. The anonymous WebDAV URL
 and the upload boot counter are persisted independently so upload filenames do
 not collide after reboot.
 
-A normal build already includes it:
+A normal C3 build already includes it:
 
 ```sh
 west build -b esp32c3_supermini linkr-bee

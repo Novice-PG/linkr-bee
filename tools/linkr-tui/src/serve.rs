@@ -16,6 +16,8 @@
 //!
 //! ```text
 //! {"event":"ready","program":"bee","version":"0.5.0","link":"ble EE:…","ops":[…]}
+//! (the `program` value is the name this copy was invoked as, so a CLI-only
+//! install reports `bee-cli`).
 //! {"id":1,"op":"query-uart"}                       →  {"event":"begin","id":1,"op":"uart"} … {"event":"end","id":1,"code":0}
 //! {"id":2,"op":"exec","cmd":"uname -a"}            →  the exec events, then end with the command's own code
 //! {"id":3,"op":"wifi"}                             →  a result event, then end
@@ -63,6 +65,8 @@ pub const OPERATIONS: &[&str] = &[
     "wifi",
     "wifi-off",
     "wifi-scan",
+    "webdav",
+    "webdav-off",
     "lan",
     "exec",
     "loopback-test",
@@ -97,8 +101,8 @@ fn json_ops(ops: &[&str]) -> String {
 /// The management reads and writes are BLE-only by construction: `@i?` and its
 /// neighbours are frames on the bridge's own characteristic, and a LAN socket
 /// or a serial line has no such channel — the bridge there is a byte pipe.
-/// A ready line that listed them anyway would promise ten operations and hold
-/// four, and the caller pays for the difference with a request it cannot use
+/// A ready line that listed them anyway would promise twelve operations and
+/// hold four, and the caller pays for the difference with a request it cannot use
 /// (the answer to which is "management is BLE-only", exit 1).
 ///
 /// A session with nothing to dial — which the command line refuses before a
@@ -123,7 +127,7 @@ pub fn operations_for(kind: Option<LinkKind>) -> Vec<&'static str> {
 fn is_ble_only(op: &str) -> bool {
     matches!(
         op,
-        "info" | "uart" | "wifi" | "wifi-off" | "wifi-scan" | "lan"
+        "info" | "uart" | "wifi" | "webdav" | "webdav-off" | "wifi-off" | "wifi-scan" | "lan"
     )
 }
 
@@ -141,7 +145,7 @@ fn needs_a_link(op: &str) -> bool {
 /// session that can still be asked things — but every request that needs it
 /// dials it if it is not up, so the first request pays for the radio and the
 /// rest do not.
-pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
+pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration, program: &str) -> i32 {
     let link = dial
         .as_ref()
         .map(Dial::describe)
@@ -151,7 +155,7 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
         "{}",
         cli::json_event(&[
             ("event", Json::Text("ready")),
-            ("program", Json::Text("bee")),
+            ("program", Json::Text(program)),
             ("version", Json::Text(env!("CARGO_PKG_VERSION"))),
             ("link", Json::Text(&link)),
             ("ops", Json::Raw(&ops)),
@@ -377,9 +381,10 @@ pub fn report_state(app: &App, format: Format) {
 /// parser enforces; a request is refused by name, never by silence.
 fn accepted_fields(op: &str) -> Option<&'static [&'static str]> {
     match op {
-        "info" | "lan" | "state" | "quit" | "wifi-off" | "wifi-scan" => Some(&[]),
+        "info" | "lan" | "state" | "quit" | "wifi-off" | "wifi-scan" | "webdav-off" => Some(&[]),
         "uart" => Some(&["value"]),
         "wifi" => Some(&["ssid", "pass"]),
+        "webdav" => Some(&["url"]),
         "exec" => Some(&["cmd", "timeout_ms", "idle_ms", "retry"]),
         "loopback-test" => Some(&["data", "timeout_ms"]),
         _ => None,
@@ -466,6 +471,12 @@ fn action_for(request: &Request) -> Result<Action, String> {
             }
             None => requests.queries.push(Query::Wifi),
         },
+        // The session's spelling of `--query-webdav` and `--webdav <url>`.
+        "webdav" => match request.value("url") {
+            Some(_) => requests.webdav = Some(request.string_wanted("url")?.to_string()),
+            None => requests.queries.push(Query::Webdav),
+        },
+        "webdav-off" => requests.webdav_off = true,
         "wifi-off" => requests.wifi_off = true,
         "wifi-scan" => requests.wifi_scan = true,
         "exec" => {
@@ -1026,18 +1037,37 @@ mod tests {
         }
     }
 
-    /// The operations this firmware does not have are not promised anywhere in
-    /// the protocol: WebDAV was cut from the device for RAM, and a session that
-    /// still listed it sent callers into `ERR unknown command`.
+    /// WebDAV is part of the protocol even when a particular firmware build
+    /// leaves it out: the host can ask, and a board without the feature
+    /// answers with its own refusal rather than the host hiding the command.
     #[test]
-    fn the_operations_the_device_does_not_have_are_not_promised() {
+    fn the_webdav_operations_are_read_and_write_through_one_name() {
         for op in ["webdav", "webdav-off"] {
             let line = format!(r#"{{"op":"{op}"}}"#);
-            let error = action_for(&request(&line)).expect_err(&line);
-            assert!(error.contains("unknown op"), "{line}: {error}");
+            let action = action_for(&request(&line)).expect(&line);
+            assert!(matches!(action, Action::Requests(_)), "{line}");
         }
-        assert!(!OPERATIONS.contains(&"webdav"));
-        assert!(!operations_json().contains("webdav"));
+        assert!(OPERATIONS.contains(&"webdav"));
+        assert!(OPERATIONS.contains(&"webdav-off"));
+        assert!(operations_json().contains("\"webdav\""));
+        assert!(operations_json().contains("\"webdav-off\""));
+
+        match action_for(&request(r#"{"op":"webdav"}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert_eq!(requests.queries, vec![Query::Webdav]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match action_for(&request(r#"{"op":"webdav","url":"https://h/d/"}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert_eq!(requests.webdav.as_deref(), Some("https://h/d/"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match action_for(&request(r#"{"op":"webdav-off"}"#)) {
+            Ok(Action::Requests(requests)) => assert!(requests.webdav_off),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A session promises what its link can actually serve. The management
@@ -1055,7 +1085,16 @@ mod tests {
 
         for kind in [LinkKind::Lan, LinkKind::Stdio] {
             let ops = operations_for(Some(kind));
-            for gone in ["info", "uart", "wifi", "wifi-off", "wifi-scan", "lan"] {
+            for gone in [
+                "info",
+                "uart",
+                "wifi",
+                "webdav",
+                "webdav-off",
+                "wifi-off",
+                "wifi-scan",
+                "lan",
+            ] {
                 assert!(!ops.contains(&gone), "{kind:?} cannot serve {gone}");
             }
             for kept in ["exec", "loopback-test", "state", "quit"] {
@@ -1098,8 +1137,8 @@ mod tests {
         }
         assert_eq!(
             operations_json(),
-            "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"lan\",\
-             \"exec\",\"loopback-test\",\"state\",\"quit\"]"
+            "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"webdav\",\
+             \"webdav-off\",\"lan\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
         );
     }
 }

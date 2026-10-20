@@ -270,6 +270,11 @@ pub const FLAGS: &[Flag] = &[
         "ask @w? and print the WiFi status",
     ),
     Flag::new(
+        "--query-webdav",
+        Value::None,
+        "ask @d? and print the log-upload status",
+    ),
+    Flag::new(
         "--query-lan",
         Value::None,
         "ask @s? and print the bridge's LAN address and token state",
@@ -291,6 +296,12 @@ pub const FLAGS: &[Flag] = &[
         Value::None,
         "list the networks the board can see",
     ),
+    Flag::new(
+        "--webdav",
+        Value::Free,
+        "set the HTTP upload URL for the log",
+    ),
+    Flag::new("--webdav-off", Value::None, "turn log upload off"),
     Flag::new(
         "--loopback-test",
         Value::Optional,
@@ -362,8 +373,11 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
         "doctor",
         "one checkup: the link, the bridge, the loopback, the target",
     ),
-    ("query", "read one thing: info, uart, wifi or lan"),
-    ("set", "change one thing and read it back: uart or wifi"),
+    ("query", "read one thing: info, uart, wifi, webdav or lan"),
+    (
+        "set",
+        "change one thing and read it back: uart, wifi or webdav",
+    ),
     (
         "exec",
         "run a command on the target and bring its status back: exec -- <cmd>",
@@ -392,11 +406,10 @@ pub fn subcommand_named(word: &str) -> Option<&'static str> {
 ///
 /// The grammar knows `tui` in every build — a binary without the interface
 /// still answers `bee tui`, with the sentence that it has no interface to
-/// open, which is why `usage` shows the whole table and the footnote beside
-/// it — but the document promises what *this* binary can be asked for, and
-/// opening the terminal is not something it can do. The same rule the
-/// operations list in `main.rs` follows, told from the one table so the two
-/// lists cannot disagree about the word.
+/// open — but the help and the capability document promise what *this* binary
+/// can be asked for, and opening the terminal is not something it can do. The
+/// same rule the operations list in `main.rs` follows, told from the one table
+/// so the two lists cannot disagree about the word.
 fn listed_subcommands() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     SUBCOMMANDS
         .iter()
@@ -506,11 +519,12 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
                     "info" => "--query-info",
                     "uart" => "--query-uart",
                     "wifi" => "--query-wifi",
+                    "webdav" => "--query-webdav",
                     "lan" => "--query-lan",
                     other => {
                         return Err(format!(
-                            "query reads one of info, uart, wifi or lan; '{other}' is not one"
-                        ))
+                        "query reads one of info, uart, wifi, webdav or lan; '{other}' is not one"
+                    ))
                     }
                 }
                 .to_string(),
@@ -518,19 +532,24 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
         }
         "set" => {
             let [what, value] = two_words(name, &words)?;
-            translated.push(
-                match what.as_str() {
-                    "uart" => "--uart",
-                    "wifi" => "--wifi",
-                    other => {
-                        return Err(format!(
-                            "set changes one of uart or wifi; '{other}' is not one"
-                        ))
+            if what == "webdav" && value.eq_ignore_ascii_case("off") {
+                translated.push("--webdav-off".to_string());
+            } else {
+                translated.push(
+                    match what.as_str() {
+                        "uart" => "--uart",
+                        "wifi" => "--wifi",
+                        "webdav" => "--webdav",
+                        other => {
+                            return Err(format!(
+                                "set changes one of uart, wifi or webdav; '{other}' is not one"
+                            ))
+                        }
                     }
-                }
-                .to_string(),
-            );
-            translated.push(value);
+                    .to_string(),
+                );
+                translated.push(value);
+            }
         }
         "loopback" => {
             let [payload] = one_word(name, &words)?;
@@ -647,19 +666,17 @@ pub fn usage(prog: &str, about: &str) -> String {
     let _ = writeln!(out, "       {prog} <SUBCOMMAND> [OPTIONS]");
     let _ = writeln!(out);
     // The subcommands are the same flags in words. One table, printed from —
-    // see `SUBCOMMANDS` — and the whole list is in the help because the whole
-    // list is the model: a caller who reads a subcommand here can write it as
-    // the flag underneath and get the same run.
+    // see `SUBCOMMANDS` — and the list is what this build can actually do:
+    // a CLI-only binary does not offer to open a terminal it does not have.
     let _ = writeln!(
         out,
         "Subcommands (the same runs, written as words; one per command line):"
     );
-    let subcommand_width = SUBCOMMANDS
-        .iter()
+    let subcommand_width = listed_subcommands()
         .map(|(name, _)| name.len())
         .max()
         .unwrap_or(0);
-    for (name, about) in SUBCOMMANDS {
+    for (name, about) in listed_subcommands() {
         let _ = writeln!(out, "  {name:subcommand_width$}  {about}");
     }
     let _ = writeln!(out);
@@ -1381,6 +1398,10 @@ pub struct Requests {
     pub wifi_off: bool,
     /// `@w scan`.
     pub wifi_scan: bool,
+    /// `@d=<url>`, when `--webdav` named one.
+    pub webdav: Option<String>,
+    /// `@d off`.
+    pub webdav_off: bool,
 }
 
 impl Requests {
@@ -1391,6 +1412,8 @@ impl Requests {
             && self.wifi.is_none()
             && !self.wifi_off
             && !self.wifi_scan
+            && self.webdav.is_none()
+            && !self.webdav_off
     }
 }
 
@@ -1467,6 +1490,13 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match app.set_wifi(ssid, password) {
             Err(why) => failed += report(format, "wifi", false, &why),
             Ok(()) => failed += wait_and_report_wifi(app, format, asked.as_deref()),
+        }
+    }
+    if requests.webdav_off || requests.webdav.is_some() {
+        let url = requests.webdav.as_deref().unwrap_or("");
+        match app.set_webdav(url) {
+            Err(why) => failed += report(format, "webdav", false, &why),
+            Ok(()) => failed += wait_and_report(app, crate::device::Query::Webdav, format),
         }
     }
     if requests.wifi_scan {
@@ -1963,6 +1993,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Uart => "uart",
         crate::device::Query::Wifi => "wifi",
         crate::device::Query::WifiScan => "wifi-scan",
+        crate::device::Query::Webdav => "webdav",
         crate::device::Query::Lan => "lan",
     }
 }
@@ -2030,6 +2061,17 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
         // stream's own lines (`OK accepted`, `@scan done`) are already off the
         // list — see `App`'s `scan_results`.
         crate::device::Query::WifiScan => app.network.scan_results.join("\n"),
+        // The URL may embed credentials, so the answer is redacted the same
+        // way the trace and the approval card are. A CLI's output goes to a
+        // pipe and a pipe goes to a log.
+        crate::device::Query::Webdav => match &app.network.webdav {
+            Some(dav) => {
+                let url = crate::accessory::redact_command(&format!("@d={}", dav.url));
+                let url = url.strip_prefix("@d=").unwrap_or(&url);
+                format!("webdav={},url={}", dav.state, url)
+            }
+            None => String::new(),
+        },
         // The state is reported; the token never is. A CLI's output goes to a
         // pipe and a pipe goes to a log, and a token in a log is a token that
         // has to be rotated.
@@ -2564,6 +2606,7 @@ mod tests {
             (&["query", "info"], &["--query-info"]),
             (&["query", "uart"], &["--query-uart"]),
             (&["query", "wifi"], &["--query-wifi"]),
+            (&["query", "webdav"], &["--query-webdav"]),
             (&["query", "lan"], &["--query-lan"]),
             (&["query", "info", "--json"], &["--query-info", "--json"]),
             (
@@ -2574,6 +2617,11 @@ mod tests {
                 &["set", "wifi", "Bench,secret"],
                 &["--wifi", "Bench,secret"],
             ),
+            (
+                &["set", "webdav", "https://dav.example/logs/"],
+                &["--webdav", "https://dav.example/logs/"],
+            ),
+            (&["set", "webdav", "off"], &["--webdav-off"]),
             (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
             (&["exec", "--", "echo", "hi"], &["--exec", "echo hi"]),
             (
@@ -2633,9 +2681,9 @@ mod tests {
     fn a_subcommand_that_does_not_add_up_is_refused() {
         for (written, wanted) in [
             (&["query"][..], "wants one word"),
-            (&["query", "webdav"], "not one"),
+            (&["query", "nope"], "not one"),
             (&["query", "info", "uart"], "takes one word"),
-            (&["set", "webdav", "x"], "not one"),
+            (&["set", "webdav"], "two words"),
             (&["set", "uart"], "two words"),
             (&["set", "uart", "a", "b"], "two words"),
             (&["exec"], "wants a command"),
@@ -2656,10 +2704,15 @@ mod tests {
     #[test]
     fn every_subcommand_is_in_the_help_and_expands_into_real_flags() {
         let text = usage("bee", "about line");
-        for (name, about) in SUBCOMMANDS {
+        for (name, about) in listed_subcommands() {
             assert!(text.contains(name), "help omits {name}");
             assert!(text.contains(about), "help omits {name}'s line");
         }
+        // The CLI-only build can still parse `tui` so it can explain that
+        // there is no interface to open, but the help must not offer it as a
+        // run this binary can perform.
+        #[cfg(not(feature = "tui"))]
+        assert!(!text.contains("  tui  "), "CLI help offers tui: {text}");
         // Each subcommand, expanded with no words of its own, uses only flags
         // the table lists: the arithmetic is the point, because a subcommand is
         // an alias and an alias of nothing is a bug the help cannot show.

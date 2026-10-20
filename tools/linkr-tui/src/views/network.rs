@@ -1,14 +1,15 @@
-//! Network view: WiFi management, as the design's
+//! Network view: WiFi and WebDAV management, as the design's
 //! `tui_network_zh_dark.png` lays it out (WEB_UX_SPEC section 6).
 //!
-//! The model is the accessory layer's wire data — a WiFi status, scan results
-//! — and the painter is the pure function from that data plus a width to the
-//! pane's lines. Everything management-channel related is BLE-only, so on a
-//! LAN session the view says so rather than showing controls that cannot work.
+//! The model is the accessory layer's wire data — a WiFi status, a WebDAV
+//! status, scan results — and the painter is the pure function from that data
+//! plus a width to the pane's lines. Everything management-channel related is
+//! BLE-only, so on a LAN session the view says so rather than showing controls
+//! that cannot work.
 
 use ratatui::text::{Line, Span};
 
-use crate::accessory::WifiStatus;
+use crate::accessory::{WebdavStatus, WifiStatus};
 use crate::app::App;
 use crate::dialogs::{self, ConfirmAction};
 use crate::text;
@@ -37,16 +38,33 @@ pub enum NetworkRow {
     /// Enter fills the name into the form and hands the keyboard to Connect —
     /// what joining needs next.
     ScanResult(usize),
+    /// Where the log goes.
+    Url,
+    /// `@d=<url>`.
+    WebdavSet,
+    /// `@d off`.
+    WebdavOff,
+    /// `@d?`.
+    WebdavStatus,
 }
 
 /// Every row that is always there, in the order the view draws them.
-pub const ROWS: [NetworkRow; 5] = [
+pub const ROWS: [NetworkRow; 9] = [
     NetworkRow::Ssid,
     NetworkRow::Scan,
     NetworkRow::Connect,
     NetworkRow::WifiOff,
     NetworkRow::WifiStatus,
+    NetworkRow::Url,
+    NetworkRow::WebdavSet,
+    NetworkRow::WebdavOff,
+    NetworkRow::WebdavStatus,
 ];
+
+/// How many of [`ROWS`] come before the scan results. The results are drawn
+/// between the WiFi section and the WebDAV one, and they stand there for the
+/// keyboard too: the walk is the drawing's order.
+const WIFI_ROWS: usize = 5;
 
 impl NetworkRow {
     /// Whether the keyboard can stand here right now.
@@ -81,7 +99,7 @@ impl NetworkRow {
         while offset <= count {
             let index =
                 (here as isize + direction * offset as isize).rem_euclid(count as isize) as usize;
-            let candidate = Self::at(index);
+            let candidate = Self::at(index, results);
             if candidate.reachable(connected, results) {
                 return candidate;
             }
@@ -97,20 +115,30 @@ impl NetworkRow {
     /// from there rather than falling off the table.
     fn position(self, results: usize) -> usize {
         match self {
-            NetworkRow::ScanResult(index) => ROWS.len() + index.min(results.saturating_sub(1)),
-            row => ROWS
-                .iter()
-                .position(|candidate| *candidate == row)
-                .expect("every row is in the table"),
+            NetworkRow::ScanResult(index) => WIFI_ROWS + index.min(results.saturating_sub(1)),
+            row => {
+                let base = ROWS
+                    .iter()
+                    .position(|candidate| *candidate == row)
+                    .expect("every row is in the table");
+                if base < WIFI_ROWS {
+                    base
+                } else {
+                    base + results
+                }
+            }
         }
     }
 
-    /// The row at a place in the walk: the fixed rows first, the results the
-    /// scan filled in after them.
-    fn at(index: usize) -> NetworkRow {
-        ROWS.get(index)
-            .copied()
-            .unwrap_or_else(|| NetworkRow::ScanResult(index - ROWS.len()))
+    /// The row at a place in the walk.
+    fn at(index: usize, results: usize) -> NetworkRow {
+        if index < WIFI_ROWS {
+            ROWS[index]
+        } else if index < WIFI_ROWS + results {
+            NetworkRow::ScanResult(index - WIFI_ROWS)
+        } else {
+            ROWS[index - results]
+        }
     }
 }
 
@@ -120,6 +148,8 @@ impl NetworkRow {
 pub struct NetworkState {
     /// The device's last reported WiFi status (`@w?`).
     pub wifi: Option<WifiStatus>,
+    /// The device's last reported WebDAV status (`@d?`).
+    pub webdav: Option<WebdavStatus>,
     /// The SSID typed into the form, echoed back verbatim.
     pub ssid_input: String,
     /// Scan results, as the device reported them.
@@ -136,6 +166,7 @@ impl Default for NetworkState {
     fn default() -> NetworkState {
         NetworkState {
             wifi: None,
+            webdav: None,
             ssid_input: String::new(),
             scan_results: Vec::new(),
             loading: false,
@@ -455,6 +486,37 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
+    lines.push(heading(s.net_webdav_section, width, theme));
+    let url = state
+        .webdav
+        .as_ref()
+        .map(|d| d.url.as_str())
+        .filter(|u| !u.is_empty())
+        .unwrap_or(empty);
+    lines.push(field_row(
+        &format!("{}{}", s.net_url_label, s.label_separator),
+        url,
+        on(NetworkRow::Url),
+        width,
+        theme,
+    ));
+    for (row, word) in [
+        (NetworkRow::WebdavSet, s.net_set),
+        (NetworkRow::WebdavOff, s.net_disable),
+        (NetworkRow::WebdavStatus, s.net_webdav_status),
+    ] {
+        lines.push(action_row(word, s.net_ble_only, on(row), width, theme));
+    }
+    if let Some(dav) = &state.webdav {
+        let state_word = if dav.state == "off" {
+            s.net_state_off
+        } else {
+            &dav.state
+        };
+        lines.push(note(&format!("WebDAV: {state_word}"), width, theme));
+    }
+
+    lines.push(Line::from(""));
     lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
     lines
 }
@@ -536,11 +598,21 @@ fn activate(app: &mut App) {
             }
         }
         NetworkRow::WifiOff => dialogs::ask(app, ConfirmAction::Accessory("@w off".to_string())),
+        NetworkRow::Url | NetworkRow::WebdavSet => dialogs::prompt_webdav_url(app),
+        NetworkRow::WebdavOff => dialogs::ask(app, ConfirmAction::Accessory("@d off".to_string())),
         // Reads are not guarded: they change nothing, and a card asking
         // permission to look at something is a card that teaches people to
         // press yes without reading.
         NetworkRow::WifiStatus => {
             if let Err(why) = app.ask_device(Query::Wifi) {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: crate::event::NoticeLevel::Error,
+                });
+            }
+        }
+        NetworkRow::WebdavStatus => {
+            if let Err(why) = app.ask_device(Query::Webdav) {
                 app.push_notice(crate::app::Notice {
                     text: why,
                     level: crate::event::NoticeLevel::Error,
@@ -686,13 +758,17 @@ mod tests {
             NetworkRow::Connect,
             NetworkRow::WifiOff,
             NetworkRow::WifiStatus,
+            NetworkRow::Url,
+            NetworkRow::WebdavSet,
+            NetworkRow::WebdavOff,
+            NetworkRow::WebdavStatus,
             NetworkRow::Ssid,
         ] {
             state.focus_next();
             assert_eq!(state.focus, expected);
         }
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::WifiStatus);
+        assert_eq!(state.focus, NetworkRow::WebdavStatus);
 
         // With a network joined the results are unreachable, and the walk
         // never lands on one.
@@ -719,7 +795,7 @@ mod tests {
     fn the_focus_wraps_at_both_ends() {
         let mut state = NetworkState::default();
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::WifiStatus);
+        assert_eq!(state.focus, NetworkRow::WebdavStatus);
         state.focus_next();
         assert_eq!(state.focus, NetworkRow::Ssid);
     }
@@ -740,7 +816,7 @@ mod tests {
         state.focus_next();
         assert_eq!(
             state.focus,
-            NetworkRow::Ssid,
+            NetworkRow::Url,
             "and the walk comes back round to the form"
         );
         state.focus_previous();
@@ -761,7 +837,7 @@ mod tests {
         });
         state.focus = NetworkRow::WifiStatus;
         state.focus_next();
-        assert_eq!(state.focus, NetworkRow::Ssid);
+        assert_eq!(state.focus, NetworkRow::Url);
         state.focus_previous();
         assert_eq!(state.focus, NetworkRow::WifiStatus);
     }

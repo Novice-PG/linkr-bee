@@ -61,6 +61,8 @@ pub enum Query {
     /// answered in pieces over several messages and ends with a line of its
     /// own, where a status is one message that ends in `OK`.
     WifiScan,
+    /// `@d?` — whether the bridge uploads its logs over WebDAV, and where.
+    Webdav,
     /// `@s?` — LAN access state, and the token the bridge expects.
     Lan,
 }
@@ -73,6 +75,7 @@ impl Query {
             Query::Uart => crate::accessory::UART_QUERY_COMMAND,
             Query::Wifi => crate::accessory::WIFI_QUERY_COMMAND,
             Query::WifiScan => crate::accessory::WIFI_SCAN_COMMAND,
+            Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
         }
     }
@@ -104,7 +107,7 @@ impl Query {
                         .error
                         .is_empty()
             }
-            Query::Uart | Query::Wifi | Query::Lan => {
+            Query::Uart | Query::Wifi | Query::Webdav | Query::Lan => {
                 // One parse: either half of the verdict ends the question.
                 let status = crate::accessory::reply_status(&lines.join("\n"));
                 status.ok || !status.error.is_empty()

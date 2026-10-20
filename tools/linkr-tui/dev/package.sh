@@ -18,7 +18,7 @@
 # With `--cli` it is the same program built without the interface — the build
 # an agent harness wants, and a smaller one:
 #   linkr-bee-cli-<version>-<target>/bee-cli[.exe]
-#   linkr-bee-cli-<version>-<target>/README.md    as above
+#   linkr-bee-cli-<version>-<target>/README.md    the CLI-specific guide
 #   linkr-bee-cli-<version>-<target>/LICENSE      as above
 #   linkr-bee-cli-<version>-<target>/THIRD_PARTY_LICENSES.md  as above
 #
@@ -78,7 +78,14 @@ fi
 
 mkdir -p "$stage/$name"
 cp "$crate_dir/target/$target/release/bee$exe" "$stage/$name/$bin$exe"
-cp "$crate_dir/README.md" "$stage/$name/README.md"
+if [ "$variant" = cli ]; then
+  # The two faces are invoked by different names, so they get guides written
+  # for the binary in the archive: the CLI archive must not tell a reader to
+  # open a terminal that this build does not contain.
+  cp "$crate_dir/README-cli.md" "$stage/$name/README.md"
+else
+  cp "$crate_dir/README.md" "$stage/$name/README.md"
+fi
 if [ -f "$repo_dir/LICENSE" ]; then
   cp "$repo_dir/LICENSE" "$stage/$name/LICENSE"
 fi

@@ -2941,7 +2941,7 @@ impl App {
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::WifiScan => {
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -2986,6 +2986,17 @@ impl App {
         self.send_accessory(&command, Query::Wifi)
     }
 
+    /// Turn WebDAV log upload on at `url`, or off when `url` is empty.
+    ///
+    /// The firmware decides whether the feature exists at all; a board built
+    /// without it answers the command with an error, which is shown where it
+    /// happened instead of being hidden behind a disabled control.
+    pub fn set_webdav(&mut self, url: &str) -> Result<(), String> {
+        let action = if url.trim().is_empty() { "off" } else { "on" };
+        let command = accessory::webdav_command(action, url)?;
+        self.send_accessory(&command, Query::Webdav)
+    }
+
     /// Send one management command the caller has already built, and wait for
     /// the read that confirms it.
     ///
@@ -2996,6 +3007,7 @@ impl App {
         let query = match command.split([' ', '=']).next().unwrap_or("").as_bytes() {
             b"@u" => Query::Uart,
             b"@w" => Query::Wifi,
+            b"@d" => Query::Webdav,
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
         self.send_accessory(command, query)
@@ -3235,6 +3247,14 @@ impl App {
                 } else {
                     self.network.scan_results = scan_results(&reply.lines);
                     self.network.settle_focus();
+                }
+            }
+            // `@d?` is a status: where the bridge uploads its logs, or off.
+            // A board built without WebDAV answers with an error instead, and
+            // the refusal path above puts that error on the same row.
+            Query::Webdav => {
+                if let Some(status) = accessory::parse_webdav_status(&text) {
+                    self.network.webdav = Some(status);
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -3597,7 +3617,9 @@ impl App {
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::WifiScan => self.network.loading = false,
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
+                self.network.loading = false
+            }
             Query::Lan => self.lan_status.loading = false,
         }
     }

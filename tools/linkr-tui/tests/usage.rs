@@ -132,18 +132,23 @@ fn an_interface_flag_with_no_interface_is_refused() {
     }
 }
 
-/// WebDAV was cut from the device for RAM, so it is promised nowhere: not in
-/// the capability list an agent reads first, and not as a flag that would
-/// dial, send `@d` and collect `ERR unknown command`.
+/// WebDAV is part of the protocol, so the host keeps it discoverable even
+/// though some firmware images are built without it. A board without the
+/// feature answers the command itself; the command line does not pretend the
+/// question does not exist.
 #[test]
-fn webdav_is_not_promised() {
+fn webdav_is_promised_and_documented() {
     let output = bee(&["--capabilities", "--json"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let caps = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(!caps.to_lowercase().contains("webdav"), "{caps}");
+    let caps = stdout(&output);
+    for wanted in ["query-webdav", "webdav-off", "webdav"] {
+        assert!(caps.contains(wanted), "{wanted} missing from {caps}");
+    }
 
-    for flag in ["--webdav", "--webdav-off", "--query-webdav"] {
-        let output = bee(&[flag]);
-        assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
+    let help = bee(&["--help"]);
+    assert_eq!(help.status.code(), Some(0), "stderr: {}", stderr(&help));
+    let help = stdout(&help);
+    for flag in ["--query-webdav", "--webdav", "--webdav-off"] {
+        assert!(help.contains(flag), "{flag} missing from help: {help}");
     }
 }

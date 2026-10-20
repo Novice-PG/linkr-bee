@@ -181,7 +181,7 @@ pub struct Strings {
     // --- network view -----------------------------------------------------
     /// The WiFi section heading.
     pub net_wifi_section: &'static str,
-    /// Why WiFi management needs BLE.
+    /// Why BLE is needed to manage the bridge's own network settings.
     pub net_wifi_needs_ble: &'static str,
     /// The network-name (SSID) field label.
     pub net_ssid_label: &'static str,
@@ -208,7 +208,19 @@ pub struct Strings {
     pub net_wifi_failed: &'static str,
     /// Shown when a scan has produced nothing.
     pub net_no_results: &'static str,
-    /// The WebDAV state prefix (`on`/`off`).
+    /// The WebDAV section heading.
+    pub net_webdav_section: &'static str,
+    /// The WebDAV upload-URL field label.
+    pub net_url_label: &'static str,
+    /// The WebDAV-enable action.
+    pub net_set: &'static str,
+    /// The WebDAV-disable action.
+    pub net_disable: &'static str,
+    /// The WebDAV status action.
+    pub net_webdav_status: &'static str,
+    /// Refusing to enable WebDAV without a URL.
+    pub net_no_url: &'static str,
+    /// The on/off state words.
     pub net_state_on: &'static str,
     pub net_state_off: &'static str,
     /// The keys the network view answers, so a form that looks like a form
@@ -519,7 +531,7 @@ const ZH: Strings = Strings {
     agent_chat_deleted: "对话已删除",
     pending_review: "待确认",
     net_wifi_section: "WiFi",
-    net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi（局域网传输方式没有管理通道）。",
+    net_wifi_needs_ble: "通过 BLE 连接后才能管理 WiFi 与 WebDAV（局域网传输方式没有管理通道）。",
     net_ssid_label: "网络名称",
     net_password_label: "密码",
     net_empty_value: "—",
@@ -532,6 +544,12 @@ const ZH: Strings = Strings {
     net_scan_failed: "扫描失败",
     net_wifi_failed: "WiFi 配网失败（result {}）。请检查密码与 2.4 GHz 信号后重试。",
     net_no_results: "暂无结果",
+    net_webdav_section: "WebDAV 日志上传",
+    net_url_label: "上传地址",
+    net_set: "[设置 WebDAV]",
+    net_disable: "[关闭 WebDAV]",
+    net_webdav_status: "[WebDAV 状态]",
+    net_no_url: "先输入 WebDAV 上传地址",
     net_state_on: "开启",
     net_state_off: "关闭",
     net_keys_hint: "↑↓ 选择 · Enter 执行 · 结果行=填名",
@@ -698,7 +716,7 @@ const EN: Strings = Strings {
     pending_review: "asks first",
     net_wifi_section: "WiFi",
     net_wifi_needs_ble:
-        "Connect over BLE to manage WiFi (the LAN transport has no management channel).",
+        "Connect over BLE to manage WiFi and WebDAV (the LAN transport has no management channel).",
     net_ssid_label: "Network name",
     net_password_label: "Password",
     net_empty_value: "—",
@@ -712,6 +730,12 @@ const EN: Strings = Strings {
     net_wifi_failed:
         "WiFi provisioning failed (result {}). Check the password and 2.4 GHz coverage, then retry.",
     net_no_results: "no results yet",
+    net_webdav_section: "WebDAV log upload",
+    net_url_label: "Upload URL",
+    net_set: "[Set WebDAV]",
+    net_disable: "[WebDAV off]",
+    net_webdav_status: "[WebDAV status]",
+    net_no_url: "enter a WebDAV upload URL first",
     net_state_on: "on",
     net_state_off: "off",
     net_keys_hint: "up/down choose · Enter run · a result fills the name",

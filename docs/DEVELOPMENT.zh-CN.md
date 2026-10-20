@@ -69,8 +69,10 @@ tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 
 - 固件目标：ESP32-C3 DevKitM、DevKitC、Super Mini 与 ESP32-C5 DevKitC
 - Zephyr：**v4.4.1**
-- 唯一固件功能：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV 日志上传
-  与 UART-over-WebSocket 局域网访问
+- 同一份固件源码包含：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV
+  日志上传与 UART-over-WebSocket 局域网访问。WebDAV 在默认 C3/C5 构建中开启；
+  ESP32-WROOM 因 DRAM 不足关闭（`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`），主机端仍保留
+  该命令并显示板子自己的拒绝原因。
 
 ## 构建
 
@@ -177,13 +179,15 @@ ERR format: @u=115200,8,n,1,n
 
 ## WiFi 与 WebDAV 日志上传
 
-项目只维护一个同时包含 WiFi、WebDAV 和 WebSocket 的固件。WiFi 无线电默认
-关闭，直到用户发送 `@w=ssid,pass`；未配网设备仍可直接作为 BLE UART bridge
-使用，不再需要单独的纯 BLE 镜像。
+固件源码同时包含 WiFi、WebDAV 和 WebSocket。WebDAV 在默认 ESP32-C3/C5 构建中
+开启；ESP32-WROOM 因 DRAM 预算不足关闭（`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`）。
+该功能仍属于协议的一部分，因此主机端保留命令，并在缺少该功能的板子上显示板子
+自己的拒绝原因。WiFi 无线电默认关闭，直到用户发送 `@w=ssid,pass`；未配网设备仍可
+直接作为 BLE UART bridge 使用，不再需要单独的纯 BLE 镜像。
 
 WiFi 凭据默认只保存在 RAM，重启即丢失。仅在量产设备已经启用 secure boot 和 flash encryption 时，才应设置 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y`：该选项会将 PSK 写入 Zephyr settings/NVS；未加密 flash 上可被读取。启用后才会在重启时自动连接。匿名 WebDAV URL 和上传 boot 计数器独立持久化，避免重启后文件名冲突。
 
-普通构建即包含：
+普通 C3 构建即包含：
 
 ```sh
 west build -b esp32c3_supermini linkr-bee
