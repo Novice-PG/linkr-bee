@@ -52,21 +52,21 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 
 | 目的 | 命令 |
 |---|---|
-| 列出附近的蓝牙设备 | `bee --scan`（唯一不用 `--json`、直接印表的动作：`bee` 列 = 本程序能直连的板子） |
-| 读板子诊断 `@i?` | `bee --query-info` |
-| 读串口参数 `@u?` | `bee --query-uart` |
-| 读 WiFi 状态 `@w?` | `bee --query-wifi` |
-| 读桥的 LAN 状态 `@s?` | `bee --query-lan`（`ws=` 与 token 是否已捕获） |
-| 设置串口 | `bee --uart 115200,8,n,1,none`　`baud,data,parity,stop,flow` |
-| 连 WiFi | `bee --wifi "MySSID,MyPassword"` |
-| 连 WiFi（密码不进参数） | `bee --wifi "MySSID" --wifi-key-file pw.txt`（读文件第一行） |
-| 扫描 WiFi | `bee --wifi-scan` |
-| 忘记 WiFi | `bee --wifi-off` |
-| 回环自测（发什么收什么） | `bee --loopback-test 414243`（发的是字面字节 `4 1 4 2 4 3`） |
-| 看这条链路的状态与计数 | `bee --link-state`（与 `--serve` 的 `state` 同构；不问板子任何问题） |
-| 一次体检（链路 + 诊断 + 串口 + 回环 + 目标 shell） | `bee --doctor`（四个词给出结论，见第九节） |
-| 把手头的东西发过去，不等结束 | `bee --send line`（把 stdin 逐行送出）或 `bee --send raw`（原样送出） |
-| 在板子的目标上跑 shell 命令 | `bee --exec "uname -a"`，见下节 |
+| 列出附近的蓝牙设备 | `bee-cli --scan`（唯一不用 `--json`、直接印表的动作：`bee` 列 = 本程序能直连的板子） |
+| 读板子诊断 `@i?` | `bee-cli --query-info` |
+| 读串口参数 `@u?` | `bee-cli --query-uart` |
+| 读 WiFi 状态 `@w?` | `bee-cli --query-wifi` |
+| 读桥的 LAN 状态 `@s?` | `bee-cli --query-lan`（`ws=` 与 token 是否已捕获） |
+| 设置串口 | `bee-cli --uart 115200,8,n,1,none`　`baud,data,parity,stop,flow` |
+| 连 WiFi | `bee-cli --wifi "MySSID,MyPassword"` |
+| 连 WiFi（密码不进参数） | `bee-cli --wifi "MySSID" --wifi-key-file pw.txt`（读文件第一行） |
+| 扫描 WiFi | `bee-cli --wifi-scan` |
+| 忘记 WiFi | `bee-cli --wifi-off` |
+| 回环自测（发什么收什么） | `bee-cli --loopback-test 414243`（发的是字面字节 `4 1 4 2 4 3`） |
+| 看这条链路的状态与计数 | `bee-cli --link-state`（与 `--serve` 的 `state` 同构；不问板子任何问题） |
+| 一次体检（链路 + 诊断 + 串口 + 回环 + 目标 shell） | `bee-cli --doctor`（四个词给出结论，见第九节） |
+| 把手头的东西发过去，不等结束 | `bee-cli --send line`（把 stdin 逐行送出）或 `bee-cli --send raw`（原样送出） |
+| 在板子的目标上跑 shell 命令 | `bee-cli --exec "uname -a"`，见下节 |
 
 > 读诊断（`@i?` 等管理命令）仅限 BLE：LAN / stdio 下会返回一行说明并以 1 退出，这不是故障。
 >
@@ -94,8 +94,8 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 | `--dry-run` | 只打印将要发出的字节，不连接、不发送 |
 
 ```sh
-bee --ble-address EE:C7:42:34:48:CF --exec "uname -a"
-bee --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
+bee-cli --ble-address EE:C7:42:34:48:CF --exec "uname -a"
+bee-cli --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 ```
 
 提示：`--exec` 靠回显里的 `LINKR_RC:` 行工作；若目标 shell 会把光标控制序列混进回显，
@@ -139,11 +139,11 @@ bee --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 
 口径：一条命令里出现**多个动作**（例如 `--exec … --query-info`）时，退出码只回答"这一批活儿
 成没成"——任一动作失败即 1。目标命令自己的状态仍在它的结果事件里（`{"event":"result",…
-"rc":5}`），不会被丢掉；这样 `if bee --exec 'exit 5' --query-info; then` 读到的是"查询失败"
+"rc":5}`），不会被丢掉；这样 `if bee-cli --exec 'exit 5' --query-info; then` 读到的是"查询失败"
 而不是"命令说了 5"。只有一个 `--exec` 时才是透传：那是脚本包一条命令最常用的形状。
 
 `--capabilities --json` 自描述本版本：支持的动作用、默认超时与退出码表，一项不落
-（本 CLI 构建的 `operations` 和 `subcommands` 里都没有 `tui`——这里没有界面可开；`bee tui`
+（本 CLI 构建的 `operations` 和 `subcommands` 里都没有 `tui`——这里没有界面可开；`bee-cli tui`
 仍会被认出，报"本构建没有界面"而不是被当成未知参数）。
 
 ## 七、许可证与第三方组件
@@ -224,30 +224,30 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 ## 十、子命令：同样的命令，写成词
 
 动作也能写成子命令，对人和对模型都更好念。**子命令与 flag 是同一件事**：程序在解析前把
-`bee scan` 改写成 `bee --scan`，所以两者永远同义，帮助与补全也出自同一张表。
+`bee-cli scan` 改写成 `bee-cli --scan`，所以两者永远同义，帮助与补全也出自同一张表。
 
 | 子命令 | 等于 |
 |---|---|
-| `bee scan` | `--scan` |
-| `bee doctor` | `--doctor` |
-| `bee query info\|uart\|wifi\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-lan` |
-| `bee set uart "115200,8,n,1,none"` | `--uart "115200,8,n,1,none"` |
-| `bee set wifi "MySSID,MyPassword"` | `--wifi "MySSID,MyPassword"` |
-| `bee exec -- df -h` | `--exec "df -h"`（`--` 之后全是命令本身，`-h` 之类不会被当 flag） |
-| `bee send --line` / `--raw` | `--send line` / `--send raw` |
-| `bee loopback AB` | `--loopback-test AB` |
-| `bee tui` | `--cli-then-tui`（做完别的事再开界面） |
-| `bee capabilities` | `--capabilities` |
+| `bee-cli scan` | `--scan` |
+| `bee-cli doctor` | `--doctor` |
+| `bee-cli query info\|uart\|wifi\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-lan` |
+| `bee-cli set uart "115200,8,n,1,none"` | `--uart "115200,8,n,1,none"` |
+| `bee-cli set wifi "MySSID,MyPassword"` | `--wifi "MySSID,MyPassword"` |
+| `bee-cli exec -- df -h` | `--exec "df -h"`（`--` 之后全是命令本身，`-h` 之类不会被当 flag） |
+| `bee-cli send --line` / `--raw` | `--send line` / `--send raw` |
+| `bee-cli loopback AB` | `--loopback-test AB` |
+| `bee-cli tui` | `--cli-then-tui`（做完别的事再开界面） |
+| `bee-cli capabilities` | `--capabilities` |
 
-全局 flag（`--ble-name`、`--json` 等）写在子命令**前或后**都行：`bee --json scan`、
-`bee scan --json`、`bee --ble-name UART-1 exec --json -- uname -a` 都可以；老脚本一个都不用改。
+全局 flag（`--ble-name`、`--json` 等）写在子命令**前或后**都行：`bee-cli --json scan`、
+`bee-cli scan --json`、`bee-cli --ble-name UART-1 exec --json -- uname -a` 都可以；老脚本一个都不用改。
 一次命令行写一个子命令（`exec` 的命令部分除外）；写错时程序会点名它要的词，例如
 `query reads one of info, uart, wifi or lan; 'webdav' is not one`。
 
 ### `doctor`：一次体检，四个词
 
 ```sh
-bee doctor --ble-name "Linkr BLE UART-1" --json
+bee-cli doctor --ble-name "Linkr BLE UART-1" --json
 ```
 
 依次跑五项、各给一个结论：
@@ -267,8 +267,8 @@ bee doctor --ble-name "Linkr BLE UART-1" --json
 
 ### `send`：只发不收，给人在环
 
-`bee --send line` 把标准输入**逐行**送出去（每行补一个换行，`\r\n` 的文件不会送成两个），
+`bee-cli --send line` 把标准输入**逐行**送出去（每行补一个换行，`\r\n` 的文件不会送成两个），
 `--send raw` 一个字节不动地送。收到什么就印什么，但**没有结束判定、没有 marker、也不重发**：
 要"送一条、等结束、拿回退出码"就用 `--exec`。标准输入直接结束（一个字节都没有）算失败，
 以免"什么都没做"看起来像成功；中途断链会报还有多少字节没送出去。
-留给人在键盘前用的写法：`bee send --line` 然后逐行输入，`Ctrl-D` 结束。
+留给人在键盘前用的写法：`bee-cli send --line` 然后逐行输入，`Ctrl-D` 结束。
