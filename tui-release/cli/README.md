@@ -18,9 +18,9 @@
 
 ```sh
 # Linux / macOS：解压后运行（按机器架构选包；macOS 另有 .dmg：本目录的是这份 CLI，上一级 macos/ 的是界面版）
-tar xzf linkr-cli-1.0.0-x86_64-unknown-linux-gnu.tar.gz
-./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --version
-./linkr-cli-1.0.0-x86_64-unknown-linux-gnu/linkr-cli --scan        # 附近有哪些设备
+tar xzf linkr-cli-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+./linkr-cli-0.5.0-x86_64-unknown-linux-gnu/linkr-cli --version
+./linkr-cli-0.5.0-x86_64-unknown-linux-gnu/linkr-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
@@ -146,14 +146,19 @@ linkr --bridge - --no-terminal --exec "echo hi" --json --quiet   # 离线试跑
 （本 CLI 构建的 `operations` 和 `subcommands` 里都没有 `tui`——这里没有界面可开；`linkr tui`
 仍会被认出，报"本构建没有界面"而不是被当成未知参数）。
 
-## 七、常驻会话：`--serve`
+## 七、许可证与第三方组件
+
+`linkr-cli --licenses` 打印完整的第三方组件清单和许可证正文。每个归档里也带有
+`THIRD_PARTY_LICENSES.md`；界面版的 About 卡片可用 `L` 打开组件页。
+
+## 八、常驻会话：`--serve`
 
 一次一个动作要**每次重新拨号**（蓝牙尤其慢）。`--serve` 只拨一次、一直用，从 stdin 逐行读
 JSON 请求，适合脚本与 Agent 连续问很多件事：
 
 ```sh
 linkr-cli --ble-address EE:C7:42:34:48:CF --serve
-{"event":"ready","program":"linkr","version":"1.0.0","link":"ble:EE:…","ops":[…]}
+{"event":"ready","program":"linkr","version":"0.5.0","link":"ble:EE:…","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -202,7 +207,7 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 - **结束**：`quit` 或 stdin 关闭 → 退出码 0。启动时若已给 `--ble-address` 等连接参数，
   会话只记住它、不提前拨号。
 
-## 八、安全与留档
+## 九、安全与留档
 
 - **token 永不回显**：桥自述里带 token 的字段上屏前一律打码；记住的 token 存在
   `~/.config/linkr/lan-tokens`（0600），不进日志、不进通知（日志里的管理回复同样打码）。
@@ -216,7 +221,7 @@ linkr-cli --ble-address EE:C7:42:34:48:CF --serve
 - 一次性试完所有查询又不想碰真机：`--bridge -` 是本程序内置的回环设备（离线跑通全流程；
   能力边界——它支持哪些 shell 语法——见第四节）。
 
-## 九、子命令：同样的命令，写成词
+## 十、子命令：同样的命令，写成词
 
 动作也能写成子命令，对人和对模型都更好念。**子命令与 flag 是同一件事**：程序在解析前把
 `linkr scan` 改写成 `linkr --scan`，所以两者永远同义，帮助与补全也出自同一张表。

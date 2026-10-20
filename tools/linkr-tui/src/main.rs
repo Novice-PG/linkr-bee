@@ -444,6 +444,7 @@ fn serve_refusal(args: &Args) -> Option<String> {
         );
     }
     for (named, what) in [
+        (args.licenses, "--licenses"),
         (args.capabilities, "--capabilities"),
         (args.print_frame.is_some(), "--print-frame"),
         (args.exec.is_some(), "--exec"),
@@ -1266,13 +1267,6 @@ fn main() -> io::Result<()> {
     };
 
     let mut args = parse_args(&prog, &argv);
-    // A licence page is an answer about the build, like `--version`: it needs
-    // no link, no settings and no terminal, and it is printed before any of
-    // the checks that would otherwise refuse a run a caller did not ask for.
-    if args.licenses {
-        print!("{}", licenses::cli_report());
-        return Ok(());
-    }
     // A session is refused here, *before* the flags that answer and exit: a
     // `--serve --capabilities` would otherwise print a capability list and
     // leave, and the caller would never learn that no session was opened.
@@ -1281,6 +1275,13 @@ fn main() -> io::Result<()> {
         if let Some(why) = serve_refusal(&args) {
             fail(&prog, &why);
         }
+    }
+    // A licence page is an answer about the build, like `--capabilities`: it
+    // needs no link, no settings and no terminal, but it does not get to hide
+    // a `--serve` that could not open a session.
+    if args.licenses {
+        print!("{}", licenses::cli_report());
+        return Ok(());
     }
     // Two answers need no link, and both ask to be given before anything is
     // dialled: a caller asking what this tool can do is not asking the radio
@@ -3243,6 +3244,7 @@ mod tests {
             for refused in [
                 &["--serve", "--bridge", "-", "--doctor"][..],
                 &["--serve", "--bridge", "-", "--send", "line"],
+                &["--serve", "--bridge", "-", "--licenses"],
             ] {
                 let why = serve_refusal(&args(refused)).expect("the session refuses it");
                 assert!(why.contains("resident session"), "{refused:?}: {why}");

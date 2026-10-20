@@ -89,4 +89,4 @@ pub const CONTRIBUTORS: &[&str] = &[
 ];
 
 /// The number of Rust crates in the full closure, direct included.
-pub const TOTAL: usize = 338;
+pub const TOTAL: usize = 239;

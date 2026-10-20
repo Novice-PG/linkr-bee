@@ -6,7 +6,7 @@
 //! is too long for a modal, so it lives in `THIRD_PARTY_LICENSES.md`, which is
 //! shipped beside the binary and printed by `linkr --licenses`.
 //!
-//! Both artefacts are generated from one `cargo metadata` run by
+//! Both artefacts are generated from `cargo metadata` and `cargo tree` by
 //! `dev/gen-licenses.py`; CI runs that generator with `--check` so a dependency
 //! bump cannot leave the shipped notice naming an old version. The data below
 //! is included rather than parsed at run time: a licence page should not need a
@@ -118,6 +118,22 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable_by_key(|name| name.to_ascii_lowercase());
         assert_eq!(names, sorted);
+    }
+
+    /// A list of SPDX identifiers is not a licence text. The shipped notice
+    /// must carry the permission texts themselves, including for the crates
+    /// whose published package omitted a licence file.
+    #[test]
+    fn the_notice_reproduces_the_licence_texts() {
+        let notice = report();
+        assert!(notice.contains("## Licence texts"), "{notice}");
+        assert!(notice.contains("Permission is hereby granted"), "{notice}");
+        assert!(notice.contains("Apache License"), "{notice}");
+        assert!(notice.contains("THE SOFTWARE IS PROVIDED"), "{notice}");
+        assert!(
+            !notice.contains("full licence text is available in that"),
+            "the notice still points at source instead of carrying the text"
+        );
     }
 
     #[test]

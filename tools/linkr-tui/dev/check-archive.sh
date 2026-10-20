@@ -102,9 +102,15 @@ for entry in $listing; do
     exit 1
   }
 done
-# And one of them must be the binary itself.
+# And the binary and the three documents it promises must all be present.
 printf '%s\n' "$listing" | grep -E "^$name/$bin(\.exe)?$" >/dev/null || {
   echo "the archive holds no binary" >&2
   exit 1
 }
+for required in README.md LICENSE THIRD_PARTY_LICENSES.md; do
+  printf '%s\n' "$listing" | grep -qx "$name/$required" || {
+    echo "the archive holds no $required" >&2
+    exit 1
+  }
+done
 echo "$archive: ok"

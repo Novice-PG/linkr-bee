@@ -348,8 +348,8 @@ const LICENSES_TRANSITIVE: Entry = [
 const LICENSES_CONTRIBUTORS: Entry = ["Contributors", "贡献者"];
 const LICENSES_LICENSE: Entry = ["Project licence", "项目许可证"];
 const LICENSES_NOTE: Entry = [
-    "Licence texts are in each component's source; the project licence is in LICENSE.",
-    "许可证全文见各组件源码；本项目许可证见 LICENSE。",
+    "Licence texts are reproduced in THIRD_PARTY_LICENSES.md and linkr --licenses; the project licence is in LICENSE.",
+    "许可证全文见 THIRD_PARTY_LICENSES.md 和 linkr --licenses；本项目许可证见 LICENSE。",
 ];
 /// The keys, in the order the window is used: move, keep, back out. "Keep"
 /// rather than "apply" because the preview has already applied — Enter is what
@@ -1765,7 +1765,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             }
             out.push(Line::default());
             out.extend(
-                wrap_rows(
+                text::wrap_words(
                     &fill(
                         entry(LICENSES_TRANSITIVE, lang),
                         &[crate::licenses::transitive_count().to_string()],
@@ -1795,7 +1795,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
                 theme.muted(),
             )));
             out.extend(
-                wrap_rows(entry(LICENSES_NOTE, lang), width.max(1))
+                text::wrap_words(entry(LICENSES_NOTE, lang), width.max(1))
                     .into_iter()
                     .map(|row| Line::from(Span::styled(row, theme.muted()))),
             );
@@ -2009,7 +2009,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // taken out of the app above; putting a new one back is the one
         // exception, and doing nothing is exactly "close".
         Dialog::About => {
-            if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L')) {
+            if matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
                 app.dialog = Some(Dialog::Licenses(0));
             }
         }
@@ -2148,7 +2150,21 @@ fn start(app: &mut App, prompt: Prompt) {
 
 /// The dialog after a scroll key, or `None` when the key closes it.
 fn scrolled(app: &App, dialog: Dialog, offset: usize, key: KeyEvent) -> Option<Dialog> {
-    let last = row_count(app, &dialog).saturating_sub(1);
+    let rows = row_count(app, &dialog);
+    let room = crate::ui::overlay::dialog_body_room(
+        app.screen,
+        app.sidebar_visible,
+        app.panel_wanted(),
+        rows,
+    );
+    // Stop at the last *visible* start, not the last row: `lines` clamps the
+    // start to `rows - room` too. Otherwise End parks the offset below the
+    // last window and the first Up presses move an offset nobody can see.
+    let last = if room == 0 {
+        rows.saturating_sub(1)
+    } else {
+        rows.saturating_sub(room)
+    };
     let moved = match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Enter => return None,
         KeyCode::Up => offset.saturating_sub(1),
@@ -2615,7 +2631,7 @@ mod tests {
         // so the count the keys clamp to has to be the count the painter
         // draws. The rail and the panel are closed to give it the wide box.
         let mut app = App {
-            screen: ratatui::layout::Rect::new(0, 0, 200, 50),
+            screen: ratatui::layout::Rect::new(0, 0, 80, 24),
             sidebar_visible: false,
             assistant_panel: false,
             ..App::default()
@@ -2625,7 +2641,14 @@ mod tests {
             app.sidebar_visible,
             app.panel_wanted(),
         );
-        let height = 6;
+        let rows = row_count(&app, &Dialog::Help(0));
+        let height = crate::ui::overlay::dialog_body_room(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+            rows,
+        );
+        assert!(height > 0, "the help should have a painted window");
         let first = text_of(&lines(&Dialog::Help(0), &app, width, height));
         assert!(first.contains("Ctrl+P"), "{first}");
 
@@ -2636,9 +2659,11 @@ mod tests {
         assert_eq!(app.dialog, Some(Dialog::Help(0)));
         handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         // The count knows about the wrapping: End lands on the body's last
-        // row, not on the row the unwrapped list would have ended at.
+        // *visible start*, not on the row the unwrapped list or the painter's
+        // clamp would have ended at.
         let all = body(&Dialog::Help(0), &app, width as usize, &app.theme());
-        let last = all.len() - 1;
+        let last = all.len().saturating_sub(height);
+        assert!(last > 0, "the help should overflow the test window");
         assert_eq!(row_count(&app, &Dialog::Help(0)), all.len());
         assert_eq!(app.dialog, Some(Dialog::Help(last)));
         // Past the end stays at the end, and the window shows the tail.
@@ -4079,6 +4104,10 @@ mod tests {
         assert!(shown.contains("transitive"), "{shown}");
         assert!(shown.contains("Novice-PG"), "{shown}");
         assert!(shown.contains("linkr --licenses"), "{shown}");
+        assert!(
+            shown.contains("THIRD_PARTY_LICENSES.md"),
+            "the notice filename was split by the wrap: {shown}"
+        );
         assert_eq!(
             title(&Dialog::Licenses(0), Lang::En),
             " Open-source components "
@@ -4104,6 +4133,39 @@ mod tests {
         assert!(matches!(app.dialog, Some(Dialog::Licenses(0))));
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.dialog.is_none(), "Escape kept the page");
+    }
+
+    /// End parks the window at the last *visible* start, so the first Up after
+    /// it actually moves the page. Clamping to the last row instead made Up
+    /// spend several presses in an offset the painter could not show.
+    #[test]
+    fn end_stops_at_the_last_visible_start() {
+        let mut app = App {
+            screen: ratatui::layout::Rect::new(0, 0, 80, 24),
+            ..App::default()
+        };
+        open_licenses(&mut app);
+        let rows = row_count(&app, &Dialog::Licenses(0));
+        let room = crate::ui::overlay::dialog_body_room(
+            app.screen,
+            app.sidebar_visible,
+            app.panel_wanted(),
+            rows,
+        );
+        assert!(room > 0, "the test screen should paint a dialog");
+        let last = rows.saturating_sub(room);
+        handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(
+            app.dialog.as_ref().map(Dialog::scroll),
+            Some(last),
+            "End should stop at the last visible start"
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.dialog.as_ref().map(Dialog::scroll),
+            Some(last.saturating_sub(1)),
+            "Up after End should move the visible window"
+        );
     }
 }
 

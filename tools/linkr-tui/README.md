@@ -49,7 +49,7 @@ three rules:
 | `vt/screen.rs` | The screen itself: a styled cell grid with a cursor, erase, insert/delete, a scroll region, the alternate screen and a bounded scrollback |
 | `vt/mod.rs` | The emulator over the screen: which private modes do what, the alternate screen, the title, and the few sequences a host must *answer* |
 | `views/terminal.rs` | The pane: a streaming UTF-8 decoder and a streaming parser in front of the emulator, plus the painter |
-| `palette.rs` | The `Ctrl+P` command palette: twenty actions, each one a function pointer so the palette runs the same code the chord does |
+| `palette.rs` | The `Ctrl+P` command palette: the actions, each one a function pointer so the palette runs the same code the chord does |
 | `dialogs.rs` | Help, the notice log, the guarded-command confirmation, the prompts that ask for a file, a network name, a password or an upload URL, the About card and the component page behind it |
 | `licenses.rs` | The third-party notice: the direct Rust dependencies the About window shows, the contributors, and the full generated `THIRD_PARTY_LICENSES.md` that `--licenses` prints |
 | `protocol.rs` | The management service's framing: request and response headers, the version and capability handshake, the Reliable UART scheme, and the reassembler that puts a fragmented answer back together |
@@ -156,20 +156,25 @@ simply never answers, and the symptom looks exactly like a dead link.
 
 ## Licences and third-party components
 
-`About` (`L`) lists the direct Rust crates the binary links, their licences and
-the project's contributors, and says where the full closure lives. The complete
-normal-dependency list is generated from `Cargo.lock` and `cargo metadata` into
-`THIRD_PARTY_LICENSES.md`, which is shipped in every archive and printed without
-a terminal:
+`About` (`L`) lists the direct Rust crates the build resolves, their licences and
+the project's contributors, and points at the full notice. The feature-resolved
+normal-dependency closure is generated from `Cargo.lock`, `cargo metadata` and
+`cargo tree` into `THIRD_PARTY_LICENSES.md`, which is shipped in every archive
+and printed without a terminal:
 
 ```sh
 linkr --licenses
 ```
 
+The notice carries the complete licence text for every component, not just an
+SPDX identifier: licence files are read from the fetched crate sources, and the
+few packages that omitted one get the standard text with the package's authors.
 The generator is `dev/gen-licenses.py`; CI runs it with `--check`, so a
 dependency bump that forgets to regenerate the notice fails the gates instead
-of shipping a stale page. Build and development dependencies are deliberately
-not listed: they are not linked into the released binary.
+of shipping a stale page. The list is the union across targets Cargo resolves,
+so a crate used only on another platform is attributed too. Build and
+development dependencies are deliberately not listed: they are outside the
+normal-dependency closure.
 
 ## Keeping a session open
 
@@ -180,7 +185,7 @@ dial is seconds:
 
 ```console
 $ linkr --ble-name Linkr --serve
-{"event":"ready","program":"linkr","version":"1.0.0","link":"ble:name:Linkr",
+{"event":"ready","program":"linkr","version":"0.5.0","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
         "lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
@@ -254,7 +259,7 @@ cargo run -- --print-frame 100x30 --ansi              # with true-colour escapes
 cargo run -- --print-frame 100x30 --ansi --theme light --lang en
 cargo run -- --print-frame 100x30 --ansi --transport ble   # transport reported as locked
 cargo run -- --print-frame 110x32 --view diagnostics --state connected --sample
-cargo run -- --print-frame 110x32 --overlay palette   # palette, help, notices, confirm
+cargo run -- --print-frame 110x32 --overlay palette   # palette, help, notices, confirm, settings, about, licenses, splash
 cargo run -- --print-frame 110x32 --feed $'\e[31mred\e[0m ok'   # the emulator, no device
 ```
 
@@ -297,9 +302,9 @@ and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-1.0.0-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-cli-1.0.0-x86_64-pc-windows-gnu.zip
-dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr_1.0.0_armhf.deb
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-cli-0.5.0-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr_0.5.0_armhf.deb
 ```
 
 A Linux target other than the host links *that* target's libdbus, which is not

@@ -15,7 +15,7 @@
 //! equivalent would have had:
 //!
 //! ```text
-//! {"event":"ready","program":"linkr","version":"1.0.0","link":"ble EE:…","ops":[…]}
+//! {"event":"ready","program":"linkr","version":"0.5.0","link":"ble EE:…","ops":[…]}
 //! {"id":1,"op":"query-uart"}                       →  {"event":"begin","id":1,"op":"uart"} … {"event":"end","id":1,"code":0}
 //! {"id":2,"op":"exec","cmd":"uname -a"}            →  the exec events, then end with the command's own code
 //! {"id":3,"op":"wifi"}                             →  a result event, then end
