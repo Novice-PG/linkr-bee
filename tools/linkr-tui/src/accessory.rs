@@ -164,10 +164,9 @@ pub fn wifi_command(action: &str, ssid: &str, password: &str) -> Result<String, 
 
 /// Build `@d=<url>` or `@d off`.
 ///
-/// The URL is for the bridge's own log uploader, not for the terminal. Only
-/// HTTP(S) is accepted; a URL with whitespace or a control character would
-/// split the management line, so it is refused here before it reaches the
-/// wire.
+/// The URL is for the bridge's own log uploader, not for the terminal.
+/// Anonymous HTTP is the firmware's current contract (`src/wifi.c`).
+/// Reject unsupported destinations before sending a configuration change.
 pub fn webdav_command(action: &str, url: &str) -> Result<String, String> {
     let mode = action.to_ascii_lowercase();
     if mode == "off" {
@@ -180,18 +179,44 @@ pub fn webdav_command(action: &str, url: &str) -> Result<String, String> {
     if target.is_empty() {
         return Err("url is required when enabling WebDAV upload".to_string());
     }
-    if target.chars().count() > AccessoryLimits::WEBDAV_URL_MAX {
+    if target.len() > AccessoryLimits::WEBDAV_URL_MAX {
         return Err(format!(
-            "url must be at most {} characters",
+            "url must be at most {} UTF-8 bytes",
             AccessoryLimits::WEBDAV_URL_MAX
         ));
     }
-    let lower = target.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        return Err("url must start with http:// or https://".to_string());
-    }
+    let rest = target
+        .strip_prefix("http://")
+        .ok_or("this firmware supports anonymous http:// upload URLs only")?;
     if target.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("url must not contain whitespace or control characters".to_string());
+    }
+    // Commas delimit the management command's legacy credential fields.
+    if target.contains([',', '?', '#']) {
+        return Err("url must not contain commas, a query or a fragment".to_string());
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || host.len() >= 64
+        || host.starts_with('.')
+        || host.ends_with(['.', '-'])
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err("url needs a hostname or IPv4 address (no credentials or IPv6)".to_string());
+    }
+    if let Some(port) = port {
+        if port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || !matches!(port.parse::<u16>(), Ok(1..=u16::MAX))
+        {
+            return Err("url port must be between 1 and 65535".to_string());
+        }
     }
     Ok(format!("@d={target}"))
 }
@@ -769,8 +794,8 @@ mod tests {
     #[test]
     fn webdav_commands_and_url_credential_redaction() {
         assert_eq!(
-            webdav_command("on", "https://host/dav/").unwrap(),
-            "@d=https://host/dav/"
+            webdav_command("on", "http://host:8080/dav/").unwrap(),
+            "@d=http://host:8080/dav/"
         );
         assert_eq!(webdav_command("off", "").unwrap(), "@d off");
         assert!(webdav_command("on", "ftp://host").is_err());
@@ -779,6 +804,31 @@ mod tests {
             redact_command("@d=https://user:pw@host/dav/"),
             "@d=https://<redacted>@host/dav/"
         );
+    }
+
+    #[test]
+    fn webdav_rejects_destinations_the_firmware_cannot_store() {
+        for url in [
+            "",
+            " \t ",
+            "https://host/dav/",
+            "http://user:pw@host/dav/",
+            "http://[::1]/dav/",
+            "http://host/dav/?q=1",
+            "http://host/dav/#part",
+            "http://host/dav,other/",
+            "http://host/with space",
+            "http:///dav/",
+            "http://host:0/dav/",
+            "http://host:65536/dav/",
+            "http://host:not-a-port/dav/",
+        ] {
+            assert!(webdav_command("on", url).is_err(), "accepted {url:?}");
+        }
+        let too_long = format!("http://host/{}", "中".repeat(85));
+        assert!(too_long.chars().count() < AccessoryLimits::WEBDAV_URL_MAX);
+        assert!(webdav_command("on", &too_long).is_err());
+        assert!(webdav_command("on", "http://192.168.1.2:65535/logs/").is_ok());
     }
 
     #[test]

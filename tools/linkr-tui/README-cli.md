@@ -45,7 +45,7 @@ bee-cli --wifi "MySSID,MyPassword"     # join a network
 bee-cli --wifi "MySSID" --wifi-key-file pw.txt
 bee-cli --wifi-scan
 bee-cli --wifi-off
-bee-cli --webdav https://dav.example/logs/
+bee-cli --webdav http://dav.example/logs/
 bee-cli --webdav-off
 bee-cli --uart 115200,8,n,1,none
 bee-cli --loopback-test 414243
@@ -57,6 +57,10 @@ because the bridge answers one management question at a time. Add `--json` for
 JSON Lines suitable for a program, and `--quiet` to suppress progress on stderr.
 `--no-terminal` is accepted for compatibility; this build has no interface to
 open.
+
+WebDAV currently accepts only anonymous `http://host[:port]/path/` endpoints;
+HTTPS, credentials, queries and fragments are unsupported. Empty URLs are
+rejected; use `--webdav-off` explicitly to disable upload.
 
 WebDAV upload is part of the protocol, but a particular firmware build may
 leave it out (the ESP32-WROOM build disables it for DRAM). In that case the

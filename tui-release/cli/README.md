@@ -63,7 +63,7 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 | 连 WiFi（密码不进参数） | `bee-cli --wifi "MySSID" --wifi-key-file pw.txt`（读文件第一行） |
 | 扫描 WiFi | `bee-cli --wifi-scan` |
 | 忘记 WiFi | `bee-cli --wifi-off` |
-| 设置 WebDAV 上传 | `bee-cli --webdav https://dav.example/logs/` |
+| 设置 WebDAV 上传 | `bee-cli --webdav http://dav.example/logs/` |
 | 关闭 WebDAV 上传 | `bee-cli --webdav-off` |
 | 回环自测（发什么收什么） | `bee-cli --loopback-test 414243`（发的是字面字节 `4 1 4 2 4 3`） |
 | 看这条链路的状态与计数 | `bee-cli --link-state`（与 `--serve` 的 `state` 同构；不问板子任何问题） |
@@ -71,6 +71,9 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 | 把手头的东西发过去，不等结束 | `bee-cli --send line`（把 stdin 逐行送出）或 `bee-cli --send raw`（原样送出） |
 | 在板子的目标上跑 shell 命令 | `bee-cli --exec "uname -a"`，见下节 |
 
+> WebDAV 当前只支持匿名 `http://host[:port]/path/`，不支持 HTTPS、认证、查询参数或片段。
+> 空地址会被拒绝；关闭上传请显式使用 `--webdav-off`。
+>
 > WebDAV 属于设备协议；ESP32-WROOM 构建因 DRAM 关闭了该功能，查询或设置会显示板子自己的
 > `ERR unknown command`，程序不会把命令藏起来。
 
@@ -241,7 +244,7 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 | `bee-cli query info\|uart\|wifi\|webdav\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-webdav` / `--query-lan` |
 | `bee-cli set uart "115200,8,n,1,none"` | `--uart "115200,8,n,1,none"` |
 | `bee-cli set wifi "MySSID,MyPassword"` | `--wifi "MySSID,MyPassword"` |
-| `bee-cli set webdav https://dav.example/logs/` | `--webdav https://dav.example/logs/` |
+| `bee-cli set webdav http://dav.example/logs/` | `--webdav http://dav.example/logs/` |
 | `bee-cli set webdav off` | `--webdav-off` |
 | `bee-cli exec -- df -h` | `--exec "df -h"`（`--` 之后全是命令本身，`-h` 之类不会被当 flag） |
 | `bee-cli send --line` / `--raw` | `--send line` / `--send raw` |

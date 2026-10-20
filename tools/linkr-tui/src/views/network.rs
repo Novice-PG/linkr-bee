@@ -358,8 +358,25 @@ fn scan_row(result: &str, glyphs: crate::capability::GlyphSet) -> ScanRow {
 /// The whole body. The order is the design's: WiFi (note, ssid, password,
 /// actions), then the scan results.
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    document(app, theme, width).0
+}
+
+/// Keep the selected control visible even after a long WiFi scan.
+pub fn visible_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
+    let (lines, focused_line) = document(app, theme, width);
+    let height = usize::from(height);
+    let offset = (focused_line + 1)
+        .saturating_sub(height)
+        .min(lines.len().saturating_sub(height));
+    lines.into_iter().skip(offset).take(height).collect()
+}
+
+/// Build the rows and their focus position together, so status/error rows
+/// cannot make scrolling point at a different control.
+fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize) {
     let s = app.strings();
     let state = &app.network;
+    let mut focused_line = 0;
     let mut lines = vec![
         Line::from(""),
         heading(
@@ -407,6 +424,9 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     } else {
         state.ssid_input.as_str()
     };
+    if on(NetworkRow::Ssid) {
+        focused_line = lines.len();
+    }
     lines.push(field_row(
         &format!("{}{}", s.net_ssid_label, s.label_separator),
         ssid_value,
@@ -420,6 +440,9 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         (NetworkRow::WifiOff, s.net_wifi_off),
         (NetworkRow::WifiStatus, s.net_status),
     ] {
+        if on(row) {
+            focused_line = lines.len();
+        }
         lines.push(action_row(label, s.net_ble_only, on(row), width, theme));
     }
 
@@ -448,6 +471,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         for (index, result) in state.scan_results.iter().enumerate() {
             let row = scan_row(result, theme.glyphs());
             if on(NetworkRow::ScanResult(index)) {
+                focused_line = lines.len();
                 // The chip, as the form's fields wear it: the keyboard is
                 // here, and what pressing Enter takes is the name inside the
                 // line. One style throughout, selected: a chip is one surface,
@@ -493,6 +517,9 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         .map(|d| d.url.as_str())
         .filter(|u| !u.is_empty())
         .unwrap_or(empty);
+    if on(NetworkRow::Url) {
+        focused_line = lines.len();
+    }
     lines.push(field_row(
         &format!("{}{}", s.net_url_label, s.label_separator),
         url,
@@ -505,6 +532,9 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         (NetworkRow::WebdavOff, s.net_disable),
         (NetworkRow::WebdavStatus, s.net_webdav_status),
     ] {
+        if on(row) {
+            focused_line = lines.len();
+        }
         lines.push(action_row(word, s.net_ble_only, on(row), width, theme));
     }
     if let Some(dav) = &state.webdav {
@@ -518,7 +548,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
-    lines
+    (lines, focused_line)
 }
 
 /// Handle one key press while the network view has the keyboard.

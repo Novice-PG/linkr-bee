@@ -1370,6 +1370,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn network_focus_remains_visible_beyond_a_long_scan_list() {
+        use crate::views::network::NetworkRow;
+
+        for (width, height, results) in [(80, 24, 10), (120, 30, 20), (80, 12, 20)] {
+            let mut app = App {
+                lang: Lang::En,
+                view: View::Network,
+                ..App::default()
+            };
+            app.network.scan_results = (0..results)
+                .map(|i| format!("Network-{i} wpa2 ch=6 -54dBm"))
+                .collect();
+            // Extra lines must not shift the focus out of the viewport.
+            app.network.loading = true;
+            app.network.error = Some("Previous request failed".to_string());
+            for (focus, label) in [
+                (
+                    NetworkRow::ScanResult(results - 1),
+                    format!("Network-{}", results - 1),
+                ),
+                (NetworkRow::Url, "Upload URL".to_string()),
+                (NetworkRow::WebdavSet, "[Set WebDAV]".to_string()),
+                (NetworkRow::WebdavOff, "[WebDAV off]".to_string()),
+                (NetworkRow::WebdavStatus, "[WebDAV status]".to_string()),
+            ] {
+                app.network.focus = focus;
+                let frame = render_to_text(&app, width, height);
+                assert!(
+                    frame.contains(&label),
+                    "{width}x{height}, {focus:?}:\n{frame}"
+                );
+            }
+            app.network.focus_next(); // Wrap from the final control to the form.
+            let frame = render_to_text(&app, width, height);
+            assert!(frame.contains("Network name"), "{frame}");
+        }
+    }
+
     /// A tiny TX rate beside a large RX one is still activity, not idle: the
     /// shared ruler lifts any nonzero sample to the smallest visible bar.
     /// Before that floor, a few bytes a second against a large receive stream

@@ -59,7 +59,7 @@ pub fn lines(app: &App, theme: &Theme, area: Rect) -> Vec<Line<'static>> {
         // shows.
         View::Terminal => views::terminal::lines(app, theme, area),
         View::Diagnostics => views::diagnostics::lines(app, theme, width),
-        View::Network => views::network::lines(app, theme, width),
+        View::Network => views::network::visible_lines(app, theme, width, area.height),
         View::Assistant => views::assistant::lines(app, theme, width),
     }
 }

@@ -2986,14 +2986,19 @@ impl App {
         self.send_accessory(&command, Query::Wifi)
     }
 
-    /// Turn WebDAV log upload on at `url`, or off when `url` is empty.
+    /// Turn WebDAV log upload on at a nonempty `url`.
     ///
     /// The firmware decides whether the feature exists at all; a board built
     /// without it answers the command with an error, which is shown where it
     /// happened instead of being hidden behind a disabled control.
     pub fn set_webdav(&mut self, url: &str) -> Result<(), String> {
-        let action = if url.trim().is_empty() { "off" } else { "on" };
-        let command = accessory::webdav_command(action, url)?;
+        let command = accessory::webdav_command("on", url)?;
+        self.send_accessory(&command, Query::Webdav)
+    }
+
+    /// Disable upload only when the caller explicitly asks to do so.
+    pub fn disable_webdav(&mut self) -> Result<(), String> {
+        let command = accessory::webdav_command("off", "")?;
         self.send_accessory(&command, Query::Webdav)
     }
 
@@ -6152,6 +6157,46 @@ mod tests {
             app.waiting_on_device(),
             "and the read that confirms it is out"
         );
+    }
+
+    #[test]
+    fn invalid_webdav_cli_requests_leave_existing_upload_configuration_alone() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        let current = accessory::WebdavStatus {
+            state: "on".to_string(),
+            url: "http://host/existing/".to_string(),
+        };
+        app.network.webdav = Some(current.clone());
+        for (url, off) in [
+            ("", false),
+            (" \t ", false),
+            ("https://host/new/", false),
+            ("http://host/new/", true),
+        ] {
+            let requests = crate::cli::Requests {
+                webdav: Some(url.to_string()),
+                webdav_off: off,
+                ..Default::default()
+            };
+            assert_eq!(
+                crate::cli::run_requests(
+                    &mut app,
+                    &requests,
+                    crate::cli::Format::Json,
+                    Duration::from_millis(100),
+                ),
+                1
+            );
+            assert_eq!(app.network.webdav.as_ref(), Some(&current));
+        }
+        assert!(
+            crate::transport::testing::asked_frames(&wire)
+                .iter()
+                .all(|frame| !frame[crate::protocol::MGMT_HEADER_SIZE..].starts_with(b"@d")),
+            "an invalid enable request must never send a write or disable"
+        );
+        app.disable_webdav().expect("explicit disable");
+        assert!(asked_includes(&wire, b"@d off"));
     }
 
     /// The command among the frames that went out, counted rather than merely

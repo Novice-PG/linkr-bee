@@ -473,7 +473,11 @@ fn action_for(request: &Request) -> Result<Action, String> {
         },
         // The session's spelling of `--query-webdav` and `--webdav <url>`.
         "webdav" => match request.value("url") {
-            Some(_) => requests.webdav = Some(request.string_wanted("url")?.to_string()),
+            Some(_) => {
+                let url = request.string_wanted("url")?;
+                crate::accessory::webdav_command("on", url)?;
+                requests.webdav = Some(url.to_string());
+            }
             None => requests.queries.push(Query::Webdav),
         },
         "webdav-off" => requests.webdav_off = true,
@@ -1058,15 +1062,26 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match action_for(&request(r#"{"op":"webdav","url":"https://h/d/"}"#)) {
+        match action_for(&request(r#"{"op":"webdav","url":"http://h/d/"}"#)) {
             Ok(Action::Requests(requests)) => {
-                assert_eq!(requests.webdav.as_deref(), Some("https://h/d/"));
+                assert_eq!(requests.webdav.as_deref(), Some("http://h/d/"));
             }
             other => panic!("{other:?}"),
         }
         match action_for(&request(r#"{"op":"webdav-off"}"#)) {
             Ok(Action::Requests(requests)) => assert!(requests.webdav_off),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_webdav_session_urls_are_refused_before_dialling() {
+        for line in [
+            r#"{"op":"webdav","url":""}"#,
+            r#"{"op":"webdav","url":" \t "}"#,
+            r#"{"op":"webdav","url":"https://host/logs/"}"#,
+        ] {
+            assert!(action_for(&request(line)).is_err(), "{line}");
         }
     }
 

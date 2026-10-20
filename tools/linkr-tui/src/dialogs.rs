@@ -720,8 +720,7 @@ pub enum PromptAction {
     /// The password for the network just named. Held nowhere: it goes straight
     /// from the field into the command and out of the process.
     WifiPassword,
-    /// Where the bridge uploads its logs. A URL may embed credentials, so it
-    /// is shown only in the URL row and the approval card is redacted.
+    /// Where the bridge uploads its logs, using anonymous HTTP.
     WebdavUrl,
     /// The address a LAN dial goes to, kept in the sidebar row it edits.
     LanHost,
@@ -806,8 +805,8 @@ impl Prompt {
                 "该网络的密码（可留空；Ctrl+R 显示）",
             ],
             PromptAction::WebdavUrl => [
-                "The upload URL (http:// or https://)",
-                "上传地址（http:// 或 https://）",
+                "Anonymous HTTP upload URL (http://)",
+                "匿名 HTTP 上传地址（http://）",
             ],
             PromptAction::LanHost => [
                 "The bridge's LAN address (the board's WiFi IP)",
@@ -827,8 +826,8 @@ impl Prompt {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
             PromptAction::WebdavUrl => [
-                "for example https://dav.example.com/logs/",
-                "例如 https://dav.example.com/logs/",
+                "for example http://dav.example.com/logs/",
+                "例如 http://dav.example.com/logs/",
             ],
             PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
             PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
@@ -2164,9 +2163,7 @@ fn start(app: &mut App, prompt: Prompt) {
                 };
             ask(app, ConfirmAction::Accessory(command));
         }
-        // The URL is quoted in the approval card with any embedded
-        // credentials redacted; the command sent to the bridge keeps them,
-        // because the bridge needs them to authenticate.
+        // Validate the firmware's anonymous HTTP destination before approval.
         PromptAction::WebdavUrl => {
             if answer.trim().is_empty() {
                 let text = app.strings().net_no_url.to_string();

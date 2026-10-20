@@ -1493,8 +1493,13 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         }
     }
     if requests.webdav_off || requests.webdav.is_some() {
-        let url = requests.webdav.as_deref().unwrap_or("");
-        match app.set_webdav(url) {
+        let result = match (requests.webdav_off, requests.webdav.as_deref()) {
+            (true, Some(_)) => Err("choose either --webdav or --webdav-off".to_string()),
+            (true, None) => app.disable_webdav(),
+            (false, Some(url)) => app.set_webdav(url),
+            (false, None) => unreachable!(),
+        };
+        match result {
             Err(why) => failed += report(format, "webdav", false, &why),
             Ok(()) => failed += wait_and_report(app, crate::device::Query::Webdav, format),
         }
@@ -2618,8 +2623,8 @@ mod tests {
                 &["--wifi", "Bench,secret"],
             ),
             (
-                &["set", "webdav", "https://dav.example/logs/"],
-                &["--webdav", "https://dav.example/logs/"],
+                &["set", "webdav", "http://dav.example/logs/"],
+                &["--webdav", "http://dav.example/logs/"],
             ),
             (&["set", "webdav", "off"], &["--webdav-off"]),
             (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
