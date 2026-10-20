@@ -753,6 +753,26 @@ impl Flag {
         }
         trimmed.replace('-', " ")
     }
+
+    fn zsh_spec(&self) -> String {
+        let help = self
+            .help
+            .replace('\\', "\\\\")
+            .replace('[', "\\[")
+            .replace(']', "\\]");
+        let label = self.zsh_label();
+        let argument = match self.value {
+            Value::None => String::new(),
+            Value::Choice => {
+                let choices: Vec<String> = self.choices.iter().map(|c| shell_quote(c)).collect();
+                format!(":{label}:({})", choices.join(" "))
+            }
+            Value::File => format!(":{label}:_files"),
+            Value::Free => format!(":{label}:"),
+            Value::Optional => format!("::{label}:"),
+        };
+        format!("{}[{help}]{argument}", self.name)
+    }
 }
 
 /// The shells a completion script can be printed for.
@@ -847,42 +867,13 @@ fn zsh_completion(prog: &str) -> String {
     out.push_str("    local -a flags\n");
     out.push_str("    flags=(\n");
     for flag in FLAGS {
-        let name = shell_quote(flag.name);
-        match flag.value {
-            Value::None => {
-                out.push_str(&format!("        {}:{}\n", name, shell_quote(flag.help)));
-            }
-            Value::Choice => {
-                let choices: Vec<String> = flag.choices.iter().map(|c| shell_quote(c)).collect();
-                out.push_str(&format!(
-                    "        {}[{}]:{}:({})\n",
-                    name,
-                    shell_quote(flag.help),
-                    flag.zsh_label(),
-                    choices.join(" ")
-                ));
-            }
-            Value::File => {
-                out.push_str(&format!(
-                    "        {}[{}]:{}:_files\n",
-                    name,
-                    shell_quote(flag.help),
-                    flag.zsh_label()
-                ));
-            }
-            Value::Free | Value::Optional => {
-                out.push_str(&format!(
-                    "        {}[{}]:{}:\n",
-                    name,
-                    shell_quote(flag.help),
-                    flag.zsh_label()
-                ));
-            }
-        }
+        // _arguments reads each specification as one string; quote the whole
+        // value so brackets, spaces and choice lists cannot become shell syntax.
+        out.push_str(&format!("        {}\n", shell_quote(&flag.zsh_spec())));
     }
     out.push_str("    )\n");
-    out.push_str("    _arguments $flags\n");
-    out.push_str("}}\n");
+    out.push_str("    _arguments \"${flags[@]}\"\n");
+    out.push_str("}\n");
     out.push_str(&format!("compdef {function} {prog}\n"));
     out
 }
@@ -2514,7 +2505,7 @@ mod tests {
             .expect("documented");
         assert_eq!(transport.choices, &["ble", "lan", "stdio"]);
         let zsh = completion_script("zsh", "bee").expect("script");
-        assert!(zsh.contains("('ble' 'lan' 'stdio')"), "{zsh}");
+        assert!(zsh.contains(&shell_quote(&transport.zsh_spec())), "{zsh}");
 
         // The theme choices are the themes: a palette that cannot be named on
         // the command line is a palette half-shipped.
