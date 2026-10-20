@@ -10,15 +10,31 @@
 
 use std::process::{Command, Output};
 
-fn linkr(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_linkr"))
+fn bee(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_bee"))
         .args(args)
         .output()
         .expect("the binary runs")
 }
 
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The command the archives install is `bee`, not the crate's old internal
+/// name: a script that pins `--version` must see the name it can invoke.
+#[test]
+fn the_version_names_the_command() {
+    let output = bee(&["--version"]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output).trim(),
+        format!("bee {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 /// `--exec ""` is not a run: the wrapper would still send its marker and the
@@ -27,7 +43,7 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn an_empty_command_is_refused() {
     for empty in ["", "   ", "\t"] {
-        let output = linkr(&["--exec", empty]);
+        let output = bee(&["--exec", empty]);
         assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
         assert!(
             stderr(&output).contains("exec wants a command to run"),
@@ -42,7 +58,7 @@ fn an_empty_command_is_refused() {
 /// reported as one that did.
 #[test]
 fn a_join_without_a_password_is_refused() {
-    let output = linkr(&["--wifi", "BenchNet"]);
+    let output = bee(&["--wifi", "BenchNet"]);
     assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
     assert!(
         stderr(&output).contains("a join needs a password"),
@@ -55,7 +71,7 @@ fn a_join_without_a_password_is_refused() {
 /// what anyone means, and `--wifi-off` is what they mean.
 #[test]
 fn a_join_without_a_network_is_refused() {
-    let output = linkr(&["--wifi", ""]);
+    let output = bee(&["--wifi", ""]);
     assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
     assert!(
         stderr(&output).contains("a join needs a network"),
@@ -69,7 +85,7 @@ fn a_join_without_a_network_is_refused() {
 /// discards.
 #[test]
 fn a_bridge_with_another_transport_is_refused() {
-    let output = linkr(&["--bridge", "-", "--transport", "ble", "--exec", "true"]);
+    let output = bee(&["--bridge", "-", "--transport", "ble", "--exec", "true"]);
     assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
     let said = stderr(&output);
     assert!(said.contains("--transport"), "{said}");
@@ -80,7 +96,7 @@ fn a_bridge_with_another_transport_is_refused() {
 /// what a bridge is, and the run goes through.
 #[test]
 fn a_bridge_with_the_stdio_transport_runs() {
-    let output = linkr(&[
+    let output = bee(&[
         "--bridge",
         "-",
         "--transport",
@@ -108,7 +124,7 @@ fn an_interface_flag_with_no_interface_is_refused() {
         (&["--escape", "^]"][..], "--escape"),
         (&["--cli-then-tui"][..], "--cli-then-tui"),
     ] {
-        let output = linkr(argv);
+        let output = bee(argv);
         assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
         let said = stderr(&output);
         assert!(said.contains("no interface"), "{flag}: {said}");
@@ -121,13 +137,13 @@ fn an_interface_flag_with_no_interface_is_refused() {
 /// dial, send `@d` and collect `ERR unknown command`.
 #[test]
 fn webdav_is_not_promised() {
-    let output = linkr(&["--capabilities", "--json"]);
+    let output = bee(&["--capabilities", "--json"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let caps = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(!caps.to_lowercase().contains("webdav"), "{caps}");
 
     for flag in ["--webdav", "--webdav-off", "--query-webdav"] {
-        let output = linkr(&[flag]);
+        let output = bee(&[flag]);
         assert_eq!(output.status.code(), Some(2), "{flag}: {}", stderr(&output));
     }
 }

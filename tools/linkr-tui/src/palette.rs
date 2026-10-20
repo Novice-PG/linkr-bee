@@ -91,7 +91,7 @@ const T_CHEAT: Entry = ["Cheat sheet", "速查参考"];
 const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
 const T_THEME: Entry = ["Choose theme", "选择主题"];
-const T_ABOUT: Entry = ["About linkr", "关于 linkr"];
+const T_ABOUT: Entry = ["About bee", "关于 bee"];
 const T_LICENSES: Entry = ["Open-source components", "开源组件"];
 const T_SPLASH: Entry = ["Toggle the startup splash", "切换启动闪屏"];
 const T_QUIT: Entry = ["Quit the TUI", "退出 TUI"];
@@ -1833,7 +1833,7 @@ mod tests {
         assert_eq!(app.view, view, "a row ran on the way down");
 
         let en = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
-        assert!(en.contains("About linkr"), "not the section: {en}");
+        assert!(en.contains("About bee"), "not the section: {en}");
         assert!(
             !en.contains("Open terminal view"),
             "the menu leaked into the window: {en}"

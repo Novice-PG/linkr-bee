@@ -849,7 +849,7 @@ fn is_transient(text: &str) -> bool {
 ///
 /// Only `In Progress` is retried, and only because it is the failure where the
 /// operation demonstrably did **not** happen: BlueZ never started it, a second
-/// client holds the adapter — a second `linkr`, a phone app, or a session of
+/// client holds the adapter — a second `bee`, a phone app, or a session of
 /// ours that never tore down. Everything else keeps its own words.
 ///
 /// Each attempt is bounded by [`CALL_TIMEOUT`]; a timeout is never retried,

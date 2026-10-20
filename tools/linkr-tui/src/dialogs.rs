@@ -342,14 +342,14 @@ const LICENSES_KEYS: Entry = [
 ];
 const LICENSES_DIRECT: Entry = ["Direct dependencies ({})", "直接依赖（{}）"];
 const LICENSES_TRANSITIVE: Entry = [
-    "Plus {} transitive crates; the full list is in linkr --licenses and THIRD_PARTY_LICENSES.md.",
-    "另有 {} 个传递依赖；完整列表见 linkr --licenses 和 THIRD_PARTY_LICENSES.md。",
+    "Plus {} transitive crates; the full list is in bee --licenses and THIRD_PARTY_LICENSES.md.",
+    "另有 {} 个传递依赖；完整列表见 bee --licenses 和 THIRD_PARTY_LICENSES.md。",
 ];
 const LICENSES_CONTRIBUTORS: Entry = ["Contributors", "贡献者"];
 const LICENSES_LICENSE: Entry = ["Project licence", "项目许可证"];
 const LICENSES_NOTE: Entry = [
-    "Licence texts are reproduced in THIRD_PARTY_LICENSES.md and linkr --licenses; the project licence is in LICENSE.",
-    "许可证全文见 THIRD_PARTY_LICENSES.md 和 linkr --licenses；本项目许可证见 LICENSE。",
+    "Licence texts are reproduced in THIRD_PARTY_LICENSES.md and bee --licenses; the project licence is in LICENSE.",
+    "许可证全文见 THIRD_PARTY_LICENSES.md 和 bee --licenses；本项目许可证见 LICENSE。",
 ];
 /// The keys, in the order the window is used: move, keep, back out. "Keep"
 /// rather than "apply" because the preview has already applied — Enter is what
@@ -1657,7 +1657,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             }
             out.push(
                 Line::from(Span::styled(
-                    "linkr".to_string(),
+                    "bee".to_string(),
                     theme.accent_strong().add_modifier(Modifier::BOLD),
                 ))
                 .alignment(Alignment::Center),
@@ -1720,7 +1720,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
         // The component page: the direct dependencies, the count of the
         // transitive tail, and the people who built the program. It is a
         // document rather than a form, so it scrolls; the full tail is kept in
-        // `THIRD_PARTY_LICENSES.md` and printed by `linkr --licenses`, because
+        // `THIRD_PARTY_LICENSES.md` and printed by `bee --licenses`, because
         // a terminal modal should not pretend three hundred rows are a page a
         // person can read at a glance.
         Dialog::Licenses(_) => {
@@ -3940,7 +3940,7 @@ mod tests {
         };
         let height = body_height(&app, &Dialog::About, 60);
         let shown = text_of(&lines(&Dialog::About, &app, 60, height));
-        assert!(shown.contains("linkr"), "{shown}");
+        assert!(shown.contains("bee"), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_LICENSE")), "{shown}");
         assert!(shown.contains(env!("CARGO_PKG_REPOSITORY")), "{shown}");
@@ -4103,7 +4103,7 @@ mod tests {
         );
         assert!(shown.contains("transitive"), "{shown}");
         assert!(shown.contains("Novice-PG"), "{shown}");
-        assert!(shown.contains("linkr --licenses"), "{shown}");
+        assert!(shown.contains("bee --licenses"), "{shown}");
         assert!(
             shown.contains("THIRD_PARTY_LICENSES.md"),
             "the notice filename was split by the wrap: {shown}"

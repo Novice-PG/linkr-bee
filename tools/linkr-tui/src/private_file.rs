@@ -71,7 +71,7 @@ pub fn restrict(_path: &Path) -> std::io::Result<()> {
 /// has lost its history. The parent directory is created first, because the
 /// stores that use this are the first thing a fresh machine writes.
 ///
-/// The temp name carries the writing process's id, because two `linkr`
+/// The temp name carries the writing process's id, because two `bee`
 /// instances on one bench are normal and a fixed `.tmp` name is a file they
 /// would take turns truncating — one instance's rename would then move the
 /// other's half-written copy into place. A name that is somehow taken is

@@ -4,7 +4,7 @@
 The About window shows the direct Rust dependencies and the contributors. The
 full closure of crates used by a release is too long for that window, so it
 lives in THIRD_PARTY_LICENSES.md, which is shipped beside the binary and is what
-`linkr --licenses` prints. Both artefacts are generated from one `cargo tree`
+`bee --licenses` prints. Both artefacts are generated from one `cargo tree`
 run (with `cargo metadata` supplying the licence fields), and CI runs this
 script with `--check`, so a dependency bump cannot leave the shipped notice
 naming an old crate or omitting a licence text.
@@ -390,7 +390,7 @@ def render_data(direct: list[dict], total: int) -> str:
         "//",
         "// This is the direct-dependency half of THIRD_PARTY_LICENSES.md: the",
         "// components the About window shows. The full transitive list lives in",
-        "// that file and is what `linkr --licenses` prints.",
+        "// that file and is what `bee --licenses` prints.",
         "",
         "pub const COMPONENTS: &[Component] = &[",
     ]

@@ -11,8 +11,8 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-fn linkr(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_linkr"))
+fn bee(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_bee"))
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -21,7 +21,7 @@ fn linkr(args: &[&str]) -> Output {
 
 /// One run with something on standard input, for `--send`.
 fn linkr_fed(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_linkr"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -50,7 +50,7 @@ fn stderr(output: &Output) -> String {
 /// as failures. The exit code is 0: nothing contradicted the run.
 #[test]
 fn the_checkup_reports_every_check_it_ran() {
-    let output = linkr(&["--bridge", "-", "doctor", "--json", "--quiet"]);
+    let output = bee(&["--bridge", "-", "doctor", "--json", "--quiet"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("\"what\":\"doctor\""), "{out}");
@@ -73,7 +73,7 @@ fn the_checkup_reports_every_check_it_ran() {
 /// tally, so a report pasted into an issue says how much was proven.
 #[test]
 fn the_checkup_reads_as_a_report() {
-    let output = linkr(&["--bridge", "-", "doctor", "--quiet"]);
+    let output = bee(&["--bridge", "-", "doctor", "--quiet"]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     let out = stdout(&output);
     for name in ["link", "bridge", "uart", "loopback", "target"] {
@@ -104,7 +104,7 @@ fn a_send_forwards_every_line_and_reports_the_bytes() {
 /// that it worked.
 #[test]
 fn a_send_of_nothing_is_refused() {
-    let output = linkr(&["--bridge", "-", "send", "--line", "--json", "--quiet"]);
+    let output = bee(&["--bridge", "-", "send", "--line", "--json", "--quiet"]);
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("\"ok\":false"), "{out}");
@@ -140,8 +140,8 @@ fn a_subcommand_reaches_the_same_run_as_its_flag() {
             "\"rc\":0",
         ),
     ] {
-        let word = linkr(by_word);
-        let flag = linkr(by_flag);
+        let word = bee(by_word);
+        let flag = bee(by_flag);
         assert_eq!(
             word.status.code(),
             flag.status.code(),

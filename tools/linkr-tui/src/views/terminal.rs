@@ -789,7 +789,7 @@ pub const SAMPLE: &str = concat!(
 pub const SAMPLE_COLOUR: &str = concat!(
     "\x1b[1;32mroot@kickpi\x1b[0m:\x1b[1;34m~\x1b[0m$ uname -a\r\n",
     "Linux kickpi-k2b 6.18.53-current-sunxi64 #14 SMP aarch64 GNU/Linux\r\n",
-    "\x1b[1;32mroot@kickpi\x1b[0m:\x1b[1;34m~\x1b[0m$ linkr --transport ble --connect\r\n",
+    "\x1b[1;32mroot@kickpi\x1b[0m:\x1b[1;34m~\x1b[0m$ bee --transport ble --connect\r\n",
     "\x1b[36m→\x1b[0m linkr-bee \x1b[1mEE:C7:42:34:48:CF\x1b[0m rssi=\x1b[32m-34\x1b[0m\r\n",
     "\x1b[32m✓\x1b[0m protocol \x1b[1m1.0\x1b[0m max_payload=\x1b[33m512\x1b[0m\r\n",
     "\x1b[31mfailed\x1b[0m to open ws://192.168.0.100/ws: \x1b[31mconnection refused\x1b[0m\r\n",

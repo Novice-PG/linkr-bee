@@ -11,16 +11,16 @@
 #   dev/package.sh --cli x86_64-pc-windows-gnu dist
 #
 # Without `--cli` the archive is the whole program:
-#   linkr-<version>-<target>/linkr[.exe]      the binary
-#   linkr-<version>-<target>/README.md        what it is and how to run it
-#   linkr-<version>-<target>/LICENSE          the licence it ships under
-#   linkr-<version>-<target>/THIRD_PARTY_LICENSES.md  the components it links
+#   linkr-bee-<version>-<target>/bee[.exe]    the binary
+#   linkr-bee-<version>-<target>/README.md    what it is and how to run it
+#   linkr-bee-<version>-<target>/LICENSE      the licence it ships under
+#   linkr-bee-<version>-<target>/THIRD_PARTY_LICENSES.md  the components it links
 # With `--cli` it is the same program built without the interface — the build
 # an agent harness wants, and a smaller one:
-#   linkr-cli-<version>-<target>/linkr-cli[.exe]
-#   linkr-cli-<version>-<target>/README.md    as above
-#   linkr-cli-<version>-<target>/LICENSE      as above
-#   linkr-cli-<version>-<target>/THIRD_PARTY_LICENSES.md  as above
+#   linkr-bee-cli-<version>-<target>/bee-cli[.exe]
+#   linkr-bee-cli-<version>-<target>/README.md    as above
+#   linkr-bee-cli-<version>-<target>/LICENSE      as above
+#   linkr-bee-cli-<version>-<target>/THIRD_PARTY_LICENSES.md  as above
 #
 # The archive format is the one the platform's own users reach for: a `.zip` on
 # Windows, a `.dmg` on macOS, a `.tar.gz` on Linux — and a `.tar.gz` beside the
@@ -52,11 +52,14 @@ case "$target" in
   *windows*) exe=.exe ;;
 esac
 
-# The tag is both the archive's name and the binary's: a CLI build is asked for
-# its help as `linkr-cli`, and the usage line reads the name it was run by.
-tag=linkr
+# The archive still carries the Linkr Bee name, but the executable inside it is
+# `bee`: `linkr` is a separate Radxa project, and two programs must not fight
+# over one command name. A CLI build is asked for its help as `bee-cli`.
+tag=linkr-bee
+bin=bee
 if [ "$variant" = cli ]; then
-  tag=linkr-cli
+  tag=linkr-bee-cli
+  bin=bee-cli
 fi
 name="$tag-$version-$target"
 stage=$(mktemp -d)
@@ -74,7 +77,7 @@ else
 fi
 
 mkdir -p "$stage/$name"
-cp "$crate_dir/target/$target/release/linkr$exe" "$stage/$name/$tag$exe"
+cp "$crate_dir/target/$target/release/bee$exe" "$stage/$name/$bin$exe"
 cp "$crate_dir/README.md" "$stage/$name/README.md"
 if [ -f "$repo_dir/LICENSE" ]; then
   cp "$repo_dir/LICENSE" "$stage/$name/LICENSE"
@@ -118,7 +121,7 @@ case "$target" in
     ;;
   *apple-darwin*)
     # The volume holds the files themselves — no top folder — so the window it
-    # opens in shows `linkr` to drag wherever the user keeps tools. The
+    # opens in shows `bee` to drag wherever the user keeps tools. The
     # tarball is written first because it is the format the smoke test reads
     # on a machine that cannot mount images.
     tarball

@@ -635,7 +635,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 std::process::exit(0);
             }
             "-V" | "--version" => {
-                println!("linkr {}", env!("CARGO_PKG_VERSION"));
+                println!("bee {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--licenses" => args.licenses = true,
@@ -1254,10 +1254,10 @@ fn main() -> io::Result<()> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "linkr".to_string());
+        .unwrap_or_else(|| "bee".to_string());
     let argv: Vec<String> = raw.map(|arg| arg.to_string_lossy().into_owned()).collect();
     // The subcommand form is a *writing* of the same command line and not a
-    // second one: `linkr exec -- df -h` becomes `linkr --exec "df -h"` before
+    // second one: `bee exec -- df -h` becomes `bee --exec "df -h"` before
     // anything is parsed, so there is one grammar to read, one table behind the
     // help and the completion, and one place a bug can live. See
     // `cli::expand_subcommand`.
@@ -2079,7 +2079,7 @@ fn run(app: &mut App) -> io::Result<()> {
     let mut guard = match TerminalGuard::enter() {
         Ok(guard) => guard,
         Err(why) if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
-            eprintln!("linkr: the TUI needs an interactive terminal ({why})");
+            eprintln!("bee: the TUI needs an interactive terminal ({why})");
             std::process::exit(2);
         }
         Err(why) => return Err(why),
@@ -3009,7 +3009,7 @@ mod tests {
 
     fn args(list: &[&str]) -> Args {
         let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
-        parse_args("linkr", &owned)
+        parse_args("bee", &owned)
     }
 
     /// `--exec` and its terms travel together, because they are one request
@@ -3117,7 +3117,7 @@ mod tests {
     /// before running it, so it has to name the parts a script depends on.
     #[test]
     fn capabilities_names_the_contract_a_script_depends_on() {
-        let json = capabilities("linkr", true);
+        let json = capabilities("bee", true);
         assert!(json.starts_with("{\"version\":\""), "{json}");
         assert!(json.ends_with("}\n"));
         assert!(json.contains("\"exec\""), "{json}");
@@ -3151,8 +3151,8 @@ mod tests {
             linkr_tui::exec::cli::DEFAULT_TIMEOUT.as_millis()
         )));
 
-        let text = capabilities("linkr", false);
-        assert!(text.starts_with("linkr "), "{text}");
+        let text = capabilities("bee", false);
+        assert!(text.starts_with("bee "), "{text}");
         assert!(text.contains("--exec COMMAND"), "{text}");
         assert!(text.contains("Exit codes"), "{text}");
         #[cfg(feature = "tui")]
@@ -3215,8 +3215,8 @@ mod tests {
         // not a request to open the terminal.
         #[cfg(feature = "cli")]
         {
-            assert_eq!(Mode::from(&args(&["--doctor"]), "linkr"), Mode::Cli);
-            assert_eq!(Mode::from(&args(&["--send", "line"]), "linkr"), Mode::Cli);
+            assert_eq!(Mode::from(&args(&["--doctor"]), "bee"), Mode::Cli);
+            assert_eq!(Mode::from(&args(&["--send", "line"]), "bee"), Mode::Cli);
             for refused in [
                 &["--serve", "--bridge", "-", "--doctor"][..],
                 &["--serve", "--bridge", "-", "--send", "line"],
@@ -3303,22 +3303,22 @@ mod tests {
     #[test]
     fn the_three_modes_are_reachable_and_distinguishable() {
         // A plain launch is the terminal.
-        assert_eq!(Mode::from(&args(&[]), "linkr"), Mode::Tui);
+        assert_eq!(Mode::from(&args(&[]), "bee"), Mode::Tui);
 
         // Asking a question is asking for an answer, so the answer is what
         // arrives and then the program leaves.
         assert_eq!(
-            Mode::from(&args(&["--query-info"]), "linkr"),
+            Mode::from(&args(&["--query-info"]), "bee"),
             Mode::Cli,
             "a query asked and left"
         );
 
         // The script mode says so.
-        assert_eq!(Mode::from(&args(&["--no-terminal"]), "linkr"), Mode::Cli);
+        assert_eq!(Mode::from(&args(&["--no-terminal"]), "bee"), Mode::Cli);
         // And it wins even with nothing asked for, which is the point: a
         // dial with no questions is still a script run.
         assert_eq!(
-            Mode::from(&args(&["--no-terminal"]), "linkr"),
+            Mode::from(&args(&["--no-terminal"]), "bee"),
             Mode::Cli,
             "a bare --no-terminal is a script run"
         );
@@ -3326,13 +3326,13 @@ mod tests {
         // The middle mode: leave the terminal until the questions are
         // answered, then take it over on the link that answered them.
         assert_eq!(
-            Mode::from(&args(&["--cli-then-tui", "--query-uart"]), "linkr"),
+            Mode::from(&args(&["--cli-then-tui", "--query-uart"]), "bee"),
             Mode::CliThenTui
         );
         // And with nothing asked for, it is still the middle mode — that is a
         // way to open the terminal only, which the terminal alone cannot say.
         assert_eq!(
-            Mode::from(&args(&["--cli-then-tui"]), "linkr"),
+            Mode::from(&args(&["--cli-then-tui"]), "bee"),
             Mode::CliThenTui
         );
     }
@@ -3344,9 +3344,9 @@ mod tests {
     #[cfg(feature = "cli")]
     #[test]
     fn the_two_mode_flags_are_not_a_conflict_on_their_own() {
-        assert_eq!(Mode::from(&args(&["--no-terminal"]), "linkr"), Mode::Cli);
+        assert_eq!(Mode::from(&args(&["--no-terminal"]), "bee"), Mode::Cli);
         assert_eq!(
-            Mode::from(&args(&["--cli-then-tui"]), "linkr"),
+            Mode::from(&args(&["--cli-then-tui"]), "bee"),
             Mode::CliThenTui
         );
     }
@@ -3365,16 +3365,16 @@ mod tests {
         assert!(!args(&[]).serve, "a session is asked for, never assumed");
         let parsed = args(&["--bridge", "-", "--serve"]);
         assert!(parsed.serve);
-        assert_eq!(Mode::from(&parsed, "linkr"), Mode::Serve);
+        assert_eq!(Mode::from(&parsed, "bee"), Mode::Serve);
         // A session holds the link the command line named, so naming one is
         // what it takes; the same mode either way, because what it dials is
         // the same question and the session answers it lazily.
         assert_eq!(
-            Mode::from(&args(&["--ble-name", "Linkr", "--serve"]), "linkr"),
+            Mode::from(&args(&["--ble-name", "Linkr", "--serve"]), "bee"),
             Mode::Serve
         );
 
-        let json = capabilities("linkr", true);
+        let json = capabilities("bee", true);
         assert!(json.contains("\"session\""), "{json}");
         assert!(
             json.contains(&linkr_tui::serve::operations_json()),

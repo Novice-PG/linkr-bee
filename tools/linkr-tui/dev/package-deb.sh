@@ -10,11 +10,11 @@
 #   dev/package-deb.sh x86_64-unknown-linux-gnu
 #   dev/package-deb.sh aarch64-unknown-linux-gnu dist
 #
-# Produces <outdir>/linkr_<version>_<arch>.deb holding
-#   usr/bin/linkr                  the binary
-#   usr/share/doc/linkr/README.md  what it is and how to run it
-#   usr/share/doc/linkr/LICENSE    the licence it ships under
-#   usr/share/doc/linkr/THIRD_PARTY_LICENSES.md  the components it links
+# Produces <outdir>/linkr-bee_<version>_<arch>.deb holding
+#   usr/bin/bee                        the command
+#   usr/share/doc/linkr-bee/README.md  what it is and how to run it
+#   usr/share/doc/linkr-bee/LICENSE    the licence it ships under
+#   usr/share/doc/linkr-bee/THIRD_PARTY_LICENSES.md  the components it links
 #
 # A cross target on a different host gets the matching linker, `CC_<target>`
 # and the target's own pkg-config directory (where the cross `libdbus-1-dev`
@@ -69,7 +69,7 @@ if [ "$target" = "$host" ]; then
 else
   readelf=$(printf '%s' "$cc" | sed 's/gcc$/readelf/')
 fi
-glibc=$("$readelf" --dyn-syms --wide "$crate_dir/target/$target/release/linkr" |
+glibc=$("$readelf" --dyn-syms --wide "$crate_dir/target/$target/release/bee" |
   grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
 if [ -n "$glibc" ]; then
   libc="libc6 (>= ${glibc#GLIBC_})"
@@ -82,18 +82,18 @@ trap 'rm -rf "$stage"' EXIT
 # The archive's root entry should read like a root: `mktemp -d` makes it 0700.
 chmod 755 "$stage"
 
-install -D -m 755 "$crate_dir/target/$target/release/linkr" "$stage/usr/bin/linkr"
-install -D -m 644 "$crate_dir/README.md" "$stage/usr/share/doc/linkr/README.md"
+install -D -m 755 "$crate_dir/target/$target/release/bee" "$stage/usr/bin/bee"
+install -D -m 644 "$crate_dir/README.md" "$stage/usr/share/doc/linkr-bee/README.md"
 if [ -f "$repo_dir/LICENSE" ]; then
-  install -D -m 644 "$repo_dir/LICENSE" "$stage/usr/share/doc/linkr/LICENSE"
+  install -D -m 644 "$repo_dir/LICENSE" "$stage/usr/share/doc/linkr-bee/LICENSE"
 fi
 install -D -m 644 "$crate_dir/THIRD_PARTY_LICENSES.md" \
-  "$stage/usr/share/doc/linkr/THIRD_PARTY_LICENSES.md"
+  "$stage/usr/share/doc/linkr-bee/THIRD_PARTY_LICENSES.md"
 
 installed_size=$(du -sk "$stage" | cut -f1)
 mkdir -p "$stage/DEBIAN"
 cat > "$stage/DEBIAN/control" <<EOF
-Package: linkr
+Package: linkr-bee
 Version: $version
 Section: comm
 Priority: optional
@@ -108,7 +108,7 @@ Description: Terminal console for Linkr Bee wireless serial bridges
 EOF
 
 mkdir -p "$outdir"
-deb=$(CDPATH='' cd -- "$outdir" && pwd)/"linkr_${version}_${arch}.deb"
+deb=$(CDPATH='' cd -- "$outdir" && pwd)/"linkr-bee_${version}_${arch}.deb"
 dpkg-deb --build --root-owner-group "$stage" "$deb"
 
 echo "$deb"

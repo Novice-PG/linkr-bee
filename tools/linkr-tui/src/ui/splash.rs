@@ -6,7 +6,7 @@
 //! the interface gets is a whole one, not one that had a splash peeled off it.
 //!
 //! The rows are the same things the design puts on the mark everywhere else —
-//! [`crate::logo`] supplies the picture, `linkr` and the version say what is
+//! [`crate::logo`] supplies the picture, `bee` and the version say what is
 //! running — and the theme comes from the capability the whole interface is
 //! drawn with, so a `LINKR_LOGO` or `LINKR_TUI_COLOR` override reaches this
 //! frame the same way it reaches every other one. The mark is transparent,
@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::default());
     }
     lines.push(Line::from(vec![
-        Span::styled("linkr", theme.accent_strong().add_modifier(Modifier::BOLD)),
+        Span::styled("bee", theme.accent_strong().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme.muted()),
     ]));
     lines.push(Line::from(Span::styled(

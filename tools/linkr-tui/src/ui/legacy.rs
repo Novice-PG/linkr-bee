@@ -3,7 +3,7 @@
 //! Windows has two consoles behind the same window: Windows Terminal, which
 //! is a modern terminal emulator and the one the interface was designed
 //! against, and conhost — the host every console application got before it,
-//! still what a plain `linkr.exe` opens in. conhost is not a terminal
+//! still what a plain `bee.exe` opens in. conhost is not a terminal
 //! emulator in the same sense: it re-renders the screen itself, draws its own
 //! scrollbar over the right edge, and decides on its own how wide a glyph is.
 //!

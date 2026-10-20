@@ -4,7 +4,7 @@
 //! dependencies, their licences, and the people who built the project. The full
 //! normal-dependency closure — hundreds of transitive crates on some targets —
 //! is too long for a modal, so it lives in `THIRD_PARTY_LICENSES.md`, which is
-//! shipped beside the binary and printed by `linkr --licenses`.
+//! shipped beside the binary and printed by `bee --licenses`.
 //!
 //! Both artefacts are generated from `cargo metadata` and `cargo tree` by
 //! `dev/gen-licenses.py`; CI runs that generator with `--check` so a dependency
@@ -42,7 +42,7 @@ pub const PROJECT_LICENSE: &str = env!("CARGO_PKG_LICENSE");
 
 /// A short line naming the project and the build, for the top of the window.
 pub fn heading() -> String {
-    format!("linkr {}", env!("CARGO_PKG_VERSION"))
+    format!("bee {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// The number of transitive crates, which the window names rather than lists.

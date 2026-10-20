@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the crate's ANSI frame dump into a standalone HTML file.
 
-Why this exists: the frame dump (`linkr --print-frame --ansi`) carries the real
+Why this exists: the frame dump (`bee --print-frame --ansi`) carries the real
 palette as true-colour escapes, but a terminal is the only place those show up.
 This renders the same bytes as a grid of fixed one-column cells, so the preview
 lines up exactly like the TUI does — including wide (CJK) glyphs, which occupy
@@ -215,7 +215,7 @@ def main() -> int:
         print(__doc__)
         return 2
     source, target = sys.argv[1], sys.argv[2]
-    title = sys.argv[3] if len(sys.argv) > 3 else "linkr TUI"
+    title = sys.argv[3] if len(sys.argv) > 3 else "bee TUI"
     with open(source, encoding="utf-8") as handle:
         dump = handle.read()
     rows = parse_rows(dump)

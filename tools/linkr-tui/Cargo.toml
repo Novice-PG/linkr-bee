@@ -13,7 +13,7 @@ cli = []
 tui = []
 
 [[bin]]
-name = "linkr"
+name = "bee"
 path = "src/main.rs"
 
 [dependencies]

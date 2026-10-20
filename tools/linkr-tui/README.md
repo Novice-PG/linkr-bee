@@ -1,4 +1,4 @@
-# linkr-tui — the host terminal, rebuilt
+# bee — the host terminal for Linkr Bee
 
 A cross-platform host client for the Linkr Bee bridge: one binary, a CLI and a
 TUI over a shared core. This crate is a **from-scratch rebuild** of the TUI that
@@ -176,7 +176,7 @@ normal-dependency closure is generated from `Cargo.lock`, `cargo metadata` and
 and printed without a terminal:
 
 ```sh
-linkr --licenses
+bee --licenses
 ```
 
 The notice carries the complete licence text for every component, not just an
@@ -197,8 +197,8 @@ wants, because every command line pays for the dial again and on Bluetooth the
 dial is seconds:
 
 ```console
-$ linkr --ble-name Linkr --serve
-{"event":"ready","program":"linkr","version":"0.5.0","link":"ble:name:Linkr",
+$ bee --ble-name Linkr --serve
+{"event":"ready","program":"bee","version":"0.5.0","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
         "lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
@@ -310,14 +310,14 @@ four Debian architectures the crate ships to: `amd64`, `arm64`, `armhf`, `i386`.
 The scripts are the *only* definition of those layouts: the CI matrix and a
 developer's shell call the same ones, so a release cannot be assembled two ways.
 A `--cli` before the target packs the same program built without the interface,
-as `linkr-cli-<version>-<target>.<ext>` — the archive an agent harness is handed,
+as `linkr-bee-cli-<version>-<target>.<ext>` — the archive an agent harness is handed,
 and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-0.5.0-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-cli-0.5.0-x86_64-pc-windows-gnu.zip
-dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr_0.5.0_armhf.deb
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.5.0-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.5.0_armhf.deb
 ```
 
 A Linux target other than the host links *that* target's libdbus, which is not

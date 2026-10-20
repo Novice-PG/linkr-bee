@@ -29,12 +29,12 @@ case "$stem" in
     # Capture first, match on the string.
     fields=$(dpkg-deb -f "$archive" Package Architecture)
     echo "$fields"
-    printf '%s\n' "$fields" | grep -qx 'Package: linkr' || {
+    printf '%s\n' "$fields" | grep -qx 'Package: linkr-bee' || {
       echo "unexpected package name" >&2
       exit 1
     }
     contents=$(dpkg-deb -c "$archive")
-    printf '%s\n' "$contents" | grep -E ' \./usr/bin/linkr$' >/dev/null || {
+    printf '%s\n' "$contents" | grep -E ' \./usr/bin/bee$' >/dev/null || {
       echo "the package holds no binary" >&2
       exit 1
     }
@@ -87,8 +87,8 @@ esac
 echo "$listing"
 name=${stem%.tar.gz}
 name=${name%.zip}
-bin=linkr
-case "$name" in linkr-cli-*) bin=linkr-cli ;; esac
+bin=bee
+case "$name" in linkr-bee-cli-*) bin=bee-cli ;; esac
 # Nothing may be in here that the script did not put there: a stray file in a
 # release is uploaded before anyone reads the diff. The folder is spelled both
 # ways because `tar` lists a directory with its trailing slash and a `find`

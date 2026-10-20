@@ -128,7 +128,7 @@ impl JsonFile {
     /// This is the only way to mutate the file, and the reason is that more
     /// than one door opens onto it: this program keeps the settings store and
     /// the agent's store over the same JSON — see [`crate::settings`] — and a
-    /// second `linkr` on the bench is a third writer. Each door holds its copy
+    /// second `bee` on the bench is a third writer. Each door holds its copy
     /// of the whole object, so a write that flushed the copy it read at
     /// startup would put the file back to that moment and drop everything the
     /// other doors have written since: change the theme and the model's key is

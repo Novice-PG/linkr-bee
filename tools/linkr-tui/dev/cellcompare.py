@@ -9,7 +9,7 @@ highlighted chip still counts and a chip's padding still does not.
 
 Needs Pillow (`python3 -m pip install pillow`).
 
-    linkr --lang zh --theme dark --transport ble --print-frame 110x30 > mine.txt
+    bee --lang zh --theme dark --transport ble --print-frame 110x30 > mine.txt
     python3 dev/cellcompare.py --frame mine.txt --shot tui_main_zh_dark.png
 
 Two readings of the output matter:

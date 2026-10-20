@@ -8,7 +8,7 @@ only means anything next to each other — so this runs the real binary once per
 surface and puts the screens on a single page, the way the design reviews were
 done.
 
-Every screen here comes from `linkr --print-frame --ansi`, which is the same
+Every screen here comes from `bee --print-frame --ansi`, which is the same
 painting code the terminal drives; this only transcribes it. A preview that drew
 the frames itself would be a second implementation, and a second implementation
 is exactly what a preview is supposed to catch.
@@ -119,7 +119,7 @@ COLOURS = (
 
 CURSOR = (
     "\x1b[2J\x1b[H"
-    "\x1b[1mlinkr@bee\x1b[0m:\x1b[34m~\x1b[0m$ linkr --flash firmware.bin\r\n"
+    "\x1b[1mlinkr@bee\x1b[0m:\x1b[34m~\x1b[0m$ bee --flash firmware.bin\r\n"
     "\x1b[32m[######      ]  60%\x1b[0m\r\n"
     # The same row, painted a second time: the first bar must not be left
     # behind, and neither must the tail of a longer one.
@@ -288,8 +288,8 @@ def main() -> int:
     parser.add_argument("--size", default="110x32", help="COLSxROWS")
     parser.add_argument(
         "--binary",
-        default=str(CRATE / "target" / "debug" / "linkr"),
-        help="the linkr binary to render with",
+        default=str(CRATE / "target" / "debug" / "bee"),
+        help="the bee binary to render with",
     )
     options = parser.parse_args()
 

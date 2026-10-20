@@ -21,8 +21,8 @@ use std::time::Duration;
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// One run of the binary, for the refusals that exit before a session opens.
-fn linkr(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_linkr"))
+fn bee(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_bee"))
         .args(args)
         .output()
         .expect("the binary runs")
@@ -43,7 +43,7 @@ impl Session {
     /// A session dialling whatever the arguments say. Everything else — the
     /// pipes, the reader thread, the patience — is the same session.
     fn start_with(dial: &[&str]) -> Session {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_linkr"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_bee"))
             .args(dial)
             .args(["--serve"])
             .stdin(Stdio::piped())
@@ -126,7 +126,7 @@ fn number(line: &str, key: &str) -> u64 {
 fn a_session_answers_many_requests_on_one_link() {
     let mut session = Session::start();
     let ready = session.until("\"event\":\"ready\"");
-    assert!(ready.contains("\"program\":\"linkr\""), "{ready}");
+    assert!(ready.contains("\"program\":\"bee\""), "{ready}");
     assert!(ready.contains("\"ops\":["), "{ready}");
     assert!(ready.contains("\"exec\""), "{ready}");
 
@@ -276,7 +276,7 @@ fn a_session_that_names_something_else_to_do_is_a_usage_error() {
         vec!["--bridge", "-", "--serve", "--capabilities"],
         vec!["--serve"],
     ] {
-        let output = linkr(&argv);
+        let output = bee(&argv);
         assert_eq!(
             output.status.code(),
             Some(2),

@@ -15,7 +15,7 @@
 //! equivalent would have had:
 //!
 //! ```text
-//! {"event":"ready","program":"linkr","version":"0.5.0","link":"ble EE:…","ops":[…]}
+//! {"event":"ready","program":"bee","version":"0.5.0","link":"ble EE:…","ops":[…]}
 //! {"id":1,"op":"query-uart"}                       →  {"event":"begin","id":1,"op":"uart"} … {"event":"end","id":1,"code":0}
 //! {"id":2,"op":"exec","cmd":"uname -a"}            →  the exec events, then end with the command's own code
 //! {"id":3,"op":"wifi"}                             →  a result event, then end
@@ -151,7 +151,7 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration) -> i32 {
         "{}",
         cli::json_event(&[
             ("event", Json::Text("ready")),
-            ("program", Json::Text("linkr")),
+            ("program", Json::Text("bee")),
             ("version", Json::Text(env!("CARGO_PKG_VERSION"))),
             ("link", Json::Text(&link)),
             ("ops", Json::Raw(&ops)),

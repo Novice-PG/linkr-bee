@@ -8,7 +8,7 @@
 //!
 //! The reference clients (`tools/linkr_ble_terminal.py`,
 //! `tools/linkr_ble_terminal_c`) print scripts for the same three shells from
-//! the same kind of table, so `linkr --print-completion zsh` can be dropped
+//! the same kind of table, so `bee --print-completion zsh` can be dropped
 //! next to `linkr_ble_terminal.py --print-completion zsh` and behave.
 
 use std::collections::HashMap;
@@ -348,8 +348,8 @@ impl Flag {
 
 /// The subcommands, and what each one is an alias of.
 ///
-/// A subcommand is not a second command line: `linkr scan` is the *same* line
-/// as `linkr --scan`, written as words. [`expand_subcommand`] rewrites it
+/// A subcommand is not a second command line: `bee scan` is the *same* line
+/// as `bee --scan`, written as words. [`expand_subcommand`] rewrites it
 /// before the one parser sees anything, so a subcommand can never mean
 /// something the flag of the same name does not — there is one grammar to
 /// teach, one table for the help and the completion, and one place a bug can
@@ -391,7 +391,7 @@ pub fn subcommand_named(word: &str) -> Option<&'static str> {
 /// The subcommands the capability document lists.
 ///
 /// The grammar knows `tui` in every build — a binary without the interface
-/// still answers `linkr tui`, with the sentence that it has no interface to
+/// still answers `bee tui`, with the sentence that it has no interface to
 /// open, which is why `usage` shows the whole table and the footnote beside
 /// it — but the document promises what *this* binary can be asked for, and
 /// opening the terminal is not something it can do. The same rule the
@@ -431,8 +431,8 @@ fn takes_a_value(flag: &str) -> Option<bool> {
 
 /// Rewrite a subcommand form of the command line into the flag form.
 ///
-/// `linkr scan --json` becomes `linkr --scan --json`, `linkr exec -- df -h`
-/// becomes `linkr --exec "df -h"`, and a line with no subcommand in it is
+/// `bee scan --json` becomes `bee --scan --json`, `bee exec -- df -h`
+/// becomes `bee --exec "df -h"`, and a line with no subcommand in it is
 /// handed back untouched — which is what keeps every existing script, every
 /// existing flag and every existing test working. The subcommand's own words
 /// are consumed, the flags around them (before *and* after, because a global
@@ -789,7 +789,7 @@ fn shell_quote(text: &str) -> String {
 }
 
 /// The function name a completion serves under: one per program name, so two
-/// builds installed side by side do not fight over `_linkr`.
+/// builds installed side by side do not fight over `_bee`.
 fn function_name(prog: &str) -> String {
     let mut name = String::from("_");
     for ch in prog.chars() {
@@ -2335,7 +2335,7 @@ mod tests {
     #[test]
     fn each_shell_names_every_flag_and_the_program_it_serves() {
         for shell in COMPLETION_SHELLS {
-            let script = completion_script(shell, "linkr").expect("a script");
+            let script = completion_script(shell, "bee").expect("a script");
             for flag in FLAGS {
                 // fish spells the dashes separately: `--lang` is offered as
                 // `-l lang`, and `-h` as `-s h`. The flag is still the flag,
@@ -2355,17 +2355,14 @@ mod tests {
                     flag.name
                 );
             }
-            assert!(script.contains("linkr"), "{shell} never names the program");
+            assert!(script.contains("bee"), "{shell} never names the program");
             // fish has no function of its own: `complete -c` is all it needs,
             // which is why it is the one shell with nothing to name.
             if shell != "fish" {
-                assert!(
-                    script.contains("_linkr"),
-                    "{shell} misses its function name"
-                );
+                assert!(script.contains("_bee"), "{shell} misses its function name");
             }
         }
-        assert!(completion_script("csh", "linkr").is_none());
+        assert!(completion_script("csh", "bee").is_none());
     }
 
     /// A program name that is not a shell identifier must not produce a broken
@@ -2516,7 +2513,7 @@ mod tests {
             .find(|flag| flag.name == "--transport")
             .expect("documented");
         assert_eq!(transport.choices, &["ble", "lan", "stdio"]);
-        let zsh = completion_script("zsh", "linkr").expect("script");
+        let zsh = completion_script("zsh", "bee").expect("script");
         assert!(zsh.contains("('ble' 'lan' 'stdio')"), "{zsh}");
 
         // The theme choices are the themes: a palette that cannot be named on
@@ -2536,7 +2533,7 @@ mod tests {
     /// about what a flag is called — and every flag appears in the usage text.
     #[test]
     fn usage_lists_the_same_flags_the_completion_does() {
-        let text = usage("linkr", "about line");
+        let text = usage("bee", "about line");
         for flag in FLAGS {
             assert!(
                 text.contains(flag.name),
@@ -2550,7 +2547,7 @@ mod tests {
             );
         }
         assert!(text.starts_with("about line"));
-        assert!(text.contains("Usage: linkr [OPTIONS]"));
+        assert!(text.contains("Usage: bee [OPTIONS]"));
     }
 
     /// Words with a quote in them must not end the string early: a flag's help
@@ -2664,10 +2661,10 @@ mod tests {
 
     /// Every expansion is written in flags the table knows, and every
     /// subcommand is in the help: the two things a reader of `--help` and a
-    /// caller of `linkr <word>` both depend on.
+    /// caller of `bee <word>` both depend on.
     #[test]
     fn every_subcommand_is_in_the_help_and_expands_into_real_flags() {
-        let text = usage("linkr", "about line");
+        let text = usage("bee", "about line");
         for (name, about) in SUBCOMMANDS {
             assert!(text.contains(name), "help omits {name}");
             assert!(text.contains(about), "help omits {name}'s line");

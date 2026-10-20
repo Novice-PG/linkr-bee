@@ -1,4 +1,4 @@
-name: Host terminal (linkr-tui)
+name: Host terminal (bee)
 
 # The host client is a Rust crate under tools/linkr-tui. It has its own gates —
 # one of which cross-checks every target a Linux runner can compile for — and
@@ -345,8 +345,8 @@ jobs:
               *.deb) dpkg-deb -x "$archive" "$dir" ;;
               *) continue ;;
             esac
-            bin=linkr
-            case "$stem" in linkr-cli-*) bin=linkr-cli ;; esac
+            bin=bee
+            case "$stem" in linkr-bee-cli-*) bin=bee-cli ;; esac
             found=$(find "$dir" -type f \( -name "$bin" -o -name "$bin.exe" \) | head -1)
             if [ -z "$found" ]; then
               echo "no $bin in $archive" >&2
@@ -354,7 +354,7 @@ jobs:
             fi
             echo "running $found"
             "$found" --version
-            if [ "$bin" = linkr-cli ]; then
+            if [ "$bin" = bee-cli ]; then
               # The CLI build runs a command over the built-in loopback: the
               # exec path is what an agent harness calls, so it is what the
               # archive proves before it is uploaded.
@@ -441,12 +441,11 @@ jobs:
             echo "release $GITHUB_REF_NAME already exists"
           else
             echo "creating release $GITHUB_REF_NAME"
-            # The tag is already namespaced (`linkr-tui-v0.2.0`), so the title
-            # is the program and the version — `linkr-tui v0.2.0`. Interpolating
-            # the whole ref here produced `linkr-tui linkr-tui-v0.2.0`, which is
-            # the tag's own prefix said twice.
+            # The tag is namespaced (`linkr-tui-v0.2.0`) while the release
+            # carries the `linkr-bee` archive prefix; the title names the
+            # program and version without repeating the tag's whole ref.
             gh release create "$GITHUB_REF_NAME" \
-              --title "linkr-tui ${GITHUB_REF_NAME#linkr-tui-}" --generate-notes
+              --title "linkr-bee ${GITHUB_REF_NAME#linkr-tui-}" --generate-notes
           fi
 
       # A draft is invisible to everyone without the token, so from outside it

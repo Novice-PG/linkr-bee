@@ -2,7 +2,7 @@
 //
 // This is the direct-dependency half of THIRD_PARTY_LICENSES.md: the
 // components the About window shows. The full transitive list lives in
-// that file and is what `linkr --licenses` prints.
+// that file and is what `bee --licenses` prints.
 
 pub const COMPONENTS: &[Component] = &[
     Component {
