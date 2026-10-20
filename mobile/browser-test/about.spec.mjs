@@ -1,4 +1,7 @@
 import { test, expect } from "@playwright/test";
+import { ABOUT_DATA } from "../../web/about-data.js";
+
+const shippedComponents = ABOUT_DATA.groups.flatMap((group) => group.components);
 
 /* The About page is a compliance surface: it must be reachable, name the
  * components the build ships, and carry the CC-BY attribution for the cursor
@@ -22,8 +25,14 @@ test("the About page lists components, licences and contributors", async ({ page
   await expect(page.locator("#aboutMeta")).toContainText("0.1.0");
   await expect(page.locator("#aboutMeta")).toContainText("Apache-2.0");
 
-  // 25 runtime + 5 firmware + 1 artwork component, generated from the tree.
-  await expect(page.locator("#aboutComponents .about-component")).toHaveCount(31);
+  // Dependency upgrades can add or remove transitive components.
+  await expect(page.locator("#aboutComponents .about-component")).toHaveCount(shippedComponents.length);
+  for (const name of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai"]) {
+    const component = shippedComponents.find((item) => item.name === name);
+    expect(component).toBeDefined();
+    await expect(page.locator("#aboutComponents .about-component").filter({ hasText: name }))
+      .toContainText(component.version);
+  }
   const components = page.locator("#aboutComponents");
   await expect(components).toContainText("@capacitor/core");
   await expect(components).toContainText("marked");
