@@ -1,7 +1,7 @@
 # macOS 产物
 
 这里放 macOS 的两份产物，由仓库的 GitHub Actions 工作流
-`.github/workflows/linkr-tui.yml` 在 macOS 运行器上构建（当前这批来自合并后的 `main` `655ae36` 的 tag `linkr-tui-v0.5.0`，与 Releases 页同名附件同一工作流），
+`.github/workflows/linkr-tui.yml` 在 macOS 运行器上构建（当前这批来自合并后的 `main` 的 tag `linkr-tui-v0.5.0`，与 Releases 页同名附件同一工作流；具体提交以发布页说明为准），
 每种芯片各给两种打包格式（内容相同）：
 
 - `linkr-bee-0.5.0-aarch64-apple-darwin.dmg` / `…-aarch64-apple-darwin.tar.gz`（Apple Silicon）
