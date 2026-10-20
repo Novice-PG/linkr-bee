@@ -1179,6 +1179,7 @@ fn listen(
         drop(events);
         drop(listening);
         drop(adapter);
+        #[cfg(target_os = "linux")]
         drop(manager);
         tokio::time::sleep(THE_LAST_MOMENT).await;
         outcome

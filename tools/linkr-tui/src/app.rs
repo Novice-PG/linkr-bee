@@ -689,6 +689,11 @@ pub struct App {
     /// touches the filesystem, and a `Default` that writes to the user's home
     /// directory is not a default anyone can run a test suite against.
     pub agent_store: Option<crate::agent::store::JsonFile>,
+    /// Owner of the loaded conversations, retained while disconnected.
+    pub agent_device: String,
+    /// Only bytes received from this connection, never local echo or UI text.
+    pub agent_serial: crate::serial::journal::SerialJournal,
+    pub agent_decoder: crate::views::terminal::Utf8Stream,
     /// Where the interface's own choices are kept between runs. `None` until
     /// `main` opens it — and `None` in a preview, which is what keeps a
     /// printed frame from writing to the user's real settings file. See
@@ -718,7 +723,7 @@ pub struct App {
     /// a second prompt submitted while the first was still being answered
     /// dropped the first one's channel — the reply the user was waiting for,
     /// lost silently.
-    pub agent_replies: Vec<std::sync::mpsc::Receiver<(String, crate::agent::runtime::Progress)>>,
+    pub agent_replies: Vec<crate::agent::runtime::PendingReply>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
     /// Whether the pane's first undecodable byte has already been announced.
@@ -862,6 +867,11 @@ impl Default for App {
             quiet_connect: false,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
+            agent_device: "unknown".to_string(),
+            agent_serial: crate::serial::journal::SerialJournal::new(
+                crate::serial::journal::DEFAULT_CAPACITY,
+            ),
+            agent_decoder: crate::views::terminal::Utf8Stream::default(),
             settings: None,
             lan_store: None,
             desktop_clipboard: false,
@@ -903,8 +913,7 @@ impl App {
         self.capability.glyphs
     }
 
-    /// The current language's table.
-    /// The key the agent's per-device state is stored under.
+    /// The key owning the loaded device state, even while disconnected.
     ///
     /// The link the app is on, spelled the way it dialled: `ble:EE:C7:…` names
     /// an address, `lan:host` a bridge, `stdio:…` a command. The interface's
@@ -912,12 +921,7 @@ impl App {
     /// and a store they shared would answer a new board with the last one's
     /// tasks and notes.
     pub fn agent_device_key(&self) -> String {
-        let described = self.session.describe();
-        if described.trim().is_empty() {
-            "unknown".to_string()
-        } else {
-            described.to_string()
-        }
+        self.agent_device.clone()
     }
 
     /// Seconds since boot, for a timestamp that means something in a log and
@@ -1544,6 +1548,10 @@ impl App {
     /// opened, and the state says `connecting` until the link's threads report
     /// it — the same beat-by-beat arrival a synchronous open gets.
     fn adopt(&mut self, opened: OpenedLink) {
+        crate::views::assistant::switch_device(self, &opened.description);
+        self.agent_serial =
+            crate::serial::journal::SerialJournal::new(crate::serial::journal::DEFAULT_CAPACITY);
+        self.agent_decoder = crate::views::terminal::Utf8Stream::default();
         let kind = opened.kind;
         self.session.adopt(opened);
         self.transport = kind;
@@ -2130,43 +2138,41 @@ impl App {
         // replaced by the next one's.
         let live = std::mem::take(&mut self.agent_replies);
         let mut arrived: Vec<(String, crate::agent::runtime::Progress)> = Vec::new();
-        for receiver in live {
+        for pending in live {
             // The channel is dropped only when the stream is over. Anything else
             // — nothing yet, or a delta in mid-answer — keeps it: a stream that
             // was cut off after its first chunk would otherwise lose the rest,
             // and the answer would stop half-way through without a `Done` to
             // close it.
             let mut closed = false;
-            let mut last: Option<String> = None;
-            while let Ok(item) = receiver.try_recv() {
-                closed = !matches!(item.1, crate::agent::runtime::Progress::Delta(_));
-                last = Some(item.0.clone());
-                arrived.push(item);
-            }
-            if closed {
-                continue;
-            }
-            // A worker that is *gone* is the end of its stream as well, and the
-            // one ending that sends nothing: without this, a channel cut off
-            // after its last delta is kept for ever and the task it belongs to
-            // says the model is still typing. The task is closed as malformed —
-            // the same sentence a provider that answered with no completion
-            // gets — because an answer that stopped mid-stream is exactly that.
-            if matches!(
-                receiver.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Disconnected)
-            ) {
-                if let Some(task_id) = last {
-                    arrived.push((
-                        task_id,
-                        crate::agent::runtime::Progress::Failed(
-                            crate::agent::runtime::Failure::Malformed,
-                        ),
-                    ));
+            loop {
+                match pending.receiver.try_recv() {
+                    Ok(item) => {
+                        if item.0 != pending.task_id {
+                            continue;
+                        }
+                        closed = !matches!(item.1, crate::agent::runtime::Progress::Delta(_));
+                        arrived.push(item);
+                        if closed {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        arrived.push((
+                            pending.task_id.clone(),
+                            crate::agent::runtime::Progress::Failed(
+                                crate::agent::runtime::Failure::Malformed,
+                            ),
+                        ));
+                        closed = true;
+                        break;
+                    }
                 }
-                continue;
             }
-            self.agent_replies.push(receiver);
+            if !closed {
+                self.agent_replies.push(pending);
+            }
         }
 
         for (task_id, progress) in arrived {
@@ -2338,6 +2344,7 @@ impl App {
         for event in self.session.pump() {
             match event {
                 LinkEvent::Data(bytes) => {
+                    self.agent_serial.append(&self.agent_decoder.push(&bytes));
                     self.terminal.push(&bytes);
                     self.note_decode_loss();
                     self.trace.rx(&bytes);
@@ -3929,7 +3936,10 @@ mod multi_reply {
             crate::agent::runtime::Progress::Done(crate::agent::usage::Usage::default()),
         ))
         .expect("send");
-        app.agent_replies = vec![rx1, rx2];
+        app.agent_replies = vec![
+            crate::agent::runtime::PendingReply::new("t1", rx1),
+            crate::agent::runtime::PendingReply::new("t2", rx2),
+        ];
 
         app.drain_agent_replies();
 
@@ -3954,7 +3964,7 @@ mod multi_reply {
         let mut app = App::default();
         app.assistant.tasks = vec![task("t1", "first")];
         let (tx, rx) = std::sync::mpsc::channel();
-        app.agent_replies = vec![rx];
+        app.agent_replies = vec![crate::agent::runtime::PendingReply::new("t1", rx)];
         app.drain_agent_replies();
         assert_eq!(app.agent_replies.len(), 1, "the channel was dropped");
         assert_eq!(app.assistant.tasks[0].status, "asking");
@@ -3997,7 +4007,7 @@ mod multi_reply {
             crate::agent::runtime::Progress::Delta("an answer to something else".to_string()),
         ))
         .expect("send");
-        app.agent_replies = vec![rx];
+        app.agent_replies = vec![crate::agent::runtime::PendingReply::new("ghost", rx)];
         app.drain_agent_replies();
         assert!(
             app.assistant.tasks[0].summary.is_empty(),

@@ -7,10 +7,15 @@
 /// Redact bearer tokens, password/key/token/secret assignments, and URL
 /// userinfo/query/fragment, then cap the result at 2000 characters.
 pub fn redact_task_text(value: &str) -> String {
+    redact_text(value, 2000)
+}
+
+/// Apply the same credential filtering to bounded, transient prompt evidence.
+pub fn redact_text(value: &str, limit: usize) -> String {
     let out = redact_bearer_tokens(value);
     let out = redact_assignments(&out);
     let out = redact_urls(&out);
-    truncate_chars(&out, 2000)
+    truncate_chars(&out, limit)
 }
 
 /// `Bearer <token>` -> `Bearer [redacted]`, case-insensitive, word-boundary.

@@ -85,6 +85,22 @@ pub enum Progress {
     Failed(Failure),
 }
 
+/// A reply keeps its task identity even if its worker exits without sending.
+#[derive(Debug)]
+pub struct PendingReply {
+    pub task_id: String,
+    pub receiver: Receiver<(String, Progress)>,
+}
+
+impl PendingReply {
+    pub fn new(task_id: impl Into<String>, receiver: Receiver<(String, Progress)>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            receiver,
+        }
+    }
+}
+
 /// What came back, when it came back at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completion {
@@ -325,6 +341,39 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         return;
     }
 
+    let is_json = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            value.trim().eq_ignore_ascii_case("application/json") || value.trim().ends_with("+json")
+        });
+    if is_json {
+        match response.text().await {
+            Ok(body) => match whole_text(provider, &body) {
+                Some(text)
+                    if !text.is_empty()
+                        && field(&body, "error").is_none_or(|error| error.trim() == "null") =>
+                {
+                    send(&reply, &job.task_id, Progress::Delta(text));
+                    send(
+                        &reply,
+                        &job.task_id,
+                        Progress::Done(usage_of(provider, &body).unwrap_or_default()),
+                    );
+                }
+                _ => send(&reply, &job.task_id, Progress::Failed(Failure::Malformed)),
+            },
+            Err(why) => send(
+                &reply,
+                &job.task_id,
+                Progress::Failed(Failure::Unreachable(redact(&why.to_string(), &key))),
+            ),
+        }
+        return;
+    }
+
     let mut stream = response.bytes_stream();
     // A partial line survives across chunks: an SSE event is not obliged to
     // arrive in one TCP segment, and cutting the buffer at the chunk boundary
@@ -338,6 +387,7 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
     // is worth keeping.
     let mut saw_text = false;
     let mut usage = Usage::default();
+    let mut finished = false;
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
             Ok(bytes) => bytes,
@@ -359,17 +409,27 @@ async fn send_stream(job: &Job, reply: Option<Sender<(String, Progress)>>) {
         // Every event in the chunk is read, and any text it holds is sent as
         // one delta: a chunk is a unit of what arrived, and one delta per chunk
         // is what the interface renders on.
-        let text = drain_events(provider, &mut buffer, &mut usage);
-        if !text.is_empty() {
+        let batch = read_events(provider, &mut buffer, &mut usage);
+        if let Some(error) = batch.error {
+            send(
+                &reply,
+                &job.task_id,
+                Progress::Failed(Failure::Unreachable(redact(&error, &key))),
+            );
+            return;
+        }
+        finished |= batch.finished;
+        if !batch.text.is_empty() {
             saw_text = true;
-            send(&reply, &job.task_id, Progress::Delta(text));
+            send(&reply, &job.task_id, Progress::Delta(batch.text));
+        }
+        if batch.done {
+            break;
         }
     }
-    if !saw_text {
-        // The provider answered 200 and the body held no completion at all — a
-        // proxy's error page, or a provider answering in a shape this reader
-        // does not know. Calling that a finished turn would file an empty reply
-        // as a success and record it.
+    if !saw_text || !finished {
+        // Neither an empty body nor EOF midway through a reply is a completed
+        // answer. Only a protocol end marker or finish reason proves that.
         send(&reply, &job.task_id, Progress::Failed(Failure::Malformed));
         return;
     }
@@ -480,8 +540,18 @@ fn data_of(frame: &str) -> Option<String> {
 /// can span several chunks. Reading the batch one event at a time without
 /// joining them is how two events in one chunk came out as a single line of
 /// mangled JSON — which parsed as nothing, and the reply went with it.
-fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> String {
-    let mut text = String::new();
+#[derive(Default, Debug)]
+struct EventBatch {
+    text: String,
+    /// An end marker closes the response without waiting for HTTP EOF.
+    done: bool,
+    /// A finish reason also permits EOF, after any final usage event.
+    finished: bool,
+    error: Option<String>,
+}
+
+fn read_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> EventBatch {
+    let mut batch = EventBatch::default();
     while let Some((event, rest)) = next_event(buffer) {
         *buffer = rest;
         let Some(payload) = data_of(&event) else {
@@ -489,9 +559,37 @@ fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> Strin
         };
         let payload = payload.trim();
         if payload == "[DONE]" {
-            // The stream's own end. Whatever follows in the buffer is not part
-            // of the reply.
+            batch.done = true;
+            batch.finished = true;
+            buffer.clear();
             break;
+        }
+        if let Some(error) = field(payload, "error").filter(|value| value.trim() != "null") {
+            batch.error = Some(error.to_string());
+            break;
+        }
+        match provider {
+            crate::agent::config::ANTHROPIC_MESSAGES => {
+                batch.done =
+                    field(payload, "type").and_then(unquote).as_deref() == Some("message_stop");
+                batch.finished |= batch.done;
+            }
+            crate::agent::config::GOOGLE_GENERATIVE_AI => {
+                batch.done = field(payload, "candidates")
+                    .and_then(first_element)
+                    .and_then(|candidate| field(candidate, "finishReason"))
+                    .and_then(unquote)
+                    .is_some_and(|reason| !reason.is_empty());
+                batch.finished |= batch.done;
+            }
+            _ => {
+                if let Some(choice) = field(payload, "choices").and_then(first_element) {
+                    batch.finished |= field(choice, "finish_reason")
+                        .and_then(unquote)
+                        .is_some_and(|reason| !reason.is_empty())
+                        || field(choice, "message").is_some();
+                }
+            }
         }
         // Text and usage are read from the same event, not one *or* the
         // other: several providers — every gateway that reports the bill in
@@ -499,7 +597,7 @@ fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> Strin
         // object beside the final slice of the reply, and an event that was
         // read for its tokens alone would drop the words it came with.
         if let Some(delta) = text_of(provider, payload) {
-            text.push_str(&delta);
+            batch.text.push_str(&delta);
         }
         if let Some(reported) = usage_of(provider, payload) {
             if provider == crate::agent::config::ANTHROPIC_MESSAGES
@@ -525,8 +623,31 @@ fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> Strin
                 *usage = reported;
             }
         }
+        if batch.done {
+            buffer.clear();
+            break;
+        }
     }
-    text
+    batch
+}
+
+#[cfg(test)]
+fn drain_events(provider: &str, buffer: &mut String, usage: &mut Usage) -> String {
+    read_events(provider, buffer, usage).text
+}
+
+/// The complete JSON shapes used when a gateway does not stream.
+fn whole_text(provider: &str, body: &str) -> Option<String> {
+    if provider != crate::agent::config::ANTHROPIC_MESSAGES {
+        return text_of(provider, body);
+    }
+    let mut text = String::new();
+    for block in array_elements(field(body, "content")?) {
+        if field(block, "type").and_then(unquote).as_deref() == Some("text") {
+            text.push_str(&unquote(field(block, "text")?)?);
+        }
+    }
+    Some(text)
 }
 
 /// Decode the valid UTF-8 prefix of `bytes`, holding an unfinished character
@@ -569,13 +690,15 @@ fn decode_utf8(bytes: &mut Vec<u8>) -> String {
 /// so the search is for the longest run of blank-line separators and the event
 /// is everything before it.
 fn next_event(buffer: &str) -> Option<(String, String)> {
-    for separator in ["\r\n\r\n", "\n\n"] {
-        if let Some(at) = buffer.find(separator) {
-            let (event, rest) = buffer.split_at(at);
-            let event = event.trim_end_matches('\r').to_string();
-            let rest = rest[separator.len()..].to_string();
-            return Some((event, rest));
-        }
+    if let Some((at, separator)) = ["\r\n\r\n", "\n\n"]
+        .into_iter()
+        .filter_map(|separator| buffer.find(separator).map(|at| (at, separator)))
+        .min_by_key(|(at, _)| *at)
+    {
+        let (event, rest) = buffer.split_at(at);
+        let event = event.trim_end_matches('\r').to_string();
+        let rest = rest[separator.len()..].to_string();
+        return Some((event, rest));
     }
     None
 }
@@ -2022,5 +2145,23 @@ mod tests {
         );
         // Nothing is listening, so this is `Unreachable` and not a hang.
         assert!(matches!(outcome, Err(Failure::Unreachable(_))));
+    }
+
+    #[test]
+    fn provider_end_markers_keep_text_and_final_usage() {
+        for (provider, body) in [
+            (ANTHROPIC_MESSAGES, concat!(
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+                "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n")),
+            (GOOGLE_GENERATIVE_AI, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"candidatesTokenCount\":7}}\n\n"),
+        ] {
+            let mut buffer = body.to_string();
+            let mut usage = Usage::default();
+            let batch = read_events(provider, &mut buffer, &mut usage);
+            assert!(batch.done && batch.finished, "{provider}");
+            assert_eq!(batch.text, "hi");
+            assert_eq!(usage.output, 7);
+        }
     }
 }

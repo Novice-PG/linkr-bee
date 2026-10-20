@@ -1924,19 +1924,7 @@ fn main() -> io::Result<()> {
 /// stores were built for a `Storage` that nobody opened, and this is the other
 /// half of opening it.
 fn load_agent_state(app: &mut App) {
-    // The key is taken before the store is borrowed, because `agent_device_key`
-    // reads `app` and a mutable borrow of `app.agent_store` is still a borrow
-    // of `app`.
-    let key = app.agent_device_key();
-    // A mutable borrow, even for a read: the `Storage` trait's `set` and
-    // `remove` take `&mut self`, so there is no read-only handle to a store.
-    if let Some(store) = app.agent_store.as_mut() {
-        app.assistant.tasks = linkr_tui::agent::tasks::TaskStore::new(&mut *store).list(&key);
-    }
-    // The ids that came back are the store's, not this run's: the counter has
-    // to start past them or the first question of the session inherits an id
-    // the shelf already holds.
-    linkr_tui::views::assistant::seed_task_counter(&mut app.assistant);
+    linkr_tui::views::assistant::load_device_state(app);
     let saved = app
         .agent_store
         .as_ref()
@@ -1979,18 +1967,6 @@ fn load_agent_state(app: &mut App) {
     app.assistant.reasoning = saved.reasoning;
     app.assistant.context_window = saved.context_window;
     app.assistant.max_tokens = saved.max_tokens;
-    // The conversations come back too, oldest first, which is the order they
-    // were written in — the store keeps the last few turns of each and drops
-    // the oldest conversations past its cap, so a long thread loses its
-    // beginning rather than its end, and the freshest threads are the ones a
-    // busy week leaves standing. `adopt` puts the panel's blank page back on
-    // top of them: a draft is not a conversation, but it is not the store's to
-    // throw away either.
-    let chats = app
-        .agent_store
-        .as_ref()
-        .and_then(|store| linkr_tui::agent::session::load_chats(store, &key));
-    app.assistant.restore(chats);
 }
 
 /// The first line of `path`, which is how a secret is handed over: a file the

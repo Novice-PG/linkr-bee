@@ -261,6 +261,7 @@ pub struct Strings {
     pub asst_mode_full_auto: &'static str,
     /// What the status line says when the unattended window elapses.
     pub asst_full_auto_expired: &'static str,
+    pub asst_device_changed: &'static str,
     /// The token-usage row label.
     pub asst_usage_label: &'static str,
     /// The conversation row label: which thread, of how many.
@@ -554,6 +555,7 @@ const ZH: Strings = Strings {
     asst_mode_manual: "手动（每次都确认）",
     asst_mode_full_auto: "全自动（危险命令仍确认）",
     asst_full_auto_expired: "Full Auto 已到时并回退到 Auto，后续命令需要确认。",
+    asst_device_changed: "设备已切换，之前的回复未完成。",
     asst_usage_label: "Token 用量",
     asst_chat_label: "对话",
     asst_panel_keys: "Ctrl+N 新对话 · Alt+↑↓ 切换",
@@ -734,6 +736,7 @@ const EN: Strings = Strings {
     asst_mode_full_auto: "full auto (destructive commands still ask)",
     asst_full_auto_expired:
         "Full Auto reached its time limit and reverted to Auto; later commands need approval.",
+    asst_device_changed: "The device changed before the reply finished.",
     asst_usage_label: "Token usage",
     asst_chat_label: "Conversation",
     asst_panel_keys: "Ctrl+N new · Alt+↑↓ switch",

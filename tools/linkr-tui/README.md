@@ -107,6 +107,19 @@ rather than into the status slot.
 
 Assistant is the next view, and behind it the agent layer.
 
+The assistant receives a bounded, credential-redacted snapshot of the current
+connection's serial output and saved device notes with each question. Local
+echo and interface messages are excluded. Notes are historical evidence; they
+do not replace checking the target's current state. Conversations and notes
+are keyed by the link identity (BLE address, LAN host or stdio bridge), so moving
+one Bee to another target still requires the operator to distinguish those
+targets. Changing the link identity saves the old conversations and loads the
+new device's history before another question is sent.
+
+Model replies accept both SSE streams and complete JSON responses. Protocol
+end markers finish a stream immediately; a stream that ends without a finish
+marker or reason is reported as incomplete rather than saved as an answer.
+
 Every management question — `@i?`, `@u?`, `@w?`, `@d?` — is asked on the
 bridge's own GATT service and not down the pipe the target prints to. That is
 not a preference: an answer delivered on the same stream as the target's output
