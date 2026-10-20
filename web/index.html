@@ -5,11 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Linkr Bee Terminal</title>
     <meta name="theme-color" id="themeColorMeta" content="#05080D" />
-    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260928-connect-entry" />
-    <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261019-drawer-unified" />
+    <link rel="icon" type="image/svg+xml" href="./assets/favicon-DG0dyekI.svg" />
+    <script type="module" crossorigin src="./assets/index-BmZWE6QZ.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CL37KAJ5.css">
   </head>
   <body>
     <main class="app-shell">
@@ -92,6 +90,13 @@
           </svg>
         </button>
         <span class="rail-spacer"></span>
+        <button class="rail-btn" type="button" data-rail-target="about" aria-label="About" data-i18n-aria="aboutNav" data-i18n-title="aboutNav">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.6"></circle>
+            <path d="M12 11v5"></path>
+            <circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none"></circle>
+          </svg>
+        </button>
       </nav>
 
       <aside id="controlsPanel" class="controls window-surface" data-i18n-aria="controls" aria-label="Controls" data-settings-active="connection">
@@ -124,6 +129,7 @@
           <button class="settings-tab" type="button" data-settings-target="terminal" data-i18n="settingsTerminal" aria-selected="false">Serial</button>
           <button class="settings-tab" type="button" data-settings-target="network" data-i18n="settingsNetwork" aria-selected="false">Network</button>
           <button class="settings-tab" type="button" data-settings-target="ai" aria-selected="false" hidden>AI</button>
+          <button class="settings-tab" type="button" data-settings-target="about" data-i18n="aboutNav" aria-selected="false">About</button>
         </nav>
 
         <section class="card" data-i18n-aria="connectionControls" aria-label="Connection controls" data-settings-page="connection">
@@ -361,17 +367,35 @@
           <div class="card-title"><span class="dot"></span><span id="agentSettingsTitle" data-ai-setting="title">AI configuration</span></div>
           <form id="agentSettingsForm" novalidate>
             <fieldset id="agentSettingsFields">
+              <label class="field"><span class="field-label" data-ai-setting="vendor">AI provider</span>
+                <select id="agentVendor" aria-describedby="agentVendorHint agentSettingsStatus"></select>
+                <span id="agentVendorHint" class="field-hint" data-ai-setting="vendorHint"></span>
+              </label>
               <label class="field"><span class="field-label" data-ai-setting="endpoint">API base URL</span>
                 <input id="agentEndpoint" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="agentEndpointHint agentSettingsStatus">
                 <span id="agentEndpointHint" class="field-hint" data-ai-setting="endpointHint"></span>
               </label>
               <label class="field"><span class="field-label" data-ai-setting="model">Model ID</span>
-                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" aria-describedby="agentSettingsStatus">
+                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" list="agentModelOptions" aria-describedby="agentModelHint agentSettingsStatus">
+                <!-- Filled by "Fetch model list" once the address and key are in; the
+                     input stays editable because a service may not offer the endpoint. -->
+                <datalist id="agentModelOptions"></datalist>
+                <span id="agentModelHint" class="field-hint" data-ai-setting="modelHint"></span>
               </label>
               <label class="field"><span class="field-label" data-ai-setting="key">API key</span>
                 <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
                 <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
               </label>
+              <!-- Stored-key disclosure sits next to the field, not at the bottom of the
+                   card: the question "where does this go?" is asked while typing it. -->
+              <p class="key-note">
+                <svg class="key-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                <span data-ai-setting="keyStorage"></span>
+              </p>
+              <!-- The hard-coded ids in the presets go stale; this reads the real list
+                   once the address and key are in, and never replaces the manual field. -->
+              <button id="agentModelFetch" class="btn model-fetch" type="button" data-ai-setting="fetchModels">Fetch model list</button>
+              <p id="agentModelStatus" class="field-hint model-fetch-status" role="status" aria-live="polite"></p>
               <label class="field"><span class="field-label" data-ai-setting="headers">Extra request headers</span>
                 <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
                 <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
@@ -423,6 +447,31 @@
             </fieldset>
             <p id="targetBindingStatus" class="field-hint" role="status" aria-live="polite"></p>
           </section>
+        </section>
+        <section id="aboutPage" class="card about-page" data-settings-page="about" aria-labelledby="aboutTitle">
+          <div class="card-title">
+            <span class="dot"></span><span id="aboutTitle" data-i18n="aboutNav">About</span>
+          </div>
+          <p class="about-lead" data-i18n="aboutLead">An open-source serial terminal for Linkr Bee bridges, with an assistant that talks to the model service you configure.</p>
+          <p id="aboutMeta" class="about-meta"></p>
+          <h3 class="about-heading" data-i18n="aboutComponentsHeading">Open source components</h3>
+          <p class="field-hint" data-i18n="aboutComponentsHint">Everything the app and its firmware ship, with the licence each one is distributed under. The full licence texts travel with the components.</p>
+          <div id="aboutComponents"></div>
+          <h3 class="about-heading" data-i18n="aboutComplianceHeading">Licences and compliance</h3>
+          <ul class="about-compliance">
+            <li data-i18n="aboutComplianceProject">This project is released under Apache-2.0.</li>
+            <li data-i18n="aboutComplianceThirdParty">Third-party components remain the property of their authors and are distributed under their own licences, listed above.</li>
+            <li data-i18n="aboutComplianceDual">DOMPurify is dual-licensed MPL-2.0 / Apache-2.0; this project uses it under Apache-2.0.</li>
+            <li data-i18n="aboutComplianceCcBy">The macaron cursors are CC-BY-4.0, © UnionTech Software Technology Co., Ltd.; three shapes were converted from XCursor to PNG. Attribution and the source revision are in vendor/macaron-cursors/README.md.</li>
+          </ul>
+          <h3 class="about-heading" data-i18n="aboutContributorsHeading">Contributors</h3>
+          <p class="field-hint" data-i18n="aboutContributorsHint">Taken from the git history of radxa/linkr-bee; duplicate identities are merged.</p>
+          <div id="aboutContributors" class="about-contributors"></div>
+          <div class="about-links">
+            <a id="aboutRepository" data-i18n="aboutRepository" target="_blank" rel="noreferrer">Repository</a>
+            <a id="aboutIssues" data-i18n="aboutIssues" target="_blank" rel="noreferrer">Report a problem</a>
+            <a id="aboutLicenseLink" data-i18n="aboutLicenseLink" target="_blank" rel="noreferrer">Licence text</a>
+          </div>
         </section>
       </aside>
 
@@ -548,12 +597,8 @@
 
     <div id="toastHost" class="toast-host" aria-live="polite"></div>
 
-    <script type="module" src="./native-bootstrap.js"></script>
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
-    <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261019-rail-i18n"></script>
-    <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a
        * dropped connection, a proxy, a stale cache -- leaves this page blank
