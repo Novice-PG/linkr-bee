@@ -82,7 +82,7 @@ pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12
 /// Bee firmware, and [`wire`] reads the Device ID behind it before the link is
 /// accepted, so a device that merely copied the UUID is still refused.
 pub fn is_board(services: &[Uuid]) -> bool {
-    services.iter().any(|uuid| *uuid == MGMT_SERVICE)
+    services.contains(&MGMT_SERVICE)
 }
 
 /// The printable part of an advertised name.
