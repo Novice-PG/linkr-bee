@@ -160,7 +160,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::new(
         "--ble-name",
         Value::Free,
-        "dial the board whose name contains this",
+        "dial the board whose advertised name contains this (a label the owner can change; --ble-address is the identity)",
     ),
     Flag::new(
         "--lan-host",

@@ -1100,7 +1100,11 @@ async fn find(
     let chosen = chosen.ok_or_else(|| match selection {
         Selection::Any => "no board was found within {} s — is the board powered?"
             .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
-        Selection::Name(name) => format!("no board named “{name}” was found"),
+        // The name is a label the owner can change, so a name that matches
+        // nothing is a board that was renamed, not a board that is missing.
+        Selection::Name(name) => format!(
+            "no board named “{name}” was found — the advertised name is a label that can be changed, so a renamed board is dialled by its address (--ble-address)"
+        ),
         Selection::Address(address) => {
             format!("no board at {address} was found")
         }

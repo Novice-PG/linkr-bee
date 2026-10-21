@@ -1090,11 +1090,15 @@ pub fn prompt_webdav_url(app: &mut App) {
 /// Ask for the advertised BLE name. The field starts with the name last read
 /// from the bridge, so a small correction does not mean retyping it.
 pub fn prompt_ble_name(app: &mut App) {
+    // The name the board last reported, and the label the air carried when
+    // the board has not been asked yet: a prompt that opens empty invites a
+    // user to retype a name the interface already knows.
     let current = app
         .network
         .ble_name
         .as_ref()
         .map(|status| status.name.as_str())
+        .or(app.advertised_name.as_deref())
         .unwrap_or("");
     let prompt = Prompt::with_text(BLE_NAME_TITLE, PromptAction::BleName, current);
     raise(app, Dialog::Prompt(prompt));

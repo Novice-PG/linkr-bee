@@ -209,7 +209,9 @@ struct Args {
     transport: Option<Transport>,
     /// The process bridge to dial, as `--bridge` names it.
     bridge: Option<String>,
-    /// The advertised name of the board to look for, as `--ble-name` gives it.
+    /// The advertised name of the board to look for, as `--ble-name` gives
+    /// it. A label the owner can change, so it selects a board and never
+    /// identifies one: the address does that.
     ble_name: Option<String>,
     /// The address of the board to dial, as `--ble-address` gives it. This
     /// wins over a name when both are given: a name finds a board *like* the

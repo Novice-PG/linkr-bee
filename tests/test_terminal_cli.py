@@ -553,6 +553,103 @@ class WifiCredentialTests(unittest.TestCase):
                 terminal.resolve_wifi_credentials("ssid", str(key))
 
 
+class BoardSelectionTests(unittest.TestCase):
+    """A board is found by the service it speaks, not by the label it carries.
+
+    The name is the owner's to change, so a host that looked for a board by
+    its name would lose it the moment it was renamed.
+    """
+
+    def board(self, name, address="AA:BB:CC:DD:EE:FF", services=()):
+        device = FakeDevice(name, address)
+        device.service_uuids = tuple(services)
+        return device
+
+    def test_a_board_is_found_by_the_service_it_speaks(self):
+        devices = [
+            self.board("Linkr Bee 078C", "AA:1"),
+            self.board("测试😀", "AA:2", services=[terminal.MGMT_SERVICE_UUID]),
+        ]
+        self.assertEqual(terminal.match_device(devices, None), "AA:2")
+
+    def test_a_renamed_board_is_still_found(self):
+        devices = [self.board("Bench Bee", "AA:3", services=[terminal.MGMT_SERVICE_UUID])]
+        self.assertEqual(terminal.match_device(devices, None), "AA:3")
+
+    def test_a_legacy_board_is_the_fallback(self):
+        # The oldest NUS-only firmware has no service to be found by, so its
+        # fixed name is the only thing that recognises it.
+        devices = [self.board("Linkr BLE UART-3", "AA:4")]
+        self.assertEqual(terminal.match_device(devices, None), "AA:4")
+
+    def test_a_board_without_the_service_is_not_guessed_at(self):
+        # A board that says nothing about the service and carries no legacy
+        # name is not a board this client may talk to.
+        self.assertIsNone(terminal.match_device([self.board("Other", "AA:5")], None))
+
+    def test_a_name_the_user_gave_still_matches(self):
+        devices = [self.board("测试😀", "AA:6")]
+        self.assertEqual(terminal.match_device(devices, "测试😀"), "AA:6")
+        self.assertEqual(terminal.match_device(devices, "测试*"), "AA:6")
+        self.assertIsNone(terminal.match_device(devices, "Linkr Bee"))
+
+    def test_a_name_is_compared_without_regard_to_its_case(self):
+        devices = [self.board("Linkr Bee 078C", "AA:7")]
+        self.assertEqual(terminal.match_device(devices, "linkr bee"), "AA:7")
+
+    def test_the_failure_names_the_boards_that_were_there(self):
+        devices = [self.board("测试😀", "AA:8"), self.board("Other", "BB:9")]
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(terminal.find_device("Linkr Bee", None, 0.1, devices=devices))
+        message = str(caught.exception)
+        self.assertIn("AA:8", message, "the address is what reaches the board")
+        self.assertIn("测试😀", message, "and the name it answers to")
+        self.assertIn("--address", message, "and the way to use it")
+
+    def test_the_failure_without_a_name_says_the_same(self):
+        devices = [self.board("测试😀", "AA:8")]
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(terminal.find_device(None, None, 0.1, devices=devices))
+        message = str(caught.exception)
+        self.assertIn("AA:8", message)
+        self.assertIn("--address", message)
+
+    def test_an_address_reaches_a_renamed_board(self):
+        self.assertEqual(
+            asyncio.run(terminal.find_device(None, "AA:8", 0.1, devices=[])),
+            "AA:8",
+        )
+
+    def test_a_completed_scan_is_used_without_bleak(self):
+        # The host that hands over a scan does not need the radio library to
+        # pick an address from it, and a CI machine without bleak installed
+        # must still be able to run these rules.
+        devices = [self.board("测试😀", "AA:9", services=[terminal.MGMT_SERVICE_UUID])]
+        # The module caches the imported names, so they are cleared here as
+        # well: without that the guard would pass on a machine that had
+        # already imported bleak and prove nothing.
+        with patch.dict(sys.modules, {"bleak": None}), \
+                patch.object(terminal, "BleakClient", None), \
+                patch.object(terminal, "BleakScanner", None):
+            self.assertEqual(
+                asyncio.run(terminal.find_device(None, None, 0.1, devices=devices)),
+                "AA:9",
+            )
+
+
+class DeviceIdTests(unittest.TestCase):
+    """The Device ID is what makes the Management Service a filter."""
+
+    def test_a_linkr_device_id_is_recognised(self):
+        self.assertTrue(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00" + bytes(6)))
+        self.assertTrue(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05\x06"))
+
+    def test_another_device_id_is_not(self):
+        self.assertFalse(terminal.is_linkr_device_id(b"\x00" * 16))
+        self.assertFalse(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00"))
+        self.assertFalse(terminal.is_linkr_device_id(b"LINKRBEE\x01\x00" + bytes(6)))
+
+
 class DeviceMatchTests(unittest.TestCase):
     def test_automatic_discovery_accepts_renamed_and_unnamed_linkr_devices(self):
         self.assertIsNone(terminal.build_parser().parse_args([]).name)

@@ -173,6 +173,9 @@ int main(void)
     CHECK(!device_matches(NULL, NULL, false));
     CHECK(device_matches("Other", "Other", false));
     CHECK(!device_matches("Bench Bee", "Other", true));
+    /* A name is compared without regard to its case, so the same command
+     * line cannot land on two different boards. */
+    CHECK(device_matches("linkr bee 078c", "Linkr Bee", false));
 
     /* normalize_name_prefix trims, drops a trailing '*' and truncates. */
     normalize_name_prefix("  Linkr Bee*  ", buf, sizeof(buf));
@@ -244,10 +247,35 @@ int main(void)
     CHECK(write_size_rejected("-1"));
     CHECK(write_size_rejected("x"));
 
-    /* An exact name outranks a prefix match, and NUS support breaks ties. */
-    CHECK(device_rank(true, true) > device_rank(true, false));
-    CHECK(device_rank(true, false) > device_rank(false, true));
-    CHECK(device_rank(false, true) > device_rank(false, false));
+    /* A board that speaks the Management Service is the one this project
+     * talks to, and it outranks a legacy NUS-only board; an exact name
+     * outranks a prefix match when a name was asked for at all. */
+    CHECK(device_rank(true, true, true) > device_rank(true, true, false));
+    CHECK(device_rank(true, true, false) > device_rank(false, true, true));
+    CHECK(device_rank(false, true, true) > device_rank(false, false, true));
+    CHECK(device_rank(false, true, false) > device_rank(false, false, true));
+
+    /* A name is compared the way a person writes one, and a name that is
+     * not the board's is not the board's. */
+    CHECK(name_starts_with_ci("Linkr Bee 078C", "linkr bee"));
+    CHECK(!name_starts_with_ci("Linkr Bee 078C", "Bench"));
+    CHECK(!name_starts_with_ci(NULL, "Linkr"));
+    CHECK(!name_starts_with_ci("Bee", ""));
+    CHECK(name_equals_ci("Bee", "bee"));
+    CHECK(!name_equals_ci("Bee", "Bench"));
+
+    /* An address is the identity: any spelling of the same twelve digits
+     * names the same board. */
+    normalize_address("AA:BB:CC:DD:EE:FF", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("aa-bb-cc-dd-ee-ff", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("hci0/dev_AA_BB_CC_DD_EE_FF", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("AA:BB:CC", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbcc");
+    normalize_address(NULL, buf, sizeof(buf));
+    CHECK_STR(buf, "");
 
     if (failures) {
         printf("%d harness check(s) failed\n", failures);
@@ -271,7 +299,13 @@ class CHarnessTests(unittest.TestCase):
 
         device_helpers = extract(
             source, "static int device_rank(", "static bool iter_uuid_array_contains",
-            ["device_rank", "device_matches", "strip_dashes", "normalize_name_prefix"])
+            ["device_rank", "strip_dashes", "normalize_name_prefix",
+             "name_starts_with_ci", "name_equals_ci", "normalize_address"])
+        # The rules that decide what a board is: a name the caller asked for,
+        # and otherwise the service the board speaks.
+        board_rules = extract(
+            source, "static bool is_legacy_name(", "static bool consider_device(",
+            ["is_legacy_name", "device_matches"])
         enter = extract(source, "static void normalize_enter(",
                         "static void describe_escape(", ["normalize_enter"])
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
@@ -285,7 +319,7 @@ class CHarnessTests(unittest.TestCase):
         harness.write_text(
             HARNESS_PRELUDE + "\n"
             + escape_helpers + "\n" + enter + "\n" + device_helpers + "\n"
-            + validators + "\n" + HARNESS_MAIN
+            + board_rules + "\n" + validators + "\n" + HARNESS_MAIN
         )
         cls.binary = directory / "harness"
         # -Werror: the harness also enforces that the extracted helpers are

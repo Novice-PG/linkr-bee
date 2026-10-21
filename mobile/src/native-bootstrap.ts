@@ -118,7 +118,7 @@ function createNativeBleBackend(): NativeBleBackend {
        * discoverable through the Web/TUI clients, which can scan both). */
       const filter = services.length
         ? { services }
-        : { namePrefix: namePrefixes[0] || "Linkr" };
+        : { namePrefix: namePrefixes[0] || "Linkr BLE UART" };
       const device = await BleClient.requestDevice({
         ...filter,
         optionalServices: options.optionalServices || [],

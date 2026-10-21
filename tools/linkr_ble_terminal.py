@@ -30,6 +30,7 @@ DEFAULT_NAME = None  # Discover by service; --name is an explicit override.
 MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_PROTOCOL_UUID = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_DEVICE_ID_UUID = "4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_COMMAND_UUID = "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001"
@@ -479,28 +480,67 @@ def normalize_name_prefix(name: str) -> str:
 
 
 def is_legacy_name(name: str | None) -> bool:
+    """Whether a name is one of the fixed legacy names.
+
+    The oldest NUS-only firmware had no per-device name and no Management
+    Service, so its fixed name is the only way to recognise it. A current
+    board can carry the same name, which is why this is a narrow exception
+    and not a rule.
+    """
     return bool(re.match(r"^Linkr BLE UART(?:$|[- ])", (name or "").strip(), re.I))
 
 
+def is_linkr_device_id(device_id: bytes) -> bool:
+    """Whether a Device ID belongs to Linkr Bee.
+
+    The first ten bytes are the fixed Linkr namespace (`LINKRBLE`, version 1)
+    and the last six are the chip's hardware id. Checking the namespace is
+    what makes the Management Service a filter rather than a promise: any
+    device can advertise the same UUID.
+    """
+    return len(device_id) == 16 and device_id.startswith(b"LINKRBLE\x01\x00")
+
+
+def advertises_management(device) -> bool:
+    """Whether the advertisement carried the Linkr Management Service.
+
+    This is how a board is found now that its name is a label the owner can
+    change: the service is in the advertisement, the name is not an identity.
+    """
+    uuids = getattr(device, "service_uuids", None)
+    if uuids is None:
+        uuids = getattr(device, "services", None) or ()
+    for service in uuids:
+        if str(service).lower() == MGMT_SERVICE_UUID:
+            return True
+    return False
+
+
 def match_device(devices, name: str | None) -> str | None:
-    """Return the best match's address, or None. Split out for testing."""
+    """Return the best match's address, or None. Split out for testing.
+
+    With no name asked for, the board is the one that speaks the Management
+    Service, and a legacy NUS-only board is the fallback. With a name, the
+    name is what the caller asked for - compared without regard to its case,
+    because a label is written by a person and the case in it is not a
+    promise.
+    """
     if name is None:
-        managed = [dev for dev in devices
-                   if MGMT_SERVICE_UUID in getattr(dev, "service_uuids", ())]
+        managed = [dev for dev in devices if advertises_management(dev)]
         legacy = [dev for dev in devices if is_legacy_name(dev.name)]
         candidates = managed or legacy
         if len(candidates) > 1:
             warn("multiple Linkr devices found; use --address to select one")
         return candidates[0].address if candidates else None
 
+    prefix = normalize_name_prefix(name).lower()
     for dev in devices:
-        if dev.name == name:
+        if dev.name and dev.name.lower() == prefix:
             return dev.address
 
-    prefix = normalize_name_prefix(name)
     prefixed = [
         dev for dev in devices
-        if dev.name and dev.name.startswith(prefix)
+        if dev.name and dev.name.lower().startswith(prefix)
     ]
     if not prefixed:
         return None
@@ -515,22 +555,76 @@ def match_device(devices, name: str | None) -> str | None:
     return prefixed[0].address
 
 
+def describe_devices(devices) -> str:
+    """The nearby boards as `name (address)`, for a message that must say
+    what to do next rather than only what did not happen."""
+    rows = [
+        f"  {dev.name or '(unknown)'} ({dev.address})"
+        for dev in devices
+    ]
+    if not rows:
+        return "  (nothing nearby was heard)"
+    return "\n".join(rows[:6])
+
+
+def parse_ble_name(text: str) -> str | None:
+    """The name out of `OK name=<name> custom=yes|no`.
+
+    The name may contain spaces, so the suffix is peeled off the right
+    rather than by splitting the line on whitespace.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.lower().startswith("ok name="):
+            continue
+        name = line[8:].strip()
+        marker = name.rfind(" custom=")
+        if marker >= 0 and name[marker + 8:].lower() in ("yes", "no"):
+            name = name[:marker].rstrip()
+        return name
+    return None
+
+
 async def find_device(name: str | None, address: str | None, timeout: float,
                       devices=None) -> str:
-    """Return the BLE address to connect to, reusing a completed scan."""
+    """Return the BLE address to connect to, reusing a completed scan.
+
+    With no name asked for, the board is found by the service it speaks and
+    not by the label it carries: the owner can change that at any time.
+    """
     if address:
         return address
 
-    import_bleak()
     criterion = (f"name {normalize_name_prefix(name)}*" if name is not None
                  else "Linkr Management Service or legacy Linkr BLE UART name")
     if devices is None:
+        # bleak is only needed to listen. A caller that hands over a
+        # completed scan - the tests, and a host that scanned for something
+        # else - is answered without it.
+        import_bleak()
         info(f"scanning for BLE device matching {criterion}")
         devices = await discover_devices(timeout)
 
-    match = match_device(devices, name)
+    if name:
+        match = match_device(devices, name)
+        if match is None:
+            prefix = normalize_name_prefix(name)
+            raise RuntimeError(
+                f"no board matched {prefix + '*'}. The advertised name is a "
+                f"label the owner can change, so a renamed board is found by "
+                f"its address instead: pass --address. Nearby devices:\n"
+                f"{describe_devices(devices)}"
+            )
+        return match
+
+    match = match_device(devices, None)
     if match is None:
-        raise RuntimeError(f"device not found matching: {criterion}")
+        raise RuntimeError(
+            "no Linkr Bee was found nearby. The advertised name is a label "
+            "the owner can change, so a renamed board is found by its "
+            "address instead: pass --address. Nearby devices:\n"
+            f"{describe_devices(devices)}"
+        )
     return match
 
 
@@ -1273,8 +1367,8 @@ async def run(args: argparse.Namespace) -> int:
             if webdav_actions and not capabilities & MGMT_CAP_WEBDAV:
                 raise RuntimeError("device does not advertise WebDAV support")
             device_id = bytes(await client.read_gatt_char(MGMT_DEVICE_ID_UUID))
-            if len(device_id) != 16:
-                raise RuntimeError("invalid Linkr Device ID length")
+            if not is_linkr_device_id(device_id):
+                raise RuntimeError("invalid Linkr Device ID")
             info(
                 f"management API v{protocol[0]}.{protocol[1]}, "
                 f"device ID {device_id.hex()}"
@@ -1307,6 +1401,18 @@ async def run(args: argparse.Namespace) -> int:
             await client.start_notify(
                 RELIABLE_UART_TX_UUID, reliable.on_indication
             )
+
+            # The board's own name, not the label the air carried: the owner
+            # can change that label at any time, and a session that reported
+            # the old one would be naming a board it is not talking to.
+            try:
+                answer = await management.send(b"@n?")
+            except Exception as exc:  # a board that predates the command
+                info(f"the board did not report its name: {exc}")
+            else:
+                name = parse_ble_name(answer.decode(errors="replace"))
+                if name:
+                    info(f"board name: {name}")
 
             if args.query_info:
                 await management.send(b"@i?")
@@ -1414,8 +1520,10 @@ def build_parser() -> argparse.ArgumentParser:
                         version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--name",
-        default=DEFAULT_NAME,
-        help="explicit BLE name/prefix filter; default discovers Linkr service or legacy names",
+        default=None,
+        help="explicit BLE name/prefix filter; by default the board is found "
+             "by the Linkr Management Service, because the advertised name is "
+             "a label the owner can change",
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true",

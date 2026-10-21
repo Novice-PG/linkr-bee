@@ -76,35 +76,34 @@ const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
 const BLE_MAX_ATT_VALUE = 244;
-const BLE_DEVICE_NAME_PREFIX = "Linkr Bee";
 const LEGACY_BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
-/* New firmware carries the Management Service. The oldest NUS-only firmware
- * carries neither that service nor a per-device name, so the browser picker
- * also offers the fixed legacy names. The connection path still distinguishes
- * them: only the legacy prefix may fall back to NUS-only terminal use. */
+/* A Linkr Bee is a device that speaks the Management Service, and that is
+ * how the picker finds one: the advertised name is a label the owner can
+ * change, so a name filter would find the factory names and nothing else.
+ * The oldest NUS-only firmware has no service to be found by and no
+ * per-device name, so its fixed name is offered as well; whether a board is
+ * one of those is decided by the service it does not have, not by its
+ * name. */
 const BLE_REQUEST_FILTERS = [
   { services: [MGMT_SERVICE] },
-  { namePrefix: BLE_DEVICE_NAME_PREFIX },
   { namePrefix: LEGACY_BLE_DEVICE_NAME_PREFIX },
 ];
 
-function hasBleNamePrefix(name, prefix) {
-  if (typeof name !== "string") return false;
-  const value = name.trim();
-  if (!value.toLowerCase().startsWith(prefix.toLowerCase())) return false;
-  const rest = value.slice(prefix.length);
-  return rest === "" || rest.startsWith("-") || rest.startsWith(" ");
-}
-
-function isLinkrBleName(name) {
+/* Whether a failed read says the Management Service is not there, as
+ * opposed to the read being refused: a board that is not paired yet, or
+ * one whose encryption is not in place yet. The first is a legacy board
+ * whose terminal still works; the second is a pairing problem, and calling
+ * it a legacy board would hide the reason the user needs. */
+function isMissingService(error) {
+  const name = error?.name || "";
+  const text = String(error?.message || "").toLowerCase();
   return (
-    hasBleNamePrefix(name, BLE_DEVICE_NAME_PREFIX) ||
-    hasBleNamePrefix(name, LEGACY_BLE_DEVICE_NAME_PREFIX)
+    name === "NotFoundError" ||
+    text.includes("no characteristic") ||
+    text.includes("no service") ||
+    text.includes("not found") ||
+    text.includes("unknown service")
   );
-}
-
-function isLegacyLinkrBleName(name) {
-  return hasBleNamePrefix(name, LEGACY_BLE_DEVICE_NAME_PREFIX);
 }
 
 const WIFI_SCAN_CMD = "@w scan";
@@ -1753,8 +1752,23 @@ function applyBleName(parsed, { custom = null } = {}) {
   }
   state.bleNameSupported = true;
   elements.bleNameInput.value = parsed.name;
+  // The board's own name is the name everything else shows. The name the
+  // picker carried is a snapshot the owner can change from another client, so
+  // a top bar that keeps it would name a board that no longer answers to it.
+  if (state.device) {
+    state.device = { ...state.device, name: parsed.name };
+    renderDeviceName();
+  }
   updateBleNameControls();
   renderBleNameStatus();
+}
+
+function renderDeviceName() {
+  elements.deviceName.textContent = state.mode === "ws"
+    ? state.wsHost || ""
+    : state.device
+      ? state.device.name || state.device.id
+      : "";
 }
 
 async function readBleName({ quiet = false } = {}) {
@@ -1797,6 +1811,11 @@ async function changeBleName(command, successKey, custom) {
     throw new Error(t("bleNameReadFailed"));
   }
   applyBleName(parsed, { custom });
+  // The board is asked again, so the name on screen is the one the board
+  // reports and not the one the write's own reply carried. A write's reply
+  // has no `custom=` field, and the advertisement only carries the new name
+  // once the board has started broadcasting it.
+  await readBleName({ quiet: true });
   toast(t(successKey));
 }
 
@@ -2232,11 +2251,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
       connected ? "connected" : "disconnected",
     );
   }
-  elements.deviceName.textContent = isWs
-    ? state.wsHost || ""
-    : state.device
-      ? state.device.name || state.device.id
-      : "";
+  renderDeviceName();
   elements.connectButton.disabled = connectionInFlight || connected || !canConnect;
   if (elements.mobileConnectBtn) {
     elements.mobileConnectBtn.disabled = connectionInFlight || (!connected && !canConnect);
@@ -2303,6 +2318,16 @@ function rememberDevice(device, restored = false) {
   state.device = device;
   state.deviceRestored = restored;
   saveSetting(LAST_DEVICE_ID_KEY, device.id);
+  /* The name belongs to the board that was there: an input still holding
+   * the last board's name would write it onto this one. */
+  state.bleName = null;
+  state.bleNameCustom = null;
+  state.bleNameSupported = null;
+  if (elements.bleNameInput) {
+    elements.bleNameInput.value = "";
+  }
+  updateBleNameControls();
+  renderBleNameStatus();
   setConnected(false);
 }
 
@@ -2315,12 +2340,11 @@ async function restoreAuthorizedDevice() {
     const devices = await bleTransport.getDevices(
       lastDeviceId ? [lastDeviceId] : [],
     );
-    const candidates = devices.filter(
-      (device) => device.id === lastDeviceId || isLinkrBleName(device.name),
-    );
-    const device =
-      candidates.find((candidate) => candidate.id === lastDeviceId) ||
-      candidates[0];
+    // The id is the only thing that identifies a board: the advertised
+    // name is a label the owner can change, so a board is restored by the
+    // id it was last seen under. Restoring by a name would pick whichever
+    // board happens to carry it and talk to the wrong one.
+    const device = devices.find((candidate) => candidate.id === lastDeviceId);
 
     if (!device) {
       return;
@@ -2814,6 +2838,9 @@ function onDisconnected() {
   state.bleName = null;
   state.bleNameCustom = null;
   state.bleNameSupported = null;
+  if (elements.bleNameInput) {
+    elements.bleNameInput.value = "";
+  }
   state.reliableMaxPayload = 20;
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
   // Drop any half-received frame: the next connection restarts the sequence.
@@ -3079,10 +3106,13 @@ async function connectOnce({ chooseDevice = false } = {}) {
         MGMT_PROTOCOL,
       );
     } catch (error) {
-      /* The oldest firmware has no Management Service. Keep its terminal
-       * usable, but only when the advertised name is the fixed legacy one;
-       * a new `Linkr Bee` name always promises the service. */
-      if (!isLegacyLinkrBleName(device.name)) throw error;
+      /* The oldest firmware has no Management Service, and its terminal
+       * stays usable. Which board this is, is told by the failure and not
+       * by the name: a service that is not there is a legacy board, while
+       * a read that was refused is a pairing problem on a board that
+       * promised the service. The name says neither - the owner chooses
+       * it, and can choose it for a current board too. */
+      if (!isMissingService(error)) throw error;
       await adoptLegacyNus(device);
       return;
     }

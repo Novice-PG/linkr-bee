@@ -654,6 +654,12 @@ pub struct App {
     /// apart from a read: `@n=<name>` makes it custom and `@n default` makes
     /// it the MAC-derived one, while neither reply repeats `custom=`.
     pub ble_name_write_custom: Option<bool>,
+    /// A link came up and the board's name has not been read yet. The read
+    /// waits for a free slot: only one question is in flight at a time.
+    pub ble_name_read_pending: bool,
+    /// A link came up and the LAN token has not been asked for yet. It goes
+    /// after the name, because only one question is in flight at a time.
+    pub lan_token_read_pending: bool,
     /// The scan whose answer has not arrived, or that is owed another attempt
     /// after being refused. See [`ScanRetry`].
     pub scan_retry: Option<ScanRetry>,
@@ -861,6 +867,8 @@ impl Default for App {
             wifi_operation: None,
             wifi_write: None,
             ble_name_write_custom: None,
+            ble_name_read_pending: false,
+            lan_token_read_pending: false,
             scan_retry: None,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
@@ -1695,10 +1703,13 @@ impl App {
     /// Device row showed a MAC. The scan that fills the picker hears the name,
     /// and hearing it once is enough to name the row and to keep the name for
     /// the next run. Nothing else moves: the dial still goes where it went.
+    ///
+    /// A name that *changed* is news: the owner renamed the board, and the
+    /// row that still showed the old label would be naming a board that no
+    /// longer answers to it. The scan's name is only a label though, so the
+    /// board's own answer is what settles it — see
+    /// [`App::remember_the_board_name`].
     fn name_the_remembered_board(&mut self, devices: &[crate::cli::FoundDevice]) {
-        if self.advertised_name.is_some() {
-            return;
-        }
         let Some(address) = self.last_dial.as_ref().and_then(|dial| match dial {
             Dial::Ble(crate::transport::ble::Selection::Address(address), _) => {
                 Some(address.as_str())
@@ -1714,8 +1725,39 @@ impl App {
         else {
             return;
         };
+        if self.advertised_name.as_deref() == Some(name.as_str()) {
+            return;
+        }
         self.advertised_name = Some(name.clone());
         self.device_name = Self::named_with_tail(&name, address);
+        self.save_settings();
+    }
+
+    /// The board's own name, and where it is shown.
+    ///
+    /// The board is asked once per link, and the answer is what every label
+    /// in the interface is built from: the Device row, the remembered shelf,
+    /// and the network view. The name in the air is a snapshot the owner can
+    /// change from another client, so a host that keeps it shows a name the
+    /// board no longer has.
+    ///
+    /// Only a BLE dial that names an address writes the shelf: a LAN or a
+    /// stdio link is not about a board and must not put one on the shelf.
+    fn remember_the_board_name(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(address) = self.last_dial.as_ref().and_then(|dial| match dial {
+            Dial::Ble(crate::transport::ble::Selection::Address(address), _) => {
+                Some(address.clone())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.advertised_name = Some(name.to_string());
+        self.device_name = Self::named_with_tail(name, &address);
         self.save_settings();
     }
 
@@ -2507,7 +2549,17 @@ impl App {
             // finds the row already in hand rather than learning a fetch is
             // needed. Links that cannot carry the question (and sessions that
             // already have their answer) are a no-op by design.
-            let _ = self.ensure_lan_token();
+            //
+            // The board's name is read on every link too, and the answer is
+            // what the Device row shows from then on: the name in the air is
+            // a snapshot, and the owner can change it from another client at
+            // any time, so a host that trusted the snapshot would keep
+            // showing a name the board no longer has. The name goes first and
+            // the token follows it, because only one question is in flight at
+            // a time.
+            self.ble_name_read_pending = true;
+            self.lan_token_read_pending = true;
+            self.ask_pending_reads();
         } else if was_live && !now_live {
             // A quiet dial that died before it was ever announced has nothing
             // left to be quiet about; the next connection is its own news.
@@ -3315,13 +3367,23 @@ impl App {
             // `@n?` and the write's confirmation share one parser. The write
             // reply has no `custom=` field, so the view keeps whatever the
             // last read said about where the name came from.
+            //
+            // The board's own answer is also the host's copy of the name: the
+            // label the air carried is a snapshot, and the owner can change
+            // it from another client at any time. Writing it here keeps the
+            // Device row, the shelf and the network view from showing three
+            // different names for one board.
             Query::BleName => {
                 if let Some(status) = accessory::parse_ble_name(&text) {
                     let custom = status.custom.or(self.ble_name_write_custom.take());
                     self.network.ble_name = Some(accessory::BleNameStatus {
-                        name: status.name,
+                        name: status.name.clone(),
                         custom,
                     });
+                    self.remember_the_board_name(&status.name);
+                    // The LAN token is asked next, now that the name's slot
+                    // is free.
+                    self.ask_pending_reads();
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -3360,6 +3422,32 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Ask the board the two things a link owes it, one after the other.
+    ///
+    /// The name comes first: it is what every label in the interface is built
+    /// from, and the name in the air is a snapshot the owner can change from
+    /// another client. The LAN token follows, because only one question can
+    /// be in flight at a time and a question replaces whatever was
+    /// outstanding.
+    ///
+    /// Nothing here displaces a question the user asked: the automatic reads
+    /// wait for a free slot, and a link that never has one simply does not
+    /// read the name until the next link.
+    fn ask_pending_reads(&mut self) {
+        if self.talk.waiting().is_some() {
+            return;
+        }
+        if self.ble_name_read_pending && self.ble_connected() {
+            self.ble_name_read_pending = false;
+            let _ = self.ask_device(Query::BleName);
+            return;
+        }
+        if self.lan_token_read_pending {
+            self.lan_token_read_pending = false;
+            let _ = self.ensure_lan_token();
         }
     }
 
@@ -5395,6 +5483,19 @@ mod tests {
         app.connect(wire.link()).expect("the memory link opens");
         assert!(pump_until(&mut app, |app| app.connected()));
         assert_eq!(app.transport, Transport::Ble);
+        // The board is asked its name as the link comes up, and the answer is
+        // fed here so the tests that follow see the questions that come after
+        // it. The answer is a *custom* name on purpose: a host that worked
+        // only for the factory default would pass every other test and fail
+        // on a board whose owner renamed it.
+        if app.talk.waiting() == Some(Query::BleName) {
+            let id = crate::transport::testing::asked_id(&wire);
+            wire.feed_management(crate::transport::testing::answer(
+                id,
+                "OK name=Bench Bee custom=yes",
+            ));
+            assert!(pump_until(&mut app, |app| app.talk.waiting() == Some(Query::Lan)));
+        }
         (app, wire)
     }
 
@@ -7111,5 +7212,156 @@ mod tests {
             "Linkr BLE UART-3"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A link that comes up asks the board what it is called, before
+    /// anything else: the name in the air is a snapshot, and the answer is
+    /// what every label in the interface is built from.
+    #[test]
+    fn a_link_asks_the_board_its_name_as_it_comes_up() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::ble();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        assert_eq!(
+            app.talk.waiting(),
+            Some(Query::BleName),
+            "the board is asked its name as the link comes up"
+        );
+    }
+
+    /// The board's own answer is what the Device row shows, and what the
+    /// shelf keeps: a board renamed from another client is named by the new
+    /// name, not by the label the air carried when the run started.
+    #[test]
+    fn the_boards_own_name_replaces_the_label_the_air_carried() {
+        use crate::transport::ble::Selection;
+
+        let path = std::env::temp_dir().join(format!(
+            "linkr-tui-settings-board-name-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.settings = Some(crate::settings::SettingsStore::at(&path));
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        // What the last run remembered: the name the board had then.
+        app.remember_device_name("FB:F6:91:14:33:3A", "Linkr Bee 078C");
+        assert_eq!(app.device_text(), "Linkr Bee 078C 33:3A");
+
+        // The board says otherwise: it was renamed from another client.
+        app.remember_the_board_name("测试😀");
+        assert_eq!(app.device_text(), "测试😀 33:3A");
+        assert_eq!(
+            crate::settings::SettingsStore::at(&path).read().device_name,
+            "测试😀",
+            "the shelf keeps the name the board reports, not the old one"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A rename made here is confirmed by the board, and the answer is the
+    /// new name: the row does not keep showing the name the board had before
+    /// the write.
+    #[test]
+    fn a_rename_updates_the_name_the_row_shows() {
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        app.remember_device_name("FB:F6:91:14:33:3A", "Linkr Bee 078C");
+        assert_eq!(app.device_text(), "Linkr Bee 078C 33:3A");
+
+        // The write's confirmation carries the new name and no `custom=`.
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::BleName,
+                status: crate::accessory::reply_status("OK name=测试😀"),
+                lines: vec!["OK name=测试😀".to_string()],
+            },
+            "",
+        );
+        assert_eq!(app.device_text(), "测试😀 33:3A");
+    }
+
+    /// A scan that hears a board under a new name corrects the remembered
+    /// one: the old label belonged to the board before the rename.
+    #[test]
+    fn a_scan_corrects_a_name_that_changed() {
+        use crate::cli::FoundDevice;
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        app.remember_device_name("FB:F6:91:14:33:3A", "Linkr Bee 078C");
+        assert_eq!(app.device_text(), "Linkr Bee 078C 33:3A");
+
+        let heard = |name: Option<&str>, address: &str| FoundDevice {
+            name: name.map(str::to_string),
+            address: address.to_string(),
+            board: true,
+            rssi: Some(-60),
+        };
+        app.name_the_remembered_board(&[heard(Some("Bench Bee"), "FB:F6:91:14:33:3A")]);
+        assert_eq!(
+            app.device_text(),
+            "Bench Bee 33:3A",
+            "a name that changed is news, and the row follows the board"
+        );
+    }
+
+    /// The name is whatever the board says it is. A host that understood only
+    /// the factory default would look right on a fresh board and wrong on
+    /// every board whose owner renamed it, so the label follows the board
+    /// through all the shapes a name can take.
+    #[test]
+    fn the_label_follows_the_board_through_every_shape_of_name() {
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".to_string()),
+            None,
+        ));
+        for name in [
+            "Linkr Bee 078C",
+            "Bench Bee",
+            "测试",
+            "测试😀",
+            "Bee",
+            "UART-3",
+            "a",
+        ] {
+            app.remember_the_board_name(name);
+            assert_eq!(
+                app.device_text(),
+                format!("{name} 33:3A"),
+                "the row shows the name the board reported: {name:?}"
+            );
+        }
     }
 }

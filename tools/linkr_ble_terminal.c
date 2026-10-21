@@ -51,6 +51,8 @@
 #define MAX_PATH_LEN    256
 #define MAX_UUID_LEN    40
 #define MAX_NAME_LEN    128
+/* How many nearby boards a failure message can name. */
+#define NEARBY_MAX      6
 /* ATT MTU 247 leaves up to 244 bytes for a GATT value. */
 #define BLE_MAX_NUS_PAYLOAD 244
 /* Management v1 frames, and the firmware's advertised-name limit in bytes. */
@@ -464,36 +466,85 @@ struct device_match {
     const char *address;
     char path[MAX_PATH_LEN];
     char found_name[MAX_NAME_LEN];
+    char found_address[MAX_NAME_LEN];
     bool found;
     bool found_has_nus;
     /* Best rank seen so far; -1 means "nothing matched yet". */
     int best_rank;
+    /* The boards that were heard, so a failure can say what was there and
+     * how to reach one of them. */
+    char nearby_name[NEARBY_MAX][MAX_NAME_LEN];
+    char nearby_address[NEARBY_MAX][32];
+    size_t nearby_count;
+    /* How many candidates matched the name that was asked for, so a bench
+     * with two boards of the same name is not a silent coin toss. */
+    size_t name_matches;
 };
 
-/* Pick between candidate devices: an exact name beats a prefix match, and
- * either beats a device that does not advertise the NUS service, which the
- * legacy NUS client cannot use. */
-static int device_rank(bool exact_name, bool has_nus)
+/* Pick between candidate devices.
+ *
+ * A board that speaks the Management Service is the one this project talks
+ * to, and it outranks a legacy NUS-only board; a board whose name was
+ * changed still speaks that service, which is why the name is a filter the
+ * caller asked for and not an identity. An exact name beats a prefix match
+ * when a name was asked for at all. */
+static int device_rank(bool exact_name, bool has_mgmt, bool has_nus)
 {
-    return (exact_name ? 2 : 0) + (has_nus ? 1 : 0);
+    return (exact_name ? 4 : 0) + (has_mgmt ? 2 : 0) + (has_nus ? 1 : 0);
 }
 
-/* Default discovery follows the management UUID after a rename. Only the
- * fixed legacy names may fall back without it; NUS alone is not Linkr-specific.
- * A non-NULL prefix is an explicit --name override, including '*'. */
-static bool device_matches(const char *name, const char *prefix, bool has_mgmt)
+/* A name compared the way a person writes one: case does not matter. */
+static bool name_starts_with_ci(const char *name, const char *prefix)
 {
-    const char *legacy = "Linkr BLE UART";
-    size_t len = strlen(legacy);
+    size_t len;
 
-    if (prefix) {
-        return name && name[0] && strncmp(name, prefix, strlen(prefix)) == 0;
+    if (!name || !prefix || !prefix[0]) {
+        return false;
     }
-    if (has_mgmt) {
-        return true;
+    len = strlen(prefix);
+    return strncasecmp(name, prefix, len) == 0;
+}
+
+static bool name_equals_ci(const char *name, const char *other)
+{
+    if (!name || !other) {
+        return false;
     }
-    return name && strncasecmp(name, legacy, len) == 0 &&
-           (name[len] == '\0' || name[len] == '-' || name[len] == ' ');
+    return strcasecmp(name, other) == 0;
+}
+
+/* An address reduced to the twelve hexadecimal digits that name it, so a
+ * value copied in any spelling - with dashes, without, in any case - finds
+ * the same board. */
+static void normalize_address(const char *address, char *out, size_t out_len)
+{
+    size_t o = 0;
+    size_t digits = 0;
+    char hex[17];
+
+    if (out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!address) {
+        return;
+    }
+    for (size_t i = 0; address[i] && digits < sizeof(hex) - 1; i++) {
+        if (isxdigit((unsigned char)address[i])) {
+            hex[digits++] = (char)tolower((unsigned char)address[i]);
+        }
+    }
+    hex[digits] = '\0';
+    /* The last twelve digits are the address: BlueZ names a device by a path
+     * that carries four digits of its own before the address. */
+    if (digits > 12) {
+        memmove(hex, hex + (digits - 12), 12);
+        hex[12] = '\0';
+    }
+    for (size_t i = 0; hex[i] && o + 1 < out_len; i++) {
+        out[o++] = hex[i];
+    }
+    out[o] = '\0';
 }
 
 static void strip_dashes(const char *in, char *out, size_t out_len)
@@ -725,6 +776,125 @@ static bool uuid_matches(DBusMessageIter *props, const char *uuid)
     return false;
 }
 
+/* The fixed names of the oldest NUS-only firmware. They have no Management
+ * Service to be found by, so the name is the only thing that recognises
+ * them - and a current board may carry one too, which is why this is a
+ * narrow exception and not a rule. */
+static bool is_legacy_name(const char *name)
+{
+    static const char legacy[] = "Linkr BLE UART";
+    size_t len = sizeof(legacy) - 1;
+
+    if (!name || !name[0]) {
+        return false;
+    }
+    return strncasecmp(name, legacy, len) == 0 &&
+           (name[len] == '\0' || name[len] == '-' || name[len] == ' ');
+}
+
+/* Whether a device is a board this client may talk to.
+ *
+ * With a name the caller asked for, the name decides. Without one, the
+ * Management Service decides - a board whose name was changed still speaks
+ * it - and the fixed legacy name is the fallback for the oldest NUS-only
+ * firmware, which has no service to be found by. */
+static bool device_matches(const char *name, const char *prefix, bool has_mgmt)
+{
+    if (prefix) {
+        return name_starts_with_ci(name, prefix);
+    }
+    if (has_mgmt) {
+        return true;
+    }
+    return is_legacy_name(name);
+}
+
+/* One candidate, considered on its own.
+ *
+ * A board is a board by the service it speaks: the Management Service for
+ * current firmware, and the fixed legacy name for the oldest NUS-only
+ * boards, which have no service to be found by. The name is a filter the
+ * caller asked for, never an identity, because the owner can change that
+ * label at any time.
+ *
+ * Returns true when the search is over: an address match is the answer, and
+ * nothing else can beat it. */
+static bool consider_device(struct device_match *match, const char *path,
+                            const char *name, const char *addr, bool has_nus,
+                            bool has_mgmt)
+{
+    if (match->address) {
+        char wanted[16];
+        char found[16];
+
+        normalize_address(match->address, wanted, sizeof(wanted));
+        normalize_address(addr, found, sizeof(found));
+        if (wanted[0] && strcmp(wanted, found) == 0) {
+            /* snprintf, not strncpy: a shorter name after a longer one
+             * would otherwise keep the previous tail. */
+            snprintf(match->path, sizeof(match->path), "%s", path);
+            snprintf(match->found_name, sizeof(match->found_name), "%s",
+                     name ? name : "");
+            snprintf(match->found_address, sizeof(match->found_address), "%s",
+                     addr ? addr : "");
+            match->found = true;
+            match->found_has_nus = has_nus;
+            return true;
+        }
+    }
+
+    /* An explicit address must never fall through to another nearby board
+     * while the requested device is still absent. */
+    if (match->address) {
+        return false;
+    }
+
+    if (match->automatic) {
+        if (!device_matches(name, NULL, has_mgmt)) {
+            return false;
+        }
+        {
+            int rank = device_rank(false, has_mgmt, has_nus);
+
+            if (rank > match->best_rank) {
+                match->best_rank = rank;
+                snprintf(match->path, sizeof(match->path), "%s", path);
+                snprintf(match->found_name, sizeof(match->found_name), "%s",
+                         name ? name : "");
+                snprintf(match->found_address, sizeof(match->found_address),
+                         "%s", addr ? addr : "");
+                match->found = true;
+                match->found_has_nus = has_nus;
+            }
+        }
+    } else if (device_matches(name, match->name_prefix, has_mgmt)) {
+        int rank = device_rank(name_equals_ci(name, match->name_prefix),
+                               has_mgmt, has_nus);
+
+        match->name_matches++;
+        if (rank > match->best_rank) {
+            match->best_rank = rank;
+            snprintf(match->path, sizeof(match->path), "%s", path);
+            snprintf(match->found_name, sizeof(match->found_name), "%s",
+                     name ? name : "");
+            snprintf(match->found_address, sizeof(match->found_address), "%s",
+                     addr ? addr : "");
+            match->found = true;
+            match->found_has_nus = has_nus;
+        }
+    }
+
+    if (match->nearby_count < NEARBY_MAX) {
+        size_t at = match->nearby_count++;
+
+        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
+                 name && name[0] ? name : "(unknown)");
+        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
+                 "%s", addr ? addr : "");
+    }
+    return false;
+}
+
 static void scan_managed_objects(DBusConnection *conn, struct device_match *match)
 {
     DBusMessage *reply;
@@ -761,7 +931,6 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 const char *addr = "";
                 bool has_nus;
                 bool has_mgmt;
-                bool name_match;
 
                 dbus_message_iter_recurse(&props, &prop_entry);
                 while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
@@ -782,35 +951,11 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
 
                 has_nus = uuid_matches(&props, NUS_SERVICE);
                 has_mgmt = uuid_matches(&props, MGMT_SERVICE);
-                if (match->address && strcasecmp(match->address, addr) == 0) {
-                    /* snprintf, not strncpy: a shorter name after a longer one
-                     * would otherwise keep the previous tail. */
-                    snprintf(match->path, sizeof(match->path), "%s", path);
-                    snprintf(match->found_name, sizeof(match->found_name), "%s",
-                             name ? name : "");
-                    match->found = true;
-                    match->found_has_nus = has_nus;
+
+                if (consider_device(match, path, name, addr, has_nus,
+                                    has_mgmt)) {
                     dbus_message_unref(reply);
                     return;
-                }
-
-                /* An explicit address must never fall through to another
-                 * nearby board while the requested device is still absent. */
-                name_match = !match->address && device_matches(name,
-                    match->automatic ? NULL : match->name_prefix, has_mgmt);
-                if (name_match) {
-                    int rank = device_rank(match->automatic ? has_mgmt :
-                                           strcmp(name, match->name_prefix) == 0,
-                                           has_nus);
-
-                    if (rank > match->best_rank) {
-                        match->best_rank = rank;
-                        snprintf(match->path, sizeof(match->path), "%s", path);
-                        snprintf(match->found_name, sizeof(match->found_name),
-                                 "%s", name ? name : "");
-                        match->found = true;
-                        match->found_has_nus = has_nus;
-                    }
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -828,16 +973,12 @@ static bool find_device(DBusConnection *conn, struct options *opt,
     bool started = false;
     double elapsed;
 
+    memset(match, 0, sizeof(*match));
     match->automatic = opt->name == NULL;
-    match->name_prefix[0] = '\0';
     normalize_name_prefix(opt->name, match->name_prefix,
                           sizeof(match->name_prefix));
     match->address = opt->address;
-    match->found = false;
-    match->found_has_nus = false;
     match->best_rank = -1;
-    match->path[0] = '\0';
-    match->found_name[0] = '\0';
 
     if (opt->address) {
         msg("Looking for BLE device at %s ...", opt->address);
@@ -893,10 +1034,27 @@ static bool find_device(DBusConnection *conn, struct options *opt,
         } else {
             err_msg("device not found matching: %s*", match->name_prefix);
         }
+        /* The advertised name is a label the owner can change, so a board
+         * that was renamed is found by its address instead. Say which
+         * addresses were heard: the answer is in hand already. */
+        if (match->nearby_count > 0) {
+            err_msg("nearby devices (name, address):");
+            for (size_t i = 0; i < match->nearby_count; i++) {
+                err_msg("  %s (%s)", match->nearby_name[i],
+                        match->nearby_address[i]);
+            }
+        }
+        err_msg("connect with --address <address> to reach one of them");
         return false;
     }
 
-    msg("Found %s (%s)", match->found_name, match->path);
+    if (match->name_matches > 1) {
+        err_msg("multiple devices match %s*; using %s (%s)",
+                match->name_prefix, match->found_name,
+                match->found_address);
+    }
+
+    msg("Found %s (%s)", match->found_name, match->found_address);
     return true;
 }
 
@@ -1613,6 +1771,21 @@ static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len
 /* Management v1                                                            */
 /* ------------------------------------------------------------------------ */
 
+/* Whether a Device ID belongs to Linkr Bee.
+ *
+ * The first ten bytes are the fixed Linkr namespace (`LINKRBLE`, version 1)
+ * and the last six are the chip's hardware id. Checking the namespace is
+ * what makes the Management Service a filter rather than a promise: any
+ * device can advertise the same UUID. */
+static bool is_linkr_device_id(const uint8_t *id, size_t len)
+{
+    static const uint8_t prefix[10] = {
+        'L', 'I', 'N', 'K', 'R', 'B', 'L', 'E', 0x01, 0x00
+    };
+
+    return len == 16 && memcmp(id, prefix, sizeof(prefix)) == 0;
+}
+
 /* One request at a time, as the firmware expects: a second command is only
  * sent after the first response has arrived. */
 static bool mgmt_send(DBusConnection *conn, const char *command,
@@ -1754,8 +1927,8 @@ static bool mgmt_check_device(DBusConnection *conn)
                 "board requires bonding)");
         return false;
     }
-    if (device_id_len != 16) {
-        err_msg("invalid Linkr Device ID length");
+    if (!is_linkr_device_id(device_id, device_id_len)) {
+        err_msg("invalid Linkr Device ID");
         return false;
     }
     msg("management API v%u.%u, device ID %u bytes", protocol[0], protocol[1],
@@ -2292,8 +2465,10 @@ static void usage(FILE *out, const char *prog)
             "Usage: %s [options]\n"
             "\n"
             "Options:\n"
-            "  --name NAME           explicit BLE name or prefix filter\n"
-            "                        default: Linkr service UUID or legacy name\n"
+            "  --name NAME           explicit BLE name or prefix filter; by\n"
+            "                        default the board is found by the Linkr\n"
+            "                        Management Service, because the advertised\n"
+            "                        name is a label the owner can change\n"
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices; exits unless another\n"
             "                        action or --address is also given\n"
