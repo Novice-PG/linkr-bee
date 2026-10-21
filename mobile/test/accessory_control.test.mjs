@@ -124,16 +124,16 @@ test("status replies are parsed into the fields a change is verified against", (
 
 test("the @i? stream is grouped until the device reports completion", () => {
   const lines = [
-    "@info fw version=0.1.1 zephyr=4.4.1",
+    "@info fw version=0.1.2 zephyr=4.4.1",
     "@info sys uptime_ms=123456 owner=0 security=2",
     "@info uart dropped=0 dropped_no_conn=0 buffer=12/4096",
   ];
   assert.deepEqual(parseInfoGroups(lines), {
-    fw: { version: "0.1.1", zephyr: "4.4.1" },
+    fw: { version: "0.1.2", zephyr: "4.4.1" },
     sys: { uptime_ms: "123456", owner: "0", security: "2" },
     uart: { dropped: "0", dropped_no_conn: "0", buffer: "12/4096" },
   });
   assert.equal(isDiagnosticsDone("@info done"), true);
-  assert.equal(isDiagnosticsDone("@info fw version=0.1.1"), false);
+  assert.equal(isDiagnosticsDone("@info fw version=0.1.2"), false);
   assert.equal(parseInfoGroups(["@info done"]).done, undefined);
 });

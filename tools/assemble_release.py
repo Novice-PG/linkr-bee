@@ -12,15 +12,15 @@ GitHub Actions downloaded; the script never reaches the network.
 
 Usage:
     tools/assemble_release.py \
-        --tag v0.1.1 --commit <sha> --run-id 123 \
+        --tag v0.1.2 --commit <sha> --run-id 123 \
         --desktop-dir artifacts/desktop \
         --firmware-dir artifacts/firmware \
         --apk-dir artifacts/apk \
         --web-dir artifacts/web \
         --out-dir release \
-        --notes-template docs/releases/v0.1.1.md \
+        --notes-template docs/releases/v0.1.2.md \
         --notes-out release-notes.md \
-        --web-version 0.1.1 --firmware-version 0.1.1 --apk-version 0.1.1
+        --web-version 0.1.2 --firmware-version 0.1.2 --apk-version 0.1.2
 """
 
 from __future__ import annotations

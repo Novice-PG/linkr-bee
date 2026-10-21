@@ -286,7 +286,7 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_DYNAMIC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_MAX=29' "${config}"
-          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION="0.1.1"' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION="0.1.2"' "${config}"
           grep -qx 'CONFIG_BT_SMP=y' "${config}"
           grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "${config}"
           grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "${config}"
