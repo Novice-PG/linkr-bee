@@ -22,7 +22,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,10 +61,11 @@ def uart_frame(sequence, payload):
 
 
 class FakeDevice:
-    def __init__(self, name, address, rssi=None):
+    def __init__(self, name, address, rssi=None, service_uuids=()):
         self.name = name
         self.address = address
         self.rssi = rssi
+        self.service_uuids = service_uuids
 
 
 class FakeWriteClient:
@@ -553,6 +554,26 @@ class WifiCredentialTests(unittest.TestCase):
 
 
 class DeviceMatchTests(unittest.TestCase):
+    def test_automatic_discovery_accepts_renamed_and_unnamed_linkr_devices(self):
+        self.assertIsNone(terminal.build_parser().parse_args([]).name)
+        for name in ("Bench Bee", "测试设备", None):
+            with self.subTest(name=name):
+                device = FakeDevice(name, "AA:1", service_uuids=(terminal.MGMT_SERVICE_UUID,))
+                self.assertEqual(terminal.match_device([device], None), "AA:1")
+
+    def test_automatic_discovery_keeps_legacy_names_but_rejects_unrelated_nus(self):
+        for name in ("Linkr BLE UART", "Linkr BLE UART-3", "linkr ble uart 7F2C"):
+            self.assertEqual(terminal.match_device([FakeDevice(name, "AA:1")], None), "AA:1")
+        for name in ("Linkr Bee 078C", "Other", "Linkr BLE UARTISH", None):
+            device = FakeDevice(name, "BB:1", service_uuids=("6e400001-b5a3-f393-e0a9-e50e24dcca9e",))
+            self.assertIsNone(terminal.match_device([device], None))
+
+    def test_explicit_name_overrides_service_discovery(self):
+        devices = [FakeDevice("Bench Bee", "AA:1", service_uuids=(terminal.MGMT_SERVICE_UUID,)),
+                   FakeDevice("Other", "BB:1")]
+        self.assertEqual(terminal.match_device(devices, "Other"), "BB:1")
+        self.assertIsNone(terminal.match_device(devices, "Linkr Bee"))
+
     def test_exact_name_wins_over_prefix(self):
         devices = [FakeDevice("Linkr Bee 2", "AA:2"),
                    FakeDevice("Linkr Bee", "AA:1")]
@@ -573,8 +594,11 @@ class DeviceMatchTests(unittest.TestCase):
 
         class FakeScanner:
             @staticmethod
-            async def discover(timeout):
-                return devices
+            async def discover(timeout, return_adv):
+                assert return_adv
+                return {dev.address: (dev, types.SimpleNamespace(
+                    local_name=dev.name, rssi=dev.rssi, service_uuids=[]))
+                    for dev in devices}
 
         buffer = io.StringIO()
         with patch.object(terminal, "BleakClient", object), \
@@ -601,6 +625,22 @@ class DeviceMatchTests(unittest.TestCase):
                                                  devices=devices)),
                 "AA:7",
             )
+
+    def test_scan_reuses_advertisement_services_for_default_selection(self):
+        device = FakeDevice("Cached name", "AA:1")
+        adv = types.SimpleNamespace(local_name="测试设备", rssi=-42,
+                                    service_uuids=[terminal.MGMT_SERVICE_UUID.upper()])
+        scanner = types.SimpleNamespace(discover=AsyncMock(
+            return_value={device.address: (device, adv)}))
+        async def run():
+            scanned = await terminal.scan_devices(0.1)
+            self.assertEqual(scanned[0].name, "测试设备")
+            return await terminal.find_device(None, None, 0.1, devices=scanned)
+        with patch.object(terminal, "BleakClient", object), \
+                patch.object(terminal, "BleakScanner", scanner), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(asyncio.run(run()), "AA:1")
+        scanner.discover.assert_awaited_once_with(timeout=0.1, return_adv=True)
 
     def test_explicit_address_skips_the_scan(self):
         self.assertEqual(

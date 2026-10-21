@@ -26,7 +26,8 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     tty = None
 
 __version__ = "0.1.2"
-DEFAULT_NAME = "Linkr Bee"
+DEFAULT_NAME = None  # Discover by service; --name is an explicit override.
+MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 MGMT_PROTOCOL_UUID = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
@@ -433,14 +434,32 @@ def resolve_wifi_credentials(spec: str, key_file: str | None = None,
     )
 
 
+@dataclass
+class DiscoveredDevice:
+    name: str | None
+    address: str
+    rssi: int | None
+    service_uuids: tuple[str, ...]
+
+
+async def discover_devices(timeout: float) -> list[DiscoveredDevice]:
+    """Keep advertisement services alongside names, including for --scan reuse."""
+    import_bleak()
+    advertisements = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    return [
+        DiscoveredDevice(adv.local_name or device.name, device.address, adv.rssi,
+                         tuple(uuid.lower() for uuid in adv.service_uuids))
+        for device, adv in advertisements.values()
+    ]
+
+
 async def scan_devices(timeout: float) -> list:
     """List every nearby BLE device, named or not.
 
     Unnamed peripherals are exactly the ones a user cannot identify by name, so
     silently dropping them made an empty --scan output misleading.
     """
-    import_bleak()
-    devices = await BleakScanner.discover(timeout=timeout)
+    devices = await discover_devices(timeout)
     for dev in sorted(devices, key=device_sort_key):
         rssi = getattr(dev, "rssi", None)
         signal = f"{rssi} dBm" if isinstance(rssi, int) else "-"
@@ -459,8 +478,21 @@ def normalize_name_prefix(name: str) -> str:
     return name
 
 
-def match_device(devices, name: str) -> str | None:
+def is_legacy_name(name: str | None) -> bool:
+    return bool(re.match(r"^Linkr BLE UART(?:$|[- ])", (name or "").strip(), re.I))
+
+
+def match_device(devices, name: str | None) -> str | None:
     """Return the best match's address, or None. Split out for testing."""
+    if name is None:
+        managed = [dev for dev in devices
+                   if MGMT_SERVICE_UUID in getattr(dev, "service_uuids", ())]
+        legacy = [dev for dev in devices if is_legacy_name(dev.name)]
+        candidates = managed or legacy
+        if len(candidates) > 1:
+            warn("multiple Linkr devices found; use --address to select one")
+        return candidates[0].address if candidates else None
+
     for dev in devices:
         if dev.name == name:
             return dev.address
@@ -483,21 +515,22 @@ def match_device(devices, name: str) -> str | None:
     return prefixed[0].address
 
 
-async def find_device(name: str, address: str | None, timeout: float,
+async def find_device(name: str | None, address: str | None, timeout: float,
                       devices=None) -> str:
     """Return the BLE address to connect to, reusing a completed scan."""
     if address:
         return address
 
     import_bleak()
-    prefix = normalize_name_prefix(name)
+    criterion = (f"name {normalize_name_prefix(name)}*" if name is not None
+                 else "Linkr Management Service or legacy Linkr BLE UART name")
     if devices is None:
-        info(f"scanning for BLE device matching {prefix + '*'}")
-        devices = await BleakScanner.discover(timeout=timeout)
+        info(f"scanning for BLE device matching {criterion}")
+        devices = await discover_devices(timeout)
 
     match = match_device(devices, name)
     if match is None:
-        raise RuntimeError(f"device not found matching: {prefix + '*'}")
+        raise RuntimeError(f"device not found matching: {criterion}")
     return match
 
 
@@ -1382,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--name",
         default=DEFAULT_NAME,
-        help="BLE device name or prefix; default matches Linkr Bee*",
+        help="explicit BLE name/prefix filter; default discovers Linkr service or legacy names",
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true",
@@ -1431,7 +1464,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-completion", choices=COMPLETION_SHELLS,
                         help="print a shell completion script and exit")
     parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
-                        help="max bytes per BLE RX write; default auto")
+                        help="terminal write size; default auto; management uses at least 20")
     parser.add_argument("--write-response", action="store_true",
                         help="use GATT write-with-response")
     parser.add_argument("--write-delay-ms", type=nonnegative_float, default=5.0,

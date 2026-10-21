@@ -24,13 +24,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <dbus/dbus.h>
 
-#define DEFAULT_NAME    "Linkr Bee"
 #define NUS_SERVICE     "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_RX_UUID     "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX_UUID     "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
@@ -460,6 +460,7 @@ static bool find_adapter(DBusConnection *conn, char *path_out, size_t path_out_l
 
 struct device_match {
     char name_prefix[MAX_NAME_LEN];
+    bool automatic;
     const char *address;
     char path[MAX_PATH_LEN];
     char found_name[MAX_NAME_LEN];
@@ -475,6 +476,24 @@ struct device_match {
 static int device_rank(bool exact_name, bool has_nus)
 {
     return (exact_name ? 2 : 0) + (has_nus ? 1 : 0);
+}
+
+/* Default discovery follows the management UUID after a rename. Only the
+ * fixed legacy names may fall back without it; NUS alone is not Linkr-specific.
+ * A non-NULL prefix is an explicit --name override, including '*'. */
+static bool device_matches(const char *name, const char *prefix, bool has_mgmt)
+{
+    const char *legacy = "Linkr BLE UART";
+    size_t len = strlen(legacy);
+
+    if (prefix) {
+        return name && name[0] && strncmp(name, prefix, strlen(prefix)) == 0;
+    }
+    if (has_mgmt) {
+        return true;
+    }
+    return name && strncasecmp(name, legacy, len) == 0 &&
+           (name[len] == '\0' || name[len] == '-' || name[len] == ' ');
 }
 
 static void strip_dashes(const char *in, char *out, size_t out_len)
@@ -741,6 +760,7 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 const char *name = "";
                 const char *addr = "";
                 bool has_nus;
+                bool has_mgmt;
                 bool name_match;
 
                 dbus_message_iter_recurse(&props, &prop_entry);
@@ -761,6 +781,7 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 }
 
                 has_nus = uuid_matches(&props, NUS_SERVICE);
+                has_mgmt = uuid_matches(&props, MGMT_SERVICE);
                 if (match->address && strcasecmp(match->address, addr) == 0) {
                     /* snprintf, not strncpy: a shorter name after a longer one
                      * would otherwise keep the previous tail. */
@@ -773,18 +794,20 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                     return;
                 }
 
-                name_match = name && name[0] &&
-                             strncmp(name, match->name_prefix,
-                                     strlen(match->name_prefix)) == 0;
+                /* An explicit address must never fall through to another
+                 * nearby board while the requested device is still absent. */
+                name_match = !match->address && device_matches(name,
+                    match->automatic ? NULL : match->name_prefix, has_mgmt);
                 if (name_match) {
-                    int rank = device_rank(strcmp(name, match->name_prefix) == 0,
+                    int rank = device_rank(match->automatic ? has_mgmt :
+                                           strcmp(name, match->name_prefix) == 0,
                                            has_nus);
 
                     if (rank > match->best_rank) {
                         match->best_rank = rank;
                         snprintf(match->path, sizeof(match->path), "%s", path);
                         snprintf(match->found_name, sizeof(match->found_name),
-                                 "%s", name);
+                                 "%s", name ? name : "");
                         match->found = true;
                         match->found_has_nus = has_nus;
                     }
@@ -805,6 +828,8 @@ static bool find_device(DBusConnection *conn, struct options *opt,
     bool started = false;
     double elapsed;
 
+    match->automatic = opt->name == NULL;
+    match->name_prefix[0] = '\0';
     normalize_name_prefix(opt->name, match->name_prefix,
                           sizeof(match->name_prefix));
     match->address = opt->address;
@@ -816,6 +841,8 @@ static bool find_device(DBusConnection *conn, struct options *opt,
 
     if (opt->address) {
         msg("Looking for BLE device at %s ...", opt->address);
+    } else if (match->automatic) {
+        msg("Scanning for Linkr Management Service or legacy Linkr BLE UART name ...");
     } else {
         msg("Scanning for BLE device matching %s* ...", match->name_prefix);
     }
@@ -861,6 +888,8 @@ static bool find_device(DBusConnection *conn, struct options *opt,
          * as "matching Linkr Bee*" sent people looking for the wrong fix. */
         if (opt->address) {
             err_msg("no BLE device found at address %s", opt->address);
+        } else if (match->automatic) {
+            err_msg("no Linkr Management Service or legacy Linkr BLE UART device found");
         } else {
             err_msg("device not found matching: %s*", match->name_prefix);
         }
@@ -1618,7 +1647,9 @@ static bool mgmt_send(DBusConnection *conn, const char *command,
     total = MGMT_HEADER_SIZE + command_len;
 
     chunk = opt->ble_write_size > 0 ? opt->ble_write_size : g_state.mtu_write_size;
-    if (chunk <= 0) {
+    /* Management's first write must contain its full 12-byte header. The
+     * terminal's smaller pacing chunks must not split that header. */
+    if (chunk < 20) {
         chunk = 20;
     }
     if (chunk > BLE_MAX_NUS_PAYLOAD) {
@@ -2261,7 +2292,8 @@ static void usage(FILE *out, const char *prog)
             "Usage: %s [options]\n"
             "\n"
             "Options:\n"
-            "  --name NAME           BLE device name or prefix (default: '%s')\n"
+            "  --name NAME           explicit BLE name or prefix filter\n"
+            "                        default: Linkr service UUID or legacy name\n"
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices; exits unless another\n"
             "                        action or --address is also given\n"
@@ -2274,7 +2306,7 @@ static void usage(FILE *out, const char *prog)
             "  --query-ble-name      read the advertised BLE name (@n?)\n"
             "  --rename-ble NAME     set the advertised BLE name (@n=NAME)\n"
             "  --reset-ble-name      restore the MAC-derived BLE name (@n default)\n"
-            "  --ble-write-size N    max bytes per BLE write (0=20-byte safe default)\n"
+            "  --ble-write-size N    NUS write size (0=20); management uses at least 20\n"
             "  --write-response      use GATT write-with-response (default: without)\n"
             "  --enter MODE          raw|cr|lf|crlf (default: raw)\n"
             "  --local-echo          echo typed bytes locally\n"
@@ -2296,7 +2328,7 @@ static void usage(FILE *out, const char *prog)
             "they are refused on legacy NUS-only firmware. Use\n"
             "linkr_ble_terminal.py for the other Management v1 controls\n"
             "(WiFi, WebDAV, UART).\n",
-            prog, DEFAULT_NAME);
+            prog);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -2540,7 +2572,7 @@ static void flag_takes_none(const char *flag, const char *inline_value)
 static void parse_args(int argc, char **argv, struct options *opt)
 {
     *opt = (struct options){
-        .name = DEFAULT_NAME,
+        .name = NULL,
         .timeout = 8.0,
         .loopback_timeout = 3.0,
         .enter = "raw",

@@ -69,6 +69,7 @@ HARNESS_PRELUDE = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define MAX_NAME_LEN_LOCAL 128
 #define BLE_MAX_NUS_PAYLOAD 244
@@ -157,6 +158,21 @@ int main(void)
     char buf[MAX_NAME_LEN_LOCAL];
     char small[4];
     char escape[16];
+
+    /* A name change must not hide a managed device. Explicit names still
+     * override the service filter; generic NUS devices do not auto-match. */
+    CHECK(device_matches("Bench Bee", NULL, true));
+    CHECK(device_matches("测试设备", NULL, true));
+    CHECK(device_matches(NULL, NULL, true));
+    CHECK(device_matches("Linkr BLE UART", NULL, false));
+    CHECK(device_matches("Linkr BLE UART-3", NULL, false));
+    CHECK(device_matches("linkr ble uart 7F2C", NULL, false));
+    CHECK(!device_matches("Linkr BLE UARTISH", NULL, false));
+    CHECK(!device_matches("Linkr Bee 078C", NULL, false));
+    CHECK(!device_matches("Other", NULL, false));
+    CHECK(!device_matches(NULL, NULL, false));
+    CHECK(device_matches("Other", "Other", false));
+    CHECK(!device_matches("Bench Bee", "Other", true));
 
     /* normalize_name_prefix trims, drops a trailing '*' and truncates. */
     normalize_name_prefix("  Linkr Bee*  ", buf, sizeof(buf));
@@ -255,7 +271,7 @@ class CHarnessTests(unittest.TestCase):
 
         device_helpers = extract(
             source, "static int device_rank(", "static bool iter_uuid_array_contains",
-            ["device_rank", "strip_dashes", "normalize_name_prefix"])
+            ["device_rank", "device_matches", "strip_dashes", "normalize_name_prefix"])
         enter = extract(source, "static void normalize_enter(",
                         "static void describe_escape(", ["normalize_enter"])
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
@@ -287,6 +303,30 @@ class CHarnessTests(unittest.TestCase):
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("harness ok", result.stdout)
+
+
+@unittest.skipUnless(shutil.which(CC), "a C compiler is required")
+class CManagementFramingTests(unittest.TestCase):
+    def test_management_headers_survive_small_terminal_write_sizes(self):
+        source = SOURCE_PATH.read_text()
+        helpers = extract(source, "static void put_le16(", "/* The same shape",
+                          ["put_le16", "put_le32"])
+        terminal = extract(source, "static bool write_with_mtu(", "/* ---",
+                           ["write_with_mtu"])
+        writer = extract(source, "static bool mgmt_send(", "/* Read the Protocol Info",
+                         ["mgmt_send"])
+        with tempfile.TemporaryDirectory(prefix="linkr-c-mgmt-") as directory:
+            path = Path(directory)
+            (path / "production_mgmt.inc").write_text(helpers + terminal + writer)
+            binary = path / "mgmt-client-test"
+            compiled = subprocess.run([
+                CC, "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror",
+                "-I", str(path), str(ROOT / "tests/mgmt_client_harness.c"),
+                "-o", str(binary),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 @unittest.skipUnless(dbus_available(), "dbus-1 development files are required")

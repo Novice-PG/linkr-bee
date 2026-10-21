@@ -76,6 +76,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           python3 tools/assemble_release.py \
+            --repo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --tag "${GITHUB_REF_NAME}" \
             --commit "${GITHUB_SHA}" \
             --run-id "${GITHUB_RUN_ID}" \

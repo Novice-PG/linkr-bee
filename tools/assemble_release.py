@@ -243,7 +243,7 @@ def main() -> int:
     parser.add_argument("--web-version", required=True)
     parser.add_argument("--firmware-version", required=True)
     parser.add_argument("--apk-version", required=True)
-    parser.add_argument("--repo", default="https://github.com/Novice-PG/linkr-bee")
+    parser.add_argument("--repo", default="https://github.com/radxa/linkr-bee")
     args = parser.parse_args()
 
     out = args.out_dir
@@ -314,6 +314,7 @@ def main() -> int:
     tui_version = tui_versions.pop()
 
     substitutions = {
+        "{{REPO}}": args.repo.rstrip("/"),
         "{{TAG}}": args.tag,
         "{{SHA}}": args.commit,
         "{{RUN_ID}}": str(args.run_id),
