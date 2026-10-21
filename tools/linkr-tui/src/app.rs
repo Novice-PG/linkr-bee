@@ -650,6 +650,10 @@ pub struct App {
     /// The `@w=` write whose answer has not arrived, or that is owed another
     /// attempt after a busy refusal. See [`WifiWrite`].
     pub wifi_write: Option<WifiWrite>,
+    /// What a BLE-name write is expected to make the name's provenance, told
+    /// apart from a read: `@n=<name>` makes it custom and `@n default` makes
+    /// it the MAC-derived one, while neither reply repeats `custom=`.
+    pub ble_name_write_custom: Option<bool>,
     /// The scan whose answer has not arrived, or that is owed another attempt
     /// after being refused. See [`ScanRetry`].
     pub scan_retry: Option<ScanRetry>,
@@ -856,6 +860,7 @@ impl Default for App {
             network: crate::views::network::NetworkState::default(),
             wifi_operation: None,
             wifi_write: None,
+            ble_name_write_custom: None,
             scan_retry: None,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
@@ -2951,7 +2956,7 @@ impl App {
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -3012,6 +3017,31 @@ impl App {
         self.send_accessory(&command, Query::Webdav)
     }
 
+    /// Set the advertised BLE name and read it back.
+    ///
+    /// The read is the confirmation: the bridge advertises what it stored, and
+    /// a write that was accepted is not a value the view can show until the
+    /// bridge has repeated it.
+    pub fn set_ble_name(&mut self, name: &str) -> Result<(), String> {
+        let command = accessory::ble_name_command(name)?;
+        self.ble_name_write_custom = Some(true);
+        let result = self.send_accessory(&command, Query::BleName);
+        if result.is_err() {
+            self.ble_name_write_custom = None;
+        }
+        result
+    }
+
+    /// Restore the MAC-derived advertised name and read it back.
+    pub fn reset_ble_name(&mut self) -> Result<(), String> {
+        self.ble_name_write_custom = Some(false);
+        let result = self.send_accessory(&accessory::reset_ble_name_command(), Query::BleName);
+        if result.is_err() {
+            self.ble_name_write_custom = None;
+        }
+        result
+    }
+
     /// Send one management command the caller has already built, and wait for
     /// the read that confirms it.
     ///
@@ -3023,8 +3053,12 @@ impl App {
             b"@u" => Query::Uart,
             b"@w" => Query::Wifi,
             b"@d" => Query::Webdav,
+            b"@n" => Query::BleName,
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
+        if query == Query::BleName {
+            self.ble_name_write_custom = Some(command != "@n default");
+        }
         self.send_accessory(command, query)
     }
 
@@ -3062,6 +3096,9 @@ impl App {
         // the thing going to the bridge: only what is remembered and shown
         // goes through the scrubber.
         let shown = accessory::redact_command(command);
+        if query != Query::BleName {
+            self.ble_name_write_custom = None;
+        }
         let now = Instant::now();
         // The question this replaces loses its spinner here rather than when
         // the new answer arrives; see `ask_device`.
@@ -3137,6 +3174,9 @@ impl App {
                 if owed {
                     return;
                 }
+            }
+            if reply.query == Query::BleName {
+                self.ble_name_write_custom = None;
             }
             // Whatever the refusal was, a scan it named is not owed anything
             // by it: the record goes, so that a scan asked later starts with
@@ -3270,6 +3310,18 @@ impl App {
             Query::Webdav => {
                 if let Some(status) = accessory::parse_webdav_status(&text) {
                     self.network.webdav = Some(status);
+                }
+            }
+            // `@n?` and the write's confirmation share one parser. The write
+            // reply has no `custom=` field, so the view keeps whatever the
+            // last read said about where the name came from.
+            Query::BleName => {
+                if let Some(status) = accessory::parse_ble_name(&text) {
+                    let custom = status.custom.or(self.ble_name_write_custom.take());
+                    self.network.ble_name = Some(accessory::BleNameStatus {
+                        name: status.name,
+                        custom,
+                    });
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -3632,7 +3684,7 @@ impl App {
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav => {
+            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
                 self.network.loading = false
             }
             Query::Lan => self.lan_status.loading = false,
@@ -4862,7 +4914,7 @@ mod tests {
         app.scroll_diagnostics_down(10);
         wire.feed_management(answer(
             id,
-            "@info fw version=0.1.1 zephyr=4.4.1\n@info done",
+            "@info fw version=0.1.2 zephyr=4.4.1\n@info done",
         ));
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
         assert_eq!(app.diagnostics.scroll, 0, "a new document opens at its top");
@@ -5416,13 +5468,13 @@ mod tests {
         let id = asked_id(&wire);
         wire.feed_management(answer(
             id,
-            "@info fw version=0.1.1 zephyr=4.4.1\n@info sys uptime_ms=123456\n@info done",
+            "@info fw version=0.1.2 zephyr=4.4.1\n@info sys uptime_ms=123456\n@info done",
         ));
 
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
         assert!(!app.diagnostics.loading);
         assert_eq!(
-            app.diagnostics.groups["fw"]["version"], "0.1.1",
+            app.diagnostics.groups["fw"]["version"], "0.1.2",
             "the firmware version came from the device, not from anywhere else"
         );
         assert_eq!(app.diagnostics.groups["sys"]["uptime_ms"], "123456");
@@ -5959,7 +6011,7 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::Zh);
         app.ask_device(Query::Diagnostics).expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "@info fw version=0.1.1\n@info done"));
+        wire.feed_management(answer(id, "@info fw version=0.1.2\n@info done"));
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
 
         app.ask_device(Query::Diagnostics).expect("asked again");
@@ -5967,7 +6019,7 @@ mod tests {
         wire.feed_management(answer(id, "ERR busy"));
         assert!(pump_until(&mut app, |app| app.diagnostics.error.is_some()));
         assert!(app.diagnostics.has_data(), "the earlier reading survives");
-        assert_eq!(app.diagnostics.groups["fw"]["version"], "0.1.1");
+        assert_eq!(app.diagnostics.groups["fw"]["version"], "0.1.2");
     }
 
     /// Asking over a link with no management channel is refused here, with the

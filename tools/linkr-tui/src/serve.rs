@@ -15,7 +15,7 @@
 //! equivalent would have had:
 //!
 //! ```text
-//! {"event":"ready","program":"bee","version":"0.1.1","link":"ble EE:…","ops":[…]}
+//! {"event":"ready","program":"bee","version":"0.1.2","link":"ble EE:…","ops":[…]}
 //! (the `program` value is the name this copy was invoked as, so a CLI-only
 //! install reports `bee-cli`).
 //! {"id":1,"op":"query-uart"}                       →  {"event":"begin","id":1,"op":"uart"} … {"event":"end","id":1,"code":0}
@@ -108,6 +108,7 @@ pub const OPERATIONS: &[&str] = &[
     "wifi-scan",
     "webdav",
     "webdav-off",
+    "ble-name",
     "lan",
     "exec",
     "loopback-test",
@@ -168,7 +169,15 @@ pub fn operations_for(kind: Option<LinkKind>) -> Vec<&'static str> {
 fn is_ble_only(op: &str) -> bool {
     matches!(
         op,
-        "info" | "uart" | "wifi" | "webdav" | "webdav-off" | "wifi-off" | "wifi-scan" | "lan"
+        "info"
+            | "uart"
+            | "wifi"
+            | "webdav"
+            | "webdav-off"
+            | "wifi-off"
+            | "wifi-scan"
+            | "lan"
+            | "ble-name"
     )
 }
 
@@ -424,6 +433,7 @@ fn accepted_fields(op: &str) -> Option<&'static [&'static str]> {
         "uart" => Some(&["value"]),
         "wifi" => Some(&["ssid", "pass"]),
         "webdav" => Some(&["url"]),
+        "ble-name" => Some(&["name", "default"]),
         "exec" => Some(&["cmd", "timeout_ms", "idle_ms", "retry"]),
         "loopback-test" => Some(&["data", "timeout_ms"]),
         _ => None,
@@ -520,6 +530,24 @@ fn action_for(request: &Request) -> Result<Action, String> {
             None => requests.queries.push(Query::Webdav),
         },
         "webdav-off" => requests.webdav_off = true,
+        // One op with three shapes, as `wifi` has two: no field reads, a
+        // `name` sets, and `"default": true` restores the MAC-derived name.
+        // A request with both is refused rather than ordered, because either
+        // order is a surprise.
+        "ble-name" => match (request.value("name"), request.value("default")) {
+            (Some(_), Some(_)) => {
+                return Err("ble-name takes either \"name\" or \"default\", not both".to_string())
+            }
+            (Some(_), None) => {
+                let name = request.string_wanted("name")?.to_string();
+                crate::accessory::ble_name_command(&name)?;
+                requests.ble_name = Some(name);
+            }
+            (None, Some(Value::Bool(true))) => requests.ble_name_default = true,
+            (None, Some(Value::Bool(false))) => {}
+            (None, Some(_)) => return Err("default must be true or false".to_string()),
+            (None, None) => requests.queries.push(Query::BleName),
+        },
         "wifi-off" => requests.wifi_off = true,
         "wifi-scan" => requests.wifi_scan = true,
         "exec" => {
@@ -1150,6 +1178,66 @@ mod tests {
         }
     }
 
+    /// The advertised name is read, set, and restored through one op, and the
+    /// name is checked in the firmware's own units before anything is sent.
+    #[test]
+    fn the_ble_name_op_reads_sets_and_restores() {
+        assert!(OPERATIONS.contains(&"ble-name"));
+        assert!(operations_json().contains("\"ble-name\""));
+
+        match action_for(&request(r#"{"op":"ble-name"}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert_eq!(requests.queries, vec![Query::BleName]);
+                assert!(requests.ble_name.is_none());
+                assert!(!requests.ble_name_default);
+            }
+            other => panic!("{other:?}"),
+        }
+        match action_for(&request(r#"{"op":"ble-name","name":"Bench Bee"}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert_eq!(requests.ble_name.as_deref(), Some("Bench Bee"));
+                assert!(!requests.ble_name_default);
+            }
+            other => panic!("{other:?}"),
+        }
+        match action_for(&request(r#"{"op":"ble-name","name":"测试😀"}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert_eq!(requests.ble_name.as_deref(), Some("测试😀"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match action_for(&request(r#"{"op":"ble-name","default":true}"#)) {
+            Ok(Action::Requests(requests)) => {
+                assert!(requests.ble_name_default);
+                assert!(requests.ble_name.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A request that wants both a name and the default is refused rather
+    /// than ordered, and a name the firmware would refuse is refused here.
+    #[test]
+    fn the_ble_name_op_refuses_what_it_cannot_do() {
+        for (line, needle) in [
+            (
+                r#"{"op":"ble-name","name":"Bee","default":true}"#,
+                "not both",
+            ),
+            (r#"{"op":"ble-name","name":""}"#, "1-29"),
+            (r#"{"op":"ble-name","name":""}"#, "1-29"),
+            (r#"{"op":"ble-name","name":"😀😀😀😀😀😀😀😀"}"#, "1-29"),
+            (r#"{"op":"ble-name","name":"one\ntwo"}"#, "control"),
+            (r#"{"op":"ble-name","default":"yes"}"#, "true or false"),
+        ] {
+            let error = action_for(&request(line)).expect_err(line);
+            assert!(
+                error.contains(needle),
+                "{line:?} gave {error:?}, wanted {needle:?}"
+            );
+        }
+    }
+
     #[test]
     fn invalid_webdav_session_urls_are_refused_before_dialling() {
         for line in [
@@ -1229,7 +1317,7 @@ mod tests {
         assert_eq!(
             operations_json(),
             "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"webdav\",\
-             \"webdav-off\",\"lan\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
+             \"webdav-off\",\"ble-name\",\"lan\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
         );
     }
 }

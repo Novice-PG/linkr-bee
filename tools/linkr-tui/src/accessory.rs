@@ -20,11 +20,17 @@ impl AccessoryLimits {
     pub const SSID_MAX: usize = 32;
     pub const PASSWORD_MAX: usize = 64;
     pub const WEBDAV_URL_MAX: usize = 256;
+    /// The firmware stores the advertised name in this many UTF-8 bytes, not
+    /// characters: a Chinese name is three bytes per ideograph and an emoji is
+    /// usually four.
+    pub const BLE_NAME_MAX: usize = 29;
 }
 
 pub const DIAGNOSTICS_COMMAND: &str = "@i?";
 pub const UART_QUERY_COMMAND: &str = "@u?";
 pub const WIFI_QUERY_COMMAND: &str = "@w?";
+/// `@n?` — the advertised name, and whether it is a custom one.
+pub const BLE_NAME_QUERY_COMMAND: &str = "@n?";
 /// `@w scan` — the bridge's radio walks the channels. The answer streams: an
 /// acceptance, a line per network, and `@scan done` (or `@scan error`) at the
 /// end; see [`crate::device::Query::WifiScan`].
@@ -35,6 +41,36 @@ pub const WEBDAV_QUERY_COMMAND: &str = "@d?";
 /// its LAN access token. `@i?` deliberately omits it, so this is the one
 /// command a client has to send to learn a token it does not already have.
 pub const LAN_QUERY_COMMAND: &str = "@s?";
+
+/// Build `@n=<name>`.
+///
+/// The bridge advertises the name verbatim and stores it in settings, so the
+/// checks the firmware applies are applied on this side too: one to 29 UTF-8
+/// bytes, no control characters. Trimming happens here because leading and
+/// trailing spaces are invisible in a prompt and would otherwise be persisted
+/// as part of the name.
+pub fn ble_name_command(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    let bytes = name.len();
+    if bytes == 0 {
+        return Err("name must be 1-29 UTF-8 bytes".to_string());
+    }
+    if bytes > AccessoryLimits::BLE_NAME_MAX {
+        return Err(format!(
+            "name must be 1-{} UTF-8 bytes; this one is {bytes}",
+            AccessoryLimits::BLE_NAME_MAX
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("name must not contain control characters".to_string());
+    }
+    Ok(format!("@n={name}"))
+}
+
+/// `@n default` — delete the custom name and go back to the MAC-derived one.
+pub fn reset_ble_name_command() -> String {
+    "@n default".to_string()
+}
 
 /// A UART settings set, as both the command builder and the parser use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +522,44 @@ pub struct WifiStatus {
     pub ip: String,
 }
 
+/// The advertised BLE name, as `@n?` reports it.
+///
+/// `custom` is `Some(false)` for the MAC-derived default and `Some(true)` for
+/// a name set with `@n=`. A write's `OK name=...` has no `custom=` field, so it
+/// is `None` there: the write says what is advertised, and the read that
+/// follows says where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BleNameStatus {
+    pub name: String,
+    pub custom: Option<bool>,
+}
+
+/// Read `OK name=<name>` and, when present, the `custom=yes|no` suffix.
+///
+/// The name may contain spaces, so the suffix is peeled off the right rather
+/// than splitting the line on whitespace. `name` is everything between the
+/// marker and that suffix, which keeps a name that ends in a word such as
+/// `custom` intact.
+pub fn parse_ble_name(text: &str) -> Option<BleNameStatus> {
+    let line = text.lines().map(str::trim).find(|line| {
+        line.get(..8)
+            .is_some_and(|head| head.eq_ignore_ascii_case("OK name="))
+    })?;
+    let mut name = line.get(8..)?.trim();
+    let mut custom = None;
+    if let Some(at) = name.rfind(" custom=") {
+        let flag = &name[at + 8..];
+        if flag.eq_ignore_ascii_case("yes") || flag.eq_ignore_ascii_case("no") {
+            custom = Some(flag.eq_ignore_ascii_case("yes"));
+            name = name[..at].trim_end();
+        }
+    }
+    Some(BleNameStatus {
+        name: name.to_string(),
+        custom,
+    })
+}
+
 /// Another WiFi operation holds the bridge's gate (`-EBUSY`).
 ///
 /// The firmware answers `@w=` and `@w off` with `ERR wifi=<errno>` when its
@@ -688,6 +762,20 @@ pub fn parse_lan_status(text: &str) -> Option<LanStatus> {
 /// One-line summary for the approval card, worded in the interface language.
 pub fn accessory_change_summary(command: &str, zh: bool) -> String {
     let text = command;
+    if let Some(name) = text.strip_prefix("@n=") {
+        return if zh {
+            format!("把 BLE 广播名改为「{name}」")
+        } else {
+            format!("Set the BLE advertised name to \"{name}\"")
+        };
+    }
+    if text == "@n default" {
+        return if zh {
+            "恢复由硬件 MAC 生成的默认 BLE 名称".to_string()
+        } else {
+            "Restore the MAC-derived default BLE name".to_string()
+        };
+    }
     if let Some(settings) = text.strip_prefix("@u=") {
         return if zh {
             format!("把桥接串口改为 {settings}")
@@ -1000,6 +1088,57 @@ mod tests {
         let off = parse_webdav_status("OK webdav off").unwrap();
         assert_eq!(off.state, "off");
         assert_eq!(off.url, "");
+    }
+
+    #[test]
+    fn ble_name_commands_and_byte_limits() {
+        assert_eq!(ble_name_command("Bench Bee").unwrap(), "@n=Bench Bee");
+        assert_eq!(ble_name_command("测试😀").unwrap(), "@n=测试😀");
+        assert_eq!(reset_ble_name_command(), "@n default");
+        // The limit is bytes, not characters: seven four-byte emoji are 28.
+        assert!(ble_name_command(&"😀".repeat(7)).is_ok());
+        assert!(ble_name_command(&"😀".repeat(8)).is_err());
+        assert!(ble_name_command("").is_err());
+        assert!(ble_name_command("   ").is_err());
+        assert!(ble_name_command("one\ntwo").is_err());
+        // Surrounding whitespace is trimmed rather than persisted.
+        assert_eq!(ble_name_command("  Bee  ").unwrap(), "@n=Bee");
+    }
+
+    #[test]
+    fn ble_name_replies_keep_spaces_and_read_customness() {
+        let queried = parse_ble_name("OK name=Bench Bee 078C custom=yes").unwrap();
+        assert_eq!(queried.name, "Bench Bee 078C");
+        assert_eq!(queried.custom, Some(true));
+        let default = parse_ble_name("OK name=Linkr Bee 078C custom=no").unwrap();
+        assert_eq!(default.name, "Linkr Bee 078C");
+        assert_eq!(default.custom, Some(false));
+        // A write's confirmation has no custom field, and a name that ends in
+        // something resembling the suffix is not split unless it parses.
+        let written = parse_ble_name("OK name=测试😀").unwrap();
+        assert_eq!(written.name, "测试😀");
+        assert_eq!(written.custom, None);
+        assert_eq!(
+            parse_ble_name("OK name=Bee custom=maybe").unwrap().name,
+            "Bee custom=maybe"
+        );
+        assert!(parse_ble_name("ERR name expected 1-29 UTF-8 bytes").is_none());
+    }
+
+    #[test]
+    fn ble_name_change_summaries_are_worded_per_language() {
+        assert_eq!(
+            accessory_change_summary("@n=测试😀", true),
+            "把 BLE 广播名改为「测试😀」"
+        );
+        assert_eq!(
+            accessory_change_summary("@n=Bench Bee", false),
+            "Set the BLE advertised name to \"Bench Bee\""
+        );
+        assert_eq!(
+            accessory_change_summary("@n default", true),
+            "恢复由硬件 MAC 生成的默认 BLE 名称"
+        );
     }
 }
 

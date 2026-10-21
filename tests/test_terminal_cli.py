@@ -90,6 +90,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage:", result.stdout)
         self.assertIn("--wifi-key-file", result.stdout)
+        self.assertIn("--rename-ble", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_version_works_without_bleak(self):
@@ -122,6 +123,20 @@ class ParserTests(unittest.TestCase):
         parser = terminal.build_parser()
         args = parser.parse_args(["--uart", "115200, 8, none, 1, hw"])
         self.assertEqual(args.uart, "115200,8,n,1,rtscts")
+
+    def test_ble_name_validation_matches_the_firmware(self):
+        parser = terminal.build_parser()
+        for name in ("Bench Bee", "测试😀", "😀" * 7):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    parser.parse_args(["--rename-ble", name]).rename_ble, name)
+        # Surrounding whitespace is trimmed rather than stored.
+        self.assertEqual(
+            parser.parse_args(["--rename-ble", "  Bee  "]).rename_ble, "Bee")
+        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f"):
+            with self.subTest(name=name):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--rename-ble", name])
 
 
 class CompletionTests(unittest.TestCase):
@@ -312,7 +327,7 @@ class CompletionTests(unittest.TestCase):
         # A prefix that several options share returns all of them.
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--json", "--q"),
                          ["--query-info", "--query-uart", "--query-wifi",
-                          "--query-webdav", "--quiet"])
+                          "--query-webdav", "--query-ble-name", "--quiet"])
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--quiet", "--j"),
                          ["--json"])
         # --flag=value is accepted by the parser, so the value completes too.
@@ -360,7 +375,9 @@ class ScanRuleTests(unittest.TestCase):
     def test_scan_with_a_control_action_continues(self):
         for extra in (["--query-info"], ["--pair"], ["--loopback-test"],
                       ["--wifi", "ssid,pass"], ["--uart", "115200,8,n,1,n"],
-                      ["--wifi-scan"], ["--webdav", "http://host/dav/"]):
+                      ["--wifi-scan"], ["--webdav", "http://host/dav/"],
+                      ["--query-ble-name"], ["--rename-ble", "Bee"],
+                      ["--reset-ble-name"]):
             with self.subTest(extra=extra):
                 self.assertTrue(
                     terminal.has_control_action(self.parse("--scan", *extra)))

@@ -216,6 +216,24 @@ pub struct Strings {
     pub net_set: &'static str,
     /// The WebDAV-disable action.
     pub net_disable: &'static str,
+    /// The advertised BLE-name section heading.
+    pub net_ble_name_section: &'static str,
+    /// The current advertised name field label.
+    pub net_ble_name_label: &'static str,
+    /// The rename action.
+    pub net_ble_name_rename: &'static str,
+    /// The restore-default action.
+    pub net_ble_name_default_action: &'static str,
+    /// The read-name action.
+    pub net_ble_name_status_action: &'static str,
+    /// The byte and character rules under the name field.
+    pub net_ble_name_hint: &'static str,
+    /// Shown when the local name check refuses a value.
+    pub net_ble_name_invalid: &'static str,
+    /// The note marking a custom name.
+    pub net_ble_name_custom: &'static str,
+    /// The note marking the MAC-derived name.
+    pub net_ble_name_default: &'static str,
     /// The WebDAV status action.
     pub net_webdav_status: &'static str,
     /// Refusing to enable WebDAV without a URL.
@@ -548,6 +566,15 @@ const ZH: Strings = Strings {
     net_url_label: "上传地址",
     net_set: "[设置 WebDAV]",
     net_disable: "[关闭 WebDAV]",
+    net_ble_name_section: "BLE 广播名",
+    net_ble_name_label: "当前名称",
+    net_ble_name_rename: "[修改名称]",
+    net_ble_name_default_action: "[恢复默认]",
+    net_ble_name_status_action: "[读取名称]",
+    net_ble_name_hint: "1–29 个 UTF-8 字节，支持中文和 emoji",
+    net_ble_name_invalid: "名称需为 1–29 个 UTF-8 字节，且不能包含控制字符",
+    net_ble_name_custom: "自定义",
+    net_ble_name_default: "MAC 默认",
     net_webdav_status: "[WebDAV 状态]",
     net_no_url: "先输入 WebDAV 上传地址",
     net_state_on: "开启",
@@ -734,6 +761,15 @@ const EN: Strings = Strings {
     net_url_label: "Upload URL",
     net_set: "[Set WebDAV]",
     net_disable: "[WebDAV off]",
+    net_ble_name_section: "BLE advertised name",
+    net_ble_name_label: "Current name",
+    net_ble_name_rename: "[Rename]",
+    net_ble_name_default_action: "[Restore default]",
+    net_ble_name_status_action: "[Read name]",
+    net_ble_name_hint: "1-29 UTF-8 bytes; Chinese and emoji are allowed",
+    net_ble_name_invalid: "the name must be 1-29 UTF-8 bytes without control characters",
+    net_ble_name_custom: "custom",
+    net_ble_name_default: "MAC default",
     net_webdav_status: "[WebDAV status]",
     net_no_url: "enter a WebDAV upload URL first",
     net_state_on: "on",
@@ -1108,6 +1144,15 @@ mod tests {
                 s.net_wifi_pending,
                 s.net_wifi_off_pending,
                 s.net_bad_command,
+                s.net_ble_name_section,
+                s.net_ble_name_label,
+                s.net_ble_name_rename,
+                s.net_ble_name_default_action,
+                s.net_ble_name_status_action,
+                s.net_ble_name_hint,
+                s.net_ble_name_invalid,
+                s.net_ble_name_custom,
+                s.net_ble_name_default,
                 s.asst_session_section,
                 s.asst_tasks_section,
                 s.asst_no_tasks,

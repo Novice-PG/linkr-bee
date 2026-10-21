@@ -34,6 +34,11 @@
 #define NUS_SERVICE     "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_RX_UUID     "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX_UUID     "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+#define MGMT_SERVICE    "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_PROTOCOL_UUID "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_DEVICE_ID_UUID "4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_COMMAND_UUID "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_RESPONSE_UUID "4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001"
 #define BLUEZ_PATH      "/org/bluez"
 #define BLUEZ_BUS       "org.bluez"
 #define DBUS_OM_IFACE   "org.freedesktop.DBus.ObjectManager"
@@ -48,11 +53,17 @@
 #define MAX_NAME_LEN    128
 /* ATT MTU 247 leaves up to 244 bytes for a GATT value. */
 #define BLE_MAX_NUS_PAYLOAD 244
+/* Management v1 frames, and the firmware's advertised-name limit in bytes. */
+#define MGMT_HEADER_SIZE 12
+#define MGMT_MAX_PAYLOAD 512
+#define MGMT_FLAG_ERROR  0x0002
+#define MGMT_MSG_RESPONSE 2
+#define BLE_NAME_MAX     29
 
 /* Keep in sync with __version__ in linkr_ble_terminal.py: both clients speak to
  * the same device and are released together. tests/test_terminal_cli_c.py
  * asserts the two strings match. */
-#define CLI_VERSION     "0.1.1"
+#define CLI_VERSION     "0.1.2"
 
 /* Exit codes mirror the Python client so scripts can treat them alike. */
 enum {
@@ -79,6 +90,10 @@ struct options {
     bool debug_io;
     const char *log_file;
     const char *escape;
+    bool query_ble_name;
+    const char *rename_ble;
+    char ble_name[BLE_NAME_MAX + 1];
+    bool reset_ble_name;
 };
 
 struct app_state {
@@ -87,6 +102,23 @@ struct app_state {
     char device_path[MAX_PATH_LEN];
     char rx_path[MAX_PATH_LEN];
     char tx_path[MAX_PATH_LEN];
+    char mgmt_protocol_path[MAX_PATH_LEN];
+    char mgmt_device_id_path[MAX_PATH_LEN];
+    char mgmt_command_path[MAX_PATH_LEN];
+    char mgmt_response_path[MAX_PATH_LEN];
+    bool mgmt_notifications_started;
+
+    /* One synchronous Management v1 request at a time. The response
+     * reassembler is fed by the D-Bus signal filter while the main thread
+     * waits in mgmt_wait_response(). */
+    uint8_t mgmt_rx[MGMT_MAX_PAYLOAD];
+    size_t mgmt_expected;
+    size_t mgmt_received;
+    uint32_t mgmt_request_id;
+    uint32_t mgmt_response_id;
+    uint16_t mgmt_flags;
+    bool mgmt_ready;
+
     int mtu_write_size;
     bool connected;
     bool notifications_started;
@@ -543,6 +575,106 @@ static size_t iter_copy_byte_array(DBusMessageIter *iter, uint8_t *out,
     return len;
 }
 
+static uint16_t get_le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static void put_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)(value & 0xff);
+    p[1] = (uint8_t)((value >> 8) & 0xff);
+}
+
+static void put_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xff);
+    p[1] = (uint8_t)((value >> 8) & 0xff);
+    p[2] = (uint8_t)((value >> 16) & 0xff);
+    p[3] = (uint8_t)((value >> 24) & 0xff);
+}
+
+/* The same shape the firmware accepts: valid UTF-8, 1..29 bytes, and no C0,
+ * C1, DEL, or embedded NUL characters. The name arrives as argv bytes; this
+ * walks it rather than trusting the locale. */
+static bool ble_name_valid(const char *name)
+{
+    size_t len = strlen(name);
+    size_t i = 0;
+
+    if (len == 0 || len > BLE_NAME_MAX) {
+        return false;
+    }
+
+    while (i < len) {
+        uint8_t c = (uint8_t)name[i];
+        uint32_t cp;
+        size_t extra;
+
+        if (c < 0x20 || c == 0x7f) {
+            return false;
+        }
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        if ((c & 0xe0) == 0xc0) {
+            extra = 1;
+            cp = c & 0x1f;
+        } else if ((c & 0xf0) == 0xe0) {
+            extra = 2;
+            cp = c & 0x0f;
+        } else if ((c & 0xf8) == 0xf0) {
+            extra = 3;
+            cp = c & 0x07;
+        } else {
+            return false;
+        }
+        if (i + extra >= len) {
+            return false;
+        }
+        for (size_t j = 1; j <= extra; j++) {
+            uint8_t continuation = (uint8_t)name[i + j];
+
+            if ((continuation & 0xc0) != 0x80) {
+                return false;
+            }
+            cp = (cp << 6) | (continuation & 0x3f);
+        }
+        if ((extra == 1 && cp < 0x80) ||
+            (extra == 2 && cp < 0x800) ||
+            (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
+            (cp >= 0xd800 && cp <= 0xdfff) ||
+            (cp >= 0x80 && cp <= 0x9f)) {
+            return false;
+        }
+        i += extra + 1;
+    }
+    return true;
+}
+
+/* Trim argv's invisible edges, then validate in the firmware's units. */
+static bool normalize_ble_name(const char *value, char *out, size_t out_len)
+{
+    const char *start = value;
+    size_t len;
+
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') {
+        start++;
+    }
+    len = strlen(start);
+    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t' ||
+                       start[len - 1] == '\r' || start[len - 1] == '\n')) {
+        len--;
+    }
+    if (len == 0 || len > BLE_NAME_MAX || len + 1 > out_len) {
+        return false;
+    }
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return ble_name_valid(out);
+}
+
 static void timespec_add_ms(struct timespec *ts, long ms)
 {
     ts->tv_sec += ms / 1000;
@@ -895,29 +1027,53 @@ static void disconnect_device(DBusConnection *conn)
     g_state.connected = false;
 }
 
-static bool discover_characteristics(DBusConnection *conn)
+static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 {
     DBusMessage *reply;
     DBusMessageIter iter, arr;
-    char nus_dbus_uuid[MAX_UUID_LEN];
     char rx_dbus_uuid[MAX_UUID_LEN];
     char tx_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_protocol_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_device_id_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_command_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_response_dbus_uuid[MAX_UUID_LEN];
 
-    hex_uuid_to_dbus(NUS_SERVICE, nus_dbus_uuid, sizeof(nus_dbus_uuid));
     hex_uuid_to_dbus(NUS_RX_UUID, rx_dbus_uuid, sizeof(rx_dbus_uuid));
     hex_uuid_to_dbus(NUS_TX_UUID, tx_dbus_uuid, sizeof(tx_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_PROTOCOL_UUID, mgmt_protocol_dbus_uuid,
+                     sizeof(mgmt_protocol_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_DEVICE_ID_UUID, mgmt_device_id_dbus_uuid,
+                     sizeof(mgmt_device_id_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_COMMAND_UUID, mgmt_command_dbus_uuid,
+                     sizeof(mgmt_command_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_RESPONSE_UUID, mgmt_response_dbus_uuid,
+                     sizeof(mgmt_response_dbus_uuid));
 
     g_state.rx_path[0] = '\0';
     g_state.tx_path[0] = '\0';
+    g_state.mgmt_protocol_path[0] = '\0';
+    g_state.mgmt_device_id_path[0] = '\0';
+    g_state.mgmt_command_path[0] = '\0';
+    g_state.mgmt_response_path[0] = '\0';
 
     /* BlueZ discovers GATT services asynchronously after Connect; retry until
-     * the NUS characteristics appear or we time out (5s). */
+     * the characteristics appear or we time out (5s). Rename operations need
+     * the Management Service quartet as well as the NUS terminal pair. */
     {
         struct timespec dstart, dnow;
         double delapsed = 0;
 
         clock_gettime(CLOCK_MONOTONIC, &dstart);
-        while (!(g_state.rx_path[0] && g_state.tx_path[0]) && delapsed < 5.0) {
+        while (delapsed < 5.0) {
+            bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
+            bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
+                              g_state.mgmt_device_id_path[0] &&
+                              g_state.mgmt_command_path[0] &&
+                              g_state.mgmt_response_path[0];
+
+            if (nus_ready && (!need_mgmt || mgmt_ready)) {
+                break;
+            }
             reply = call_sync(conn, BLUEZ_BUS, "/", DBUS_OM_IFACE,
                               "GetManagedObjects", NULL);
             if (reply) {
@@ -975,6 +1131,22 @@ static bool discover_characteristics(DBusConnection *conn)
                                     snprintf(g_state.tx_path,
                                              sizeof(g_state.tx_path), "%s",
                                              path);
+                                } else if (strcasecmp(uuid, mgmt_protocol_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_protocol_path,
+                                             sizeof(g_state.mgmt_protocol_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_device_id_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_device_id_path,
+                                             sizeof(g_state.mgmt_device_id_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_command_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_command_path,
+                                             sizeof(g_state.mgmt_command_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_response_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_response_path,
+                                             sizeof(g_state.mgmt_response_path),
+                                             "%s", path);
                                 }
                             }
                         }
@@ -986,8 +1158,16 @@ static bool discover_characteristics(DBusConnection *conn)
                 dbus_message_unref(reply);
             }
 
-            if (g_state.rx_path[0] && g_state.tx_path[0]) {
-                break;
+            {
+                bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
+                bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
+                                  g_state.mgmt_device_id_path[0] &&
+                                  g_state.mgmt_command_path[0] &&
+                                  g_state.mgmt_response_path[0];
+
+                if (nus_ready && (!need_mgmt || mgmt_ready)) {
+                    break;
+                }
             }
 
             usleep(300000);
@@ -1001,9 +1181,21 @@ static bool discover_characteristics(DBusConnection *conn)
         msg("NUS RX/TX characteristics not found");
         return false;
     }
+    if (need_mgmt && (!g_state.mgmt_protocol_path[0] ||
+                      !g_state.mgmt_device_id_path[0] ||
+                      !g_state.mgmt_command_path[0] ||
+                      !g_state.mgmt_response_path[0])) {
+        msg("Management Service characteristics not found; legacy NUS-only "
+            "firmware cannot read or change the BLE name");
+        return false;
+    }
 
     msg("NUS RX: %s", g_state.rx_path);
     msg("NUS TX: %s", g_state.tx_path);
+    if (need_mgmt) {
+        msg("Management command: %s", g_state.mgmt_command_path);
+        msg("Management response: %s", g_state.mgmt_response_path);
+    }
     return true;
 }
 
@@ -1056,6 +1248,45 @@ static void handle_device_properties(DBusMessage *msg, DBusMessageIter *iter)
     }
 }
 
+/* Reassemble one Management v1 response. The first indication carries the
+ * header; continuation indications carry payload bytes only. */
+static void mgmt_feed_response(const uint8_t *data, size_t len)
+{
+    if (g_state.mgmt_ready) {
+        return;
+    }
+    if (g_state.mgmt_expected == 0) {
+        if (len < MGMT_HEADER_SIZE || data[0] != 'L' || data[1] != 'K' ||
+            data[2] != 1 || data[3] != MGMT_MSG_RESPONSE) {
+            return;
+        }
+        g_state.mgmt_response_id =
+            (uint32_t)data[4] | ((uint32_t)data[5] << 8) |
+            ((uint32_t)data[6] << 16) | ((uint32_t)data[7] << 24);
+        g_state.mgmt_expected = get_le16(data + 8);
+        g_state.mgmt_flags = get_le16(data + 10);
+        if (g_state.mgmt_expected == 0 ||
+            g_state.mgmt_expected > MGMT_MAX_PAYLOAD) {
+            msg("Management response has an invalid length");
+            g_state.mgmt_expected = 0;
+            return;
+        }
+        data += MGMT_HEADER_SIZE;
+        len -= MGMT_HEADER_SIZE;
+    }
+    if (g_state.mgmt_received + len > g_state.mgmt_expected) {
+        msg("Management response exceeds its declared length");
+        g_state.mgmt_expected = 0;
+        g_state.mgmt_received = 0;
+        return;
+    }
+    memcpy(g_state.mgmt_rx + g_state.mgmt_received, data, len);
+    g_state.mgmt_received += len;
+    if (g_state.mgmt_received == g_state.mgmt_expected) {
+        g_state.mgmt_ready = true;
+    }
+}
+
 static DBusHandlerResult filter_signals(DBusConnection *conn,
                                         DBusMessage *msg, void *user_data)
 {
@@ -1087,7 +1318,38 @@ static DBusHandlerResult filter_signals(DBusConnection *conn,
     }
 
     const char *path = dbus_message_get_path(msg);
-    if (!path || strcmp(path, g_state.tx_path) != 0) {
+    if (!path) {
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    if (g_state.mgmt_response_path[0] &&
+        strcmp(path, g_state.mgmt_response_path) == 0) {
+        dbus_message_iter_next(&iter);
+        if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        }
+        dbus_message_iter_recurse(&iter, &changed);
+        while (dbus_message_iter_get_arg_type(&changed) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter kv;
+            const char *key;
+
+            dbus_message_iter_recurse(&changed, &kv);
+            iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+            dbus_message_iter_next(&kv);
+            if (strcmp(key, "Value") == 0) {
+                uint8_t data[MGMT_MAX_PAYLOAD + MGMT_HEADER_SIZE];
+                size_t len = iter_copy_byte_array(&kv, data, sizeof(data));
+
+                if (len > 0) {
+                    mgmt_feed_response(data, len);
+                }
+            }
+            dbus_message_iter_next(&changed);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+
+    if (strcmp(path, g_state.tx_path) != 0) {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
 
@@ -1167,17 +1429,84 @@ static void stop_notifications(DBusConnection *conn)
     g_state.notifications_started = false;
 }
 
+static bool start_mgmt_notifications(DBusConnection *conn)
+{
+    DBusMessage *reply;
+
+    reply = call_sync(conn, BLUEZ_BUS, g_state.mgmt_response_path, CHAR_IFACE,
+                      "StartNotify", NULL);
+    if (!reply) {
+        return false;
+    }
+    dbus_message_unref(reply);
+    g_state.mgmt_notifications_started = true;
+    return true;
+}
+
+static void stop_mgmt_notifications(DBusConnection *conn)
+{
+    DBusMessage *reply;
+
+    if (!g_state.mgmt_notifications_started) {
+        return;
+    }
+    reply = call_sync(conn, BLUEZ_BUS, g_state.mgmt_response_path, CHAR_IFACE,
+                      "StopNotify", NULL);
+    if (reply) {
+        dbus_message_unref(reply);
+    }
+    g_state.mgmt_notifications_started = false;
+}
+
+/* Read a GATT characteristic. ReadValue takes an options dict even when it is
+ * empty; the reply is the raw value array. */
+static bool read_char_value(DBusConnection *conn, const char *path,
+                            uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    DBusMessage *call, *reply;
+    DBusMessageIter iter, dict;
+    DBusError err;
+
+    call = dbus_message_new_method_call(BLUEZ_BUS, path, CHAR_IFACE,
+                                        "ReadValue");
+    if (!call) {
+        return false;
+    }
+    dbus_message_iter_init_append(call, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&iter, &dict);
+
+    dbus_error_init(&err);
+    reply = dbus_connection_send_with_reply_and_block(conn, call, 15000, &err);
+    dbus_message_unref(call);
+    if (!reply) {
+        if (dbus_error_is_set(&err)) {
+            msg("D-Bus error reading %s: %s", path, err.message);
+            dbus_error_free(&err);
+        }
+        return false;
+    }
+
+    if (!dbus_message_iter_init(reply, &iter)) {
+        dbus_message_unref(reply);
+        return false;
+    }
+    *out_len = iter_copy_byte_array(&iter, out, out_cap);
+    dbus_message_unref(reply);
+    return true;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Write helpers                                                            */
 /* ------------------------------------------------------------------------ */
 
-static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
-                        bool with_response)
+static bool write_char(DBusConnection *conn, const char *path,
+                       const uint8_t *data, size_t len, bool with_response)
 {
     DBusMessage *msg_call, *reply;
     DBusMessageIter iter, arr;
 
-    msg_call = dbus_message_new_method_call(BLUEZ_BUS, g_state.rx_path,
+    msg_call = dbus_message_new_method_call(BLUEZ_BUS, path,
                                             CHAR_IFACE, "WriteValue");
     if (!msg_call) {
         return false;
@@ -1214,6 +1543,12 @@ static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
     return true;
 }
 
+static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
+                        bool with_response)
+{
+    return write_char(conn, g_state.rx_path, data, len, with_response);
+}
+
 static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len,
                            struct options *opt)
 {
@@ -1242,6 +1577,202 @@ static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len
             usleep(5000);
         }
     }
+    return true;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Management v1                                                            */
+/* ------------------------------------------------------------------------ */
+
+/* One request at a time, as the firmware expects: a second command is only
+ * sent after the first response has arrived. */
+static bool mgmt_send(DBusConnection *conn, const char *command,
+                      struct options *opt, char *reply, size_t reply_cap)
+{
+    uint8_t frame[MGMT_HEADER_SIZE + MGMT_MAX_PAYLOAD];
+    size_t command_len = strlen(command);
+    size_t total;
+    int chunk;
+
+    if (command_len == 0 || command_len > MGMT_MAX_PAYLOAD) {
+        msg("Management command is outside the advertised limit");
+        return false;
+    }
+
+    g_state.mgmt_expected = 0;
+    g_state.mgmt_received = 0;
+    g_state.mgmt_ready = false;
+    g_state.mgmt_request_id++;
+    if (g_state.mgmt_request_id == 0) {
+        g_state.mgmt_request_id = 1;
+    }
+
+    frame[0] = 'L';
+    frame[1] = 'K';
+    frame[2] = 1;
+    frame[3] = 1; /* request */
+    put_le32(frame + 4, g_state.mgmt_request_id);
+    put_le16(frame + 8, (uint16_t)command_len);
+    put_le16(frame + 10, 0);
+    memcpy(frame + MGMT_HEADER_SIZE, command, command_len);
+    total = MGMT_HEADER_SIZE + command_len;
+
+    chunk = opt->ble_write_size > 0 ? opt->ble_write_size : g_state.mtu_write_size;
+    if (chunk <= 0) {
+        chunk = 20;
+    }
+    if (chunk > BLE_MAX_NUS_PAYLOAD) {
+        chunk = BLE_MAX_NUS_PAYLOAD;
+    }
+
+    for (size_t offset = 0; offset < total; offset += (size_t)chunk) {
+        size_t n = total - offset;
+
+        if (n > (size_t)chunk) {
+            n = (size_t)chunk;
+        }
+        if (opt->debug_io) {
+            msg("MGMT TX %zu bytes", n);
+        }
+        /* The command characteristic is write-with-response: the firmware
+         * only reassembles a request that was acknowledged. */
+        if (!write_char(conn, g_state.mgmt_command_path, frame + offset, n,
+                        true)) {
+            msg("Management write failed at offset %zu", offset);
+            return false;
+        }
+        if (offset + n < total) {
+            usleep(5000);
+        }
+    }
+
+    {
+        struct timespec start, now;
+        double elapsed = 0;
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        while (!g_state.mgmt_ready && elapsed < 5.0) {
+            if (!dbus_connection_read_write_dispatch(conn, 100)) {
+                break;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            elapsed = (now.tv_sec - start.tv_sec) +
+                      (now.tv_nsec - start.tv_nsec) / 1e9;
+        }
+    }
+
+    if (!g_state.mgmt_ready) {
+        msg("Management response timed out");
+        return false;
+    }
+    if (g_state.mgmt_response_id != g_state.mgmt_request_id) {
+        msg("Management response was for another request");
+        return false;
+    }
+
+    {
+        size_t len = g_state.mgmt_received;
+
+        while (len > 0 && (g_state.mgmt_rx[len - 1] == '\r' ||
+                           g_state.mgmt_rx[len - 1] == '\n')) {
+            len--;
+        }
+        if (len + 1 > reply_cap) {
+            len = reply_cap - 1;
+        }
+        memcpy(reply, g_state.mgmt_rx, len);
+        reply[len] = '\0';
+    }
+
+    if (g_state.mgmt_flags & MGMT_FLAG_ERROR) {
+        err_msg("%s", reply);
+        return false;
+    }
+    return true;
+}
+
+/* Read the Protocol Info characteristic and the Device ID: the firmware
+ * requires both, and a name change is a persisted write like any other. */
+static bool mgmt_check_device(DBusConnection *conn)
+{
+    uint8_t protocol[16];
+    uint8_t device_id[32];
+    size_t protocol_len = 0;
+    size_t device_id_len = 0;
+    uint32_t capabilities;
+
+    if (!read_char_value(conn, g_state.mgmt_protocol_path, protocol,
+                         sizeof(protocol), &protocol_len)) {
+        err_msg("cannot read the Management Protocol Info characteristic "
+                "(pair with --pair if the board requires bonding)");
+        return false;
+    }
+    if (protocol_len < 10 || protocol[0] != 1) {
+        err_msg("unsupported Linkr Management API version");
+        return false;
+    }
+    capabilities = (uint32_t)protocol[4] | ((uint32_t)protocol[5] << 8) |
+                   ((uint32_t)protocol[6] << 16) | ((uint32_t)protocol[7] << 24);
+    if (!(capabilities & (1u << 3))) {
+        err_msg("device does not advertise Device ID support");
+        return false;
+    }
+    if (!read_char_value(conn, g_state.mgmt_device_id_path, device_id,
+                         sizeof(device_id), &device_id_len)) {
+        err_msg("cannot read the Linkr Device ID (pair with --pair if the "
+                "board requires bonding)");
+        return false;
+    }
+    if (device_id_len != 16) {
+        err_msg("invalid Linkr Device ID length");
+        return false;
+    }
+    msg("management API v%u.%u, device ID %u bytes", protocol[0], protocol[1],
+        (unsigned)device_id_len);
+    return true;
+}
+
+/* Run the requested Management operations. The answers go to stdout so a
+ * script can read them; progress and errors stay on stderr. */
+static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
+{
+    char reply[MGMT_MAX_PAYLOAD + 1];
+    char command[BLE_NAME_MAX + 8];
+
+    if (!start_mgmt_notifications(conn)) {
+        err_msg("cannot subscribe to Management responses");
+        return false;
+    }
+    if (!mgmt_check_device(conn)) {
+        stop_mgmt_notifications(conn);
+        return false;
+    }
+
+    if (opt->query_ble_name) {
+        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        printf("%s\n", reply);
+    }
+    if (opt->rename_ble) {
+        snprintf(command, sizeof(command), "@n=%s", opt->rename_ble);
+        if (!mgmt_send(conn, command, opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        printf("%s\n", reply);
+    }
+    if (opt->reset_ble_name) {
+        if (!mgmt_send(conn, "@n default", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        printf("%s\n", reply);
+    }
+
+    fflush(stdout);
+    stop_mgmt_notifications(conn);
     return true;
 }
 
@@ -1740,6 +2271,9 @@ static void usage(FILE *out, const char *prog)
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
+            "  --query-ble-name      read the advertised BLE name (@n?)\n"
+            "  --rename-ble NAME     set the advertised BLE name (@n=NAME)\n"
+            "  --reset-ble-name      restore the MAC-derived BLE name (@n default)\n"
             "  --ble-write-size N    max bytes per BLE write (0=20-byte safe default)\n"
             "  --write-response      use GATT write-with-response (default: without)\n"
             "  --enter MODE          raw|cr|lf|crlf (default: raw)\n"
@@ -1756,9 +2290,12 @@ static void usage(FILE *out, const char *prog)
             "Long options also accept the --option=value form.\n"
             "Exit codes: 0 ok, 1 error, 2 bad arguments, 3 device disconnected.\n"
             "\n"
-            "This is the Linux/BlueZ reference client and it speaks legacy NUS\n"
-            "only. Use linkr_ble_terminal.py for Management v1, Reliable UART,\n"
-            "WiFi and WebDAV control.\n",
+            "This is the Linux/BlueZ reference client. It speaks legacy NUS for\n"
+            "the terminal, and Management Service v1 for the BLE name: reading\n"
+            "and renaming need the Management Service and a valid Device ID, so\n"
+            "they are refused on legacy NUS-only firmware. Use\n"
+            "linkr_ble_terminal.py for the other Management v1 controls\n"
+            "(WiFi, WebDAV, UART).\n",
             prog, DEFAULT_NAME);
 }
 
@@ -1790,6 +2327,9 @@ static const struct completion_option k_completion_options[] = {
     { "--loopback-test", true, false, "", "send payload and require echo" },
     { "--loopback-timeout", true, false, "", "loopback timeout seconds" },
     { "--no-terminal", false, false, "", "connect, run commands, exit" },
+    { "--query-ble-name", false, false, "", "read the advertised BLE name" },
+    { "--rename-ble", true, false, "", "set the advertised BLE name" },
+    { "--reset-ble-name", false, false, "", "restore the default BLE name" },
     { "--ble-write-size", true, false, "", "max bytes per BLE write" },
     { "--write-response", false, false, "", "use GATT write-with-response" },
     { "--enter", true, false, "raw cr lf crlf", "translate Enter key bytes" },
@@ -2074,6 +2614,22 @@ static void parse_args(int argc, char **argv, struct options *opt)
         } else if (strcmp(flag, "--no-terminal") == 0) {
             flag_takes_none(flag, inline_value);
             opt->no_terminal = true;
+        } else if (strcmp(flag, "--query-ble-name") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->query_ble_name = true;
+        } else if (strcmp(flag, "--rename-ble") == 0) {
+            const char *value = flag_takes_value(argc, argv, &i, flag,
+                                                 inline_value);
+
+            if (!normalize_ble_name(value, opt->ble_name,
+                                    sizeof(opt->ble_name))) {
+                usage_fatal("--rename-ble must be 1-%d UTF-8 bytes without "
+                            "control characters", BLE_NAME_MAX);
+            }
+            opt->rename_ble = opt->ble_name;
+        } else if (strcmp(flag, "--reset-ble-name") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->reset_ble_name = true;
         } else if (strcmp(flag, "--ble-write-size") == 0) {
             opt->ble_write_size = parse_ble_write_size(
                 flag_takes_value(argc, argv, &i, flag, inline_value));
@@ -2103,6 +2659,9 @@ static void parse_args(int argc, char **argv, struct options *opt)
     if (strcmp(opt->enter, "raw") != 0 && strcmp(opt->enter, "cr") != 0 &&
         strcmp(opt->enter, "lf") != 0 && strcmp(opt->enter, "crlf") != 0) {
         usage_fatal("--enter must be raw, cr, lf, or crlf");
+    }
+    if (opt->rename_ble && opt->reset_ble_name) {
+        usage_fatal("choose either --rename-ble or --reset-ble-name");
     }
     opt->escape = parse_escape(opt->escape);
 }
@@ -2154,7 +2713,8 @@ int main(int argc, char **argv)
         scan_and_list_devices(g_state.conn, opt.timeout);
         /* Listing is the whole job unless another action was requested. The
          * Python client follows the same rule. */
-        if (!opt.loopback_test && !opt.pair && !opt.address) {
+        if (!opt.loopback_test && !opt.pair && !opt.address &&
+            !opt.query_ble_name && !opt.rename_ble && !opt.reset_ble_name) {
             return EXIT_OK;
         }
     }
@@ -2174,7 +2734,9 @@ int main(int argc, char **argv)
         return EXIT_ERROR;
     }
 
-    if (!discover_characteristics(g_state.conn)) {
+    if (!discover_characteristics(g_state.conn,
+                                 opt.query_ble_name || opt.rename_ble ||
+                                 opt.reset_ble_name)) {
         disconnect_device(g_state.conn);
         return EXIT_ERROR;
     }
@@ -2185,6 +2747,18 @@ int main(int argc, char **argv)
     }
 
     configure_write_chunk();
+
+    if (opt.query_ble_name || opt.rename_ble || opt.reset_ble_name) {
+        if (!run_ble_name_actions(g_state.conn, &opt)) {
+            stop_notifications(g_state.conn);
+            disconnect_device(g_state.conn);
+            restore_terminal();
+            if (g_state.log_file) {
+                fclose(g_state.log_file);
+            }
+            return EXIT_ERROR;
+        }
+    }
 
     if (opt.loopback_test) {
         bool ok = do_loopback_test(g_state.conn, &opt);

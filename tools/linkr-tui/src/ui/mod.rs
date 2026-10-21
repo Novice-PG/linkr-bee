@@ -1395,6 +1395,10 @@ mod tests {
                 (NetworkRow::WebdavSet, "[Set WebDAV]".to_string()),
                 (NetworkRow::WebdavOff, "[WebDAV off]".to_string()),
                 (NetworkRow::WebdavStatus, "[WebDAV status]".to_string()),
+                (NetworkRow::BleName, "Current name".to_string()),
+                (NetworkRow::BleNameRename, "[Rename]".to_string()),
+                (NetworkRow::BleNameDefault, "[Restore default]".to_string()),
+                (NetworkRow::BleNameStatus, "[Read name]".to_string()),
             ] {
                 app.network.focus = focus;
                 let frame = render_to_text(&app, width, height);

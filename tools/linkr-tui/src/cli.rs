@@ -275,6 +275,11 @@ pub const FLAGS: &[Flag] = &[
         "ask @d? and print the log-upload status",
     ),
     Flag::new(
+        "--query-ble-name",
+        Value::None,
+        "ask @n? and print the advertised BLE name",
+    ),
+    Flag::new(
         "--query-lan",
         Value::None,
         "ask @s? and print the bridge's LAN address and token state",
@@ -302,6 +307,16 @@ pub const FLAGS: &[Flag] = &[
         "set the HTTP upload URL for the log",
     ),
     Flag::new("--webdav-off", Value::None, "turn log upload off"),
+    Flag::new(
+        "--rename-ble",
+        Value::Free,
+        "set the advertised BLE name (1-29 UTF-8 bytes)",
+    ),
+    Flag::new(
+        "--reset-ble-name",
+        Value::None,
+        "restore the MAC-derived advertised BLE name",
+    ),
     Flag::new(
         "--loopback-test",
         Value::Optional,
@@ -373,10 +388,13 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
         "doctor",
         "one checkup: the link, the bridge, the loopback, the target",
     ),
-    ("query", "read one thing: info, uart, wifi, webdav or lan"),
+    (
+        "query",
+        "read one thing: info, uart, wifi, webdav, ble-name or lan",
+    ),
     (
         "set",
-        "change one thing and read it back: uart, wifi or webdav",
+        "change one thing and read it back: uart, wifi, webdav or ble-name",
     ),
     (
         "exec",
@@ -520,10 +538,11 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
                     "uart" => "--query-uart",
                     "wifi" => "--query-wifi",
                     "webdav" => "--query-webdav",
+                    "ble-name" => "--query-ble-name",
                     "lan" => "--query-lan",
                     other => {
                         return Err(format!(
-                        "query reads one of info, uart, wifi, webdav or lan; '{other}' is not one"
+                        "query reads one of info, uart, wifi, webdav, ble-name or lan; '{other}' is not one"
                     ))
                     }
                 }
@@ -534,15 +553,18 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
             let [what, value] = two_words(name, &words)?;
             if what == "webdav" && value.eq_ignore_ascii_case("off") {
                 translated.push("--webdav-off".to_string());
+            } else if what == "ble-name" && value.eq_ignore_ascii_case("default") {
+                translated.push("--reset-ble-name".to_string());
             } else {
                 translated.push(
                     match what.as_str() {
                         "uart" => "--uart",
                         "wifi" => "--wifi",
                         "webdav" => "--webdav",
+                        "ble-name" => "--rename-ble",
                         other => {
                             return Err(format!(
-                                "set changes one of uart, wifi or webdav; '{other}' is not one"
+                                "set changes one of uart, wifi, webdav or ble-name; '{other}' is not one"
                             ))
                         }
                     }
@@ -1406,6 +1428,10 @@ pub struct Requests {
     pub webdav: Option<String>,
     /// `@d off`.
     pub webdav_off: bool,
+    /// `@n=<name>`, when `--rename-ble` named one.
+    pub ble_name: Option<String>,
+    /// `@n default`.
+    pub ble_name_default: bool,
 }
 
 impl Requests {
@@ -1418,6 +1444,8 @@ impl Requests {
             && !self.wifi_scan
             && self.webdav.is_none()
             && !self.webdav_off
+            && self.ble_name.is_none()
+            && !self.ble_name_default
     }
 }
 
@@ -1506,6 +1534,18 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match result {
             Err(why) => failed += report(format, "webdav", false, &why),
             Ok(()) => failed += wait_and_report(app, crate::device::Query::Webdav, format),
+        }
+    }
+    if requests.ble_name.is_some() || requests.ble_name_default {
+        let result = match (requests.ble_name.as_deref(), requests.ble_name_default) {
+            (Some(_), true) => Err("choose either --rename-ble or --reset-ble-name".to_string()),
+            (Some(name), false) => app.set_ble_name(name),
+            (None, true) => app.reset_ble_name(),
+            (None, false) => unreachable!(),
+        };
+        match result {
+            Err(why) => failed += report(format, "ble-name", false, &why),
+            Ok(()) => failed += wait_and_report(app, crate::device::Query::BleName, format),
         }
     }
     if requests.wifi_scan {
@@ -2003,6 +2043,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Wifi => "wifi",
         crate::device::Query::WifiScan => "wifi-scan",
         crate::device::Query::Webdav => "webdav",
+        crate::device::Query::BleName => "ble-name",
         crate::device::Query::Lan => "lan",
     }
 }
@@ -2079,6 +2120,18 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
                 let url = url.strip_prefix("@d=").unwrap_or(&url);
                 format!("webdav={},url={}", dav.state, url)
             }
+            None => String::new(),
+        },
+        crate::device::Query::BleName => match &app.network.ble_name {
+            Some(name) => format!(
+                "name={},custom={}",
+                name.name,
+                match name.custom {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "unknown",
+                }
+            ),
             None => String::new(),
         },
         // The state is reported; the token never is. A CLI's output goes to a
@@ -2616,6 +2669,7 @@ mod tests {
             (&["query", "uart"], &["--query-uart"]),
             (&["query", "wifi"], &["--query-wifi"]),
             (&["query", "webdav"], &["--query-webdav"]),
+            (&["query", "ble-name"], &["--query-ble-name"]),
             (&["query", "lan"], &["--query-lan"]),
             (&["query", "info", "--json"], &["--query-info", "--json"]),
             (
@@ -2631,6 +2685,12 @@ mod tests {
                 &["--webdav", "http://dav.example/logs/"],
             ),
             (&["set", "webdav", "off"], &["--webdav-off"]),
+            (
+                &["set", "ble-name", "Bench Bee"],
+                &["--rename-ble", "Bench Bee"],
+            ),
+            (&["set", "ble-name", "测试😀"], &["--rename-ble", "测试😀"]),
+            (&["set", "ble-name", "default"], &["--reset-ble-name"]),
             (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
             (&["exec", "--", "echo", "hi"], &["--exec", "echo hi"]),
             (

@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     termios = None
     tty = None
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 DEFAULT_NAME = "Linkr Bee"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
@@ -37,6 +37,9 @@ RELIABLE_UART_RX_UUID = "4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001"
 RELIABLE_UART_TX_UUID = "4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001"
 RELIABLE_UART_STATE_UUID = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_HEADER = struct.Struct("<2sBBIHH")
+# The firmware's advertised-name limit, in UTF-8 bytes. The C client keeps the
+# same constant; tests/test_terminal_cli_c.py checks the two strings agree.
+BLE_NAME_MAX = 29
 RELIABLE_UART_HEADER = struct.Struct("<2sBBIHH")
 MGMT_API_MAJOR = 1
 MGMT_CAP_WIFI = 1 << 0
@@ -195,6 +198,33 @@ def ble_write_size(value: str) -> int:
     if not 0 <= parsed <= 244:
         raise argparse.ArgumentTypeError("BLE write size must be between 0 and 244")
     return parsed
+
+
+def normalize_ble_name(value: str) -> str:
+    """Validate an advertised BLE name before touching the radio.
+
+    The firmware stores the UTF-8 bytes verbatim and rejects C0/C1 controls,
+    DEL, embedded NUL, invalid UTF-8, and anything over 29 bytes. A prompt
+    whose answer is visually empty is treated the same way: trimming here is
+    what makes a name typed with a trailing space stable across reads.
+    """
+    name = value.strip()
+    if not name:
+        raise argparse.ArgumentTypeError(
+            "BLE name must be 1-29 UTF-8 bytes")
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise argparse.ArgumentTypeError(
+            "BLE name must be valid UTF-8") from exc
+    if len(encoded) > BLE_NAME_MAX:
+        raise argparse.ArgumentTypeError(
+            f"BLE name must be 1-{BLE_NAME_MAX} UTF-8 bytes; "
+            f"this one is {len(encoded)}")
+    if any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f for char in name):
+        raise argparse.ArgumentTypeError(
+            "BLE name must not contain control characters")
+    return name
 
 
 def normalize_uart_spec(spec: str) -> str:
@@ -856,7 +886,8 @@ def has_control_action(args: argparse.Namespace) -> bool:
     return any((
         args.query_info, args.query_uart, args.uart, args.wifi,
         args.wifi_scan, args.wifi_off, args.query_wifi, args.webdav,
-        args.webdav_off, args.query_webdav,
+        args.webdav_off, args.query_webdav, args.rename_ble,
+        args.reset_ble_name, args.query_ble_name,
         args.loopback_test is not None, args.pair,
     ))
 
@@ -1281,6 +1312,15 @@ async def run(args: argparse.Namespace) -> int:
             if args.query_webdav:
                 await management.send(b"@d?")
 
+            if args.rename_ble is not None:
+                await management.send(f"@n={args.rename_ble}".encode())
+
+            if args.reset_ble_name:
+                await management.send(b"@n default")
+
+            if args.query_ble_name:
+                await management.send(b"@n?")
+
             if args.loopback_test is not None:
                 payload = args.loopback_test.encode()
                 notify_queue = asyncio.Queue()
@@ -1368,6 +1408,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
     parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
     parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
+    parser.add_argument("--query-ble-name", action="store_true",
+                        help="send @n? and print the advertised BLE name")
+    parser.add_argument("--rename-ble", type=normalize_ble_name, metavar="NAME",
+                        help="set a custom advertised BLE name (1-29 UTF-8 bytes)")
+    parser.add_argument("--reset-ble-name", action="store_true",
+                        help="restore the MAC-derived advertised BLE name")
     parser.add_argument("--pair", action="store_true",
                         help="request OS bonding (hold pairing GPIO low: GPIO1 C3/C5, "
                              "GPIO4 WROOM); macOS pairs on encrypted reads")

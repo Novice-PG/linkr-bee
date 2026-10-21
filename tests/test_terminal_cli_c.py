@@ -355,6 +355,36 @@ class CBinaryArgumentTests(unittest.TestCase):
                 result = self.run_cli(flag, value)
                 self.assertEqual(result.returncode, 2, result.stderr)
 
+    def test_ble_name_flags_are_validated_before_any_bluetooth(self):
+        # The firmware's own limits: 1-29 UTF-8 bytes, no control characters.
+        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f"):
+            with self.subTest(name=name):
+                result = self.run_cli("--rename-ble", name, "--no-terminal")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("--rename-ble", result.stderr)
+                self.assertNotIn("BlueZ", result.stderr)
+                self.assertNotIn("D-Bus", result.stderr)
+
+    def test_ble_name_flags_accept_what_the_firmware_accepts(self):
+        for name in ("Bench Bee", "测试😀"):
+            with self.subTest(name=name):
+                result = self.run_cli("--rename-ble", name, "--version")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(c_version_string(), result.stdout)
+
+    def test_rename_and_reset_cannot_both_be_asked_for(self):
+        result = self.run_cli("--rename-ble", "Bee", "--reset-ble-name")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("choose either --rename-ble or --reset-ble-name",
+                      result.stderr)
+
+    def test_ble_name_flags_are_documented(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ("--query-ble-name", "--rename-ble", "--reset-ble-name"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, result.stdout)
+
     def test_boolean_flags_reject_an_inline_value(self):
         for argument in ("--scan=1", "--quiet=yes", "--no-terminal=true"):
             with self.subTest(argument=argument):
@@ -558,6 +588,21 @@ class CParityTests(unittest.TestCase):
     def test_both_clients_expose_print_completion(self):
         for source in (self.c_source, self.py_source):
             self.assertIn("--print-completion", source)
+
+    def test_both_clients_expose_the_ble_name_entry(self):
+        """Every host client can read, set, and restore the advertised name."""
+        for flag in ("--query-ble-name", "--rename-ble", "--reset-ble-name"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, self.c_source)
+                self.assertIn(flag, self.py_source)
+
+    def test_both_clients_use_the_same_name_limit(self):
+        c_limit = re.search(r'#define BLE_NAME_MAX\s+(\d+)', self.c_source)
+        py_limit = re.search(r'^BLE_NAME_MAX = (\d+)', self.py_source,
+                             re.MULTILINE)
+        self.assertIsNotNone(c_limit, "BLE_NAME_MAX missing from the C client")
+        self.assertIsNotNone(py_limit, "BLE_NAME_MAX missing from the CLI")
+        self.assertEqual(c_limit.group(1), py_limit.group(1))
 
 
 if __name__ == "__main__":
