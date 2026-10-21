@@ -362,9 +362,12 @@ The first release is intentionally foreground-only. Do not add iOS
 `bluetooth-central` background mode until disconnect/reconnect and power behavior
 have been tested on real hardware.
 
-For a new host, hold Bee GPIO1 to GND before connecting and accept OS pairing.
-Android checks the existing bond and creates one only when absent; iOS handles
-pairing on encrypted GATT reads. Existing bonds reconnect without GPIO1.
+For a new host on C3/C5, hold GPIO1 to GND before connecting and accept OS
+pairing. WROOM ships with pairing authorization disabled, so no GPIO4 press is
+needed; GPIO4 is used only when
+`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. Android checks the existing bond
+and creates one only when absent; iOS handles pairing on encrypted GATT reads.
+Existing bonds reconnect without the pairing GPIO.
 See [pairing and recovery](../docs/BLE_PAIRING.md) for lost keys, the eight-host
 limit, factory reset, and required real-device acceptance checks.
 

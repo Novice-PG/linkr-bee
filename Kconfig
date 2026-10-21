@@ -82,15 +82,23 @@ config LINKR_BLE_BRIDGE_UART_BAUD_RATE
 	  1500000, 921600, and 1000000.
 
 config LINKR_BLE_BRIDGE_UART_AUTOBAUD
-	bool "Auto-detect the bridge UART line rate"
+	bool "Enable on-demand bridge UART line-rate detection"
 	depends on SOC_SERIES_ESP32
 	default n
 	help
 	  Follow the peer's line rate instead of demanding it match us, so a
 	  swapped SBC never has to change a single stty to suit this board.
 
-	  Every 400 ms the RMT receiver hands back one burst it captured from
-	  RXD as a train of run durations, and software refines the bit time
+	  The detector is idle at boot. Start one bounded pass with @a (or the
+	  active-low linkr-autobaud GPIO key), query it with @a?, and cancel it
+	  with @a stop. A pass ends when it confirms a match, applies a new
+	  rate, sees no measurable capture for 5 s, or is stopped. The port is
+	  never changed without a pass, and a completed pass is not restarted
+	  automatically.
+
+	  While a pass is running, every 400 ms the RMT receiver hands back one
+	  burst it captured from RXD as a train of run durations, and software
+	  refines the bit time
 	  out of the train — (sum of runs) / (bit times they add up to) —
 	  then reconfigures the port through the existing @u= path. Measuring
 	  a whole span instead of the UART detector's single shortest pulse
@@ -258,12 +266,30 @@ config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 
 config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 	bool "Require GPIO button press for BLE pairing"
-	default y
+	default n
 	help
 	  When enabled, the pairing GPIO (linkr-pairing alias) must be held
 	  active before the host can initiate BLE pairing. Set to n to allow
 	  pairing without physical button access, e.g. for boards without a
 	  dedicated pairing button or during development.
+
+config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
+	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"
+	depends on BT
+	default n
+	select BT_DEVICE_NAME_DYNAMIC
+	help
+	  Advertise "Linkr Bee XXXX" by default, where XXXX is the last four
+	  hex digits of the factory hardware MAC in uppercase (for example
+	  58:BF:25:33:07:8C becomes 078C). The name is stable for the life of
+	  the board and distinct between units without another stored value.
+
+	  The @n command (or @linkr name) can replace the complete name at
+	  runtime. A custom name is persisted in settings and restored across
+	  boots; @n default removes it and returns to the hardware-MAC name.
+	  Names are 1-29 UTF-8 bytes so they fit a complete legacy
+	  advertisement. Discovery must still match the Linkr Management
+	  Service UUID, not the name.
 
 config LINKR_BLE_BRIDGE_TEST_UART_ECHO
 	bool "Echo received UART bytes back to UART"

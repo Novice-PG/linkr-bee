@@ -537,16 +537,16 @@ class WifiCredentialTests(unittest.TestCase):
 
 class DeviceMatchTests(unittest.TestCase):
     def test_exact_name_wins_over_prefix(self):
-        devices = [FakeDevice("Linkr BLE UART 2", "AA:2"),
-                   FakeDevice("Linkr BLE UART", "AA:1")]
+        devices = [FakeDevice("Linkr Bee 2", "AA:2"),
+                   FakeDevice("Linkr Bee", "AA:1")]
         self.assertEqual(
-            terminal.match_device(devices, "Linkr BLE UART"), "AA:1")
+            terminal.match_device(devices, "Linkr Bee"), "AA:1")
 
     def test_prefix_matches_the_default_name(self):
         devices = [FakeDevice("Other", "BB:1"),
-                   FakeDevice("Linkr BLE UART 7F2C", "AA:7")]
+                   FakeDevice("Linkr Bee 7F2C", "AA:7")]
         self.assertEqual(
-            terminal.match_device(devices, "Linkr BLE UART*"), "AA:7")
+            terminal.match_device(devices, "Linkr Bee*"), "AA:7")
 
     def test_no_match_returns_none(self):
         self.assertIsNone(terminal.match_device([FakeDevice("Other", "BB:1")], "x*"))
@@ -576,11 +576,11 @@ class DeviceMatchTests(unittest.TestCase):
             async def discover(timeout):  # pragma: no cover - must not be called
                 raise AssertionError("find_device scanned twice")
 
-        devices = [FakeDevice("Linkr BLE UART 7F2C", "AA:7")]
+        devices = [FakeDevice("Linkr Bee 7F2C", "AA:7")]
         with patch.object(terminal, "BleakClient", object), \
                 patch.object(terminal, "BleakScanner", ExplodingScanner):
             self.assertEqual(
-                asyncio.run(terminal.find_device("Linkr BLE UART*", None, 0.1,
+                asyncio.run(terminal.find_device("Linkr Bee*", None, 0.1,
                                                  devices=devices)),
                 "AA:7",
             )

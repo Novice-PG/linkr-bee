@@ -14,9 +14,10 @@ and the individual platform guides.
    Bee RX is GPIO20 and Bee TX is GPIO21.
 2. Open the client. For the Web terminal, run `tools/serve_web.sh` from the repository
    root and visit `http://127.0.0.1:8765/` in Chrome/Chromium.
-3. For a new host, hold Bee GPIO1 to GND, select **Connect**, and accept the operating
-   system's pairing prompt. Release GPIO1 once paired. An existing bond does not
-   need the jumper again.
+3. For a new host on a board with pairing authorization enabled (C3/C5), hold
+   **GPIO1** to GND, select **Connect**, and accept the operating system's pairing
+   prompt. WROOM disables the physical check by default and needs no GPIO4 press.
+   Release it once paired. An existing bond does not need the jumper again.
 4. Open **Serial** in the settings rail. Match the target's baud, data bits, parity,
    stop bits, and flow control; the default is `115200,8,n,1,n`.
 5. Reset the target or press Enter in the terminal to obtain its console prompt.

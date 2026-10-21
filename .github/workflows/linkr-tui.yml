@@ -31,6 +31,10 @@ on:
       - "tools/linkr-tui/**"
       - ".github/workflows/linkr-tui.yml"
   workflow_dispatch:
+  # Project releases (v*) call this workflow for the desktop matrix. The
+  # called workflow's own release job is gated on a linkr-tui-v* tag, so the
+  # project release job can attach the same archives to its own release.
+  workflow_call:
 
 permissions:
   contents: read

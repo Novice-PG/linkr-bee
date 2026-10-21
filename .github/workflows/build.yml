@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
   pull_request:
   workflow_dispatch:
+  # Tag-driven project releases call this workflow from release.yml, so the
+  # tag does not start a second, competing copy of the firmware and APK builds.
+  workflow_call:
 
 permissions:
   contents: read
@@ -86,6 +87,14 @@ jobs:
 
       - name: Build HarmonyOS web assets
         run: npm run build:harmony
+
+      - name: Upload the web package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-bee-web
+          path: mobile/dist/
+          if-no-files-found: error
+          retention-days: 30
 
   # A debug APK of the Capacitor shell. `mobile` above only proves the web
   # assets compile; this is the half that catches a broken native resource, a

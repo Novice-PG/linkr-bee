@@ -15,7 +15,7 @@
 //! equivalent would have had:
 //!
 //! ```text
-//! {"event":"ready","program":"bee","version":"0.5.0","link":"ble EE:…","ops":[…]}
+//! {"event":"ready","program":"bee","version":"0.6.0","link":"ble EE:…","ops":[…]}
 //! (the `program` value is the name this copy was invoked as, so a CLI-only
 //! install reports `bee-cli`).
 //! {"id":1,"op":"query-uart"}                       →  {"event":"begin","id":1,"op":"uart"} … {"event":"end","id":1,"code":0}

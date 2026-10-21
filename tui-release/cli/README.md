@@ -18,9 +18,9 @@
 
 ```sh
 # Linux / macOS：解压后运行（按机器架构选包；macOS 另有 .dmg：本目录的是这份 CLI，上一级 macos/ 的是界面版）
-tar xzf linkr-bee-cli-0.5.0-x86_64-unknown-linux-gnu.tar.gz
-./linkr-bee-cli-0.5.0-x86_64-unknown-linux-gnu/bee-cli --version
-./linkr-bee-cli-0.5.0-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
+tar xzf linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+./linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu/bee-cli --version
+./linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
@@ -170,7 +170,7 @@ JSON 请求，适合脚本与 Agent 连续问很多件事：
 
 ```sh
 bee-cli --ble-address EE:C7:42:34:48:CF --serve
-{"event":"ready","program":"bee-cli","version":"0.5.0","link":"ble:EE:…","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.6.0","link":"ble:EE:…","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -262,7 +262,7 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 ### `doctor`：一次体检，四个词
 
 ```sh
-bee-cli doctor --ble-name "Linkr BLE UART-1" --json
+bee-cli doctor --ble-name "Linkr Bee 078C" --json
 ```
 
 依次跑五项、各给一个结论：

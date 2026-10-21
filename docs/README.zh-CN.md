@@ -22,7 +22,7 @@
 | [开发指南](DEVELOPMENT.zh-CN.md) · [English](DEVELOPMENT.md) | 固件构建和刷写、Kconfig、终端工具、协议与测试模式 |
 | [硬件需求](HARDWARE.md) | 引脚、电气要求、测试点与量产注意事项 |
 | [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) | GATT 服务、分帧请求、Reliable UART 与事件 |
-| [蓝牙配对与恢复](BLE_PAIRING.md) | GPIO1 授权、绑定保留、各端步骤与故障恢复 |
+| [蓝牙配对与恢复](BLE_PAIRING.md) | 配对 GPIO 授权（C3/C5 为 GPIO1；WROOM 可选 GPIO4，默认关闭）、绑定保留、各端步骤与故障恢复 |
 | [鸿蒙桥接协议](../harmonyos/BRIDGE_PROTOCOL.md) | ArkWeb 与 ArkTS 之间的 JSON 桥接约定（英文） |
 | [视觉资源](../assets/README.md) | Logo、截图语言分组与重新截图的方法（英文） |
 

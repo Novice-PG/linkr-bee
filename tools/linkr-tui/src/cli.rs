@@ -1000,10 +1000,10 @@ pub struct FoundDevice {
     /// and a path shown where an address belongs is a device name nobody can
     /// match against anything.
     pub address: String,
-    /// Whether it looks like a board this program can dial — it advertises
-    /// the UART or the management service, or carries the firmware's name.
-    /// See [`crate::transport::ble::is_board`] for why one signal is not
-    /// enough to ask every platform.
+    /// Whether it advertises the Linkr Management Service. This is the only
+    /// discovery signal; the advertised name is display-only, and the
+    /// Device ID read after connecting is what finally confirms the board.
+    /// See [`crate::transport::ble::is_board`].
     pub board: bool,
     /// How strong the advertisement was heard, in dBm. `None` when the
     /// adapter's own report had no reading — a fresh scan on a busy adapter
@@ -1023,13 +1023,12 @@ pub enum Until {
     ABoardAnswers,
 }
 
-/// Listen for `timeout` and report every device that answered.
+/// Listen for `timeout` and report every Linkr Bee that answered.
 ///
 /// The scan is the one command that answers a question nothing else can — "is
-/// the board on the air at all" — so it runs before anything is dialled and
-/// prints even the devices it cannot use: a Linkr Bee that is advertising but
-/// not offering the serial service is a different problem from one that is
-/// switched off, and the list is how you tell them apart.
+/// the board on the air at all". A device without the Linkr Management Service
+/// is not listed: the advertised name is editable, and NUS is shared with
+/// unrelated UART bridges.
 pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
     drain_scan(scan_stream(timeout, Until::TheWindowEnds))
 }
@@ -1037,7 +1036,7 @@ pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
 /// Listen until the first board answers, or `timeout` runs out.
 ///
 /// The shape the startup dial runs. The same list comes back, but the scan
-/// ends the moment a serial-service device is heard: a board in range answers
+/// ends the moment a management-service device is heard: a board in range answers
 /// within a scan interval or two, and waiting out the whole window for a
 /// second board that may not exist is the difference between a start that
 /// feels instant and one the user goes looking at the radio for. A bench with
@@ -1267,13 +1266,12 @@ where
     Ok(found)
 }
 
-/// Most useful first: boards before strangers, then by name, then by signal.
+/// Most useful first: by name, then by signal. Every row is a Linkr Bee;
+/// NUS-only devices and names without the management service never get here.
 fn sort_found(devices: &mut [FoundDevice]) {
     devices.sort_by(|left, right| {
-        right
-            .board
-            .cmp(&left.board)
-            .then_with(|| left.name.cmp(&right.name))
+        left.name
+            .cmp(&right.name)
             // Two boards with one name are told apart by who is
             // closer: the stronger reading is the one the user is
             // probably standing next to.
@@ -1366,12 +1364,16 @@ fn rows_of_heard(
         let Some(reading) = heard.get(&id) else {
             continue;
         };
-        let board =
-            crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref());
+        // The picker is a Linkr Bee picker, not a dump of every radio nearby.
+        // NUS is a common third-party service and names are editable labels,
+        // so only the management service puts a row on this list.
+        if !crate::transport::ble::is_board(&properties.services) {
+            continue;
+        }
         found.push(FoundDevice {
-            name: properties.local_name,
+            name: crate::transport::ble::display_name(properties.local_name.as_deref()),
             address: properties.address.to_string(),
-            board,
+            board: true,
             // The reading the advertisement that was just heard carried, or
             // the last one the daemon has on file when that event carried
             // none — an advertisement that only changed a service list, say.
@@ -2760,6 +2762,7 @@ mod tests {
         btleplug::api::PeripheralProperties {
             address: address.parse().expect("an address"),
             local_name: Some(name.to_string()),
+            services: vec![crate::transport::ble::MGMT_SERVICE],
             rssi,
             ..Default::default()
         }
@@ -2796,6 +2799,18 @@ mod tests {
             Some(-61),
             "the reading just heard beats the one the daemon has been keeping"
         );
+    }
+
+    /// A nearby keyboard, sensor, or another vendor's NUS bridge was heard,
+    /// but it does not advertise the Linkr Management Service and must not
+    /// appear in the Linkr Bee picker.
+    #[test]
+    fn a_stranger_is_not_listed_even_when_it_was_heard() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Some Keyboard", Some(-30));
+        properties.services.clear();
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        assert!(rows_of_heard(&heard, known).is_empty());
     }
 
     /// An event that says a device is there without saying how loud it is — a

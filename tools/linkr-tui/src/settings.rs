@@ -48,7 +48,7 @@ pub struct Settings {
     /// The address of the last board dialled over Bluetooth, so a bench with
     /// one board does not make the user find it again every morning.
     pub address: String,
-    /// The name the board answered to — `Linkr BLE UART-3` — which the Device
+    /// The name the board answered to — `Linkr Bee 078C` — which the Device
     /// row says beside the tail of the address. The address alone leaves the
     /// row a bare MAC: everything to a scanner, nothing to the person looking
     /// at the bench.

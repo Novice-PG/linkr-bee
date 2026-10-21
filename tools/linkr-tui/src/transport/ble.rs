@@ -72,36 +72,42 @@ pub const MGMT_COMMAND: Uuid = Uuid::from_u128(0x4c4b0004_9a7e_4f4e_8b8a_3d6f12a
 /// Notify: the responses, as one `protocol::ManagementReassembler` stream.
 pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12a0c001);
 
-/// The name the bridge's firmware ships with, which its scan response carries
-/// when the advertisement itself has no room for it.
-///
-/// A prefix rather than the whole name: a bench with several units suffixes
-/// the name to tell them apart (`Linkr BLE UART 7F2C`), and the name is only
-/// one of the three signals [`is_board`] accepts.
-pub const BOARD_NAME: &str = "Linkr BLE UART";
-
 /// Whether an advertisement describes a board this program can dial.
 ///
-/// Three signals, any one of them enough, because what an advertisement
-/// carries depends on the platform as much as on the firmware. The board
-/// itself advertises the **management service** and puts its **name** in the
-/// scan response — the UART service lives in the GATT table and is not on the
-/// air at all. BlueZ folds cached GATT services into what it reports, so a
-/// Linux that has met this board before lists the UART service too and a
-/// UART-only test works there; Windows reports the advertisement and nothing
-/// else, so that same test found nothing at all on Windows. All three signals
-/// are accepted, and which one answered is not kept: what the device *is* is
-/// checked once the link is up, where [`wire`] refuses anything without the
-/// UART characteristics — a device that merely looks like a board fails with
-/// the right error instead of reading as silence.
-pub fn is_board(services: &[Uuid], name: Option<&str>) -> bool {
-    services
-        .iter()
-        .any(|uuid| *uuid == NUS_SERVICE || *uuid == MGMT_SERVICE)
-        || name.is_some_and(|name| {
-            name.get(..BOARD_NAME.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(BOARD_NAME))
-        })
+/// The Linkr Management Service is the only discovery signal. The name is a
+/// display label that the owner can replace with `@n`, and NUS is a service
+/// many unrelated BLE UART products advertise; accepting either would put a
+/// keyboard, a sensor, or another vendor's UART bridge in the picker. The
+/// management service is placed in the primary advertisement by every Linkr
+/// Bee firmware, and [`wire`] reads the Device ID behind it before the link is
+/// accepted, so a device that merely copied the UUID is still refused.
+pub fn is_board(services: &[Uuid]) -> bool {
+    services.iter().any(|uuid| *uuid == MGMT_SERVICE)
+}
+
+/// The printable part of an advertised name.
+///
+/// Bluetooth names are arbitrary bytes on the air. A control character in a
+/// terminal cell can move the cursor, clear the screen, or inject an escape
+/// sequence, so the name is stripped of controls before it reaches the UI.
+pub fn display_name(name: Option<&str>) -> Option<String> {
+    let cleaned: String = name?
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+/// Whether a Device ID read from the management service belongs to Linkr Bee.
+///
+/// The first ten bytes are the fixed Linkr namespace (`LINKRBLE`, version 1);
+/// the remaining six are the chip's hardware ID. Checking this is what makes
+/// the service UUID a filter rather than a promise.
+pub fn is_linkr_device_id(id: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"LINKRBLE\x01\x00";
+
+    id.len() == 16 && id.starts_with(PREFIX)
 }
 
 /// Ceiling for one ATT write.
@@ -212,7 +218,7 @@ const WRITE_BACKLOG: usize = 64;
 /// Which device on the air to connect to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
-    /// The first device advertising the Nordic UART Service. Right for a
+    /// The first device advertising the Linkr Management Service. Right for a
     /// bench with one board on it, and the reason a desk with two is a
     /// problem to be named rather than guessed at.
     Any,
@@ -1096,7 +1102,7 @@ async fn pick(
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
-        let looks_like_a_board = is_board(&properties.services, properties.local_name.as_deref());
+        let looks_like_a_board = is_board(&properties.services);
         let wanted = selection.accepts(
             properties.local_name.as_deref(),
             &candidate.id().to_string(),
@@ -1120,7 +1126,37 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         .await
         .map_err(|why| format!("the services could not be enumerated: {why}"))?;
 
+    if !peripheral
+        .services()
+        .iter()
+        .any(|service| service.uuid == MGMT_SERVICE)
+    {
+        return Err(
+            "the device does not offer the Linkr Management service — it is not a Linkr Bee"
+                .to_string(),
+        );
+    }
+
     let characteristics = peripheral.characteristics();
+    let device_id = characteristics
+        .iter()
+        .find(|characteristic| characteristic.uuid == MGMT_DEVICE_ID)
+        .ok_or_else(|| {
+            "the Linkr Management service does not expose a Device ID characteristic".to_string()
+        })?;
+    // The characteristic is read-encrypted. BlueZ and WinRT negotiate the
+    // bond as part of the read; a refusal is a refused link, not a device
+    // that can be treated as a board by name alone.
+    let id = retry_busy(|| async { peripheral.read(device_id).await })
+        .await
+        .map_err(|why| format!("the Linkr Device ID could not be read: {why}"))?;
+    if !is_linkr_device_id(&id) {
+        return Err(
+            "the device's Device ID does not belong to the Linkr Bee namespace — refusing it"
+                .to_string(),
+        );
+    }
+
     for wanted in [NUS_TX, NUS_RX] {
         // Checked for both, because a firmware that advertises NUS but does
         // not lay out the standard characteristics is a real thing, and it is
@@ -1534,42 +1570,48 @@ mod tests {
         );
     }
 
-    /// The firmware's own advertisement is the Windows case: it carries the
-    /// management service and the name, and never the UART service — so a
-    /// board test that wanted UART found nothing at all on a Windows host
-    /// while BlueZ, holding a service cache from an earlier session, found
-    /// the same board on Linux. Each of the three signals alone is a board.
+    /// The Linkr Management Service is the only discovery signal. NUS is
+    /// shared with unrelated UART bridges, and a name is a user-editable
+    /// label, so neither may put a stranger in the picker.
     #[test]
-    fn a_board_is_recognised_by_any_of_its_signals() {
-        let none = None;
+    fn a_board_is_recognised_by_its_management_service() {
+        assert!(is_board(&[MGMT_SERVICE]), "the management service");
         assert!(
-            is_board(&[NUS_SERVICE], none),
-            "the UART service, cached by BlueZ"
+            !is_board(&[NUS_SERVICE]),
+            "another vendor's NUS device is not a Linkr Bee"
         );
-        assert!(
-            is_board(&[MGMT_SERVICE], none),
-            "the management service, as advertised"
-        );
-        assert!(
-            is_board(&[], Some("Linkr BLE UART")),
-            "exactly the shipped name"
-        );
-        assert!(
-            is_board(&[], Some("linkr ble uart 7f2c")),
-            "another unit's suffix does not make it a stranger"
-        );
+        assert!(!is_board(&[]), "a name alone is not identity");
     }
 
-    /// A name that merely starts the same way is not the board, and a short
-    /// or non-ASCII name must be answered rather than panicked over — the
-    /// prefix is cut from the candidate's bytes, not the constant's.
+    /// A device that copies the service UUID still has to answer with the
+    /// Linkr Device ID namespace after the link is up.
     #[test]
-    fn a_name_that_only_sounds_like_the_board_is_not_one() {
-        assert!(!is_board(&[], Some("Linkr BLE UAR")));
-        assert!(!is_board(&[], Some("Linkr BLE Something")));
-        assert!(!is_board(&[], None));
-        assert!(!is_board(&[], Some("连接加热器")));
-        assert!(!is_board(&[], Some("")));
+    fn only_the_linkr_device_id_is_accepted() {
+        assert!(is_linkr_device_id(
+            b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05\x06"
+        ));
+        assert!(!is_linkr_device_id(b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05"));
+        assert!(!is_linkr_device_id(
+            b"OTHERBLE\x01\x00\x01\x02\x03\x04\x05\x06"
+        ));
+        assert!(!is_linkr_device_id(&[]));
+    }
+
+    /// Control characters are removed before a scan result reaches a
+    /// terminal cell. A valid UTF-8 custom name survives.
+    #[test]
+    fn advertised_names_are_made_printable() {
+        assert_eq!(
+            display_name(Some("Linkr Bee 078C")),
+            Some("Linkr Bee 078C".into())
+        );
+        assert_eq!(display_name(Some("  测试 Bee  ")), Some("测试 Bee".into()));
+        assert_eq!(
+            display_name(Some("bad\nname\x1b[2J")),
+            Some("badname[2J".into())
+        );
+        assert_eq!(display_name(Some("\x00\x1b")), None);
+        assert_eq!(display_name(None), None);
     }
 
     /// Segmentation is what keeps a long write legal, and the thing it must

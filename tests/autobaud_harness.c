@@ -6,6 +6,7 @@
  *
  * Raw-capture scenarios run the production span classifier against fake
  * RMT memory; the older focused decision scenarios supply a span directly. */
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,6 +16,7 @@
 
 #define ARG_UNUSED(x) (void)(x)
 #define K_MSEC(x) (x)
+#define K_NO_WAIT 0
 
 /* Zephyr's LOG_WRN evaluates its arguments (it is a real logging macro); the
  * harness discards them, but still evaluates them so a helper used only
@@ -24,6 +26,7 @@ static void log_discard(const char *fmt, ...)
 	(void)fmt;
 }
 #define LOG_WRN(...) log_discard(__VA_ARGS__)
+#define LOG_INF(...) log_discard(__VA_ARGS__)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -109,6 +112,43 @@ static uint32_t k_uptime_get_32(void)
 	return fake_now_ms;
 }
 
+/* The production block's request flags. A single-threaded harness needs no
+ * real atomics, but it must preserve the compare-and-set contract. */
+typedef int atomic_t;
+
+static int atomic_get(atomic_t *target)
+{
+	return *target;
+}
+
+static void atomic_set(atomic_t *target, int value)
+{
+	*target = value;
+}
+
+static int atomic_cas(atomic_t *target, int old_value, int new_value)
+{
+	if (*target != old_value) {
+		return 0;
+	}
+	*target = new_value;
+	return 1;
+}
+
+/* From uart_autobaud.h; copied here because the harness does not build
+ * against the Zephyr headers that header pulls in. */
+enum linkr_uart_autobaud_result {
+	LINKR_UART_AUTOBAUD_APPLIED,
+	LINKR_UART_AUTOBAUD_UNCHANGED,
+	LINKR_UART_AUTOBAUD_TIMEOUT,
+	LINKR_UART_AUTOBAUD_STOPPED,
+	LINKR_UART_AUTOBAUD_FAILED,
+};
+
+typedef void (*linkr_uart_autobaud_callback_t)(
+	enum linkr_uart_autobaud_result result, uint32_t old_baud,
+	uint32_t new_baud);
+
 /* What src/main.c programs: cycles-per-bit x 16, split across the integer
  * and fractional halves of clk_div — 694 + 7/16 at 115200, the numbers the
  * tick's own comment quotes. */
@@ -167,6 +207,10 @@ int linkr_uart_config_reconfigure(uint32_t baudrate);
 void linkr_uart_rmt_span_init(uintptr_t uart_reg_addr);
 bool linkr_uart_rmt_span_poll(struct linkr_uart_span *span);
 int linkr_uart_rmt_span_line_level(void);
+
+/* Public follower predicates, normally declared by uart_autobaud.h. The
+ * production stop() calls running(); the header supplies this in firmware. */
+bool linkr_uart_autobaud_running(void);
 
 /* From uart_rmt_span.h; the block's burst-tail test uses it. */
 #define LINKR_UART_SPAN_MIN_RUNS 4u
@@ -257,13 +301,72 @@ static void window_quiet(int level)
 	autobaud_tick(NULL);
 }
 
+/*
+ * Start a pass and consume the request at the current fake time, matching the
+ * firmware's K_NO_WAIT start tick. The start tick must not steal the next
+ * window's fake capture (the firmware's tick 400 ms later gets a fresh one).
+ */
+static void start_pass(void)
+{
+	fake_captured = false;
+	fake_line_level = 1;
+	if (linkr_uart_autobaud_request() != 0) {
+		abort();
+	}
+	autobaud_tick(NULL);
+}
+
+static int result_count;
+static enum linkr_uart_autobaud_result last_result;
+static uint32_t result_old;
+static uint32_t result_new;
+
+static void autobaud_result(enum linkr_uart_autobaud_result result,
+			    uint32_t old_baud, uint32_t new_baud)
+{
+	result_count++;
+	last_result = result;
+	result_old = old_baud;
+	result_new = new_baud;
+}
+
+/* No request: this is the boot state the product must keep. A line that
+ * would otherwise be followed must not move the port. */
+static void scenario_idle(void)
+{
+	for (int i = 0; i < 20; i++) {
+		window_span(span_line(9600, 8), 1);
+	}
+}
+
+/* A pass with no traffic ends after the inactivity timeout; it must not
+ * leave the RMT receiver or the work item running forever. */
+static void scenario_timeout(void)
+{
+	for (int i = 0; i < 15; i++) {
+		window_quiet(1);
+	}
+}
+
+/* A user stop reports STOPPED and leaves the port alone. */
+static void scenario_stop(void)
+{
+	window_quiet(1); /* one empty window, pass remains active */
+
+	if (linkr_uart_autobaud_stop() != 0) {
+		abort();
+	}
+	window_quiet(1); /* consume the stop request */
+}
+
 /* A link that has been measured against the port, followed by a stream with
  * no single-bit run in it anywhere — 0xCC carries runs of two and three bits,
  * which classify to a non-integer fit, so the capture is not a measurement
  * and the port must not move. */
 static void scenario_verified_then_binary(void)
 {
-	window_span(span_line(115200, 8), 1);
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 
 	for (int i = 0; i < 6; i++) {
 		window_span(span_bad(8), 1);
@@ -283,9 +386,23 @@ static void scenario_startup_follows_a_slower_peer(void)
  * 921600 / 1000000 consoles come from. */
 static void scenario_verified_step_up(void)
 {
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
+	window_span(span_line(921600, 8), 1);
+	window_span(span_line(921600, 8), 1);
+}
+
+/* A second manual pass must be able to undo a divisor-shaped rate the first
+ * pass applied. Starting a new pass is not evidence that the rate the last
+ * pass chose is correct, so it must not re-trust it. */
+static void scenario_second_pass_can_undo_applied_rate(void)
+{
+	window_span(span_line(921600, 8), 1);
+	window_span(span_line(921600, 8), 1); /* apply 921600, ends pass */
+
+	start_pass(); /* this is a new @a, not a continuation */
 	window_span(span_line(115200, 8), 1);
-	window_span(span_line(921600, 8), 1);
-	window_span(span_line(921600, 8), 1);
+	window_span(span_line(115200, 8), 1); /* 921600/8: apply 115200 */
 }
 
 /* Verified, then a peer that slowed to a rate our own is *not* divided by:
@@ -295,7 +412,8 @@ static void scenario_verified_other_rate(void)
 	configured_baud = 1500000;
 	set_divider(configured_baud);
 
-	window_span(span_line(1500000, 8), 1);
+	window_span(span_line(1500000, 8), 1); /* match: pass ends */
+	start_pass();
 	window_span(span_line(115200, 8), 1);
 	window_span(span_line(115200, 8), 1);
 }
@@ -318,7 +436,8 @@ static void scenario_startup_binary(void)
  * run, which still has to be refused. */
 static void scenario_one_gap_does_not_reopen(void)
 {
-	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 	window_quiet(1);
 	for (int i = 0; i < 6; i++) {
 		window_span(span_bad(8), 1);
@@ -335,7 +454,8 @@ static void scenario_quiet_then_an_integer_slowdown(void)
 	configured_baud = 921600;
 	set_divider(configured_baud);
 
-	window_span(span_line(921600, 8), 1); /* measured, agreed */
+	window_span(span_line(921600, 8), 1); /* match: pass ends */
+	start_pass();
 
 	for (int i = 0; i < 10; i++) {
 		window_quiet(1);
@@ -352,7 +472,8 @@ static void scenario_quiet_then_an_integer_slowdown(void)
  * byte stream can reach, so it is still refused after the silence. */
 static void scenario_quiet_then_a_short_binary(void)
 {
-	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 
 	for (int i = 0; i < 10; i++) {
 		window_quiet(1);
@@ -370,7 +491,8 @@ static void scenario_quiet_then_a_short_binary(void)
  * they always did. */
 static void scenario_odd_rate_peer_is_followed(void)
 {
-	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 
 	for (int i = 0; i < 4; i++) {
 		window_span(span_line(150000, 8), 1);
@@ -394,6 +516,11 @@ static void scenario_stuck_port_recovers(void)
 	for (int i = 0; i < 8; i++) {
 		window_span(span_line(115200, 8), 1); /* clean */
 	}
+
+	/* The apply ended that pass. Confirm the restored rate with a fresh
+	 * pass so this scenario still checks the re-armed verified state. */
+	start_pass();
+	window_span(span_line(115200, 8), 1); /* match: unchanged */
 }
 
 /* A burst's own tail closed by the re-arm is not a verdict: too few runs to
@@ -402,7 +529,8 @@ static void scenario_stuck_port_recovers(void)
  * window is not lost. */
 static void scenario_a_burst_tail_is_not_a_refusal(void)
 {
-	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 	window_span(span_line(9600, 8), 1);   /* candidate: 9600 */
 	window_span(span_tail(2), 1);	   /* tail: not a verdict */
 	window_span(span_line(9600, 8), 1);   /* confirmed, followed */
@@ -419,7 +547,8 @@ static void scenario_the_shortest_run_refuses_what_the_estimate_cannot(void)
 	configured_baud = 1500000;
 	set_divider(configured_baud);
 
-	window_span(span_line(1500000, 8), 1); /* measured, agreed */
+	window_span(span_line(1500000, 8), 1); /* match: pass ends */
+	start_pass();
 
 	/* est_q8 reads 1500000/5.5 (off-band, not a divisor), but the shortest
 	 * run still reads 1500000/2 — a missing single-bit run. */
@@ -442,7 +571,8 @@ static void scenario_the_shortest_run_refuses_what_the_estimate_cannot(void)
  * that tells a silent line from a busy one when no capture came back. */
 static void scenario_a_busy_line_is_not_silent(void)
 {
-	window_span(span_line(115200, 8), 1); /* measured, agreed */
+	window_span(span_line(115200, 8), 1); /* match: pass ends */
+	start_pass();
 
 	for (int i = 0; i < 10; i++) {
 		window_quiet(0); /* line in space: busy, not silent */
@@ -520,8 +650,21 @@ int main(int argc, char **argv)
 	 * starts the window, and holds the cooldown and warning clocks. */
 	set_divider(configured_baud);
 	linkr_uart_autobaud_init((uintptr_t)&fake_uart);
+	linkr_uart_autobaud_set_callback(autobaud_result);
 
-	if (strcmp(scenario, "raw_rmt_jitter") == 0) {
+	/* The detector is idle at boot. Every scenario except the idle one
+	 * asks for the pass the way @a or the GPIO key would. */
+	if (strcmp(scenario, "idle") != 0) {
+		start_pass();
+	}
+
+	if (strcmp(scenario, "idle") == 0) {
+		scenario_idle();
+	} else if (strcmp(scenario, "timeout") == 0) {
+		scenario_timeout();
+	} else if (strcmp(scenario, "stop") == 0) {
+		scenario_stop();
+	} else if (strcmp(scenario, "raw_rmt_jitter") == 0) {
 		scenario_raw_rmt_jitter(false);
 	} else if (strcmp(scenario, "raw_rmt_disagrees") == 0) {
 		scenario_raw_rmt_jitter(true);
@@ -537,6 +680,8 @@ int main(int argc, char **argv)
 		scenario_startup_follows_a_slower_peer();
 	} else if (strcmp(scenario, "verified_step_up") == 0) {
 		scenario_verified_step_up();
+	} else if (strcmp(scenario, "second_pass_can_undo_applied_rate") == 0) {
+		scenario_second_pass_can_undo_applied_rate();
 	} else if (strcmp(scenario, "verified_other_rate") == 0) {
 		scenario_verified_other_rate();
 	} else if (strcmp(scenario, "startup_binary") == 0) {
@@ -567,6 +712,10 @@ int main(int argc, char **argv)
 	printf("reconfigs=%d\n", reconfigure_calls);
 	printf("last=%u\n", reconfigured_to);
 	printf("verified=%d\n", autobaud_verified ? 1 : 0);
+	printf("results=%d\n", result_count);
+	printf("result=%d\n", result_count ? (int)last_result : -1);
+	printf("result_old=%u\n", result_old);
+	printf("result_new=%u\n", result_new);
 
 	return 0;
 }

@@ -30,7 +30,7 @@
 
 #include <dbus/dbus.h>
 
-#define DEFAULT_NAME    "Linkr BLE UART"
+#define DEFAULT_NAME    "Linkr Bee"
 #define NUS_SERVICE     "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_RX_UUID     "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX_UUID     "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
@@ -726,7 +726,7 @@ static bool find_device(DBusConnection *conn, struct options *opt,
 
     if (!match->found) {
         /* Name the criterion that actually failed: an address search reported
-         * as "matching Linkr BLE UART*" sent people looking for the wrong fix. */
+         * as "matching Linkr Bee*" sent people looking for the wrong fix. */
         if (opt->address) {
             err_msg("no BLE device found at address %s", opt->address);
         } else {
@@ -865,7 +865,8 @@ static bool pair_device(DBusConnection *conn, const char *device_path)
     DBusMessage *request, *reply;
     bool success;
 
-    msg("Hold Bee GPIO1 to GND; accept pairing in the system Bluetooth agent.");
+    msg("Hold the Bee pairing GPIO to GND (GPIO1 C3/C5, GPIO4 WROOM); "
+        "accept pairing in the system Bluetooth agent.");
     dbus_error_init(&err);
     request = dbus_message_new_method_call(BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair");
     if (!request) return false;
@@ -1734,7 +1735,8 @@ static void usage(FILE *out, const char *prog)
             "  --scan                list nearby BLE devices; exits unless another\n"
             "                        action or --address is also given\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
-            "  --pair                request OS bonding; hold Bee GPIO1 low\n"
+            "  --pair                request OS bonding; hold pairing GPIO low\n"
+            "                        (GPIO1 C3/C5, GPIO4 WROOM)\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
@@ -1784,7 +1786,7 @@ static const struct completion_option k_completion_options[] = {
     { "--address", true, false, "", "BLE address; skip name scan" },
     { "--scan", false, false, "", "list nearby BLE devices" },
     { "--timeout", true, false, "", "scan timeout seconds" },
-    { "--pair", false, false, "", "request OS bonding; hold Bee GPIO1 low" },
+    { "--pair", false, false, "", "request OS bonding; hold pairing GPIO low" },
     { "--loopback-test", true, false, "", "send payload and require echo" },
     { "--loopback-timeout", true, false, "", "loopback timeout seconds" },
     { "--no-terminal", false, false, "", "connect, run commands, exit" },
@@ -2161,7 +2163,8 @@ int main(int argc, char **argv)
         return EXIT_ERROR;
     }
 
-    msg("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.");
+    msg("New host: hold the Bee pairing GPIO to GND before pairing (GPIO1 C3/C5, "
+        "GPIO4 WROOM). Bonded hosts reconnect without it.");
     if (!connect_device(g_state.conn, match.path)) {
         return EXIT_ERROR;
     }

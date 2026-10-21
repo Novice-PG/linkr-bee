@@ -1,0 +1,143 @@
+name: Project release
+
+# A project release is one download page for every component. The component
+# workflows still own their builds and their own namespaced releases; this
+# workflow calls them for a v* tag, then assembles the firmware ZIPs, Web
+# package, APK and desktop archives into the project-level release shape.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Firmware, Web and APK
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+
+  desktop:
+    name: Desktop matrix
+    permissions:
+      # The called workflow keeps its own linkr-tui-v* release job. It is
+      # skipped for a project tag, but the permission is declared here so the
+      # reusable workflow's job-level grant remains valid.
+      contents: write
+    uses: ./.github/workflows/linkr-tui.yml
+
+  publish:
+    name: Assemble and publish
+    needs: [build, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Download the desktop archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linkr-tui-*
+          path: artifacts/desktop
+          merge-multiple: true
+
+      - name: Download the firmware bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linkr-bee-esp32*
+          path: artifacts/firmware
+
+      - name: Download the Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: linkr-bee-apk
+          path: artifacts/apk
+
+      - name: Download the Web package
+        uses: actions/download-artifact@v4
+        with:
+          name: linkr-bee-web
+          path: artifacts/web
+
+      - name: Assemble the release and its provenance
+        run: |
+          set -euo pipefail
+          python3 tools/assemble_release.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --commit "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --desktop-dir artifacts/desktop \
+            --firmware-dir artifacts/firmware \
+            --apk-dir artifacts/apk \
+            --web-dir artifacts/web \
+            --out-dir release \
+            --notes-template docs/releases/v0.2.md \
+            --notes-out release-notes.md \
+            --web-version 0.1.0 \
+            --firmware-version 0.2.0 \
+            --apk-version 1.0
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Linkr Bee ${GITHUB_REF_NAME}"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --title "${title}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" --title "${title}" \
+              --notes-file release-notes.md --verify-tag
+          fi
+
+      - name: Drop assets this build does not carry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" --json assets \
+            --jq '.assets[].name' > /tmp/release-assets
+          while IFS= read -r name; do
+            if [ ! -f "release/${name}" ]; then
+              echo "dropping ${name}: this build does not carry it"
+              gh release delete-asset "${GITHUB_REF_NAME}" "${name}" -y
+            fi
+          done < /tmp/release-assets
+
+      - name: Upload every asset and the checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+
+      - name: The release carries this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected=$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          count=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets | length')
+          draft=$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')
+          echo "release ${GITHUB_REF_NAME}: assets=${count} expected=${expected} draft=${draft}"
+          [ "${draft}" = "false" ] || {
+            echo "the release is a draft" >&2
+            exit 1
+          }
+          [ "${count}" = "${expected}" ] || {
+            echo "the release carries ${count} assets, this build made ${expected}" >&2
+            exit 1
+          }

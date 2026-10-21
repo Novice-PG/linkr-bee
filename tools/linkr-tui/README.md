@@ -200,7 +200,7 @@ dial is seconds:
 
 ```console
 $ bee --ble-name Linkr --serve
-{"event":"ready","program":"bee","version":"0.5.0","link":"ble:name:Linkr",
+{"event":"ready","program":"bee","version":"0.6.0","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
         "lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
@@ -320,9 +320,9 @@ and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.5.0-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.5.0-x86_64-pc-windows-gnu.zip
-dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.5.0_armhf.deb
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.6.0-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.6.0-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.6.0_armhf.deb
 ```
 
 A Linux target other than the host links *that* target's libdbus, which is not

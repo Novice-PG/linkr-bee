@@ -159,10 +159,10 @@ int main(void)
     char escape[16];
 
     /* normalize_name_prefix trims, drops a trailing '*' and truncates. */
-    normalize_name_prefix("  Linkr BLE UART*  ", buf, sizeof(buf));
-    CHECK_STR(buf, "Linkr BLE UART");
-    normalize_name_prefix("Linkr BLE UART", buf, sizeof(buf));
-    CHECK_STR(buf, "Linkr BLE UART");
+    normalize_name_prefix("  Linkr Bee*  ", buf, sizeof(buf));
+    CHECK_STR(buf, "Linkr Bee");
+    normalize_name_prefix("Linkr Bee", buf, sizeof(buf));
+    CHECK_STR(buf, "Linkr Bee");
     normalize_name_prefix("*", buf, sizeof(buf));
     CHECK_STR(buf, "");
     normalize_name_prefix("", buf, sizeof(buf));

@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     tty = None
 
 __version__ = "1.0.0"
-DEFAULT_NAME = "Linkr BLE UART"
+DEFAULT_NAME = "Linkr Bee"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 MGMT_PROTOCOL_UUID = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
@@ -1154,8 +1154,8 @@ async def run(args: argparse.Namespace) -> int:
             task.add_done_callback(geometry_tasks.discard)
 
     info("connecting...")
-    info("new host: hold Bee GPIO1 to GND before pairing. "
-         "Bonded hosts reconnect without GPIO1.")
+    info("new host: hold the Bee pairing GPIO to GND before pairing "
+         "(GPIO1 C3/C5, GPIO4 WROOM). Bonded hosts reconnect without it.")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
 
     try:
@@ -1342,7 +1342,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--name",
         default=DEFAULT_NAME,
-        help="BLE device name or prefix; default matches Linkr BLE UART*",
+        help="BLE device name or prefix; default matches Linkr Bee*",
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true",
@@ -1369,7 +1369,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
     parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
     parser.add_argument("--pair", action="store_true",
-                        help="request OS bonding (hold Bee GPIO1 low); macOS pairs on encrypted reads")
+                        help="request OS bonding (hold pairing GPIO low: GPIO1 C3/C5, "
+                             "GPIO4 WROOM); macOS pairs on encrypted reads")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
     parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,

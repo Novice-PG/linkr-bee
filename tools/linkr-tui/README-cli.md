@@ -13,7 +13,7 @@ this build has no interface and exits with status 2.
 ## Check the build
 
 ```sh
-./bee-cli --version          # bee-cli 0.5.0
+./bee-cli --version          # bee-cli 0.6.0
 ./bee-cli --capabilities     # operations, defaults and exit codes
 ./bee-cli --licenses         # third-party notice (also in THIRD_PARTY_LICENSES.md)
 ```
@@ -23,7 +23,7 @@ this build has no interface and exits with status 2.
 | Transport | Flag |
 |---|---|
 | Bluetooth address | `--ble-address EE:C7:42:34:48:CF` |
-| Bluetooth name fragment | `--ble-name "UART-3"` |
+| Bluetooth name fragment | `--ble-name "UART-"` (C3/C5: `UART-3`; WROOM: `UART-XXXX`; use the full suffix when several units are nearby) |
 | LAN WebSocket | `--lan-host 192.168.0.102` |
 | LAN token | `--lan-token <TOKEN>`, `--lan-token-file <FILE>` or `$LINKR_LAN_TOKEN` |
 | Offline loopback | `--bridge -` |
@@ -78,8 +78,8 @@ With `--idle`, output is returned without a verified exit status.
 input ends or a request says `quit`:
 
 ```sh
-bee-cli --ble-name "UART-3" --serve
-{"event":"ready","program":"bee-cli","version":"0.5.0","link":"ble:name:UART-3","ops":[…]}
+bee-cli --ble-name "UART-" --serve
+{"event":"ready","program":"bee-cli","version":"0.6.0","link":"ble:name:UART-","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

@@ -5,9 +5,10 @@
 本文集中说明固件构建与刷写、UART 集成、控制命令、测试模式、客户端工具、
 通信协议和 Kconfig 配置。
 
-基于 Zephyr 的 ESP32-C3/C5 BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
+基于 Zephyr 的 ESP32-C3/C5/WROOM BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
 
-- BLE 外设以 `Linkr BLE UART-3` 广播
+- BLE 外设以 `Linkr Bee XXXX` 广播；`XXXX` 是硬件 MAC 最后四位十六进制
+  （所有板型一致，可用 `@n` 改为自定义名）
 - 兼容 Nordic UART Service 的 UUID
 - BLE RX 特征写入转发到所选 UART
 - UART RX 字节通过 BLE TX 通知转发出去
@@ -25,9 +26,10 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
   - [GitHub Actions 构建与刷写](#github-actions-构建与刷写)
 - [UART 选择](#uart-选择)
 - [SBC UART 设置](#sbc-uart-设置)
+  - [按需自动波特率（ESP32-WROOM）](#按需自动波特率esp32-wroom)
 - [WiFi 与 WebDAV 日志上传](#wifi-与-webdav-日志上传)
   - [UART over WebSocket（局域网桥）](#uart-over-websocket局域网桥)
-  - [GPIO1 配对、持久化与恢复出厂](#gpio1-配对持久化与恢复出厂)
+  - [配对 GPIO、持久化与恢复出厂](#配对-gpio持久化与恢复出厂)
 - [控制命令参考](#控制命令参考)
 - [测试选项](#测试选项)
 - [BLE 协议](#ble-协议)
@@ -177,6 +179,40 @@ OK uart=115200,8,N,1,none
 ERR format: @u=115200,8,n,1,n
 ```
 
+### 按需自动波特率（ESP32-WROOM）
+
+WROOM 构建启用 `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`，但检测器启动后保持
+idle，不会自动跟随线速率。需要时再启动：
+
+```text
+@a?          查询：OK autobaud state=idle|running baud=... timeout_ms=5000
+@a           启动一次检测（也接受 @a start）
+@a stop      取消正在运行的检测
+```
+
+每次检测采样一个 400 ms 的 RMT 窗口，连续两个窗口一致后才调用
+`uart_configure()`。检测在确认匹配（`applied` 或 `unchanged`）、重新配置失败
+（`error`）、连续 5 秒没有可测量捕获（`timeout`）或收到 `@a stop`（`stopped`）
+时结束。每次捕获都会重置 5 秒计时，因此仍在通信的线路不会因短时空闲被误停。
+一次检测结束后不会自动重启。
+
+启动命令的 response 不带 `FINAL`；结果稍后以同一 request ID 的 type=3
+Management Event 返回，并带 `FINAL`：
+
+```text
+@event autobaud state=applied old=115200 new=1500000
+@event autobaud state=unchanged old=115200 new=115200
+@event autobaud state=timeout old=115200 new=115200
+@event autobaud state=stopped old=115200 new=115200
+@event autobaud state=error old=115200 new=57600
+```
+
+WROOM overlay 将低有效的 `linkr-autobaud` 按键映射到 GPIO13；按下按键启动同一
+次检测，但没有 request ID，结果只写日志。GPIO2 继续作为板载低有效活动 LED，
+LED 与按键不再共用引脚。GPIO2 现在是输出，不能再把按键或跳线接到 GND，否则会
+短路 LED 输出；按键必须接 GPIO13。GPIO13 不是启动 strapping 引脚，但复位时不要
+按住该键，否则固件启动后会立即触发一次检测。
+
 ## WiFi 与 WebDAV 日志上传
 
 固件源码同时包含 WiFi、WebDAV 和 WebSocket。WebDAV 在默认 ESP32-C3/C5 构建中
@@ -221,17 +257,19 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 BLE 会话断开后，UART 采集继续向 WebSocket 客户端和日志上传器转发；
 BLE 路径丢弃的数据不会在重连后补发。
 
-### GPIO1 配对、持久化与恢复出厂
+### 配对 GPIO、持久化与恢复出厂
 
 固件启用 LE Secure Connections Just Works 配对、绑定和加密 GATT 访问。
-新增主机或替换旧密钥时，需要在请求到达前将 GPIO1 拉低；已有绑定的加密重连
-无需操作 GPIO1。默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过恢复出厂
-清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
+C3/C5 在新增主机或替换旧密钥时，需要在请求到达前将 GPIO1 拉低。WROOM 的
+board conf 默认 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，不需要按
+GPIO4；只有把该选项设为 `y` 时，GPIO4 才作为物理授权输入。已有绑定的加密
+重连无需操作配对 GPIO。默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过
+恢复出厂清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
 | BLE 绑定 | `CONFIG_BT_SETTINGS` 在 NVS 中保留最多 8 台主机密钥 | 板级恢复出厂同时清除全部绑定和其他设置 |
-| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | 板级恢复出厂会生成新的 identity/address，避免系统沿用旧名称缓存 |
+| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | 板级恢复出厂会生成新的 identity/address，避免系统沿用旧缓存；默认名 `Linkr Bee XXXX` 来自硬件 MAC，不随地址或恢复出厂变化 |
 | WiFi SSID/PSK | 默认仅 RAM；`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才保存并在启动时重连 | `@w off` 停用并断开；恢复出厂会擦除 |
 | WebDAV 目标 | 匿名 URL 独立于 WiFi 凭据持久化设置，默认也会保存 | `@d off` 停用；恢复出厂会擦除 |
 | 上传 boot ID | 上传器分配新的 boot ID 时保存，避免重启后复用文件名 | 恢复出厂会擦除 |
@@ -239,7 +277,7 @@ BLE 路径丢弃的数据不会在重连后补发。
 保存的 WiFi 和 WebDAV 配置都是单条、带版本的 settings 记录；启动时会忽略无效或不安全的记录。凭据持久化 Kconfig 是量产前提，不是运行时检测：只有在 secure boot 与 flash encryption 确实已完成烧录时才能开启。未加密设备把 SSID/PSK 写入 NVS 后，仍可能被从 flash 读取。`@w off` 是功能性清除，不是经过验证的安全擦除；设备报废或重新配置时应使用恢复出厂。
 
 恢复出厂时，在设备复位或上电后将恢复输入与 GND 短接并持续保持两秒：C3
-使用 GPIO0，C5 DevKitC 使用 GPIO28/BOOT。固件会在 Bluetooth 与 settings
+使用 GPIO0，C5 DevKitC 使用 GPIO28/BOOT，WROOM 使用 GPIO27。固件会在 Bluetooth 与 settings
 加载前擦除整个 `storage_partition`，清除 Bluetooth identity 数据、Linkr 的
 WiFi/WebDAV 配置和上传 boot 计数器，并生成新的随机静态 BLE
 identity/address。不要让恢复输入永久接地，并将该焊盘或按键的物理访问视为
@@ -288,12 +326,36 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 | `@s token=<32 位十六进制>` | `@linkr socket token=<32 位十六进制>` | 指定局域网访问令牌 |
 | `@s token off` | `@linkr socket token off` | 关闭局域网鉴权（允许未认证访问） |
 
+### BLE 名称命令（所有板型）
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@n?` | `@linkr name?` | 查询当前广播名及是否为自定义名 |
+| `@n=<name>` | `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 名称 |
+| `@n default` | `@linkr name default` | 删除自定义名，恢复 `Linkr Bee XXXX` |
+
+`XXXX` 是硬件 MAC 最后四位十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。
+控制字符和非法 UTF-8 会被拒绝。名称只用于显示：主机必须按 Management
+Service UUID 发现，并在连接后校验 Device ID，不能按广播名匹配。
+
 ### UART 命令
 
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
 | `@u?` | `@linkr uart?` | 查询 UART 设置 |
 | `@u=baud,data,parity,stop,flow` | `@linkr uart=...` | 设置 UART 模式 |
+
+### 自动波特率命令（ESP32-WROOM）
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@a?` | `@linkr autobaud?` | 查询检测器状态和当前波特率 |
+| `@a` / `@a start` | `@linkr autobaud` / `@linkr autobaud start` | 启动一次按需检测 |
+| `@a stop` | `@linkr autobaud stop` | 取消正在运行的检测 |
+
+启动 response 不带 `FINAL`；结果以同一 request ID 的 `FINAL` type=3
+`@event autobaud ...` 返回。状态机和 GPIO13 按键说明见
+[按需自动波特率](#按需自动波特率esp32-wroom)。
 
 ### 响应格式
 
@@ -459,9 +521,10 @@ coredump 扇区。
 
 ## BLE 终端
 
-`tools/linkr_ble_terminal.py` 是当前主机侧参考客户端。它连接
-`Linkr BLE UART*` 设备，核对 Management API v1 和 Device ID，使用 Reliable
-UART 传输终端字节，并将管理响应与串口输出分开。
+`tools/linkr_ble_terminal.py` 是当前主机侧参考客户端。它连接 Linkr Bee，
+核对 Management API v1 和 Device ID，使用 Reliable UART 传输终端字节，并将
+管理响应与串口输出分开。广播名只用于显示；默认名为 `Linkr Bee XXXX`，其中
+`XXXX` 是硬件 MAC 最后四位十六进制。
 
 按需安装主机依赖（`--help` / `--version` 不需要）：
 
@@ -698,9 +761,10 @@ http://127.0.0.1:8765/
 如果保存的设备已不可用，页面会清除记录，并在下一次连接时回退到系统选择器；
 不支持 `getDevices()` 的浏览器始终使用系统选择器。
 
-固件将 Management Service UUID 放在主广播包中，将 `Linkr BLE UART-3` 名称放在扫描
-响应中。页面按 Management Service UUID 过滤浏览器设备选择器，这在 macOS Chromium
-浏览器上比只按名称过滤更可靠。
+固件将 Management Service UUID 放在主广播包中，将广播名放在扫描响应中。
+所有板型默认名都是 `Linkr Bee XXXX`，其中 `XXXX` 是硬件 MAC 最后四位
+十六进制；可用 `@n` 改为自定义名。页面按 Management Service UUID 过滤浏览器
+设备选择器，这在 macOS Chromium 浏览器上比只按名称过滤更可靠。
 
 页面可以：
 
@@ -756,8 +820,10 @@ npm run build:harmony:hap
 Android/iOS 环境要求见 [`mobile/README.md`](../mobile/README.md)，HarmonyOS host
 接口见 [`harmonyos/README.md`](../harmonyos/README.md) 和
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md)，其中也包含调试
-签名和无设备测试说明。首版手机 App 仅支持前台运行。首次连接需要 GPIO1 物理授权并完成系统配对；
-浏览器设备选择授权与 BLE 绑定是两种独立状态。
+签名和无设备测试说明。首版手机 App 仅支持前台运行。固件要求加密并绑定的
+BLE 连接。C3/C5 首次连接需要将 GPIO1 拉低完成物理授权；WROOM 默认关闭配对
+检查，只有启用 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` 时才需要拉低
+GPIO4。浏览器设备选择授权与 BLE 绑定是两种独立状态。
 
 ---
 

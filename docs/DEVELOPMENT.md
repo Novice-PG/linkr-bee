@@ -5,10 +5,11 @@
 This guide covers firmware builds, flashing, UART integration, control commands,
 test modes, client tooling, protocols, and Kconfig options.
 
-Zephyr application for an ESP32-C3/C5 BLE serial bridge. The first milestone is a
+Zephyr application for an ESP32-C3/C5/WROOM BLE serial bridge. The first milestone is a
 plain Bluetooth LE UART window:
 
-- BLE peripheral advertising as `Linkr BLE UART-3`
+- BLE peripheral advertising as `Linkr Bee XXXX`, where `XXXX` is the last
+  four hex digits of the hardware MAC (all boards; `@n` can replace it)
 - Nordic UART Service compatible UUIDs
 - BLE RX characteristic writes are forwarded to the selected UART
 - UART RX bytes are forwarded through BLE TX notifications
@@ -26,9 +27,10 @@ repository owns the accessory firmware and reference clients.
   - [GitHub Actions Build](#github-actions-build)
 - [UART Selection](#uart-selection)
 - [SBC UART Settings](#sbc-uart-settings)
+  - [On-demand UART Autobaud (ESP32-WROOM)](#on-demand-uart-autobaud-esp32-wroom)
 - [WiFi and WebDAV Log Upload](#wifi-and-webdav-log-upload)
   - [UART over WebSocket (LAN Bridge)](#uart-over-websocket-lan-bridge)
-  - [GPIO1 Pairing, Persistence, and Factory Reset](#gpio1-pairing-persistence-and-factory-reset)
+  - [Pairing GPIO, Persistence, and Factory Reset](#pairing-gpio-persistence-and-factory-reset)
 - [Control Commands Reference](#control-commands-reference)
 - [Test Options](#test-options)
 - [BLE Protocol](#ble-protocol)
@@ -209,6 +211,43 @@ OK uart=115200,8,N,1,none
 ERR format: @u=115200,8,n,1,n
 ```
 
+### On-demand UART autobaud (ESP32-WROOM)
+
+The WROOM build enables `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`, but the
+detector is idle at boot. It does not follow the line rate until asked:
+
+```text
+@a?          query: OK autobaud state=idle|running baud=... timeout_ms=5000
+@a           start one pass (also @a start)
+@a stop      cancel the running pass
+```
+
+A pass samples one 400 ms RMT window at a time and requires two agreeing
+windows before it calls `uart_configure()`. It ends on a confirmed match
+(`applied` or `unchanged`), a failed reconfigure (`error`), no measurable
+capture for 5 seconds (`timeout`), or `@a stop` (`stopped`). Every capture
+resets the 5-second clock, so a line that is still talking keeps the pass
+alive. A completed pass is never restarted automatically.
+
+The start response is non-final. The result arrives later as a type=3
+Management event with the same request ID and `FINAL`:
+
+```text
+@event autobaud state=applied old=115200 new=1500000
+@event autobaud state=unchanged old=115200 new=115200
+@event autobaud state=timeout old=115200 new=115200
+@event autobaud state=stopped old=115200 new=115200
+@event autobaud state=error old=115200 new=57600
+```
+
+The WROOM overlay maps the active-low `linkr-autobaud` key to GPIO13. Pressing
+it starts exactly the same one-shot pass, with no request ID; that pass only
+logs its result. GPIO2 remains the board's active-low activity LED, so the LED
+and key do not share a pin. Do not connect a key from GPIO2 to GND: GPIO2 is an
+output, and the LED is still connected, so that would short the output. GPIO13
+has no boot strapping function, but do not hold the key during reset: the pass
+would start as soon as the firmware boots.
+
 ## WiFi and WebDAV log upload
 
 The firmware source includes WiFi, WebDAV, and WebSocket support. WebDAV is
@@ -292,18 +331,21 @@ The shipped configuration enables
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
 
-### GPIO1 pairing, persistence, and factory reset
+### Pairing GPIO, persistence, and factory reset
 
 BLE uses LE Secure Connections Just Works pairing, bonding and encrypted GATT
-access. Hold GPIO1 low before a new host requests pairing. Existing bonds
-restore encryption without GPIO1; replacing lost host keys requires GPIO1 again.
-The default is eight bonds with no automatic eviction. A full table requires
-factory reset before adding more hosts. See [pairing and recovery](BLE_PAIRING.md).
+access. C3/C5 hold GPIO1 low before a new host requests pairing. WROOM ships
+with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no GPIO press is needed;
+if that option is enabled, GPIO4 is the pairing input. Existing bonds restore
+encryption without the pairing GPIO; replacing lost host keys requires it again
+when the check is enabled. The default is eight bonds with no automatic
+eviction. A full table requires factory reset before adding more hosts. See
+[pairing and recovery](BLE_PAIRING.md).
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
 | BLE bonds | Up to eight host key records persisted by `CONFIG_BT_SETTINGS` | Board-specific factory reset clears all bonds and other settings |
-| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
+| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale caches; the default `Linkr Bee XXXX` name stays tied to the hardware MAC and does not change |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
 | Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
@@ -376,12 +418,38 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 | `@s token=<32 hex>` | `@linkr socket token=<32 hex>` | Set the LAN access token |
 | `@s token off` | `@linkr socket token off` | Disable LAN auth (unauthenticated access) |
 
+### BLE Name Commands (all boards)
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@n?` | `@linkr name?` | Query the current advertised name and whether it is custom |
+| `@n=<name>` | `@linkr name=<name>` | Set and persist a 1–29 byte UTF-8 name |
+| `@n default` | `@linkr name default` | Delete the custom name and restore `Linkr Bee XXXX` |
+
+`XXXX` is the last four hex digits of the factory hardware MAC (for example
+`58:BF:25:33:07:8C` becomes `078C`). Control characters and invalid UTF-8 are
+rejected. The name is display-only: hosts must discover the Management Service
+UUID and verify Device ID, never match on the advertised name.
+
 ### UART Commands
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
 | `@u?` | `@linkr uart?` | Query UART settings |
 | `@u=baud,data,parity,stop,flow` | `@linkr uart=...` | Set UART mode |
+
+### Autobaud Commands (ESP32-WROOM)
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@a?` | `@linkr autobaud?` | Query detector state and current baud |
+| `@a` / `@a start` | `@linkr autobaud` / `@linkr autobaud start` | Start one on-demand pass |
+| `@a stop` | `@linkr autobaud stop` | Cancel the running pass |
+
+The start response is non-final; the result is a `FINAL` type=3
+`@event autobaud ...` on the same request ID. See
+[on-demand autobaud](#on-demand-uart-autobaud-esp32-wroom) for the state
+machine and GPIO13 trigger.
 
 ### Response Format
 
@@ -565,8 +633,10 @@ The host terminal prints the detected write chunk size when it connects.
 ## BLE terminal
 
 `tools/linkr_ble_terminal.py` is the current host reference client. It connects
-to a `Linkr BLE UART*` device, verifies Management API v1 and Device ID, uses
-Reliable UART for terminal bytes, and keeps management responses separate.
+to a Linkr Bee, verifies Management API v1 and Device ID, uses Reliable UART for
+terminal bytes, and keeps management responses separate. The advertised name is
+display-only; the default is `Linkr Bee XXXX`, where `XXXX` is the last four hex
+digits of the hardware MAC.
 
 Install the host dependency if needed (`--help`/`--version` do not need it):
 
@@ -835,10 +905,12 @@ reuse the authorization without reopening the chooser.  If the saved device is
 no longer available, the page clears it and falls back to the normal chooser on
 the next attempt.  Browsers without `getDevices()` always use the chooser.
 
-The firmware places the Management Service UUID in the primary advertising packet and
-the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
-device chooser by the Management service UUID, which is more reliable than name-only
-filtering on macOS Chromium browsers.
+The firmware places the Management Service UUID in the primary advertising
+packet and the advertised name in the scan response. The default name is
+`Linkr Bee XXXX` on every board, where `XXXX` is the last four hex digits of the
+hardware MAC; `@n` can replace it with a custom name. The page filters the
+browser device chooser by the Management Service UUID, which is more reliable
+than name-only filtering on macOS Chromium browsers.
 
 Plain static hosting has no bundler, so the assistant is shipped prebuilt in
 `web/vendor/agent/`. Rebuild it after changing the agent runtime or upgrading the
@@ -935,10 +1007,10 @@ See [`mobile/README.md`](../mobile/README.md) for Android/iOS requirements and
 [`harmonyos/README.md`](../harmonyos/README.md) plus
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md) for the HarmonyOS
 host contract, debug signing, and host-side tests. The first mobile release is
-foreground-only. The firmware requires an encrypted, bonded BLE link and gates
-new pairings on GPIO1, so each new host must be authorized physically before it
-can pair; see [pairing and recovery](BLE_PAIRING.md) for the authorization and
-recovery rules.
+foreground-only. The firmware requires an encrypted, bonded BLE link. C3/C5 gate
+new pairings on GPIO1; WROOM ships with the pairing check off, and uses GPIO4
+only when `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. See
+[pairing and recovery](BLE_PAIRING.md) for the authorization and recovery rules.
 
 ---
 

@@ -917,7 +917,7 @@ impl App {
     ///
     /// The link the app is on, spelled the way it dialled: `ble:EE:C7:…` names
     /// an address, `lan:host` a bridge, `stdio:…` a command. The interface's
-    /// own display name is a default — two boards are both "Linkr BLE UART" —
+    /// own display name is a default — two boards are both "Linkr Bee" —
     /// and a store they shared would answer a new board with the last one's
     /// tasks and notes.
     pub fn agent_device_key(&self) -> String {
@@ -1620,8 +1620,8 @@ impl App {
         Some(&address[offset..])
     }
 
-    /// A board's name with the tail of the address it belongs to: "Linkr BLE
-    /// UART-3" and `FB:F6:91:14:33:3A` read together as `Linkr BLE UART-3 33:3A`.
+    /// A board's name with the tail of the address it belongs to: "Linkr Bee
+    /// 078C" and `FB:F6:91:14:33:3A` read together as `Linkr Bee 078C 33:3A`.
     ///
     /// The one spelling of a named board, wherever a row has to write one: a
     /// scan result coming in, the link coming up, and the shelf being read at
@@ -1642,8 +1642,15 @@ impl App {
     /// keeps calling the board by its name — and the row that says it, the
     /// same row a scan result paints.
     pub fn remember_device_name(&mut self, address: &str, name: &str) {
-        self.advertised_name = Some(name.to_string());
-        self.device_name = Self::named_with_tail(name, address);
+        let Some(name) = crate::transport::ble::display_name(Some(name)) else {
+            // A shelf written by an older build can carry a name that is
+            // nothing but controls. The address is still the board's name.
+            self.advertised_name = None;
+            self.device_name = address.to_ascii_uppercase();
+            return;
+        };
+        self.device_name = Self::named_with_tail(&name, address);
+        self.advertised_name = Some(name);
     }
 
     /// Name the target a dial is aimed at, for the row that shows the wait.
@@ -2650,7 +2657,7 @@ impl App {
     /// ends at the first board that answers instead of at the end of the
     /// window, so a start on a bench where the board is already advertising
     /// does not sit through a full scan for an answer it has; and a scan that
-    /// hears exactly one board that speaks the serial service dials it quietly
+    /// hears exactly one device advertising the Linkr Management Service dials it quietly
     /// — a user who runs this on a bench has one board in front of them and
     /// did not ask for a chooser or for a window announcing it — where two or
     /// more boards put the list up, because only then is there a choice to
@@ -2692,12 +2699,14 @@ impl App {
         }
         // Set *after* the dial, so the dial's own naming of its target cannot
         // undo it: the name the scan heard is a better answer than the address
-        // the dial was aimed with, and it is not known to the dial.
-        if let Some(name) = advertised_name {
-            self.advertised_name = Some(name.to_string());
+        // the dial was aimed with, and it is not known to the dial. The name
+        // is display-only, and controls from the air must not reach a cell.
+        let advertised_name = crate::transport::ble::display_name(advertised_name);
+        if let Some(name) = &advertised_name {
+            self.advertised_name = Some(name.clone());
         }
         self.device_name = match advertised_name {
-            Some(name) => Self::named_with_tail(name, address),
+            Some(name) => Self::named_with_tail(&name, address),
             None => address.to_ascii_uppercase(),
         };
         // The signal the scan heard the board at. A connected board stops
@@ -2747,8 +2756,9 @@ impl App {
 
     /// Refill an open picker from the scan's live list.
     ///
-    /// Only boards that offer the serial service, as in [`App::settle_scan`]:
-    /// a keyboard on the bench is noise a user does not want to wait through.
+    /// Only devices advertising the Linkr Management Service, as in
+    /// [`App::settle_scan`]: a keyboard on the bench is noise a user does not
+    /// want to wait through.
     /// The cursor follows the row it was on by device rather than by index,
     /// because a device that appears above the cursor would otherwise move
     /// the selection under the user's fingers.
@@ -2777,10 +2787,10 @@ impl App {
     /// Fold a finished scan in: list the boards, and dial a lone one when the
     /// scan was opened to connect.
     ///
-    /// Only boards that offer the serial service are listed. A keyboard on the
-    /// bench is noise a user does not want to wait through, and the list this
-    /// program can act on is the serial one — everything else is a device this
-    /// bridge has nothing to say to.
+    /// Only devices advertising the Linkr Management Service are listed. A
+    /// keyboard on the bench is noise a user does not want to wait through,
+    /// and the list this program can act on is the management one — everything
+    /// else is a device this bridge has nothing to say to.
     ///
     /// One board and the scan was the startup one: dial it. A bench with one
     /// board on it is the common case, and making the user pick from a list of
@@ -5008,10 +5018,10 @@ mod tests {
         assert!(app.last_dial.is_none());
     }
 
-    /// A finished scan folds in the way that opened it: only boards that speak
-    /// the serial service count, a lone board at startup is dialled without a
-    /// window, a pair leaves the list up to pick from, nothing heard says
-    /// nothing, and a scan the user asked for is always a list.
+    /// A finished scan folds in the way that opened it: only devices with the
+    /// Linkr Management Service count, a lone board at startup is dialled
+    /// without a window, a pair leaves the list up to pick from, nothing heard
+    /// says nothing, and a scan the user asked for is always a list.
     #[test]
     fn a_scan_lists_serial_boards_and_dials_a_lone_one() {
         use crate::cli::FoundDevice;
