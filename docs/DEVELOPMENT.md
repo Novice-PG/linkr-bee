@@ -437,6 +437,21 @@ keep one narrow compatibility exception: a pre-service device with the fixed
 `Linkr BLE UART...` name and only NUS is treated as a terminal-only legacy
 board. A `Linkr Bee...` name without the service is always refused.
 
+Every host client exposes the same three operations:
+
+| Host | Read | Set | Restore default |
+| --- | --- | --- | --- |
+| `bee` (TUI) | Network view → *Read name* | Network view → *Rename* | Network view → *Restore default* |
+| `bee-cli` | `--query-ble-name` / `query ble-name` | `--rename-ble NAME` / `set ble-name NAME` | `--reset-ble-name` / `set ble-name default` |
+| `bee --serve` | `{"op":"ble-name"}` | `{"op":"ble-name","name":"…"}` | `{"op":"ble-name","default":true}` |
+| `linkr_ble_terminal.py` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| `linkr_ble_terminal_c` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| Web / mobile | *BLE name* controls next to the device | same | same |
+
+The desktop and mobile clients ask the board first (`@n?`) and show whether the
+name is the MAC-derived default or a custom one; a write is confirmed by the
+board and read back. The C client prints the board's answer on stdout.
+
 ### UART Commands
 
 | Short Form | Long Form | Description |
@@ -474,7 +489,7 @@ dropped-byte count, WiFi/IP state, and WebDAV
 queue, drop, HTTP, failure, and success counters:
 
 ```text
-@info fw version=0.1.1 zephyr=4.4.1
+@info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -494,11 +509,25 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
+The advertised BLE name is read and changed the same way on every host:
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-ble-name --no-terminal
+python3 tools/linkr_ble_terminal.py --rename-ble '测试😀' --no-terminal
+python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
+```
+
+The name is 1–29 UTF-8 bytes and is checked on the host before anything is
+sent, so Chinese and emoji are accepted and a name the firmware would refuse
+fails without touching the radio. The change is persisted in the board's
+settings and survives a reboot; `--reset-ble-name` restores the
+MAC-derived `Linkr Bee XXXX`.
+
 Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.1"],"command":"@i?"}`.
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
@@ -509,6 +538,8 @@ Scripting and safety notes:
   `--wifi SSID,PASSWORD` still works but is visible in `ps`.
 - `--uart` is validated locally (baud 300–3000000, data 5–8, parity n/o/e,
   stop 1/2, flow n/rtscts) and fails before anything is sent to the device.
+- `--rename-ble` is validated locally too: 1–29 UTF-8 bytes, no control
+  characters, and the two name flags cannot both be given.
 - Exit codes: `0` ok, `1` error, `2` bad arguments, `3` device disconnected
   during the terminal session.
 
@@ -668,8 +699,11 @@ A Linux-only reference implementation written in C is provided in
 `tools/linkr_ble_terminal.c`. It talks to BlueZ over the system D-Bus using
 `libdbus-1` directly, without GLib. This keeps the userspace dependency small,
 but it still requires a working Linux BLE central stack underneath it.
-The C program is currently a legacy NUS terminal; use the Python or Web client
-for Management v1 and Reliable UART integration.
+The C program speaks legacy NUS for the terminal, and Management Service v1
+for the advertised BLE name: `--query-ble-name`, `--rename-ble NAME`, and
+`--reset-ble-name` read Protocol Info and the Device ID first, and are refused
+on legacy NUS-only firmware. Use the Python or Web client for the remaining
+Management v1 controls (WiFi, WebDAV, UART) and for Reliable UART.
 
 Runtime path:
 
@@ -766,13 +800,16 @@ hciconfig -a
 ls -l /sys/class/bluetooth
 ```
 
-The legacy C terminal supports raw NUS terminal and scan/loopback workflows.
-Its old management flags are not compatible with API v1; use the Python client
+The legacy C terminal supports raw NUS terminal and scan/loopback workflows,
+and it reads and renames the advertised BLE name over Management Service v1.
+Its other management flags are not compatible with API v1; use the Python client
 for configuration and diagnostics:
 
 ```sh
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
 ./linkr_ble_terminal_c --scan
+./linkr_ble_terminal_c --query-ble-name --no-terminal
+./linkr_ble_terminal_c --rename-ble 'Bench Bee' --no-terminal
 python3 tools/linkr_ble_terminal.py --query-info --no-terminal
 ```
 
@@ -830,6 +867,9 @@ Useful options:
 
 - `Ctrl-]`: exit the terminal
 - `--query-info --no-terminal`: read firmware and runtime diagnostics
+- `--query-ble-name --no-terminal`: read the advertised BLE name
+- `--rename-ble NAME --no-terminal`: set the advertised BLE name
+- `--reset-ble-name --no-terminal`: restore the MAC-derived BLE name
 - `--wifi-scan --no-terminal`: list nearby 2.4 GHz WiFi networks through the bridge
 - `--loopback-test A --no-terminal`: send `A` and require `A` back
 - `--scan --no-terminal`: list nearby BLE devices
@@ -1071,7 +1111,7 @@ hardware.
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.1` | Reported firmware version |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
 
 ### Test Configuration
 

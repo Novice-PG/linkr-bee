@@ -13,7 +13,7 @@ this build has no interface and exits with status 2.
 ## Check the build
 
 ```sh
-./bee-cli --version          # bee-cli 0.1.1
+./bee-cli --version          # bee-cli 0.1.2
 ./bee-cli --capabilities     # operations, defaults and exit codes
 ./bee-cli --licenses         # third-party notice (also in THIRD_PARTY_LICENSES.md)
 ```
@@ -40,6 +40,7 @@ bee-cli --query-info                   # @i?
 bee-cli --query-uart                   # @u?
 bee-cli --query-wifi                   # @w?
 bee-cli --query-webdav                 # @d?
+bee-cli --query-ble-name               # @n?
 bee-cli --query-lan                    # @s?
 bee-cli --wifi "MySSID,MyPassword"     # join a network
 bee-cli --wifi "MySSID" --wifi-key-file pw.txt
@@ -48,9 +49,24 @@ bee-cli --wifi-off
 bee-cli --webdav http://dav.example/logs/
 bee-cli --webdav-off
 bee-cli --uart 115200,8,n,1,none
+bee-cli --rename-ble "测试😀"          # @n=测试😀
+bee-cli --reset-ble-name               # @n default
 bee-cli --loopback-test 414243
 bee-cli --exec "uname -a"
 ```
+
+The advertised BLE name is read and changed with the same three flags the
+interactive terminal uses:
+
+```sh
+bee-cli query ble-name                 # --query-ble-name
+bee-cli set ble-name "Bench Bee"       # --rename-ble
+bee-cli set ble-name default           # --reset-ble-name
+```
+
+The name is 1–29 UTF-8 bytes and is checked on the host before anything is
+sent, so Chinese and emoji are accepted and a name the firmware would refuse
+fails without a round trip. A write is confirmed by the board and read back.
 
 A command line may contain several requests; they are sent one at a time
 because the bridge answers one management question at a time. Add `--json` for
@@ -79,7 +95,7 @@ input ends or a request says `quit`:
 
 ```sh
 bee-cli --ble-name "UART-" --serve
-{"event":"ready","program":"bee-cli","version":"0.1.1","link":"ble:name:UART-","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:name:UART-","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

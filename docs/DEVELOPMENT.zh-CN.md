@@ -342,6 +342,20 @@ UTF-8 会被拒绝。当前固件的名称只用于显示：主机必须按 Mana
 兼容例外：没有 Management Service、只有 NUS 且固定名为 `Linkr BLE UART...` 的
 旧固件按仅终端设备处理；新式 `Linkr Bee...` 名称没有服务时一律拒绝。
 
+每个主机客户端都提供同样的三个操作：
+
+| 客户端 | 读取 | 设置 | 恢复默认 |
+| --- | --- | --- | --- |
+| `bee`（TUI） | 网络视图 → *读取名称* | 网络视图 → *修改名称* | 网络视图 → *恢复默认* |
+| `bee-cli` | `--query-ble-name` / `query ble-name` | `--rename-ble NAME` / `set ble-name NAME` | `--reset-ble-name` / `set ble-name default` |
+| `bee --serve` | `{"op":"ble-name"}` | `{"op":"ble-name","name":"…"}` | `{"op":"ble-name","default":true}` |
+| `linkr_ble_terminal.py` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| `linkr_ble_terminal_c` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| Web / 手机 | 设备旁的 *BLE 名称* 控件 | 同左 | 同左 |
+
+桌面与手机客户端先向板子查询（`@n?`），并区分 MAC 默认名与自定义名；写入后
+由板子确认并回读。C 客户端把板子的回答打印到标准输出。
+
 ### UART 命令
 
 | 短形式 | 长形式 | 说明 |
@@ -377,7 +391,7 @@ ERR format: @u=115200,8,n,1,n
 WebDAV 队列、丢弃、HTTP、失败和成功计数：
 
 ```text
-@info fw version=0.1.1 zephyr=4.4.1
+@info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -396,10 +410,22 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
+广播名的读取与修改在所有主机上用法一致：
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-ble-name --no-terminal
+python3 tools/linkr_ble_terminal.py --rename-ble '测试😀' --no-terminal
+python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
+```
+
+名称为 1–29 个 UTF-8 字节，主机先本地校验再发送，因此中文和 emoji 可用，
+固件会拒绝的名称在接触射频之前就会失败。修改会写入板子的 settings，重启后
+仍然保留；`--reset-ble-name` 恢复由硬件 MAC 生成的 `Linkr Bee XXXX`。
+
 脚本化与安全注意事项：
 
 - `--json` 把管理响应与事件按行输出为 JSON，例如
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.1"],"command":"@i?"}`；
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`；
   `@w=`/`@d=` 这类命令在 JSON 里的 `command` 字段始终是 `<redacted>`。
 - `--quiet` 只抑制进度信息（`linkr: …`），错误与 `loopback PASS/FAIL` 仍然输出。
 - `--help` 与 `--version` 不需要安装 bleak，只有真正访问设备时才导入它。
@@ -546,7 +572,7 @@ python3 -m pip install bleak
 
 ### Linux 或 Linkr Buildroot 的 C 终端
 
-`tools/linkr_ble_terminal.c` 提供仅 Linux 的 C 参考实现。它通过系统 D-Bus 直接用 `libdbus-1` 与 BlueZ 通信，不依赖 GLib。这使用户态依赖很小，但仍需要底层可用的 Linux BLE 中心栈。该程序目前是 legacy NUS 终端；Management v1 与 Reliable UART 对接请使用 Python 或 Web 参考客户端。
+`tools/linkr_ble_terminal.c` 提供仅 Linux 的 C 参考实现。它通过系统 D-Bus 直接用 `libdbus-1` 与 BlueZ 通信，不依赖 GLib。这使用户态依赖很小，但仍需要底层可用的 Linux BLE 中心栈。该程序的终端部分仍是 legacy NUS，广播名则走 Management Service v1：`--query-ble-name`、`--rename-ble NAME`、`--reset-ble-name` 会先读取 Protocol Info 和 Device ID，在只有 NUS 的旧固件上会被拒绝。其余 Management v1 控制（WiFi、WebDAV、UART）和 Reliable UART 请使用 Python 或 Web 参考客户端。
 
 运行时路径：
 
@@ -631,12 +657,15 @@ hciconfig -a
 ls -l /sys/class/bluetooth
 ```
 
-legacy C 终端支持原始 NUS 终端、扫描和回环流程。它的旧管理参数不兼容 API
+legacy C 终端支持原始 NUS 终端、扫描和回环流程，并通过 Management Service v1
+读取和修改广播名。它的旧管理参数不兼容 API
 v1；配置和诊断请使用 Python 客户端：
 
 ```sh
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
 ./linkr_ble_terminal_c --scan
+./linkr_ble_terminal_c --query-ble-name --no-terminal
+./linkr_ble_terminal_c --rename-ble 'Bench Bee' --no-terminal
 python3 tools/linkr_ble_terminal.py --query-info --no-terminal
 ```
 
@@ -693,6 +722,9 @@ GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 
 - `Ctrl-]`：退出终端
 - `--query-info --no-terminal`：读取固件和运行时诊断
+- `--query-ble-name --no-terminal`：读取广播名
+- `--rename-ble NAME --no-terminal`：设置广播名
+- `--reset-ble-name --no-terminal`：恢复由硬件 MAC 生成的默认广播名
 - `--wifi-scan --no-terminal`：通过 bridge 列出附近 2.4 GHz WiFi
 - `--loopback-test A --no-terminal`：发送 `A` 并要求收到 `A`
 - `--scan --no-terminal`：列出附近 BLE 设备
@@ -881,7 +913,7 @@ GPIO4。浏览器设备选择授权与 BLE 绑定是两种独立状态。
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.1` | 上报的固件版本 |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | 上报的固件版本 |
 
 ### 测试配置
 
