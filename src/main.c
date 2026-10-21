@@ -777,6 +777,31 @@ static void advertise_schedule(k_timeout_t delay)
 	k_work_reschedule(&advertise_work, delay);
 }
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
+/* The scan response is copied into the controller when advertising starts, so
+ * a board that was renamed keeps broadcasting its old name until the
+ * advertising is started again. The name a scanner shows is the only place a
+ * user can tell two boards apart at a glance, and a board that answers to one
+ * name on the air and another over the management channel is worse than one
+ * that was never renamed: the user cannot tell which board they are holding.
+ *
+ * Stopping and starting the advertising does not touch the connection — Zephyr
+ * keeps a connected link up while the advertising is cycled — and the new
+ * scan response carries the name the rename just installed.
+ */
+static void ble_name_advertise_refresh(void)
+{
+	int err;
+
+	err = bt_le_adv_stop();
+	if (err && err != -EINVAL) {
+		LOG_WRN("BLE advertising stop failed: %d", err);
+		return;
+	}
+	advertise_start();
+}
+#endif
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
@@ -1507,12 +1532,17 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 			return true;
 		}
 		ble_name_make_default();
+		/* The scan response length follows the buffer here, before the
+		 * name is handed to the stack: a failure below must not leave
+		 * the old length beside the new bytes, which would advertise a
+		 * truncated name. */
+		sd[0].data_len = (uint8_t)strlen(ble_name);
 		err = bt_set_name(ble_name);
 		if (err) {
 			(void)send_control_response(conn, "ERR name=%d\r\n", err);
 			return true;
 		}
-		sd[0].data_len = (uint8_t)strlen(ble_name);
+		ble_name_advertise_refresh();
 		(void)send_control_response(conn, "OK name=%s\r\n", ble_name);
 		return true;
 	}
@@ -1555,6 +1585,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 				return true;
 			}
 			ble_name_custom = true;
+			ble_name_advertise_refresh();
 			(void)send_control_response(conn, "OK name=%s\r\n",
 						    ble_name);
 			return true;
