@@ -18,9 +18,9 @@
 
 ```sh
 # Linux / macOS：解压后运行（按机器架构选包；macOS 另有 .dmg：本目录的是这份 CLI，上一级 macos/ 的是界面版）
-tar xzf linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu.tar.gz
-./linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu/bee-cli --version
-./linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
+tar xzf linkr-bee-cli-0.1.2-x86_64-unknown-linux-gnu.tar.gz
+./linkr-bee-cli-0.1.2-x86_64-unknown-linux-gnu/bee-cli --version
+./linkr-bee-cli-0.1.2-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
@@ -57,6 +57,9 @@ flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--esc
 | 读串口参数 `@u?` | `bee-cli --query-uart` |
 | 读 WiFi 状态 `@w?` | `bee-cli --query-wifi` |
 | 读 WebDAV 状态 `@d?` | `bee-cli --query-webdav` |
+| 读广播名 `@n?` | `bee-cli --query-ble-name` |
+| 改广播名 `@n=<名称>` | `bee-cli --rename-ble "测试😀"`（1–29 个 UTF-8 字节，中文和 emoji 可用） |
+| 恢复默认广播名 `@n default` | `bee-cli --reset-ble-name` |
 | 读桥的 LAN 状态 `@s?` | `bee-cli --query-lan`（`ws=` 与 token 是否已捕获） |
 | 设置串口 | `bee-cli --uart 115200,8,n,1,none`　`baud,data,parity,stop,flow` |
 | 连 WiFi | `bee-cli --wifi "MySSID,MyPassword"` |
@@ -170,7 +173,7 @@ JSON 请求，适合脚本与 Agent 连续问很多件事：
 
 ```sh
 bee-cli --ble-address EE:C7:42:34:48:CF --serve
-{"event":"ready","program":"bee-cli","version":"0.1.1","link":"ble:EE:…","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:EE:…","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -187,7 +190,7 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 
 | 行 | 字段 | 说明 |
 |---|---|---|
-| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是这个会话当下能服务的请求（随传输变化：LAN / stdio 下不含 `info`/`uart`/`wifi`/`wifi-off`/`wifi-scan`/`webdav`/`webdav-off`/`lan` 这些仅限 BLE 的项；`--capabilities` 才是本构建的全表） |
+| `ready` | `program` `version` `link` `ops` | 启动横幅；`ops` 是这个会话当下能服务的请求（随传输变化：LAN / stdio 下不含 `info`/`uart`/`wifi`/`wifi-off`/`wifi-scan`/`webdav`/`webdav-off`/`ble-name`/`lan` 这些仅限 BLE 的项；`--capabilities` 才是本构建的全表） |
 | `begin` | `id` `op` | 每个请求的开口；`id` 是可选数字，原样回显（不给就是 `null`） |
 | `end` | `id` `code` | 每个请求的收口；`code` 就是一次性命令行的退出码（第六节） |
 
@@ -202,6 +205,7 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 | `wifi-scan` | —— | `--wifi-scan` |
 | `webdav` | 给 `url`：设置并开启；不给：读 | `--webdav` / `--query-webdav` |
 | `webdav-off` | —— | `--webdav-off` |
+| `ble-name` | 给 `name`：改名；给 `default: true`：恢复默认；都不给：读 | `--rename-ble` / `--reset-ble-name` / `--query-ble-name` |
 | `lan` | —— | 读桥的局域网状态（`@s?`）：`ws=` 与 token 是否已捕获；界面里是连接区的一行 |
 | `exec` | `cmd`（必填）、`timeout_ms`、`idle_ms`、`retry` | `--exec` 全部参数 |
 | `loopback-test` | `data`（字面字节，非十六进制）、`timeout_ms`（默认 3000） | `--loopback-test` |
@@ -244,11 +248,13 @@ bee-cli --ble-address EE:C7:42:34:48:CF --serve
 |---|---|
 | `bee-cli scan` | `--scan` |
 | `bee-cli doctor` | `--doctor` |
-| `bee-cli query info\|uart\|wifi\|webdav\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-webdav` / `--query-lan` |
+| `bee-cli query info\|uart\|wifi\|webdav\|ble-name\|lan` | `--query-info` / `--query-uart` / `--query-wifi` / `--query-webdav` / `--query-ble-name` / `--query-lan` |
 | `bee-cli set uart "115200,8,n,1,none"` | `--uart "115200,8,n,1,none"` |
 | `bee-cli set wifi "MySSID,MyPassword"` | `--wifi "MySSID,MyPassword"` |
 | `bee-cli set webdav http://dav.example/logs/` | `--webdav http://dav.example/logs/` |
 | `bee-cli set webdav off` | `--webdav-off` |
+| `bee-cli set ble-name "测试😀"` | `--rename-ble "测试😀"` |
+| `bee-cli set ble-name default` | `--reset-ble-name` |
 | `bee-cli exec -- df -h` | `--exec "df -h"`（`--` 之后全是命令本身，`-h` 之类不会被当 flag） |
 | `bee-cli send --line` / `--raw` | `--send line` / `--send raw` |
 | `bee-cli loopback AB` | `--loopback-test AB` |
