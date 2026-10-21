@@ -437,6 +437,21 @@ keep one narrow compatibility exception: a pre-service device with the fixed
 `Linkr BLE UART...` name and only NUS is treated as a terminal-only legacy
 board. A `Linkr Bee...` name without the service is always refused.
 
+**The address identifies a board; the name labels it.** The owner can rename
+a board at any time, so a name is never an identity:
+
+- the board is *found* by the Management Service it advertises, and reached by
+  its BLE address;
+- the board is *named* by its own answer to `@n?`, which is what every client
+  shows. The desktop terminal asks the board as soon as a link comes up and
+  again after every rename, so a board renamed from another client is named
+  correctly on the next connection;
+- a client that is given a name that matches nothing says which boards were
+  heard and how to reach one of them by address;
+- a rename makes the board broadcast the new name: the scan response is
+  copied into the controller when advertising starts, so the firmware restarts
+  the advertising once the new name is installed.
+
 Every host client exposes the same three operations:
 
 | Host | Read | Set | Restore default |

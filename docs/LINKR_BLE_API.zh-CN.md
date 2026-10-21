@@ -30,7 +30,8 @@ Management 响应不会再出现在串口数据中，串口内容也不会被误
 - Complete Local Name：所有板型的默认名都是 `Linkr Bee XXXX`，其中 `XXXX`
   是硬件 MAC 最后四位十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。
   `@n` 可将其替换为 1–29 字节的自定义名（可含中文）。当前固件的名称只用于
-  显示，扫描仍必须按 Management Service UUID 过滤；
+  显示，扫描仍必须按 Management Service UUID 过滤；改名后固件会重启一次
+  广播，扫描响应随即带上新名字；
 - Primary advertisement UUID：Management Service UUID；
 - 当前固件必须按 Management Service UUID 扫描，不能依赖名称。仅为兼容没有
   Management Service、只有 NUS 且固定名为 `Linkr BLE UART...` 的旧固件，
