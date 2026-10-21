@@ -18,9 +18,9 @@
 
 ```sh
 # Linux / macOS：解压后运行（按机器架构选包；macOS 另有 .dmg：本目录的是这份 CLI，上一级 macos/ 的是界面版）
-tar xzf linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu.tar.gz
-./linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu/bee-cli --version
-./linkr-bee-cli-0.6.0-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
+tar xzf linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu.tar.gz
+./linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu/bee-cli --version
+./linkr-bee-cli-0.1.1-x86_64-unknown-linux-gnu/bee-cli --scan        # 附近有哪些设备
 ```
 
 ```powershell
@@ -170,7 +170,7 @@ JSON 请求，适合脚本与 Agent 连续问很多件事：
 
 ```sh
 bee-cli --ble-address EE:C7:42:34:48:CF --serve
-{"event":"ready","program":"bee-cli","version":"0.6.0","link":"ble:EE:…","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.1.1","link":"ble:EE:…","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -287,3 +287,7 @@ bee-cli doctor --ble-name "Linkr Bee 078C" --json
 要"送一条、等结束、拿回退出码"就用 `--exec`。标准输入直接结束（一个字节都没有）算失败，
 以免"什么都没做"看起来像成功；中途断链会报还有多少字节没送出去。
 留给人在键盘前用的写法：`bee-cli send --line` 然后逐行输入，`Ctrl-D` 结束。
+
+---
+
+整理：Novice-PG · 2026-10-21
