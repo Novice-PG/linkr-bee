@@ -36,12 +36,17 @@ Linux 上也可以直接用 `../linux/` 里的 `.deb` 安装包：它装的是�
 | 连接方式 | 参数 |
 |---|---|
 | 蓝牙地址（最稳） | `--ble-address EE:C7:42:34:48:CF` |
-| 按名字片段找 | `--ble-name "UART-3"` |
+| 按名字片段找（名字是标签，可被改名） | `--ble-name "UART-3"`；板子改过名就用 `--ble-address` |
 | 局域网 WebSocket | `--lan-host 192.168.0.102`（也可给完整 `ws://` 地址） |
 | 该桥要求的 token | `--lan-token <TOKEN>`；或 `--lan-token-file <文件>`；或环境变量 `$LINKR_LAN_TOKEN` |
 | 锁定传输方式 | `--transport ble\|lan\|stdio` |
 | 离线回环（试手） | `--bridge -` |
 | 连接超时 | `--connect-timeout <秒>`（默认 20；蓝牙链路最多再等 30） |
+
+不给 `--name` 时，板子按它广播的 Management Service 找、按蓝牙地址连：名字随时可以改，
+所以名字只用来筛选，不用来认板子；名字没匹配上时程序会列出听到的板子并提示用 `--address`。
+连上之后 `bee-cli` 会向板子问一次名字（`@n?`），所以 `--query-ble-name` 与界面里显示的
+名字都是板子自己的回答。
 
 只跑一个动作时：连上 → 动作 → 打印 → 退出。本 CLI 构建没有界面，因此配置界面的那几个
 flag——`--cli-then-tui`、`--enter`、`--local-echo`、`--line-mode`、`--escape`——会在参数阶段
