@@ -423,13 +423,19 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
 | `@n?` | `@linkr name?` | Query the current advertised name and whether it is custom |
-| `@n=<name>` | `@linkr name=<name>` | Set and persist a 1–29 byte UTF-8 name |
+| `@n=<name>` | `@linkr name=<name>` | Set and persist a 1–29 byte UTF-8 name; Chinese and emoji are allowed (emoji are usually 4 bytes each) |
 | `@n default` | `@linkr name default` | Delete the custom name and restore `Linkr Bee XXXX` |
 
 `XXXX` is the last four hex digits of the factory hardware MAC (for example
-`58:BF:25:33:07:8C` becomes `078C`). Control characters and invalid UTF-8 are
-rejected. The name is display-only: hosts must discover the Management Service
-UUID and verify Device ID, never match on the advertised name.
+`58:BF:25:33:07:8C` becomes `078C`). Names are limited by UTF-8 bytes, not
+characters: Chinese is allowed, and emoji are valid too (a typical emoji uses
+four bytes, so seven fit in 28 bytes while eight exceed the 29-byte limit).
+Control characters and invalid UTF-8 are rejected. For current firmware the
+name is display-only: hosts must discover the Management Service UUID and
+verify Device ID, never match on the advertised name. The TUI and Web clients
+keep one narrow compatibility exception: a pre-service device with the fixed
+`Linkr BLE UART...` name and only NUS is treated as a terminal-only legacy
+board. A `Linkr Bee...` name without the service is always refused.
 
 ### UART Commands
 
@@ -468,7 +474,7 @@ dropped-byte count, WiFi/IP state, and WebDAV
 queue, drop, HTTP, failure, and success counters:
 
 ```text
-@info fw version=0.2.0 zephyr=4.4.1
+@info fw version=0.1.1 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -492,7 +498,7 @@ Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.2.0"],"command":"@i?"}`.
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.1"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
@@ -1065,7 +1071,7 @@ hardware.
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.2.0` | Reported firmware version |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.1` | Reported firmware version |
 
 ### Test Configuration
 

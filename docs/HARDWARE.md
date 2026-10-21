@@ -212,7 +212,7 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
   仍自动分片并保留 20 字节兼容路径
 - 控制命令：
   - `@u?` / `@u=baud,data,parity,stop,flow`（UART）
-  - `@n?` / `@n=<name>` / `@n default`（查询、设置、恢复默认广播名；名称 1–29 字节 UTF-8）
+  - `@n?` / `@n=<name>` / `@n default`（查询、设置、恢复默认广播名；名称 1–29 字节 UTF-8，支持中文和 emoji）
   - `@a?` / `@a` / `@a stop`（WROOM 按需自动波特率，需 `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`；GPIO13 可选）
   - `@w=ssid,pass` / `@w off` / `@w?`（WiFi）
   - `@d=http://host/path/` / `@d off` / `@d?`（匿名 HTTP WebDAV）

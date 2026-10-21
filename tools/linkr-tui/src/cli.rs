@@ -1000,10 +1000,10 @@ pub struct FoundDevice {
     /// and a path shown where an address belongs is a device name nobody can
     /// match against anything.
     pub address: String,
-    /// Whether it advertises the Linkr Management Service. This is the only
-    /// discovery signal; the advertised name is display-only, and the
-    /// Device ID read after connecting is what finally confirms the board.
-    /// See [`crate::transport::ble::is_board`].
+    /// Whether the advertisement identifies a Linkr Bee. New firmware is
+    /// identified by the Linkr Management Service and confirmed by its Device
+    /// ID after connecting; the oldest NUS-only firmware remains identified
+    /// by its fixed legacy name. See [`crate::transport::ble::is_board`].
     pub board: bool,
     /// How strong the advertisement was heard, in dBm. `None` when the
     /// adapter's own report had no reading — a fresh scan on a busy adapter
@@ -1026,9 +1026,9 @@ pub enum Until {
 /// Listen for `timeout` and report every Linkr Bee that answered.
 ///
 /// The scan is the one command that answers a question nothing else can — "is
-/// the board on the air at all". A device without the Linkr Management Service
-/// is not listed: the advertised name is editable, and NUS is shared with
-/// unrelated UART bridges.
+/// the board on the air at all". New firmware is selected by the Linkr
+/// Management Service; the oldest NUS-only firmware is still listed when it
+/// uses its fixed `Linkr BLE UART` name. A new name alone is never enough.
 pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
     drain_scan(scan_stream(timeout, Until::TheWindowEnds))
 }
@@ -1036,7 +1036,7 @@ pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
 /// Listen until the first board answers, or `timeout` runs out.
 ///
 /// The shape the startup dial runs. The same list comes back, but the scan
-/// ends the moment a management-service device is heard: a board in range answers
+/// ends the moment a board is heard: a board in range answers
 /// within a scan interval or two, and waiting out the whole window for a
 /// second board that may not exist is the difference between a start that
 /// feels instant and one the user goes looking at the radio for. A bench with
@@ -1267,7 +1267,8 @@ where
 }
 
 /// Most useful first: by name, then by signal. Every row is a Linkr Bee;
-/// NUS-only devices and names without the management service never get here.
+/// unrelated NUS devices and new names without the management service never
+/// get here.
 fn sort_found(devices: &mut [FoundDevice]) {
     devices.sort_by(|left, right| {
         left.name
@@ -1365,9 +1366,10 @@ fn rows_of_heard(
             continue;
         };
         // The picker is a Linkr Bee picker, not a dump of every radio nearby.
-        // NUS is a common third-party service and names are editable labels,
-        // so only the management service puts a row on this list.
-        if !crate::transport::ble::is_board(&properties.services) {
+        // New firmware must carry the management service; the oldest images
+        // are allowed through only by their fixed legacy name.
+        if !crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref())
+        {
             continue;
         }
         found.push(FoundDevice {
@@ -2808,6 +2810,31 @@ mod tests {
     fn a_stranger_is_not_listed_even_when_it_was_heard() {
         let mut properties = seen("AA:BB:CC:DD:EE:FF", "Some Keyboard", Some(-30));
         properties.services.clear();
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        assert!(rows_of_heard(&heard, known).is_empty());
+    }
+
+    /// The oldest firmware advertised NUS only and a fixed name. It has no
+    /// Device ID to verify, but it is still a Linkr Bee and must remain
+    /// searchable so an owner can keep using it.
+    #[test]
+    fn legacy_nus_only_firmware_is_still_listed() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Linkr BLE UART-3", Some(-30));
+        properties.services = vec![crate::transport::ble::NUS_SERVICE];
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        let rows = rows_of_heard(&heard, known);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name.as_deref(), Some("Linkr BLE UART-3"));
+        assert!(rows[0].board);
+    }
+
+    /// A new-style name is not a substitute for the Management Service.
+    #[test]
+    fn a_new_name_without_the_service_is_not_listed() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Linkr Bee 078C", Some(-30));
+        properties.services = vec![crate::transport::ble::NUS_SERVICE];
         let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
         let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
         assert!(rows_of_heard(&heard, known).is_empty());

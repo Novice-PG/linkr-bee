@@ -4862,7 +4862,7 @@ mod tests {
         app.scroll_diagnostics_down(10);
         wire.feed_management(answer(
             id,
-            "@info fw version=0.2.0 zephyr=4.4.1\n@info done",
+            "@info fw version=0.1.1 zephyr=4.4.1\n@info done",
         ));
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
         assert_eq!(app.diagnostics.scroll, 0, "a new document opens at its top");
@@ -5416,13 +5416,13 @@ mod tests {
         let id = asked_id(&wire);
         wire.feed_management(answer(
             id,
-            "@info fw version=0.2.0 zephyr=4.4.1\n@info sys uptime_ms=123456\n@info done",
+            "@info fw version=0.1.1 zephyr=4.4.1\n@info sys uptime_ms=123456\n@info done",
         ));
 
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
         assert!(!app.diagnostics.loading);
         assert_eq!(
-            app.diagnostics.groups["fw"]["version"], "0.2.0",
+            app.diagnostics.groups["fw"]["version"], "0.1.1",
             "the firmware version came from the device, not from anywhere else"
         );
         assert_eq!(app.diagnostics.groups["sys"]["uptime_ms"], "123456");
@@ -5959,7 +5959,7 @@ mod tests {
         let (mut app, wire) = connected_over_ble(Lang::Zh);
         app.ask_device(Query::Diagnostics).expect("asked");
         let id = asked_id(&wire);
-        wire.feed_management(answer(id, "@info fw version=0.2.0\n@info done"));
+        wire.feed_management(answer(id, "@info fw version=0.1.1\n@info done"));
         assert!(pump_until(&mut app, |app| app.diagnostics.has_data()));
 
         app.ask_device(Query::Diagnostics).expect("asked again");
@@ -5967,7 +5967,7 @@ mod tests {
         wire.feed_management(answer(id, "ERR busy"));
         assert!(pump_until(&mut app, |app| app.diagnostics.error.is_some()));
         assert!(app.diagnostics.has_data(), "the earlier reading survives");
-        assert_eq!(app.diagnostics.groups["fw"]["version"], "0.2.0");
+        assert_eq!(app.diagnostics.groups["fw"]["version"], "0.1.1");
     }
 
     /// Asking over a link with no management channel is refused here, with the

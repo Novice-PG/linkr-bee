@@ -74,6 +74,7 @@ jobs:
       - name: Assemble the release and its provenance
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
           python3 tools/assemble_release.py \
             --tag "${GITHUB_REF_NAME}" \
             --commit "${GITHUB_SHA}" \
@@ -83,11 +84,11 @@ jobs:
             --apk-dir artifacts/apk \
             --web-dir artifacts/web \
             --out-dir release \
-            --notes-template docs/releases/v0.2.md \
+            --notes-template "docs/releases/${GITHUB_REF_NAME}.md" \
             --notes-out release-notes.md \
-            --web-version 0.1.0 \
-            --firmware-version 0.2.0 \
-            --apk-version 1.0
+            --web-version "${version}" \
+            --firmware-version "${version}" \
+            --apk-version "${version}"
 
       - name: Create or update the release
         env:

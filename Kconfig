@@ -26,7 +26,7 @@ endif
 
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"
-	default "0.2.0"
+	default "0.1.1"
 	help
 	  Human-readable application version returned by the diagnostic command
 	  and included in release metadata.
@@ -276,7 +276,7 @@ config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
 	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"
 	depends on BT
-	default n
+	default y
 	select BT_DEVICE_NAME_DYNAMIC
 	help
 	  Advertise "Linkr Bee XXXX" by default, where XXXX is the last four
@@ -288,8 +288,12 @@ config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
 	  runtime. A custom name is persisted in settings and restored across
 	  boots; @n default removes it and returns to the hardware-MAC name.
 	  Names are 1-29 UTF-8 bytes so they fit a complete legacy
-	  advertisement. Discovery must still match the Linkr Management
-	  Service UUID, not the name.
+	  advertisement.
+
+	  New firmware is still discovered and verified by the Linkr
+	  Management Service UUID and Device ID, never by this display name.
+	  Firmware that predates the service keeps its fixed
+	  "Linkr BLE UART..." name as a compatibility discovery signal.
 
 config LINKR_BLE_BRIDGE_TEST_UART_ECHO
 	bool "Echo received UART bytes back to UART"

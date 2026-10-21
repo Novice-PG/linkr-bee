@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     termios = None
     tty = None
 
-__version__ = "1.0.0"
+__version__ = "0.1.1"
 DEFAULT_NAME = "Linkr Bee"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"

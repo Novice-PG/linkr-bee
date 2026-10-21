@@ -2,10 +2,13 @@
 
 import { createLanTokenStore } from "./lan_token_store.js";
 import {
+  BLE_NAME_QUERY_COMMAND,
   DIAGNOSTICS_COMMAND,
   UART_QUERY_COMMAND,
   WIFI_QUERY_COMMAND,
   WEBDAV_QUERY_COMMAND,
+  bleNameCommand,
+  parseBleName,
   parseInfoGroups,
   parseUartSettings,
   parseWebdavStatus,
@@ -74,6 +77,36 @@ const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
 const BLE_MAX_ATT_VALUE = 244;
 const BLE_DEVICE_NAME_PREFIX = "Linkr Bee";
+const LEGACY_BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
+/* New firmware carries the Management Service. The oldest NUS-only firmware
+ * carries neither that service nor a per-device name, so the browser picker
+ * also offers the fixed legacy names. The connection path still distinguishes
+ * them: only the legacy prefix may fall back to NUS-only terminal use. */
+const BLE_REQUEST_FILTERS = [
+  { services: [MGMT_SERVICE] },
+  { namePrefix: BLE_DEVICE_NAME_PREFIX },
+  { namePrefix: LEGACY_BLE_DEVICE_NAME_PREFIX },
+];
+
+function hasBleNamePrefix(name, prefix) {
+  if (typeof name !== "string") return false;
+  const value = name.trim();
+  if (!value.toLowerCase().startsWith(prefix.toLowerCase())) return false;
+  const rest = value.slice(prefix.length);
+  return rest === "" || rest.startsWith("-") || rest.startsWith(" ");
+}
+
+function isLinkrBleName(name) {
+  return (
+    hasBleNamePrefix(name, BLE_DEVICE_NAME_PREFIX) ||
+    hasBleNamePrefix(name, LEGACY_BLE_DEVICE_NAME_PREFIX)
+  );
+}
+
+function isLegacyLinkrBleName(name) {
+  return hasBleNamePrefix(name, LEGACY_BLE_DEVICE_NAME_PREFIX);
+}
+
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
 const WIFI_SCAN_TIMEOUT_MS = 50000;
@@ -103,6 +136,7 @@ const state = {
   nusReady: false,
   mgmtReady: false,
   reliableReady: false,
+  legacy: false,
   reliableTxSequence: 1,
   reliableRxSequence: 1,
   reliableRxDesync: false,
@@ -146,6 +180,9 @@ const state = {
    * reports a FINAL phase, or when the fallback poll takes over. */
   wifiOperation: null,
   wifiOperationTimer: null,
+  bleName: null,
+  bleNameCustom: null,
+  bleNameSupported: null,
   diagnostics: {},
   logSize: 0,
   terminalGeometry: null,
@@ -181,6 +218,11 @@ const elements = {
   diagUart: $("diagUart"),
   diagWifi: $("diagWifi"),
   diagUpload: $("diagUpload"),
+  bleNameInput: $("bleNameInput"),
+  bleNameSetButton: $("bleNameSetButton"),
+  bleNameDefaultButton: $("bleNameDefaultButton"),
+  bleNameQueryButton: $("bleNameQueryButton"),
+  bleNameStatus: $("bleNameStatus"),
   setUartButton: $("setUartButton"),
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
@@ -366,6 +408,22 @@ const I18N = {
     diagUpload: "Upload Queue",
     refreshDiagnostics: "Refresh diagnostics",
     diagnosticsUpdated: "Diagnostics updated",
+    bleNameTitle: "BLE device name",
+    bleNameAria: "BLE device name",
+    bleNameHint: "Shown when scanning nearby devices. 1–29 UTF-8 bytes; Chinese and emoji are allowed (an emoji usually uses 4 bytes). The Device ID used for verification does not change.",
+    bleName: "Advertised name",
+    placeholderBleName: "Linkr Bee 078C",
+    bleNameUnknown: "Connect over BLE to read the current name.",
+    bleNameDefault: "Restore default",
+    bleNameQuery: "Read name",
+    bleNameSet: "BLE name updated",
+    bleNameReset: "Default BLE name restored",
+    bleNameInvalid: "Enter 1–29 UTF-8 bytes, without control characters.",
+    bleNameUnsupported: "This firmware does not support BLE name changes.",
+    bleNameReadFailed: "Could not read the BLE name.",
+    bleNameStateDefault: "current: {name} (default)",
+    bleNameStateCustom: "current: {name} (custom)",
+    legacyHint: "Legacy firmware: Management Service not found. Terminal is available; accessory settings are disabled.",
     wifiWebdav: "WiFi & WebDAV",
     connect: "Connect",
     disconnect: "Disconnect",
@@ -549,6 +607,22 @@ const I18N = {
     diagUpload: "上传队列",
     refreshDiagnostics: "刷新诊断",
     diagnosticsUpdated: "诊断信息已更新",
+    bleNameTitle: "BLE 设备名称",
+    bleNameAria: "BLE 设备名称",
+    bleNameHint: "扫描附近设备时显示的名称，最多 29 个 UTF-8 字节，可直接使用中文和 emoji（每个 emoji 通常占 4 字节）。用于连接校验的 Device ID 不会改变。",
+    bleName: "广播名称",
+    placeholderBleName: "Linkr Bee 078C",
+    bleNameUnknown: "通过 BLE 连接后可读取当前名称。",
+    bleNameDefault: "恢复默认",
+    bleNameQuery: "读取名称",
+    bleNameSet: "BLE 名称已更新",
+    bleNameReset: "已恢复默认 BLE 名称",
+    bleNameInvalid: "请输入 1–29 个 UTF-8 字节，且不能包含控制字符。",
+    bleNameUnsupported: "当前固件不支持修改 BLE 名称。",
+    bleNameReadFailed: "读取 BLE 名称失败。",
+    bleNameStateDefault: "当前：{name}（默认）",
+    bleNameStateCustom: "当前：{name}（自定义）",
+    legacyHint: "旧固件：未发现 Management Service，仅终端功能可用，配件设置已禁用。",
     wifiWebdav: "WiFi 与 WebDAV",
     connect: "连接",
     disconnect: "断开",
@@ -1021,6 +1095,7 @@ function applyLang() {
   renderRefLists();
   refreshDynamicTexts();
   renderDiagnostics();
+  renderBleNameStatus();
   updateWifiConnectionView();
   updateFullscreenButton();
   updateModifierButtons();
@@ -1623,7 +1698,7 @@ function hasManagementCapability(capability) {
 }
 
 function requestDeviceState() {
-  if (!state.connected || state.mode !== "ble") {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
     return Promise.resolve();
   }
   const requests = [requestDiagnostics()];
@@ -1638,6 +1713,117 @@ function requestDeviceState() {
     requests.push(sendControl("@s?"));
   }
   return Promise.all(requests);
+}
+
+function updateBleNameControls() {
+  const enabled =
+    state.connected &&
+    state.mode === "ble" &&
+    state.mgmtReady &&
+    state.bleNameSupported !== false;
+  elements.bleNameInput.disabled = !enabled;
+  elements.bleNameSetButton.disabled = !enabled;
+  elements.bleNameDefaultButton.disabled = !enabled;
+  elements.bleNameQueryButton.disabled = !enabled;
+}
+
+function renderBleNameStatus() {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
+    elements.bleNameStatus.textContent = t("bleNameUnknown");
+    return;
+  }
+  if (state.bleNameSupported === false) {
+    elements.bleNameStatus.textContent = t("bleNameUnsupported");
+    return;
+  }
+  if (!state.bleName) {
+    elements.bleNameStatus.textContent = t("bleNameUnknown");
+    return;
+  }
+  const key = state.bleNameCustom ? "bleNameStateCustom" : "bleNameStateDefault";
+  elements.bleNameStatus.textContent = t(key).replace("{name}", state.bleName);
+}
+
+function applyBleName(parsed, { custom = null } = {}) {
+  state.bleName = parsed.name;
+  if (custom !== null) {
+    state.bleNameCustom = Boolean(custom);
+  } else if (parsed.custom !== null) {
+    state.bleNameCustom = parsed.custom;
+  }
+  state.bleNameSupported = true;
+  elements.bleNameInput.value = parsed.name;
+  updateBleNameControls();
+  renderBleNameStatus();
+}
+
+async function readBleName({ quiet = false } = {}) {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
+    return null;
+  }
+  try {
+    const reply = await sendControl(BLE_NAME_QUERY_COMMAND, {
+      returnResponse: true,
+    });
+    const parsed = parseBleName(reply);
+    if (!parsed) {
+      state.bleName = null;
+      state.bleNameCustom = null;
+      state.bleNameSupported = false;
+      updateBleNameControls();
+      renderBleNameStatus();
+      if (!quiet) toast(t("bleNameUnsupported"), "error");
+      return null;
+    }
+    applyBleName(parsed);
+    return parsed;
+  } catch (error) {
+    if (!quiet) {
+      appendLine(`[error] ${error.message}`);
+      toast(t("bleNameReadFailed"), "error");
+    }
+    return null;
+  }
+}
+
+async function changeBleName(command, successKey, custom) {
+  const reply = await sendControl(command, { returnResponse: true });
+  const status = replyStatus(reply);
+  if (!status.ok) {
+    throw new Error(status.error || t("bleNameReadFailed"));
+  }
+  const parsed = parseBleName(reply);
+  if (!parsed) {
+    throw new Error(t("bleNameReadFailed"));
+  }
+  applyBleName(parsed, { custom });
+  toast(t(successKey));
+}
+
+async function setNameFromInput() {
+  let command;
+  try {
+    command = bleNameCommand({ name: elements.bleNameInput.value });
+  } catch (_error) {
+    elements.bleNameStatus.textContent = t("bleNameInvalid");
+    elements.bleNameInput.focus();
+    return;
+  }
+  try {
+    await changeBleName(command, "bleNameSet", true);
+  } catch (error) {
+    elements.bleNameStatus.textContent = t("bleNameReadFailed");
+    appendLine(`[error] ${error.message}`);
+  }
+}
+
+async function restoreDefaultBleName() {
+  try {
+    await changeBleName("@n default", "bleNameReset", false);
+  } catch (error) {
+    elements.bleNameStatus.textContent = t("bleNameReadFailed");
+    appendLine(`[error] ${error.message}`);
+  }
 }
 
 function scheduleWifiStateRefresh() {
@@ -2017,7 +2203,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   const isWs = state.mode === "ws";
   const canConnect =
     Boolean(state.term) && (isWs || Boolean(bleTransport?.isAvailable()));
-  const canControl = connected && !isWs;
+  const canControl = connected && !isWs && state.mgmtReady;
   const canControlWifi = canControl && hasManagementCapability(MGMT_CAP_WIFI);
   const canMutateWifi =
     canControlWifi && hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
@@ -2102,6 +2288,8 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     .querySelectorAll("#cheatList button[data-cmd]")
     .forEach((button) => (button.disabled = !connected));
   refreshConnectionActions();
+  updateBleNameControls();
+  renderBleNameStatus();
   if (connected) {
     setAutoScroll(true, true);
     state.term?.focus();
@@ -2128,9 +2316,7 @@ async function restoreAuthorizedDevice() {
       lastDeviceId ? [lastDeviceId] : [],
     );
     const candidates = devices.filter(
-      (device) =>
-        device.id === lastDeviceId ||
-        (device.name && device.name.startsWith(BLE_DEVICE_NAME_PREFIX)),
+      (device) => device.id === lastDeviceId || isLinkrBleName(device.name),
     );
     const device =
       candidates.find((candidate) => candidate.id === lastDeviceId) ||
@@ -2154,7 +2340,7 @@ async function restoreAuthorizedDevice() {
 }
 
 function requestDiagnostics() {
-  if (!state.connected) {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
     return Promise.resolve();
   }
   state.diagnostics = {};
@@ -2624,6 +2810,10 @@ function onDisconnected() {
   state.nusReady = false;
   state.mgmtReady = false;
   state.reliableReady = false;
+  state.legacy = false;
+  state.bleName = null;
+  state.bleNameCustom = null;
+  state.bleNameSupported = null;
   state.reliableMaxPayload = 20;
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
   // Drop any half-received frame: the next connection restarts the sequence.
@@ -2797,6 +2987,44 @@ async function connect({ chooseDevice = false } = {}) {
   }
 }
 
+/* A pre-Management-Service board still speaks the plain Nordic UART Service.
+ * Subscribe to its notify characteristic and mark the session terminal-only:
+ * every accessory control is gated on `state.mgmtReady`, so none of them will
+ * try to send a management frame the old firmware cannot answer. */
+async function adoptLegacyNus(device) {
+  const notificationSession = {};
+  bleNotificationSession = notificationSession;
+  state.writeGeneration += 1;
+  agentPanel?.connectionChanged(false);
+  agentJournal.reset();
+  await bleTransport.startNotifications(
+    device.id,
+    NUS_SERVICE,
+    NUS_TX,
+    (value) => {
+      if (bleNotificationSession !== notificationSession) return;
+      const bytes = new Uint8Array(
+        value.buffer.slice(
+          value.byteOffset,
+          value.byteOffset + value.byteLength,
+        ),
+      );
+      handleIncomingBytes(bytes);
+    },
+  );
+  state.legacy = true;
+  state.mgmtReady = false;
+  state.reliableReady = false;
+  state.nusReady = true;
+  state.mgmtCapabilities = 0;
+  state.deviceId = "";
+  state.deviceRestored = false;
+  elements.wsTokenInput.value = lanTokens.selectDevice("");
+  setConnected(true, { preserveJournal: true });
+  appendLine(`[legacy] ${device.name || device.id}`);
+  appendLine(t("legacyHint"));
+}
+
 async function connectOnce({ chooseDevice = false } = {}) {
   if (state.mode === "ws") {
     setConnecting(true);
@@ -2828,9 +3056,9 @@ async function connectOnce({ chooseDevice = false } = {}) {
   try {
     await bleTransport.initialize();
     if (!device) {
-      appendLine(`[scan] requesting Linkr Management v1 device`);
+      appendLine(`[scan] requesting a Linkr Bee device`);
       device = await bleTransport.requestDevice({
-        filters: [{ services: [MGMT_SERVICE] }],
+        filters: BLE_REQUEST_FILTERS,
         optionalServices: [MGMT_SERVICE, NUS_SERVICE, RELIABLE_UART_SERVICE],
       });
       rememberDevice(device);
@@ -2842,11 +3070,22 @@ async function connectOnce({ chooseDevice = false } = {}) {
     await bleTransport.connect(device.id, onDisconnected);
     transportConnected = true;
     state.nusReady = true;
-    const protocolValue = await bleTransport.read(
-      device.id,
-      MGMT_SERVICE,
-      MGMT_PROTOCOL,
-    );
+    state.legacy = false;
+    let protocolValue;
+    try {
+      protocolValue = await bleTransport.read(
+        device.id,
+        MGMT_SERVICE,
+        MGMT_PROTOCOL,
+      );
+    } catch (error) {
+      /* The oldest firmware has no Management Service. Keep its terminal
+       * usable, but only when the advertised name is the fixed legacy one;
+       * a new `Linkr Bee` name always promises the service. */
+      if (!isLegacyLinkrBleName(device.name)) throw error;
+      await adoptLegacyNus(device);
+      return;
+    }
     if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
       throw new Error("Unsupported Linkr Management API version");
     }
@@ -2942,6 +3181,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
+    readBleName({ quiet: true });
   } catch (error) {
     appendLine(`[error] ${error.message}`);
     if (pairingAttempted) {
@@ -3005,6 +3245,17 @@ async function disconnect() {
           state.device.id,
           RELIABLE_UART_SERVICE,
           RELIABLE_UART_TX,
+        );
+      } catch (_error) {
+        // Ignore disconnect races.
+      }
+    }
+    if (state.legacy && state.device) {
+      try {
+        await bleTransport.stopNotifications(
+          state.device.id,
+          NUS_SERVICE,
+          NUS_TX,
         );
       } catch (_error) {
         // Ignore disconnect races.
@@ -3428,6 +3679,22 @@ function bind() {
         toast(t("uartSet"));
       })
       .catch((error) => appendLine(`[error] ${error.message}`));
+  });
+
+  elements.bleNameSetButton.addEventListener("click", () => {
+    setNameFromInput();
+  });
+  elements.bleNameDefaultButton.addEventListener("click", () => {
+    restoreDefaultBleName();
+  });
+  elements.bleNameQueryButton.addEventListener("click", () => {
+    readBleName();
+  });
+  elements.bleNameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      setNameFromInput();
+    }
   });
 
   elements.clearButton.addEventListener("click", () => {

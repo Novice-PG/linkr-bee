@@ -29,10 +29,12 @@ Management 响应不会再出现在串口数据中，串口内容也不会被误
 
 - Complete Local Name：所有板型的默认名都是 `Linkr Bee XXXX`，其中 `XXXX`
   是硬件 MAC 最后四位十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。
-  `@n` 可将其替换为 1–29 字节的自定义名（可含中文）。名称只用于显示，
-  扫描仍必须按 Management Service UUID 过滤；
+  `@n` 可将其替换为 1–29 字节的自定义名（可含中文）。当前固件的名称只用于
+  显示，扫描仍必须按 Management Service UUID 过滤；
 - Primary advertisement UUID：Management Service UUID；
-- 扫描必须按 Management Service UUID 过滤，不能依赖名称。
+- 当前固件必须按 Management Service UUID 扫描，不能依赖名称。仅为兼容没有
+  Management Service、只有 NUS 且固定名为 `Linkr BLE UART...` 的旧固件，
+  TUI 和 Web 允许这一种名称例外；新式 `Linkr Bee...` 名称不能替代服务校验。
 
 BLE 地址是 settings 中持久化的 random-static identity。普通升级和重启不改变
 地址；将板级恢复输入与 GND 短接并保持到上电后两秒会恢复出厂（C3 为 GPIO0，
@@ -189,7 +191,7 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 | --- | --- |
 | `@h` | 命令帮助 |
 | `@n?` / `@linkr name?` | 查询当前广播名及是否为自定义名 |
-| `@n=<name>` / `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 自定义名 |
+| `@n=<name>` / `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 自定义名；支持中文和 emoji（按字节计，通常每个 emoji 4 字节） |
 | `@n default` / `@linkr name default` | 删除自定义名，恢复 `Linkr Bee XXXX` |
 | `@i?` | 多行设备诊断，以 `@info done` 结束 |
 | `@u?` | 查询 UART 配置 |

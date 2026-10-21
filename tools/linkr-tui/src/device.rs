@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn a_read_ends_at_the_line_that_says_it_ends() {
         assert!(Query::Diagnostics.complete(&["@info sys uptime_ms=1".into(), "@info done".into()]));
-        assert!(!Query::Diagnostics.complete(&["@info fw version=0.2.0".into()]));
+        assert!(!Query::Diagnostics.complete(&["@info fw version=0.1.1".into()]));
         assert!(Query::Uart.complete(&["OK uart=115200,8,N,1,none".into()]));
         // An error is an ending too: the answer arrived, it just said no.
         assert!(Query::Wifi.complete(&["ERR ssid too long".into()]));
@@ -420,7 +420,7 @@ mod tests {
         let (id, _) = talk.ask(Query::Diagnostics, start);
         let (header, body) = response(
             id,
-            "@info fw version=0.2.0\n@info sys uptime_ms=123456\n@info done",
+            "@info fw version=0.1.1\n@info sys uptime_ms=123456\n@info done",
             MGMT_FLAG_FINAL,
         );
         assert!(talk.offer(&header, &body));
@@ -447,7 +447,7 @@ mod tests {
         let start = Instant::now();
         let mut talk = Conversation::new();
         let (id, _) = talk.ask(Query::Diagnostics, start);
-        let (head, part) = response(id, "@info fw version=0.2.0\n", 0);
+        let (head, part) = response(id, "@info fw version=0.1.1\n", 0);
         assert!(talk.offer(&head, &part));
         assert!(
             talk.take_reply().is_none(),
@@ -471,11 +471,11 @@ mod tests {
         let (head, part) = response(id, "@info fw vers", 0);
         assert!(talk.offer(&head, &part));
         assert!(talk.take_reply().is_none(), "half a word is not a read");
-        let (tail, rest) = response(id, "ion=0.2.0\n@info done", MGMT_FLAG_FINAL);
+        let (tail, rest) = response(id, "ion=0.1.1\n@info done", MGMT_FLAG_FINAL);
         assert!(talk.offer(&tail, &rest));
         let reply = talk.take_reply().expect("whole now");
         assert_eq!(reply.lines.len(), 2, "the halves are one line each");
-        assert_eq!(reply.lines[0], "@info fw version=0.2.0");
+        assert_eq!(reply.lines[0], "@info fw version=0.1.1");
         assert_eq!(reply.lines[1], "@info done");
     }
 

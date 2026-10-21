@@ -13,7 +13,7 @@ this build has no interface and exits with status 2.
 ## Check the build
 
 ```sh
-./bee-cli --version          # bee-cli 0.6.0
+./bee-cli --version          # bee-cli 0.1.1
 ./bee-cli --capabilities     # operations, defaults and exit codes
 ./bee-cli --licenses         # third-party notice (also in THIRD_PARTY_LICENSES.md)
 ```
@@ -79,7 +79,7 @@ input ends or a request says `quit`:
 
 ```sh
 bee-cli --ble-name "UART-" --serve
-{"event":"ready","program":"bee-cli","version":"0.6.0","link":"ble:name:UART-","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"0.1.1","link":"ble:name:UART-","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

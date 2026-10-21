@@ -331,12 +331,16 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
 | `@n?` | `@linkr name?` | 查询当前广播名及是否为自定义名 |
-| `@n=<name>` | `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 名称 |
+| `@n=<name>` | `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 名称；支持中文和 emoji（每个 emoji 通常 4 字节） |
 | `@n default` | `@linkr name default` | 删除自定义名，恢复 `Linkr Bee XXXX` |
 
 `XXXX` 是硬件 MAC 最后四位十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。
-控制字符和非法 UTF-8 会被拒绝。名称只用于显示：主机必须按 Management
-Service UUID 发现，并在连接后校验 Device ID，不能按广播名匹配。
+名称限制按 UTF-8 字节数而不是字符数：可以使用中文，也可以使用 emoji（常见
+emoji 占 4 字节，7 个正好 28 字节，8 个就会超过 29 字节上限）。控制字符和非法
+UTF-8 会被拒绝。当前固件的名称只用于显示：主机必须按 Management Service UUID
+发现，并在连接后校验 Device ID，不能按广播名匹配。TUI 和 Web 保留一个很窄的
+兼容例外：没有 Management Service、只有 NUS 且固定名为 `Linkr BLE UART...` 的
+旧固件按仅终端设备处理；新式 `Linkr Bee...` 名称没有服务时一律拒绝。
 
 ### UART 命令
 
@@ -373,7 +377,7 @@ ERR format: @u=115200,8,n,1,n
 WebDAV 队列、丢弃、HTTP、失败和成功计数：
 
 ```text
-@info fw version=0.2.0 zephyr=4.4.1
+@info fw version=0.1.1 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -395,7 +399,7 @@ python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 脚本化与安全注意事项：
 
 - `--json` 把管理响应与事件按行输出为 JSON，例如
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.2.0"],"command":"@i?"}`；
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.1"],"command":"@i?"}`；
   `@w=`/`@d=` 这类命令在 JSON 里的 `command` 字段始终是 `<redacted>`。
 - `--quiet` 只抑制进度信息（`linkr: …`），错误与 `loopback PASS/FAIL` 仍然输出。
 - `--help` 与 `--version` 不需要安装 bleak，只有真正访问设备时才导入它。
@@ -877,7 +881,7 @@ GPIO4。浏览器设备选择授权与 BLE 绑定是两种独立状态。
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.2.0` | 上报的固件版本 |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.1` | 上报的固件版本 |
 
 ### 测试配置
 

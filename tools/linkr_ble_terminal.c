@@ -52,7 +52,7 @@
 /* Keep in sync with __version__ in linkr_ble_terminal.py: both clients speak to
  * the same device and are released together. tests/test_terminal_cli_c.py
  * asserts the two strings match. */
-#define CLI_VERSION     "1.0.0"
+#define CLI_VERSION     "0.1.1"
 
 /* Exit codes mirror the Python client so scripts can treat them alike. */
 enum {

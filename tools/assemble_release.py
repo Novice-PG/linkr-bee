@@ -12,15 +12,15 @@ GitHub Actions downloaded; the script never reaches the network.
 
 Usage:
     tools/assemble_release.py \
-        --tag v0.2 --commit <sha> --run-id 123 \
+        --tag v0.1.1 --commit <sha> --run-id 123 \
         --desktop-dir artifacts/desktop \
         --firmware-dir artifacts/firmware \
         --apk-dir artifacts/apk \
         --web-dir artifacts/web \
         --out-dir release \
-        --notes-template docs/releases/v0.2.md \
+        --notes-template docs/releases/v0.1.1.md \
         --notes-out release-notes.md \
-        --web-version 0.1.0 --firmware-version 0.2.0 --apk-version 1.0
+        --web-version 0.1.1 --firmware-version 0.1.1 --apk-version 0.1.1
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ DEB_ARCH = {
 DESKTOP_RE = re.compile(r"^(linkr-bee(?:-cli)?)-([0-9]+\.[0-9]+\.[0-9]+)-(.+)\.(?:tar\.gz|zip|dmg)$")
 DEB_RE = re.compile(r"^linkr-bee_([0-9]+\.[0-9]+\.[0-9]+)_([a-z0-9]+)\.deb$")
 FIRMWARE_RE = re.compile(r"^linkr-bee-(.+)-firmware-([a-z0-9-]+)\.zip$")
-WEB_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+)-web\.zip$")
-APK_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+)-android-debug\.apk$")
+WEB_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-web\.zip$")
+APK_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-android-debug\.apk$")
 
 
 def sha256(path: Path) -> str:
@@ -302,6 +302,17 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    tui_versions = {
+        match.group(2)
+        for path in assets
+        if (match := DESKTOP_RE.match(path.name))
+    }
+    if len(tui_versions) != 1:
+        raise SystemExit(
+            f"expected one TUI version in the desktop assets, found {sorted(tui_versions)}"
+        )
+    tui_version = tui_versions.pop()
+
     substitutions = {
         "{{TAG}}": args.tag,
         "{{SHA}}": args.commit,
@@ -309,7 +320,7 @@ def main() -> int:
         "{{WEB_VERSION}}": args.web_version,
         "{{FIRMWARE_VERSION}}": args.firmware_version,
         "{{APK_VERSION}}": args.apk_version,
-        "{{TUI_VERSION}}": "0.6.0",
+        "{{TUI_VERSION}}": tui_version,
     }
     notes = args.notes_template.read_text(encoding="utf-8")
     for needle, replacement in substitutions.items():

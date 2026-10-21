@@ -72,17 +72,50 @@ pub const MGMT_COMMAND: Uuid = Uuid::from_u128(0x4c4b0004_9a7e_4f4e_8b8a_3d6f12a
 /// Notify: the responses, as one `protocol::ManagementReassembler` stream.
 pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12a0c001);
 
+/// The advertised-name prefix used by firmware that predates per-device names.
+///
+/// Those units cannot be renamed, so their names are still `Linkr BLE UART`
+/// (the original image) or `Linkr BLE UART-3` (later builds). They must remain
+/// discoverable and diallable; the name is the only signal left on the oldest
+/// NUS-only images, which do not carry the Management Service at all.
+pub const LEGACY_NAME_PREFIX: &str = "Linkr BLE UART";
+
+/// Whether a name belongs to the legacy Linkr BLE UART advertisement.
+///
+/// The comparison is case-insensitive and requires a boundary after the
+/// prefix, so `Linkr BLE UART-3` and `Linkr BLE UART` match while an unrelated
+/// `Linkr BLE UARTISH` does not. This is a compatibility path, not an identity:
+/// devices that carry the Management Service are still verified through their
+/// Device ID in [`wire`].
+pub fn is_legacy_name(name: Option<&str>) -> bool {
+    let Some(name) = name.map(str::trim) else {
+        return false;
+    };
+    let Some(head) = name.get(..LEGACY_NAME_PREFIX.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(LEGACY_NAME_PREFIX) {
+        return false;
+    }
+    name[LEGACY_NAME_PREFIX.len()..]
+        .chars()
+        .next()
+        .is_none_or(|next| next == '-' || next == ' ')
+}
+
 /// Whether an advertisement describes a board this program can dial.
 ///
-/// The Linkr Management Service is the only discovery signal. The name is a
-/// display label that the owner can replace with `@n`, and NUS is a service
-/// many unrelated BLE UART products advertise; accepting either would put a
-/// keyboard, a sensor, or another vendor's UART bridge in the picker. The
-/// management service is placed in the primary advertisement by every Linkr
-/// Bee firmware, and [`wire`] reads the Device ID behind it before the link is
-/// accepted, so a device that merely copied the UUID is still refused.
-pub fn is_board(services: &[Uuid]) -> bool {
-    services.contains(&MGMT_SERVICE)
+/// New firmware is recognised by the Linkr Management Service; [`wire`] then
+/// reads the Device ID behind it before the link is accepted, so a device that
+/// merely copied the UUID is still refused. NUS alone is shared with unrelated
+/// UART bridges and is never enough.
+///
+/// Firmware from before the Management Service exists is the exception. It
+/// advertised only NUS under a fixed `Linkr BLE UART...` name, so those names
+/// remain a compatibility signal. That path only accepts the old prefix; a new
+/// `Linkr Bee XXXX` name without the Management Service is not trusted.
+pub fn is_board(services: &[Uuid], name: Option<&str>) -> bool {
+    services.contains(&MGMT_SERVICE) || is_legacy_name(name)
 }
 
 /// The printable part of an advertised name.
@@ -1102,7 +1135,7 @@ async fn pick(
         let Ok(Some(properties)) = candidate.properties().await else {
             continue;
         };
-        let looks_like_a_board = is_board(&properties.services);
+        let looks_like_a_board = is_board(&properties.services, properties.local_name.as_deref());
         let wanted = selection.accepts(
             properties.local_name.as_deref(),
             &candidate.id().to_string(),
@@ -1126,35 +1159,51 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         .await
         .map_err(|why| format!("the services could not be enumerated: {why}"))?;
 
-    if !peripheral
+    let has_management = peripheral
         .services()
         .iter()
-        .any(|service| service.uuid == MGMT_SERVICE)
-    {
-        return Err(
-            "the device does not offer the Linkr Management service — it is not a Linkr Bee"
-                .to_string(),
-        );
-    }
-
+        .any(|service| service.uuid == MGMT_SERVICE);
     let characteristics = peripheral.characteristics();
-    let device_id = characteristics
-        .iter()
-        .find(|characteristic| characteristic.uuid == MGMT_DEVICE_ID)
-        .ok_or_else(|| {
-            "the Linkr Management service does not expose a Device ID characteristic".to_string()
-        })?;
-    // The characteristic is read-encrypted. BlueZ and WinRT negotiate the
-    // bond as part of the read; a refusal is a refused link, not a device
-    // that can be treated as a board by name alone.
-    let id = retry_busy(|| async { peripheral.read(device_id).await })
-        .await
-        .map_err(|why| format!("the Linkr Device ID could not be read: {why}"))?;
-    if !is_linkr_device_id(&id) {
-        return Err(
-            "the device's Device ID does not belong to the Linkr Bee namespace — refusing it"
-                .to_string(),
-        );
+
+    if has_management {
+        let device_id = characteristics
+            .iter()
+            .find(|characteristic| characteristic.uuid == MGMT_DEVICE_ID)
+            .ok_or_else(|| {
+                "the Linkr Management service does not expose a Device ID characteristic"
+                    .to_string()
+            })?;
+        // The characteristic is read-encrypted. BlueZ and WinRT negotiate the
+        // bond as part of the read; a refusal is a refused link, not a device
+        // that can be treated as a board by name alone.
+        let id = retry_busy(|| async { peripheral.read(device_id).await })
+            .await
+            .map_err(|why| format!("the Linkr Device ID could not be read: {why}"))?;
+        if !is_linkr_device_id(&id) {
+            return Err(
+                "the device's Device ID does not belong to the Linkr Bee namespace — refusing it"
+                    .to_string(),
+            );
+        }
+    } else {
+        // Pre-Management-Service firmware is a terminal-only bridge. It never
+        // had the Device ID to read, so its fixed legacy name is the only
+        // signal available. Do not accept a new `Linkr Bee XXXX` name here:
+        // that firmware always advertises the Management Service, and a
+        // missing service on such a name is evidence of an impostor.
+        let properties = retry_busy(|| async { peripheral.properties().await })
+            .await
+            .map_err(|why| format!("the device could not be identified: {why}"))?;
+        let name = properties
+            .as_ref()
+            .and_then(|properties| properties.local_name.as_deref());
+        if !is_legacy_name(name) {
+            return Err(
+                "the device does not offer the Linkr Management service and does not use the \
+                 legacy Linkr BLE UART name — it is not a Linkr Bee"
+                    .to_string(),
+            );
+        }
     }
 
     for wanted in [NUS_TX, NUS_RX] {
@@ -1570,17 +1619,42 @@ mod tests {
         );
     }
 
-    /// The Linkr Management Service is the only discovery signal. NUS is
-    /// shared with unrelated UART bridges, and a name is a user-editable
-    /// label, so neither may put a stranger in the picker.
+    /// New firmware is discovered by its Management Service. NUS is shared
+    /// with unrelated UART bridges, and a new `Linkr Bee` name is only a
+    /// display label, so neither may put a stranger in the picker.
     #[test]
     fn a_board_is_recognised_by_its_management_service() {
-        assert!(is_board(&[MGMT_SERVICE]), "the management service");
+        assert!(is_board(&[MGMT_SERVICE], None), "the management service");
         assert!(
-            !is_board(&[NUS_SERVICE]),
+            !is_board(&[NUS_SERVICE], None),
             "another vendor's NUS device is not a Linkr Bee"
         );
-        assert!(!is_board(&[]), "a name alone is not identity");
+        assert!(
+            !is_board(&[], Some("Linkr Bee 078C")),
+            "a new name without the service is not identity"
+        );
+        assert!(!is_board(&[], None), "no service and no name");
+    }
+
+    /// The oldest NUS-only firmware used fixed names that no owner could
+    /// change. Those units must stay searchable and diallable even though they
+    /// never carried the Management Service.
+    #[test]
+    fn legacy_uart_names_remain_searchable() {
+        for name in ["Linkr BLE UART", "Linkr BLE UART-3", "linkr ble uart 7F2C"] {
+            assert!(
+                is_board(&[NUS_SERVICE], Some(name)),
+                "{name} should remain discoverable"
+            );
+            assert!(is_legacy_name(Some(name)), "{name} should be a legacy name");
+        }
+        for name in ["Linkr BLE UARTISH", "Linkr Bee 078C", "UART-3", ""] {
+            assert!(!is_legacy_name(Some(name)), "{name} is not legacy");
+            assert!(
+                !is_board(&[NUS_SERVICE], Some(name)),
+                "{name} is not a board"
+            );
+        }
     }
 
     /// A device that copies the service UUID still has to answer with the

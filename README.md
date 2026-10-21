@@ -218,10 +218,13 @@ network. Use LAN mode on a network you trust.
 
 ## Limits
 
-- Devices are matched by the Linkr Management Service, not by their advertised
-  name. The default name is `Linkr Bee XXXX`, where `XXXX` is the last four hex
-  digits of the hardware MAC (for example `58:BF:25:33:07:8C` → `078C`); custom
-  names are display-only and can be set with `@n`.
+- Current firmware is matched by the Linkr Management Service, not by its
+  advertised name. The default name is `Linkr Bee XXXX`, where `XXXX` is the
+  last four hex digits of the hardware MAC (for example
+  `58:BF:25:33:07:8C` → `078C`); custom names are display-only and can be set
+  with `@n`. The TUI and Web clients also accept the fixed
+  `Linkr BLE UART...` name of pre-service, NUS-only firmware as a terminal-only
+  compatibility fallback; a `Linkr Bee...` name without the service is refused.
 - Web Bluetooth means Chrome or Chromium. Safari and Firefox do not implement it.
 - WiFi provisioning is 2.4 GHz only.
 - iOS simulators cannot do Bluetooth LE; use a real device.
