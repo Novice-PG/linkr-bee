@@ -650,10 +650,9 @@ pub struct App {
     /// The `@w=` write whose answer has not arrived, or that is owed another
     /// attempt after a busy refusal. See [`WifiWrite`].
     pub wifi_write: Option<WifiWrite>,
-    /// What a BLE-name write is expected to make the name's provenance, told
-    /// apart from a read: `@n=<name>` makes it custom and `@n default` makes
-    /// it the MAC-derived one, while neither reply repeats `custom=`.
-    pub ble_name_write_custom: Option<bool>,
+    /// The next BLE-name reply acknowledges a write. Its name may itself
+    /// end in `custom=yes`, so only the following `@n?` supplies display state.
+    pub ble_name_write_pending: bool,
     /// A link came up and the board's name has not been read yet. The read
     /// waits for a free slot: only one question is in flight at a time.
     pub ble_name_read_pending: bool,
@@ -866,7 +865,7 @@ impl Default for App {
             network: crate::views::network::NetworkState::default(),
             wifi_operation: None,
             wifi_write: None,
-            ble_name_write_custom: None,
+            ble_name_write_pending: false,
             ble_name_read_pending: false,
             lan_token_read_pending: false,
             scan_retry: None,
@@ -2557,9 +2556,8 @@ impl App {
             // showing a name the board no longer has. The name goes first and
             // the token follows it, because only one question is in flight at
             // a time.
-            self.ble_name_read_pending = true;
-            self.lan_token_read_pending = true;
-            self.ask_pending_reads();
+            self.ble_name_read_pending = self.ble_connected();
+            self.lan_token_read_pending = self.ble_connected();
         } else if was_live && !now_live {
             // A quiet dial that died before it was ever announced has nothing
             // left to be quiet about; the next connection is its own news.
@@ -2589,6 +2587,9 @@ impl App {
             }
             self.talk.reset();
             self.management.reset();
+            self.ble_name_write_pending = false;
+            self.ble_name_read_pending = false;
+            self.lan_token_read_pending = false;
             // And the half-typed line goes with it.
             self.pending_line.clear();
         }
@@ -2598,6 +2599,9 @@ impl App {
         if !now_live && self.dialing.is_none() {
             self.signal_dbm = None;
         }
+        // Optional reads resume whenever the request slot becomes free,
+        // including after a refusal, timeout, or intervening user request.
+        self.ask_pending_reads();
         self.rx = self.session.rx();
         self.tx = self.session.tx();
         // The same beat the counters moved on: the graph is a clock, and this
@@ -2979,6 +2983,7 @@ impl App {
         if let Some(previous) = self.talk.waiting() {
             self.stop_waiting(previous);
         }
+        self.ble_name_write_pending = false;
         let (id, body) = self.talk.ask(query, Instant::now());
         let frame = match crate::protocol::encode_management_request(id, body.as_bytes()) {
             Ok(frame) => frame,
@@ -3076,20 +3081,20 @@ impl App {
     /// bridge has repeated it.
     pub fn set_ble_name(&mut self, name: &str) -> Result<(), String> {
         let command = accessory::ble_name_command(name)?;
-        self.ble_name_write_custom = Some(true);
+        self.ble_name_write_pending = true;
         let result = self.send_accessory(&command, Query::BleName);
         if result.is_err() {
-            self.ble_name_write_custom = None;
+            self.ble_name_write_pending = false;
         }
         result
     }
 
     /// Restore the MAC-derived advertised name and read it back.
     pub fn reset_ble_name(&mut self) -> Result<(), String> {
-        self.ble_name_write_custom = Some(false);
+        self.ble_name_write_pending = true;
         let result = self.send_accessory(&accessory::reset_ble_name_command(), Query::BleName);
         if result.is_err() {
-            self.ble_name_write_custom = None;
+            self.ble_name_write_pending = false;
         }
         result
     }
@@ -3108,10 +3113,12 @@ impl App {
             b"@n" => Query::BleName,
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
-        if query == Query::BleName {
-            self.ble_name_write_custom = Some(command != "@n default");
+        self.ble_name_write_pending = query == Query::BleName;
+        let result = self.send_accessory(command, query);
+        if result.is_err() {
+            self.ble_name_write_pending = false;
         }
-        self.send_accessory(command, query)
+        result
     }
 
     /// Ask the bridge what networks it can see.
@@ -3149,7 +3156,7 @@ impl App {
         // goes through the scrubber.
         let shown = accessory::redact_command(command);
         if query != Query::BleName {
-            self.ble_name_write_custom = None;
+            self.ble_name_write_pending = false;
         }
         let now = Instant::now();
         // The question this replaces loses its spinner here rather than when
@@ -3228,7 +3235,7 @@ impl App {
                 }
             }
             if reply.query == Query::BleName {
-                self.ble_name_write_custom = None;
+                self.ble_name_write_pending = false;
             }
             // Whatever the refusal was, a scan it named is not owed anything
             // by it: the record goes, so that a scan asked later starts with
@@ -3364,26 +3371,21 @@ impl App {
                     self.network.webdav = Some(status);
                 }
             }
-            // `@n?` and the write's confirmation share one parser. The write
-            // reply has no `custom=` field, so the view keeps whatever the
-            // last read said about where the name came from.
-            //
-            // The board's own answer is also the host's copy of the name: the
-            // label the air carried is a snapshot, and the owner can change
-            // it from another client at any time. Writing it here keeps the
-            // Device row, the shelf and the network view from showing three
-            // different names for one board.
+            // A write confirms its name without a provenance suffix, making
+            // it ambiguous when the name itself ends in `custom=yes` or
+            // `custom=no`. Read it back before updating any saved labels.
             Query::BleName => {
-                if let Some(status) = accessory::parse_ble_name(&text) {
-                    let custom = status.custom.or(self.ble_name_write_custom.take());
-                    self.network.ble_name = Some(accessory::BleNameStatus {
-                        name: status.name.clone(),
-                        custom,
-                    });
+                if std::mem::take(&mut self.ble_name_write_pending) {
+                    if let Err(why) = self.ask_device(Query::BleName) {
+                        self.network.error = Some(why.clone());
+                        self.push_notice(Notice {
+                            text: why,
+                            level: NoticeLevel::Error,
+                        });
+                    }
+                } else if let Some(status) = accessory::parse_ble_name(&text) {
                     self.remember_the_board_name(&status.name);
-                    // The LAN token is asked next, now that the name's slot
-                    // is free.
-                    self.ask_pending_reads();
+                    self.network.ble_name = Some(status);
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -3437,10 +3439,10 @@ impl App {
     /// wait for a free slot, and a link that never has one simply does not
     /// read the name until the next link.
     fn ask_pending_reads(&mut self) {
-        if self.talk.waiting().is_some() {
+        if !self.ble_connected() || self.waiting_on_device() {
             return;
         }
-        if self.ble_name_read_pending && self.ble_connected() {
+        if self.ble_name_read_pending {
             self.ble_name_read_pending = false;
             let _ = self.ask_device(Query::BleName);
             return;
@@ -3734,6 +3736,9 @@ impl App {
     /// Say that a question went unanswered, and stop the view waiting on it.
     fn report_unanswered(&mut self, query: Query, now: Instant) {
         self.stop_waiting(query);
+        if query == Query::BleName {
+            self.ble_name_write_pending = false;
+        }
         // A scan is the one question a busy board refuses with nothing at all:
         // the request reaches a management task that is in the middle of
         // another WiFi operation, and no reply, no `ERR` and no partial list
@@ -7231,6 +7236,92 @@ mod tests {
             Some(Query::BleName),
             "the board is asked its name as the link comes up"
         );
+    }
+
+    #[test]
+    fn a_refused_malformed_or_timed_out_name_read_does_not_block_lan() {
+        for response in [Some("ERR unknown command"), Some("OK"), None] {
+            let mut app = App::default();
+            let wire = crate::transport::testing::MemoryLink::ble();
+            app.connect(wire.link()).unwrap();
+            assert!(pump_until(&mut app, |app| app.connected()));
+            assert_eq!(app.talk.waiting(), Some(Query::BleName));
+            let id = asked_id(&wire);
+            if let Some(response) = response {
+                wire.feed_management(answer(id, response));
+            } else {
+                let deadline = Instant::now() + Query::BleName.patience();
+                assert_eq!(app.talk.abandon(deadline), Some(Query::BleName));
+                app.report_unanswered(Query::BleName, deadline);
+            }
+            assert!(
+                pump_until(&mut app, |app| app.talk.waiting() == Some(Query::Lan)),
+                "LAN read must continue after {response:?}"
+            );
+            assert!(!app.lan_token_read_pending);
+            let id = asked_id(&wire);
+            wire.feed_management(answer(id, "OK ws=off token=none"));
+            assert!(pump_until(&mut app, |app| app.lan_captured == LanCapture::None));
+        }
+    }
+
+    #[test]
+    fn an_intervening_user_query_does_not_block_the_pending_lan_read() {
+        let mut app = App::default();
+        let wire = crate::transport::testing::MemoryLink::ble();
+        app.connect(wire.link()).unwrap();
+        assert!(pump_until(&mut app, |app| app.connected()));
+        app.ask_device(Query::Uart).unwrap();
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "OK uart=115200,8,N,1,none"));
+        assert!(pump_until(&mut app, |app| app.talk.waiting() == Some(Query::Lan)));
+        assert_eq!(app.baud, Some(115200));
+    }
+
+    #[test]
+    fn name_writes_are_read_back_before_labels_change() {
+        for (name, action, custom) in [
+            ("Bench custom=yes", "set", true),
+            ("Bench custom=no", "accessory", true),
+            ("测试😀", "set", true),
+            ("Linkr Bee 078C", "reset", false),
+        ] {
+            let (mut app, wire) = connected_over_ble(Lang::En);
+            match action {
+                "reset" => app.reset_ble_name().unwrap(),
+                "accessory" => app.run_accessory(&format!("@n={name}")).unwrap(),
+                _ => app.set_ble_name(name).unwrap(),
+            }
+            let id = asked_id(&wire);
+            wire.feed_management(answer(id, &format!("OK name={name}")));
+            assert!(pump_until(&mut app, |app| !app.ble_name_write_pending));
+            assert_eq!(app.talk.waiting(), Some(Query::BleName));
+            assert_eq!(app.network.ble_name.as_ref().unwrap().name, "Bench Bee");
+
+            let frames = crate::transport::testing::asked_frames(&wire);
+            assert_eq!(frames.len(), 1, "one read follows the write");
+            let frame = &frames[0];
+            assert_eq!(&frame[crate::protocol::MGMT_HEADER_SIZE..], b"@n?");
+            let id = u32::from_le_bytes(frame[4..8].try_into().unwrap());
+            let provenance = if custom { "yes" } else { "no" };
+            wire.feed_management(answer(id, &format!("OK name={name} custom={provenance}")));
+            assert!(pump_until(&mut app, |app| !app.waiting_on_device()));
+            let status = app.network.ble_name.as_ref().unwrap();
+            assert_eq!(status.name, name);
+            assert_eq!(status.custom, Some(custom));
+        }
+    }
+
+    #[test]
+    fn a_failed_name_write_keeps_the_last_verified_label() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        app.set_ble_name("Bench custom=yes").unwrap();
+        let id = asked_id(&wire);
+        wire.feed_management(answer(id, "ERR name=-5"));
+        assert!(pump_until(&mut app, |app| !app.waiting_on_device()));
+        assert!(!app.ble_name_write_pending);
+        assert_eq!(app.network.ble_name.as_ref().unwrap().name, "Bench Bee");
+        assert_eq!(app.network.error.as_deref(), Some("ERR name=-5"));
     }
 
     /// The board's own answer is what the Device row shows, and what the
