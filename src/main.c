@@ -572,6 +572,79 @@ static int ble_name_settings_set(const char *name, size_t len,
 	return 0;
 }
 
+enum ble_name_persist_result {
+	BLE_NAME_PERSIST_OK = 0,
+	BLE_NAME_PERSIST_INSTALL_FAILED,
+	BLE_NAME_PERSIST_SAVE_FAILED,
+};
+
+static enum ble_name_persist_result
+ble_name_install_and_save(const char *value, size_t len, int *err)
+{
+	char previous[BLE_NAME_MAX + 1];
+	bool previous_custom = ble_name_custom;
+	size_t previous_len = strlen(ble_name);
+	int ret;
+
+	memcpy(previous, ble_name, previous_len + 1);
+	/* Install first, then persist. A stored name that the stack refused
+	 * would answer @n? with the old one and come back as the new one after
+	 * a reboot. */
+	ret = ble_name_apply(value);
+	if (ret) {
+		*err = ret;
+		return BLE_NAME_PERSIST_INSTALL_FAILED;
+	}
+	ret = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);
+	if (ret) {
+		(void)ble_name_apply(previous);
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_SAVE_FAILED;
+	}
+	ble_name_custom = true;
+	return BLE_NAME_PERSIST_OK;
+}
+
+static enum ble_name_persist_result
+ble_name_reset_and_delete(int *err)
+{
+	char previous[BLE_NAME_MAX + 1];
+	bool previous_custom = ble_name_custom;
+	uint8_t previous_sd_len = sd[0].data_len;
+	size_t previous_len = strlen(ble_name);
+	int ret;
+
+	memcpy(previous, ble_name, previous_len + 1);
+	ble_name_make_default();
+	/* The scan response length follows the buffer here, before the name
+	 * is handed to the stack: a failure below must not leave the old
+	 * length beside the new bytes, which would advertise a truncated
+	 * name. */
+	sd[0].data_len = (uint8_t)strlen(ble_name);
+	ret = bt_set_name(ble_name);
+	if (ret) {
+		memcpy(ble_name, previous, previous_len + 1);
+		sd[0].data_len = previous_sd_len;
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_INSTALL_FAILED;
+	}
+	/* Persist only after the name is in effect: deleting the stored name
+	 * while the install fails would make @n? report one name and the next
+	 * boot another. */
+	ret = settings_delete(BLE_NAME_SETTINGS_KEY);
+	if (ret && ret != -ENOENT) {
+		(void)bt_set_name(previous);
+		memcpy(ble_name, previous, previous_len + 1);
+		sd[0].data_len = previous_sd_len;
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_SAVE_FAILED;
+	}
+	return BLE_NAME_PERSIST_OK;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(linkr_ble, "linkr/ble", NULL,
 			       ble_name_settings_set, NULL, NULL);
 #else
@@ -1537,38 +1610,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		return true;
 	}
 	if (!strcmp(body, "name default") || !strcmp(body, "n default")) {
-		char previous[BLE_NAME_MAX + 1];
-		bool previous_custom = ble_name_custom;
-		uint8_t previous_sd_len = sd[0].data_len;
-		size_t previous_len = strlen(ble_name);
+		enum ble_name_persist_result result;
 
-		memcpy(previous, ble_name, previous_len + 1);
-
-		ble_name_make_default();
-		/* The scan response length follows the buffer here, before the
-		 * name is handed to the stack: a failure below must not leave
-		 * the old length beside the new bytes, which would advertise a
-		 * truncated name. */
-		sd[0].data_len = (uint8_t)strlen(ble_name);
-		err = bt_set_name(ble_name);
-		if (err) {
-			memcpy(ble_name, previous, previous_len + 1);
-			sd[0].data_len = previous_sd_len;
-			ble_name_custom = previous_custom;
-			(void)send_control_response(conn, "ERR name=%d\r\n", err);
-			return true;
-		}
-		/* Persist only after the name is in effect: deleting the
-		 * stored name while the install fails would make @n? report
-		 * one name and the next boot another. */
-		err = settings_delete(BLE_NAME_SETTINGS_KEY);
-		if (err && err != -ENOENT) {
-			(void)bt_set_name(previous);
-			memcpy(ble_name, previous, previous_len + 1);
-			sd[0].data_len = previous_sd_len;
-			ble_name_custom = previous_custom;
-			(void)send_control_response(conn, "ERR name save=%d\r\n",
-						    err);
+		result = ble_name_reset_and_delete(&err);
+		if (result != BLE_NAME_PERSIST_OK) {
+			(void)send_control_response(
+				conn,
+				result == BLE_NAME_PERSIST_SAVE_FAILED ?
+					"ERR name save=%d\r\n" :
+					"ERR name=%d\r\n",
+				err);
 			return true;
 		}
 		ble_name_advertise_refresh();
@@ -1589,10 +1640,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 			value = body + 2;
 		}
 		if (value) {
+			enum ble_name_persist_result result;
 			size_t len;
-			char previous[BLE_NAME_MAX + 1];
-			bool previous_custom = ble_name_custom;
-			size_t previous_len = strlen(ble_name);
 
 			value = trim_spaces((char *)value);
 			len = strlen(value);
@@ -1603,26 +1652,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					BLE_NAME_MAX);
 				return true;
 			}
-			memcpy(previous, ble_name, previous_len + 1);
-			/* Install first, then persist. A stored name that the
-			 * stack refused would answer @n? with the old one and
-			 * come back as the new one after a reboot. */
-			err = ble_name_apply(value);
-			if (err) {
-				(void)send_control_response(conn,
-							    "ERR name=%d\r\n", err);
+			result = ble_name_install_and_save(value, len, &err);
+			if (result != BLE_NAME_PERSIST_OK) {
+				(void)send_control_response(
+					conn,
+					result == BLE_NAME_PERSIST_SAVE_FAILED ?
+						"ERR name save=%d\r\n" :
+						"ERR name=%d\r\n",
+					err);
 				return true;
 			}
-			err = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);
-			if (err) {
-				(void)ble_name_apply(previous);
-				ble_name_custom = previous_custom;
-				(void)send_control_response(conn,
-							    "ERR name save=%d\r\n",
-							    err);
-				return true;
-			}
-			ble_name_custom = true;
 			ble_name_advertise_refresh();
 			(void)send_control_response(conn, "OK name=%s\r\n",
 						    ble_name);

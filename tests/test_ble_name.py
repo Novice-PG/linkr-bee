@@ -6,6 +6,7 @@ firmware's own code, sliced out and compiled against host fakes. What a board
 does with the name over the air is hardware behaviour and stays on the bench.
 """
 
+import errno
 import os
 from pathlib import Path
 import re
@@ -51,6 +52,10 @@ class BleNameTests(unittest.TestCase):
             + slice_between(main, "static int ble_name_apply(",
                             "static int ble_name_settings_set(",
                             ["ble_name_apply"])
+            + slice_between(main, "enum ble_name_persist_result {",
+                            "SETTINGS_STATIC_HANDLER_DEFINE(",
+                            ["ble_name_install_and_save",
+                             "ble_name_reset_and_delete"])
         )
         (directory / "ble_name_production.inc").write_text(block)
         # Compile the harness with the firmware's own limit. The harness no
@@ -158,42 +163,69 @@ class BleNameTests(unittest.TestCase):
         for key in ("hardware_custom", "identity_custom", "fallback_custom"):
             self.assertEqual(fields[key], "0", key)
 
+    def test_a_successful_save_installs_before_persisting(self):
+        fields = self.scenario("save_ok")
+        self.assertEqual(fields["save_ok_result"], "0")
+        self.assertEqual(fields["save_ok_buffer"], "New Name")
+        self.assertEqual(fields["save_ok_length"], "8")
+        self.assertEqual(fields["save_ok_custom"], "1")
+        self.assertEqual(fields["save_ok_save_calls"], "1")
+        self.assertEqual(fields["save_ok_saved"], "New Name")
+        self.assertEqual(fields["save_ok_saved_len"], "8")
+
     def test_a_failed_save_rolls_the_runtime_name_back(self):
         """Persist second, and undo the runtime change if persisting fails.
 
         The old order wrote settings first: a stack refusal then left the
-        stored name and the advertised name disagreeing until reboot. A
-        failed delete on the reset path has the same rollback.
+        stored name and the advertised name disagreeing until reboot.
         """
-        main = (ROOT / "src/main.c").read_text()
-        set_path = main[main.index('if (!strncmp(body, "name=", 5))'):
-                        main.index('#endif /* CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC */')]
-        apply_at = set_path.index("err = ble_name_apply(value);")
-        save_at = set_path.index(
-            "err = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);")
-        rollback_at = set_path.index("(void)ble_name_apply(previous);")
-        self.assertLess(apply_at, save_at)
-        self.assertLess(save_at, rollback_at)
+        fields = self.scenario("save_fail")
+        self.assertEqual(fields["save_fail_result"], "2")
+        self.assertEqual(fields["save_fail_err"], str(-errno.EIO))
+        self.assertEqual(fields["save_fail_buffer"], "Old Name")
+        self.assertEqual(fields["save_fail_length"], "8")
+        self.assertEqual(fields["save_fail_custom"], "1")
+        self.assertEqual(fields["save_fail_save_calls"], "1")
+        self.assertEqual(fields["save_fail_bt_last"], "Old Name")
 
-        reset = main[main.index('if (!strcmp(body, "name default")'):
-                     main.index('if (!strncmp(body, "name=", 5))')]
-        set_name_at = reset.index("bt_set_name(ble_name)")
-        delete_at = reset.index("settings_delete(BLE_NAME_SETTINGS_KEY)")
-        reset_rollback_at = reset.index("(void)bt_set_name(previous)")
-        self.assertLess(set_name_at, delete_at)
-        self.assertLess(delete_at, reset_rollback_at)
+    def test_a_refused_install_does_not_touch_the_store(self):
+        fields = self.scenario("install_fail")
+        self.assertEqual(fields["install_fail_result"], "1")
+        self.assertEqual(fields["install_fail_err"], str(-errno.EINVAL))
+        self.assertEqual(fields["install_fail_buffer"], "Old Name")
+        self.assertEqual(fields["install_fail_length"], "8")
+        self.assertEqual(fields["install_fail_custom"], "1")
+        self.assertEqual(fields["install_fail_save_calls"], "0")
 
-    def test_the_reset_path_keeps_the_length_beside_the_buffer(self):
+    def test_reset_installs_then_deletes_the_stored_name(self):
+        fields = self.scenario("reset_ok")
+        self.assertEqual(fields["reset_ok_result"], "0")
+        self.assertEqual(fields["reset_ok_buffer"], "Linkr Bee 078C")
+        self.assertEqual(fields["reset_ok_length"], "14")
+        self.assertEqual(fields["reset_ok_custom"], "0")
+        self.assertEqual(fields["reset_ok_delete_calls"], "1")
+        self.assertEqual(fields["reset_ok_bt_last"], "Linkr Bee 078C")
+
+    def test_a_refused_reset_restores_the_name_and_the_length(self):
         """A failure to hand the default name to the stack must not leave the
         old length beside the new bytes."""
-        main = (ROOT / "src/main.c").read_text()
-        reset = main[main.index('if (!strcmp(body, "name default")'):
-                     main.index('if (!strncmp(body, "name=", 5))')]
-        length_at = reset.index("sd[0].data_len")
-        set_at = reset.index("bt_set_name(ble_name)")
-        self.assertLess(length_at, set_at,
-                        "the scan response length must follow the buffer "
-                        "before the name is handed to the stack")
+        fields = self.scenario("reset_install_fail")
+        self.assertEqual(fields["reset_install_fail_result"], "1")
+        self.assertEqual(fields["reset_install_fail_err"], str(-errno.EINVAL))
+        self.assertEqual(fields["reset_install_fail_buffer"], "Old Name")
+        self.assertEqual(fields["reset_install_fail_length"], "8")
+        self.assertEqual(fields["reset_install_fail_custom"], "1")
+        self.assertEqual(fields["reset_install_fail_delete_calls"], "0")
+
+    def test_a_failed_delete_restores_the_name_and_the_length(self):
+        fields = self.scenario("reset_delete_fail")
+        self.assertEqual(fields["reset_delete_fail_result"], "2")
+        self.assertEqual(fields["reset_delete_fail_err"], str(-errno.EIO))
+        self.assertEqual(fields["reset_delete_fail_buffer"], "Old Name")
+        self.assertEqual(fields["reset_delete_fail_length"], "8")
+        self.assertEqual(fields["reset_delete_fail_custom"], "1")
+        self.assertEqual(fields["reset_delete_fail_delete_calls"], "1")
+        self.assertEqual(fields["reset_delete_fail_bt_last"], "Old Name")
 
 
 if __name__ == "__main__":

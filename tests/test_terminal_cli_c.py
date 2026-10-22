@@ -177,6 +177,15 @@ int main(void)
      * line cannot land on two different boards. */
     CHECK(device_matches("linkr bee 078c", "Linkr Bee", false));
 
+    /* A rename needs all four Management characteristics. A legacy NUS-only
+     * board has none of them, so it is not ready when management is needed. */
+    CHECK(management_paths_complete(true, true, true, true));
+    CHECK(!management_paths_complete(true, true, true, false));
+    CHECK(!management_paths_complete(true, true, false, true));
+    CHECK(!management_paths_complete(true, false, true, true));
+    CHECK(!management_paths_complete(false, true, true, true));
+    CHECK(!management_paths_complete(false, false, false, false));
+
     /* normalize_name_prefix trims, drops a trailing '*' and truncates. */
     normalize_name_prefix("  Linkr Bee*  ", buf, sizeof(buf));
     CHECK_STR(buf, "Linkr Bee");
@@ -318,6 +327,10 @@ class CHarnessTests(unittest.TestCase):
         board_rules = extract(
             source, "static bool is_legacy_name(", "static bool consider_device(",
             ["is_legacy_name", "device_matches"])
+        management_ready = extract(
+            source, "static bool management_paths_complete(",
+            "static bool discover_characteristics(",
+            ["management_paths_complete"])
         enter = extract(source, "static void normalize_enter(",
                         "static void describe_escape(", ["normalize_enter"])
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
@@ -334,8 +347,8 @@ class CHarnessTests(unittest.TestCase):
         harness.write_text(
             HARNESS_PRELUDE + "\n"
             + escape_helpers + "\n" + enter + "\n" + sanitizer + "\n"
-            + device_helpers + "\n" + board_rules + "\n" + validators + "\n"
-            + HARNESS_MAIN
+            + device_helpers + "\n" + board_rules + "\n" + management_ready
+            + "\n" + validators + "\n" + HARNESS_MAIN
         )
         cls.binary = directory / "harness"
         # -Werror: the harness also enforces that the extracted helpers are
@@ -726,6 +739,17 @@ class CParityTests(unittest.TestCase):
         self.assertLess(write, read)
         self.assertLess(reset, read)
         self.assertIn("changed || opt->query_ble_name", body)
+
+    def test_c_refuses_a_legacy_nus_only_board_for_name_actions(self):
+        """A board without the Management quartet is still a terminal, but a
+        rename must fail loudly instead of writing into a missing channel."""
+        body = re.search(r"static bool discover_characteristics\(.*?\n\}",
+                         self.c_source, re.S).group(0)
+        self.assertIn("legacy NUS-only", body)
+        self.assertIn("firmware cannot read or change the BLE name", body)
+        self.assertIn("need_mgmt && !management_paths_complete(", body)
+        message = body.index("legacy NUS-only")
+        self.assertLess(message, body.index("return false;", message))
 
     def test_both_clients_reject_the_same_invisible_characters(self):
         self.assertIn("0x2028", self.c_source)

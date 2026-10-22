@@ -1268,6 +1268,16 @@ static void disconnect_device(DBusConnection *conn)
     g_state.connected = false;
 }
 
+/* A rename needs all four Management characteristics, while a terminal-only
+ * session needs only the NUS pair. Keep the decision in one place so the
+ * discovery loop and the final refusal cannot disagree about what "ready"
+ * means for a legacy NUS-only board. */
+static bool management_paths_complete(bool protocol, bool device_id,
+                                      bool command, bool response)
+{
+    return protocol && device_id && command && response;
+}
+
 static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 {
     DBusMessage *reply;
@@ -1307,10 +1317,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
         clock_gettime(CLOCK_MONOTONIC, &dstart);
         while (delapsed < 5.0) {
             bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
-            bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
-                              g_state.mgmt_device_id_path[0] &&
-                              g_state.mgmt_command_path[0] &&
-                              g_state.mgmt_response_path[0];
+            bool mgmt_ready = management_paths_complete(
+                g_state.mgmt_protocol_path[0],
+                g_state.mgmt_device_id_path[0],
+                g_state.mgmt_command_path[0],
+                g_state.mgmt_response_path[0]);
 
             if (nus_ready && (!need_mgmt || mgmt_ready)) {
                 break;
@@ -1401,10 +1412,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 
             {
                 bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
-                bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
-                                  g_state.mgmt_device_id_path[0] &&
-                                  g_state.mgmt_command_path[0] &&
-                                  g_state.mgmt_response_path[0];
+                bool mgmt_ready = management_paths_complete(
+                    g_state.mgmt_protocol_path[0],
+                    g_state.mgmt_device_id_path[0],
+                    g_state.mgmt_command_path[0],
+                    g_state.mgmt_response_path[0]);
 
                 if (nus_ready && (!need_mgmt || mgmt_ready)) {
                     break;
@@ -1422,10 +1434,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
         msg("NUS RX/TX characteristics not found");
         return false;
     }
-    if (need_mgmt && (!g_state.mgmt_protocol_path[0] ||
-                      !g_state.mgmt_device_id_path[0] ||
-                      !g_state.mgmt_command_path[0] ||
-                      !g_state.mgmt_response_path[0])) {
+    if (need_mgmt && !management_paths_complete(
+            g_state.mgmt_protocol_path[0],
+            g_state.mgmt_device_id_path[0],
+            g_state.mgmt_command_path[0],
+            g_state.mgmt_response_path[0])) {
         msg("Management Service characteristics not found; legacy NUS-only "
             "firmware cannot read or change the BLE name");
         return false;

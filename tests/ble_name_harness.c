@@ -87,17 +87,90 @@ static struct bt_data sd[] = {
 /* The stack refuses the name for one scenario: a board whose controller will
  * not take the name must not end up advertising half of it. */
 static bool bt_set_name_fails;
+static int bt_set_name_calls;
+static char bt_set_name_last[BLE_NAME_MAX + 1];
 
 static int bt_set_name(const char *name)
 {
+	bt_set_name_calls++;
+	snprintf(bt_set_name_last, sizeof(bt_set_name_last), "%s", name);
 	if (bt_set_name_fails) {
 		return -EINVAL;
 	}
-	ARG_UNUSED(name);
 	return 0;
 }
 
+/* The persistence side of the same operation. Both calls are counted so the
+ * tests can prove install-failure never reaches the store, and that the
+ * rollback happens after a store failure. */
+#define BLE_NAME_SETTINGS_KEY "linkr/ble/name"
+
+static int settings_save_err;
+static int settings_delete_err;
+static int settings_save_calls;
+static int settings_delete_calls;
+static char settings_saved_value[BLE_NAME_MAX + 1];
+static size_t settings_saved_len;
+
+static int settings_save_one(const char *name, const void *value, size_t len)
+{
+	ARG_UNUSED(name);
+	settings_save_calls++;
+	if (settings_save_err) {
+		return settings_save_err;
+	}
+	if (len > BLE_NAME_MAX) {
+		return -EINVAL;
+	}
+	memcpy(settings_saved_value, value, len);
+	settings_saved_value[len] = '\0';
+	settings_saved_len = len;
+	return 0;
+}
+
+static int settings_delete(const char *name)
+{
+	ARG_UNUSED(name);
+	settings_delete_calls++;
+	return settings_delete_err;
+}
+
 #include "ble_name_production.inc"
+
+static void reset_persistence_fakes(void)
+{
+	bt_set_name_fails = false;
+	bt_set_name_calls = 0;
+	bt_set_name_last[0] = '\0';
+	settings_save_err = 0;
+	settings_delete_err = 0;
+	settings_save_calls = 0;
+	settings_delete_calls = 0;
+	settings_saved_value[0] = '\0';
+	settings_saved_len = 0;
+}
+
+static void seed_old_name(void)
+{
+	memcpy(ble_name, "Old Name", 9);
+	sd[0].data_len = (uint8_t)strlen(ble_name);
+	ble_name_custom = true;
+}
+
+static void print_persistence(const char *label, int result, int err)
+{
+	printf("%s_result=%d\n", label, result);
+	printf("%s_err=%d\n", label, err);
+	printf("%s_buffer=%s\n", label, ble_name);
+	printf("%s_length=%u\n", label, (unsigned int)sd[0].data_len);
+	printf("%s_custom=%d\n", label, ble_name_custom ? 1 : 0);
+	printf("%s_save_calls=%d\n", label, settings_save_calls);
+	printf("%s_delete_calls=%d\n", label, settings_delete_calls);
+	printf("%s_saved=%s\n", label, settings_saved_value);
+	printf("%s_saved_len=%u\n", label, (unsigned int)settings_saved_len);
+	printf("%s_bt_calls=%d\n", label, bt_set_name_calls);
+	printf("%s_bt_last=%s\n", label, bt_set_name_last);
+}
 
 static void print_name(const char *label, const char *name)
 {
@@ -200,6 +273,47 @@ int main(int argc, char **argv)
 
 		printf("err=%d\n", err);
 		print_state("applied");
+		return 0;
+	}
+
+	if (!strcmp(scenario, "save_ok") || !strcmp(scenario, "save_fail") ||
+	    !strcmp(scenario, "install_fail")) {
+		enum ble_name_persist_result result;
+		int err = 0;
+
+		reset_persistence_fakes();
+		seed_old_name();
+		if (!strcmp(scenario, "save_fail")) {
+			settings_save_err = -EIO;
+		}
+		if (!strcmp(scenario, "install_fail")) {
+			bt_set_name_fails = true;
+		}
+		result = ble_name_install_and_save("New Name", 8, &err);
+		print_persistence(scenario, result, err);
+		return 0;
+	}
+
+	if (!strcmp(scenario, "reset_ok") ||
+	    !strcmp(scenario, "reset_install_fail") ||
+	    !strcmp(scenario, "reset_delete_fail")) {
+		enum ble_name_persist_result result;
+		uint8_t hardware[6] = { 0x58, 0xbf, 0x25, 0x33, 0x07, 0x8c };
+		int err = 0;
+
+		reset_persistence_fakes();
+		seed_old_name();
+		memcpy(fake_hw_id, hardware, sizeof(hardware));
+		fake_hw_id_len = sizeof(hardware);
+		fake_identity_count = 0;
+		if (!strcmp(scenario, "reset_install_fail")) {
+			bt_set_name_fails = true;
+		}
+		if (!strcmp(scenario, "reset_delete_fail")) {
+			settings_delete_err = -EIO;
+		}
+		result = ble_name_reset_and_delete(&err);
+		print_persistence(scenario, result, err);
 		return 0;
 	}
 
