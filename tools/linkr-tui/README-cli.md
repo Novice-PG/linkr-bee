@@ -67,6 +67,9 @@ bee-cli set ble-name default           # --reset-ble-name
 The name is 1–29 UTF-8 bytes and is checked on the host before anything is
 sent, so Chinese and emoji are accepted and a name the firmware would refuse
 fails without a round trip. A write is confirmed by the board and read back.
+For a rename or reset the C reference client prints only the board's `@n?`
+readback, not the write reply; a rename exits non-zero when the board reports
+a different name.
 
 A command line may contain several requests; they are sent one at a time
 because the bridge answers one management question at a time. Add `--json` for

@@ -826,7 +826,9 @@ static bool ble_name_query_value(const char *reply, char *out, size_t out_len)
                     break;
                 }
             }
-            if (name_len >= out_len) {
+            /* The firmware never advertises an empty name, and a reset's
+             * "readable is enough" check must not accept one. */
+            if (name_len == 0 || name_len >= out_len) {
                 return false;
             }
             memcpy(out, name, name_len);
