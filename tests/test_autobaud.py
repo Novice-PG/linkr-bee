@@ -350,6 +350,33 @@ class AutobaudTests(unittest.TestCase):
         self.assertEqual(result["reconfigs"], "0")
         self.assertEqual(result["verified"], "1")
 
+    def test_a_busy_line_renews_the_inactivity_timeout(self):
+        """A capture or a low pin sample restarts the five-second clock.
+
+        The old code renewed only on a capture, so a line that never idled
+        long enough for the receiver to begin was treated as silent and the
+        pass timed out while the peer was still talking. Thirty windows are
+        twelve seconds: past the inactivity limit, but this line is not
+        inactive.
+        """
+        result = self.run_scenario("a_busy_line_renews_the_timeout")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["results"], "0")
+
+    def test_a_busy_line_is_still_bounded_by_the_hard_deadline(self):
+        """Renewal must not let a permanently busy line hold the port open.
+
+        At sixty seconds the pass reports TIMEOUT and keeps the configured
+        rate; the fake clock runs to sixty-four seconds, so the deadline is
+        crossed and later ticks see an idle follower.
+        """
+        result = self.run_scenario("a_busy_line_hits_the_hard_deadline")
+        self.assertEqual(result["rate"], "115200")
+        self.assertEqual(result["reconfigs"], "0")
+        self.assertEqual(result["results"], "1")
+        self.assertEqual(result["result"], "2")  # TIMEOUT
+
 
 if __name__ == "__main__":
     unittest.main()

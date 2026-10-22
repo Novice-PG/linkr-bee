@@ -1097,21 +1097,61 @@ async fn find(
         let _ = adapter.stop_scan().await;
     }
 
-    let chosen = chosen.ok_or_else(|| match selection {
-        Selection::Any => "no board was found within {} s — is the board powered?"
-            .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
-        // The name is a label the owner can change, so a name that matches
-        // nothing is a board that was renamed, not a board that is missing.
-        Selection::Name(name) => format!(
-            "no board named “{name}” was found — the advertised name is a label that can be changed, so a renamed board is dialled by its address (--ble-address)"
-        ),
-        Selection::Address(address) => {
-            format!("no board at {address} was found")
+    let chosen = match chosen {
+        Some(chosen) => chosen,
+        None => {
+            let mut message = match selection {
+                Selection::Any => "no board was found within {} s — is the board powered?"
+                    .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
+                // The name is a label the owner can change, so a name that
+                // matches nothing is a board that was renamed, not a board
+                // that is missing.
+                Selection::Name(name) => format!(
+                    "no board named “{name}” was found — the advertised name is a label that can be changed, so a renamed board is dialled by its address (--ble-address)"
+                ),
+                Selection::Address(address) => {
+                    format!("no board at {address} was found")
+                }
+            };
+            // "Dial it by address" is only useful if the addresses heard are
+            // on screen; a scan already paid for them.
+            if matches!(selection, Selection::Name(_)) {
+                let heard = heard_boards(&adapter).await;
+                if !heard.is_empty() {
+                    message.push_str("\nheard nearby: ");
+                    message.push_str(&heard.join(", "));
+                }
+            }
+            return Err(message);
         }
-    })?;
+    };
 
     let dialled_here = dial(&chosen, dial_attempt(window, started.elapsed())).await?;
     Ok((chosen, dialled_here))
+}
+
+/// The boards the adapter has heard, as `name (address)`, for a message whose
+/// next step is "dial one of these by address". At most six, like the scan
+/// picker: a list longer than the screen is not an answer.
+async fn heard_boards(adapter: &btleplug::platform::Adapter) -> Vec<String> {
+    let Ok(peripherals) = adapter.peripherals().await else {
+        return Vec::new();
+    };
+    let mut heard = Vec::new();
+    for peripheral in peripherals {
+        let Ok(Some(properties)) = peripheral.properties().await else {
+            continue;
+        };
+        if !is_board(&properties.services, properties.local_name.as_deref()) {
+            continue;
+        }
+        let name = display_name(properties.local_name.as_deref())
+            .unwrap_or_else(|| "Linkr Bee".to_string());
+        heard.push(format!("{name} ({})", peripheral.address()));
+    }
+    heard.sort();
+    heard.truncate(6);
+    heard
 }
 
 /// The first device that is a board this interface can talk to — see

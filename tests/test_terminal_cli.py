@@ -131,13 +131,51 @@ class ParserTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(
                     parser.parse_args(["--rename-ble", name]).rename_ble, name)
-        # Surrounding whitespace is trimmed rather than stored.
+        # Surrounding ASCII whitespace is trimmed rather than stored; NBSP and
+        # U+3000 are ordinary name bytes, exactly as the firmware sees them.
         self.assertEqual(
             parser.parse_args(["--rename-ble", "  Bee  "]).rename_ble, "Bee")
-        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f"):
+        self.assertEqual(
+            parser.parse_args(["--rename-ble", "\u00a0Bee\u3000"]).rename_ble,
+            "\u00a0Bee\u3000")
+        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f",
+                     "c1\u0085", "line\u2028sep", "para\u2029sep"):
             with self.subTest(name=name):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(["--rename-ble", name])
+
+    def test_ble_name_reply_parsing_takes_customness_only_from_a_query(self):
+        module = load_terminal()
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bench Bee custom=yes", query=True),
+            "Bench Bee")
+        # A name that itself ends in the suffix text survives a query parse:
+        # only the final field belongs to the reply.
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee custom=yes custom=no", query=True),
+            "Bee custom=yes")
+        # A write's reply has no custom field to peel.
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee custom=yes"),
+            "Bee custom=yes")
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee\u3000 custom=no", query=True),
+            "Bee\u3000")
+
+    def test_device_names_from_the_air_cannot_drive_the_terminal(self):
+        module = load_terminal()
+        self.assertEqual(
+            module.printable_device_name("Bee\x1b[2J\x85name"), "Bee[2Jname")
+        self.assertEqual(module.printable_device_name(None), "(unknown)")
+        self.assertEqual(module.printable_device_name("\x1b"), "(unknown)")
+
+    def test_rename_and_reset_cannot_both_be_asked_for(self):
+        result = self.run_cli("--rename-ble", "Bee", "--reset-ble-name")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--rename-ble and --reset-ble-name are mutually exclusive",
+                      result.stderr)
+        # The parser refuses before any radio work; bleak was never imported.
+        self.assertNotIn("bleak", result.stderr.lower())
 
 
 class CompletionTests(unittest.TestCase):

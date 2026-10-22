@@ -45,15 +45,25 @@ class BleNameTests(unittest.TestCase):
             slice_between(main, "static bool ble_name_valid(",
                           "static void ble_name_make_default(",
                           ["ble_name_valid"])
+            + slice_between(main, "static void ble_name_make_default(",
+                            "static int ble_name_apply(",
+                            ["ble_name_make_default"])
             + slice_between(main, "static int ble_name_apply(",
                             "static int ble_name_settings_set(",
                             ["ble_name_apply"])
         )
         (directory / "ble_name_production.inc").write_text(block)
+        # Compile the harness with the firmware's own limit. The harness no
+        # longer defines its own 29, so a changed limit reaches the vectors
+        # below and trips the 29/30-byte cases instead of going unnoticed.
+        limit = re.search(r"^#define BLE_NAME_MAX (\d+)$", main, re.MULTILINE)
+        if not limit:
+            raise AssertionError("src/main.c has no BLE_NAME_MAX definition")
         cls.binary = directory / "ble-name-test"
         subprocess.run([
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall",
-            "-Wextra", "-Werror", "-I", str(directory),
+            "-Wextra", "-Werror", f"-DBLE_NAME_MAX={limit.group(1)}",
+            "-I", str(directory),
             str(ROOT / "tests/ble_name_harness.c"), "-o", str(cls.binary),
         ], check=True)
 
@@ -74,10 +84,17 @@ class BleNameTests(unittest.TestCase):
         # The limit is bytes, not characters: seven four-byte emoji fit.
         self.assertEqual(fields["emoji7"], "1")
         self.assertEqual(fields["emoji8"], "0")
+        # Pin the exact boundary the host clients mirror.
+        self.assertEqual(fields["bytes29"], "1")
+        self.assertEqual(fields["bytes30"], "0")
         self.assertEqual(fields["empty"], "0")
         self.assertEqual(fields["control"], "0")
         self.assertEqual(fields["del"], "0")
         self.assertEqual(fields["c1"], "0")
+        # U+2028/U+2029 are line breaks to some terminals and logs even
+        # though they are not C0/C1; the firmware refuses them everywhere.
+        self.assertEqual(fields["line_separator"], "0")
+        self.assertEqual(fields["paragraph_separator"], "0")
         self.assertEqual(fields["overlong"], "0")
         self.assertEqual(fields["truncated"], "0")
         self.assertEqual(fields["surrogate"], "0")
@@ -101,19 +118,70 @@ class BleNameTests(unittest.TestCase):
     def test_the_rename_paths_restart_the_advertising(self):
         """The scan response is copied into the controller when advertising
         starts, so a renamed board keeps broadcasting the old name until the
-        advertising is cycled. Both rename paths must cycle it."""
+        advertising is cycled. Both rename paths must cycle it, through the
+        one work item that owns the stop/start pair."""
         main = (ROOT / "src/main.c").read_text()
         self.assertIn("static void ble_name_advertise_refresh(void)",
                       main)
-        # The refresh itself stops the advertising before starting it again.
         refresh = main[main.index("static void ble_name_advertise_refresh("):
                        main.index("#endif", main.index(
                            "static void ble_name_advertise_refresh("))]
-        self.assertIn("bt_le_adv_stop()", refresh)
-        self.assertIn("advertise_start()", refresh)
+        # The request is handed to the advertising work, not acted on from
+        # the BT RX workqueue: both threads touch the legacy advertising API.
+        self.assertIn("atomic_set(&advertise_refresh_req, 1)", refresh)
+        self.assertIn("advertise_schedule(K_NO_WAIT)", refresh)
+        self.assertNotIn("bt_le_adv_stop()", refresh)
+
+        work = main[main.index("static void advertise_retry("):
+                    main.index("static void advertise_schedule(")]
+        stop_at = work.index("bt_le_adv_stop()")
+        start_at = work.index("advertise_start()")
+        self.assertLess(stop_at, start_at,
+                        "the scan response is only refreshed by a new start")
+        # A failed stop leaves the old response on the air: ask for another
+        # pass instead of starting a second advertising set beside it.
+        self.assertIn("atomic_set(&advertise_refresh_req, 1)", work)
+        self.assertIn("k_work_reschedule(&advertise_work, K_MSEC(500))", work)
+
         # Both the set path and the reset path call it: two call sites, and
         # the definition itself is the third mention of the name.
         self.assertEqual(main.count("ble_name_advertise_refresh();"), 2)
+
+    def test_the_default_name_comes_from_the_hardware_id(self):
+        """The fallback chain must produce a displayable name, not empty
+        bytes: factory hardware ID first, then the BLE identity's address,
+        then the bare prefix."""
+        fields = self.scenario("default")
+        self.assertEqual(fields["hardware"], "Linkr Bee 078C")
+        self.assertEqual(fields["identity"], "Linkr Bee 078C")
+        self.assertEqual(fields["fallback"], "Linkr Bee")
+        for key in ("hardware_custom", "identity_custom", "fallback_custom"):
+            self.assertEqual(fields[key], "0", key)
+
+    def test_a_failed_save_rolls_the_runtime_name_back(self):
+        """Persist second, and undo the runtime change if persisting fails.
+
+        The old order wrote settings first: a stack refusal then left the
+        stored name and the advertised name disagreeing until reboot. A
+        failed delete on the reset path has the same rollback.
+        """
+        main = (ROOT / "src/main.c").read_text()
+        set_path = main[main.index('if (!strncmp(body, "name=", 5))'):
+                        main.index('#endif /* CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC */')]
+        apply_at = set_path.index("err = ble_name_apply(value);")
+        save_at = set_path.index(
+            "err = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);")
+        rollback_at = set_path.index("(void)ble_name_apply(previous);")
+        self.assertLess(apply_at, save_at)
+        self.assertLess(save_at, rollback_at)
+
+        reset = main[main.index('if (!strcmp(body, "name default")'):
+                     main.index('if (!strncmp(body, "name=", 5))')]
+        set_name_at = reset.index("bt_set_name(ble_name)")
+        delete_at = reset.index("settings_delete(BLE_NAME_SETTINGS_KEY)")
+        reset_rollback_at = reset.index("(void)bt_set_name(previous)")
+        self.assertLess(set_name_at, delete_at)
+        self.assertLess(delete_at, reset_rollback_at)
 
     def test_the_reset_path_keeps_the_length_beside_the_buffer(self):
         """A failure to hand the default name to the stack must not leave the

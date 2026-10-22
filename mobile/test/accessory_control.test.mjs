@@ -59,6 +59,14 @@ test("BLE name commands use UTF-8 byte limits and can restore the MAC default", 
   assert.throws(() => bleNameCommand({ name: "测试测试测试测试测试" }), /29 UTF-8 bytes/);
   assert.throws(() => bleNameCommand({ name: "   " }), /required/);
   assert.throws(() => bleNameCommand({ name: "Bee\nName" }), /control/);
+  // The firmware's full reject set, not only C0/DEL: C1 and the Unicode line
+  // separators are refused before the command would leave the browser.
+  assert.throws(() => bleNameCommand({ name: "a\u0085b" }), /control/);
+  assert.throws(() => bleNameCommand({ name: "a\u2028b" }), /control/);
+  assert.throws(() => bleNameCommand({ name: "a\u2029b" }), /control/);
+  // Trimming matches the firmware's four ASCII bytes; NBSP and U+3000 are
+  // ordinary characters and must survive so every host stores the same name.
+  assert.equal(bleNameCommand({ name: "\u00a0Bee\u3000" }), "@n=\u00a0Bee\u3000");
 });
 
 test("BLE names allow emoji and enforce the byte budget, not the character count", () => {
@@ -80,10 +88,18 @@ test("BLE names allow emoji and enforce the byte budget, not the character count
 });
 
 test("BLE name replies preserve spaces and report whether the name is custom", () => {
-  assert.deepEqual(parseBleName("OK name=Linkr Bee 078C custom=no"), { name: "Linkr Bee 078C", custom: false });
-  assert.deepEqual(parseBleName("OK name=测试 Bee custom=yes"), { name: "测试 Bee", custom: true });
-  assert.deepEqual(parseBleName("OK name=🐝 Linkr Bee custom=yes"), { name: "🐝 Linkr Bee", custom: true });
+  assert.deepEqual(parseBleName("OK name=Linkr Bee 078C custom=no", { query: true }), { name: "Linkr Bee 078C", custom: false });
+  assert.deepEqual(parseBleName("OK name=测试 Bee custom=yes", { query: true }), { name: "测试 Bee", custom: true });
+  assert.deepEqual(parseBleName("OK name=🐝 Linkr Bee custom=yes", { query: true }), { name: "🐝 Linkr Bee", custom: true });
   assert.deepEqual(parseBleName("OK name=Linkr Bee 078C"), { name: "Linkr Bee 078C", custom: null });
+  // A write reply carries no `custom=` field, so a name that itself ends in
+  // " custom=yes" must survive a write parse intact; only a query strips the
+  // final suffix.
+  assert.deepEqual(parseBleName("OK name=Bee custom=yes"), { name: "Bee custom=yes", custom: null });
+  assert.deepEqual(parseBleName("OK name=Bee custom=yes custom=no", { query: true }), { name: "Bee custom=yes", custom: false });
+  // A trailing U+3000 belongs to the name; the parser strips only the line
+  // ending, not Unicode whitespace the firmware would have stored.
+  assert.deepEqual(parseBleName("OK name=Bee\u3000 custom=no", { query: true }), { name: "Bee\u3000", custom: false });
   assert.equal(parseBleName("ERR name expected 1-29 UTF-8 bytes"), null);
   assert.equal(parseBleName(""), null);
 });

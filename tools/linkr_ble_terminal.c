@@ -715,7 +715,8 @@ static bool ble_name_valid(const char *name)
             (extra == 2 && cp < 0x800) ||
             (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
             (cp >= 0xd800 && cp <= 0xdfff) ||
-            (cp >= 0x80 && cp <= 0x9f)) {
+            (cp >= 0x80 && cp <= 0x9f) ||
+            cp == 0x2028 || cp == 0x2029) {
             return false;
         }
         i += extra + 1;
@@ -743,6 +744,49 @@ static bool normalize_ble_name(const char *value, char *out, size_t out_len)
     memcpy(out, start, len);
     out[len] = '\0';
     return ble_name_valid(out);
+}
+
+/* A name heard over the air is chosen by anyone nearby. Drop C0, DEL and the
+ * C1 pair (ESC included) before it reaches stderr, so an advertisement cannot
+ * drive the terminal. */
+static void printable_ble_name(const char *name, char *out, size_t out_len)
+{
+    size_t used = 0;
+
+    if (!out || out_len == 0) {
+        return;
+    }
+    /* An unnamed peripheral is a normal scan result, not an error: fall
+     * through to the same "(unknown)" a name of only controls gets. Returning
+     * early here left the caller's buffer uninitialized and then printed it
+     * with %s. */
+    if (!name) {
+        name = "";
+    }
+    for (size_t i = 0; name[i] != '\0' && used + 1 < out_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+
+        if (c < 0x20 || c == 0x7f) {
+            continue;
+        }
+        if (c == 0xc2 && (unsigned char)name[i + 1] >= 0x80 &&
+            (unsigned char)name[i + 1] <= 0x9f) {
+            i++;
+            continue;
+        }
+        out[used++] = (char)c;
+    }
+    if (used == 0 && out_len > 1) {
+        const char *fallback = "(unknown)";
+        size_t fallback_len = strlen(fallback);
+
+        if (fallback_len > out_len - 1) {
+            fallback_len = out_len - 1;
+        }
+        memcpy(out, fallback, fallback_len);
+        used = fallback_len;
+    }
+    out[used] = '\0';
 }
 
 static void timespec_add_ms(struct timespec *ts, long ms)
@@ -823,6 +867,22 @@ static bool consider_device(struct device_match *match, const char *path,
                             const char *name, const char *addr, bool has_nus,
                             bool has_mgmt)
 {
+    char printable[MAX_NAME_LEN];
+
+    printable_ble_name(name, printable, sizeof(printable));
+
+    /* Every device that got this far was heard, whether or not it matched
+     * the requested name. Record it before any early return, otherwise the
+     * "not found" message has nothing to offer the user. */
+    if (match->nearby_count < NEARBY_MAX) {
+        size_t at = match->nearby_count++;
+
+        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
+                 printable);
+        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
+                 "%s", addr ? addr : "");
+    }
+
     if (match->address) {
         char wanted[16];
         char found[16];
@@ -834,7 +894,7 @@ static bool consider_device(struct device_match *match, const char *path,
              * would otherwise keep the previous tail. */
             snprintf(match->path, sizeof(match->path), "%s", path);
             snprintf(match->found_name, sizeof(match->found_name), "%s",
-                     name ? name : "");
+                     printable);
             snprintf(match->found_address, sizeof(match->found_address), "%s",
                      addr ? addr : "");
             match->found = true;
@@ -860,7 +920,7 @@ static bool consider_device(struct device_match *match, const char *path,
                 match->best_rank = rank;
                 snprintf(match->path, sizeof(match->path), "%s", path);
                 snprintf(match->found_name, sizeof(match->found_name), "%s",
-                         name ? name : "");
+                         printable);
                 snprintf(match->found_address, sizeof(match->found_address),
                          "%s", addr ? addr : "");
                 match->found = true;
@@ -876,21 +936,12 @@ static bool consider_device(struct device_match *match, const char *path,
             match->best_rank = rank;
             snprintf(match->path, sizeof(match->path), "%s", path);
             snprintf(match->found_name, sizeof(match->found_name), "%s",
-                     name ? name : "");
+                     printable);
             snprintf(match->found_address, sizeof(match->found_address), "%s",
                      addr ? addr : "");
             match->found = true;
             match->found_has_nus = has_nus;
         }
-    }
-
-    if (match->nearby_count < NEARBY_MAX) {
-        size_t at = match->nearby_count++;
-
-        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
-                 name && name[0] ? name : "(unknown)");
-        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
-                 "%s", addr ? addr : "");
     }
     return false;
 }
@@ -1110,10 +1161,13 @@ static void list_devices(DBusConnection *conn)
                     dbus_message_iter_next(&prop_entry);
                 }
                 if (addr) {
+                    char printable[MAX_NAME_LEN];
+
                     /* Unnamed peripherals used to be dropped here, which made an
                      * empty list look like "nothing is nearby". They are exactly
                      * the devices a user cannot identify by looking at names. */
-                    printf("%s\t%s\n", addr, (name && name[0]) ? name : "(unknown)");
+                    printable_ble_name(name, printable, sizeof(printable));
+                    printf("%s\t%s\n", addr, printable);
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -1942,6 +1996,7 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
 {
     char reply[MGMT_MAX_PAYLOAD + 1];
     char command[BLE_NAME_MAX + 8];
+    bool changed = false;
 
     if (!start_mgmt_notifications(conn)) {
         err_msg("cannot subscribe to Management responses");
@@ -1952,13 +2007,6 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
         return false;
     }
 
-    if (opt->query_ble_name) {
-        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
-            stop_mgmt_notifications(conn);
-            return false;
-        }
-        printf("%s\n", reply);
-    }
     if (opt->rename_ble) {
         snprintf(command, sizeof(command), "@n=%s", opt->rename_ble);
         if (!mgmt_send(conn, command, opt, reply, sizeof(reply))) {
@@ -1966,9 +2014,21 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
             return false;
         }
         printf("%s\n", reply);
+        changed = true;
     }
     if (opt->reset_ble_name) {
         if (!mgmt_send(conn, "@n default", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        printf("%s\n", reply);
+        changed = true;
+    }
+    if (changed || opt->query_ble_name) {
+        /* A write's reply echoes the request, not the state the board will
+         * advertise; `@n?` is the authority, so read it back after a
+         * change. */
+        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
             stop_mgmt_notifications(conn);
             return false;
         }

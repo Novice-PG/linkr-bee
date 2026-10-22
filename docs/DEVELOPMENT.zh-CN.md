@@ -107,10 +107,18 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 
 ### GitHub Actions 构建与刷写
 
-`.github/workflows/build.yml` 使用矩阵构建 `esp32c3_supermini`、
-`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore`
-的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、pull request 和手动触发时
-运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
+`.github/workflows/build.yml` 使用矩阵构建五块板的默认 WiFi + BLE 配置：
+`esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、
+`esp32c5_devkitc/esp32c5/hpcore` 与 `esp32_devkitc/esp32/procpu`
+（ESP32-WROOM-32）。它会在 `main` push、pull request 和手动触发时运行，
+使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1；每个 job 只安装该板需要的工具链
+（RISC-V 目标用 `riscv64-zephyr-elf`，WROOM 用
+`xtensa-espressif_esp32_zephyr-elf`），不拉取完整 CI 镜像。
+
+项目级发布由 `v*` tag 触发：`.github/workflows/release.yml` 复用本工作流和
+桌面构建矩阵，再由 `tools/assemble_release.py` 校验每个产物自带的版本号，
+组装固件 ZIP、Web 包、APK 与桌面压缩包。也可以在 tag 上手动词发一次
+dry-run，只执行组装、不修改 GitHub release。
 
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
@@ -126,7 +134,8 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
 ```
 
-脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`，
+脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`、
+WROOM 写入 `0x1000`，
 但不执行整片擦除。它只重写镜像覆盖的扇区，因此普通升级会保留 BLE identity
 和已保存配置；需要清除它们时使用板型对应的恢复出厂输入。artifact 还包含
 `FLASHING.txt`、`firmware.json`、ELF、linker map、
@@ -181,8 +190,9 @@ ERR format: @u=115200,8,n,1,n
 
 ### 按需自动波特率（ESP32-WROOM）
 
-WROOM 构建启用 `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`，但检测器启动后保持
-idle，不会自动跟随线速率。需要时再启动：
+WROOM 构建支持 `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD`，但板级默认关闭
+（`=n`），发布镜像不会自行改写串口参数。需要时在构建中显式打开；即使打开，
+检测器启动后也保持 idle，不会自动跟随线速率，需要时再启动：
 
 ```text
 @a?          查询：OK autobaud state=idle|running baud=... timeout_ms=5000
@@ -193,8 +203,9 @@ idle，不会自动跟随线速率。需要时再启动：
 每次检测采样一个 400 ms 的 RMT 窗口，连续两个窗口一致后才调用
 `uart_configure()`。检测在确认匹配（`applied` 或 `unchanged`）、重新配置失败
 （`error`）、连续 5 秒没有可测量捕获（`timeout`）或收到 `@a stop`（`stopped`）
-时结束。每次捕获都会重置 5 秒计时，因此仍在通信的线路不会因短时空闲被误停。
-一次检测结束后不会自动重启。
+时结束。每次捕获，以及每次采样到线路处于活动电平，都会重置 5 秒计时，因此
+仍在通信的线路不会因短时空闲被误停，即使它的间隔短到接收器无法开始捕获。
+60 秒硬上限仍会终止一条始终不安静的线路。一次检测结束后不会自动重启。
 
 启动命令的 response 不带 `FINAL`；结果稍后以同一 request ID 的 type=3
 Management Event 返回，并带 `FINAL`：

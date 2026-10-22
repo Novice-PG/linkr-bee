@@ -108,7 +108,8 @@ def collect_desktop(source: Path, out: Path) -> list[Path]:
     return files
 
 
-def collect_firmware(source: Path, out: Path, tag: str) -> list[Path]:
+def collect_firmware(source: Path, out: Path, tag: str,
+                     expected_version: str) -> list[Path]:
     files = []
     for directory in sorted(item for item in source.iterdir() if item.is_dir()):
         slug = directory.name
@@ -117,6 +118,16 @@ def collect_firmware(source: Path, out: Path, tag: str) -> list[Path]:
         slug = slug.removeprefix("linkr-bee-")
         if slug not in FIRMWARE_BOARDS:
             raise SystemExit(f"unknown firmware board slug: {slug}")
+        manifest = directory / "firmware.json"
+        if not manifest.is_file():
+            raise SystemExit(f"firmware artifact {slug} has no firmware.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        version = data.get("version")
+        if version != expected_version:
+            raise SystemExit(
+                f"firmware {slug} reports version {version!r}, "
+                f"expected {expected_version!r}"
+            )
         name = f"linkr-bee-{tag}-firmware-{slug}.zip"
         destination = out / name
         zip_tree(directory, destination, f"linkr-bee-{slug}")
@@ -124,16 +135,44 @@ def collect_firmware(source: Path, out: Path, tag: str) -> list[Path]:
     return files
 
 
-def collect_apk(source: Path, out: Path, tag: str) -> list[Path]:
+def collect_apk(source: Path, out: Path, tag: str,
+                expected_version: str) -> list[Path]:
     apks = sorted(source.glob("*.apk"))
     if len(apks) != 1:
         raise SystemExit(f"expected exactly one APK, found {len(apks)}")
+    match = APK_RE.match(apks[0].name)
+    if not match:
+        raise SystemExit(
+            f"APK {apks[0].name} does not carry its version; name it "
+            "linkr-bee-v<version>-android-debug.apk"
+        )
+    version = match.group(1).removeprefix("v")
+    if version != expected_version:
+        raise SystemExit(
+            f"APK reports version {version!r}, expected {expected_version!r}"
+        )
     destination = out / f"linkr-bee-{tag}-android-debug.apk"
     copy_file(apks[0], destination)
     return [destination]
 
 
-def collect_web(source: Path, out: Path, tag: str, repo: str, commit: str) -> list[Path]:
+def collect_web(source: Path, out: Path, tag: str, repo: str, commit: str,
+                expected_version: str) -> list[Path]:
+    about = source / "about-data.js"
+    if not about.is_file():
+        raise SystemExit("the Web artifact has no about-data.js")
+    match = re.search(
+        r'"app"\s*:\s*\{.*?"version"\s*:\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+        about.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    if not match:
+        raise SystemExit("about-data.js does not name an application version")
+    version = match.group(1)
+    if version != expected_version:
+        raise SystemExit(
+            f"Web reports version {version!r}, expected {expected_version!r}"
+        )
     package = out / "web-package" / f"linkr-bee-{tag}-web"
     if package.exists():
         shutil.rmtree(package)
@@ -251,11 +290,27 @@ def main() -> int:
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
+    # The tag names the release; the artifacts name the components. A build
+    # that says 0.1.3 under a v0.1.2 tag must fail here rather than ship a
+    # manifest whose version only came from argv.
+    tag_version = args.tag.removeprefix("v")
+    for label, version in (
+        ("Web", args.web_version),
+        ("firmware", args.firmware_version),
+        ("APK", args.apk_version),
+    ):
+        if version != tag_version:
+            raise SystemExit(
+                f"{label} version {version!r} does not match tag {args.tag!r}"
+            )
+
     assets: list[Path] = []
     assets.extend(collect_desktop(args.desktop_dir, out))
-    assets.extend(collect_firmware(args.firmware_dir, out, args.tag))
-    assets.extend(collect_apk(args.apk_dir, out, args.tag))
-    assets.extend(collect_web(args.web_dir, out, args.tag, args.repo, args.commit))
+    assets.extend(collect_firmware(
+        args.firmware_dir, out, args.tag, args.firmware_version))
+    assets.extend(collect_apk(args.apk_dir, out, args.tag, args.apk_version))
+    assets.extend(collect_web(
+        args.web_dir, out, args.tag, args.repo, args.commit, args.web_version))
 
     # The web staging directory is an input to the zip, not an asset.
     web_staging = out / "web-package"
@@ -307,11 +362,20 @@ def main() -> int:
         for path in assets
         if (match := DESKTOP_RE.match(path.name))
     }
+    tui_versions |= {
+        match.group(1)
+        for path in assets
+        if (match := DEB_RE.match(path.name))
+    }
     if len(tui_versions) != 1:
         raise SystemExit(
-            f"expected one TUI version in the desktop assets, found {sorted(tui_versions)}"
+            f"expected one desktop version, found {sorted(tui_versions)}"
         )
     tui_version = tui_versions.pop()
+    if tui_version != tag_version:
+        raise SystemExit(
+            f"desktop version {tui_version!r} does not match tag {args.tag!r}"
+        )
 
     substitutions = {
         "{{REPO}}": args.repo.rstrip("/"),
