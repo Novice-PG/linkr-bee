@@ -48,7 +48,7 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 | --- | --- | --- |
 | Web 终端 | 桌面浏览器直接使用，无需安装客户端 | [使用指南](docs/USAGE.zh-CN.md) |
 | Rust CLI / TUI | 键盘操作、桌面终端、脚本与 Agent 会话 | [主机终端](tools/linkr-tui/README.md)（英文） |
-| Android / iOS App | 原生 BLE 与共享触控终端 | [移动端](mobile/README.md)（英文） |
+| Android / iOS App | 原生 BLE 与共享触控终端：拖动滚动、轻点输入、长按选词 | [移动端](mobile/README.md)（英文） |
 | HarmonyOS NEXT App | 手机和平板布局、原生 BLE 宿主 | [鸿蒙客户端](harmonyos/README.md)（英文） |
 | Python / C 终端 | 现有桌面脚本与 Linux / Buildroot 集成 | [终端工具](docs/DEVELOPMENT.zh-CN.md#ble-终端) |
 
