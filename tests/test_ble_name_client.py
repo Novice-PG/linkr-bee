@@ -75,6 +75,9 @@ class BleNameClientTests(unittest.TestCase):
         self.assertEqual(fields["crlf_value"], "Bee")
         self.assertEqual(fields["no_suffix_value"], "Bee")
         self.assertEqual(fields["error_ok"], "0")
+        # The firmware never advertises an empty name; a reset must not treat
+        # one as a successful readback.
+        self.assertEqual(fields["empty_name_ok"], "0")
 
     def test_a_rename_must_be_read_back_but_a_reset_only_needs_an_answer(self):
         fields = self.scenario()

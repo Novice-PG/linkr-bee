@@ -49,6 +49,7 @@ int main(void)
 	print_query("error", "ERR name=1");
 	print_query("crlf", "OK name=Bee custom=no\r\n");
 	print_query("no_suffix", "OK name=Bee");
+	print_query("empty_name", "OK name= custom=no");
 
 	printf("match_rename=%d\n",
 	       ble_name_readback_matches("OK name=Bee custom=yes", "Bee",
