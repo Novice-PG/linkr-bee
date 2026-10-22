@@ -14,9 +14,20 @@ inverted-T arrow cluster, Home/End, Paste, Enter, Page Up/Down, Backspace, symbo
 and common Ctrl shortcuts. Tap a modifier before the next key; tap again to
 cancel. Modifiers reset after use or disconnect. For example, Ctrl then C sends
 an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
-shells that support it. Paste uses the clipboard when available and otherwise
-prompts you to long-press the terminal. Both rows stay above the soft keyboard
-and are shared with the Web and HarmonyOS clients.
+shells that support it. Paste uses the clipboard when available. Both rows stay
+above the soft keyboard and are shared with the Web and HarmonyOS clients.
+
+Long press the terminal to select a line. The toolbar Copy button copies that
+selection, or the whole terminal buffer when nothing is selected; narrow screens
+keep the button visible. Drag vertically inside the terminal to move through
+scrollback; the gesture drives `term.scrollLines()`. These touch paths live in the
+shared web UI because WebView text selection cannot reach xterm's rendered rows.
+
+The native shells handle the soft keyboard locally. Opening it shrinks the
+WebView and refits the terminal rows; closing it restores the previous layout.
+They deliberately do not send `stty` to the target, so the remote tty keeps its
+size. The browser Web build still synchronizes rows and columns after login and
+on layout changes.
 
 ## About page
 

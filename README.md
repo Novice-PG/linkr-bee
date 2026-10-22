@@ -146,10 +146,12 @@ The UART side is 3.3 V logic, not RS-232. See the
 </details>
 
 UART settings apply immediately, so a target that boots at an unusual baud rate
-needs no reflash. The terminal also keeps the target's window size in sync after
-login and on layout changes, which full-screen programs need. If output arrives but
-typing does nothing, check that the target RX goes to the accessory TX, and turn
-hardware flow control off unless CTS and RTS are both wired.
+needs no reflash. In the browser, the terminal keeps the target's window size in
+sync after login and on layout changes, which full-screen programs need. Native
+phone apps instead resize only their local view when the soft keyboard opens, so
+the remote tty keeps its current size. If output arrives but typing does nothing,
+check that the target RX goes to the accessory TX, and turn hardware flow control
+off unless CTS and RTS are both wired.
 
 <p align="center">
   <img src="assets/screenshots/linkr-bee-terminal-mobile-en.jpg" alt="English responsive terminal preview at phone width" width="360">

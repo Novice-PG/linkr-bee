@@ -87,9 +87,11 @@ preview as a real-device result.
   does not offer Esc, Tab, arrows, or Ctrl combinations.
 - The target must support ANSI sequences to produce colored or full-screen
   output. The Web terminal uses xterm.js for 256-color rendering and cursor control.
-- The client synchronizes terminal rows/columns at supported shell prompts after
-  login and on layout changes. This is best effort on a UART, not an SSH PTY;
-  bootloaders and custom consoles may not support the shell resize command.
+- The browser client synchronizes terminal rows/columns at supported shell
+  prompts after login and on layout changes. This is best effort on a UART, not
+  an SSH PTY; bootloaders and custom consoles may not support the shell resize
+  command. Native phone apps keep the remote tty size unchanged when the soft
+  keyboard opens or closes; only the local WebView is resized.
 - If output is garbled, check UART framing and ground before changing fonts.
 - If output works but input does not, check target RX to Bee TX and the flow-control
   setting. Local echo alone does not prove the target received a byte.
