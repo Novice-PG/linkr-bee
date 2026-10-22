@@ -1048,7 +1048,8 @@ The page can:
   for pending input and command text to the right of the cursor. Incoming login
   prompts and Linux boot banners invalidate the size cache even if the accessory
   stays connected. Prompt detection is heuristic and supports common plain-text
-  Linux consoles; custom prompts may not be recognized
+  Linux consoles; custom prompts may not be recognized. Native phone shells skip
+  this remote sync when the soft keyboard changes the local viewport
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
 
@@ -1075,6 +1076,17 @@ independent option.
 | Android | Capacitor and native BLE plugin | Project generated; web assets and plugin sync verified |
 | iOS | Capacitor and CoreBluetooth plugin | Project generated; web assets and plugin sync verified |
 | HarmonyOS NEXT | ArkWeb UI and ArkTS BLE host over `JavaScriptProxy` | API 26 Stage project implemented; ArkTS type check and unsigned HAP build verified, device validation pending |
+
+Terminal layout and touch behavior intentionally differ by surface:
+
+| Surface | Remote tty size | Soft keyboard | History and copy |
+| --- | --- | --- | --- |
+| Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
+| Android / iOS / HarmonyOS native shell | Unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close | Touch drag calls `term.scrollLines()` without opening the keyboard; tap opens it; long press selects a word and dragging extends the selection; Copy uses the selection, or the whole buffer when nothing is selected |
+
+The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
+resize is local display state, not a request to reflow the remote console. The
+browser build keeps the existing `stty rows <rows> cols <cols>` behavior.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 
@@ -1110,7 +1122,7 @@ hardware.
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
+| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, long-press word selection with drag, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
 
 ---
 

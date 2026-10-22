@@ -14,9 +14,24 @@ inverted-T arrow cluster, Home/End, Paste, Enter, Page Up/Down, Backspace, symbo
 and common Ctrl shortcuts. Tap a modifier before the next key; tap again to
 cancel. Modifiers reset after use or disconnect. For example, Ctrl then C sends
 an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
-shells that support it. Paste uses the clipboard when available and otherwise
-prompts you to long-press the terminal. Both rows stay above the soft keyboard
-and are shared with the Web and HarmonyOS clients.
+shells that support it. Paste uses the clipboard when available. Both rows stay
+above the soft keyboard and are shared with the Web and HarmonyOS clients.
+
+Touch follows the Termux model: drag vertically to scroll history, tap to open
+the soft keyboard, and long press to select the word under the finger. Keep the
+finger down and drag to extend the selection by character or across lines. The
+toolbar Copy button copies that selection, or the whole terminal buffer when
+nothing is selected; narrow screens keep the button visible. Scrolling and
+selection do not open the keyboard, including the delayed focus some Android
+WebViews perform after `touchend`. The accessory row also has a keyboard toggle.
+These touch paths live in the shared web UI because WebView text selection cannot
+reach xterm's rendered rows.
+
+The native shells handle the soft keyboard locally. Opening it shrinks the
+WebView and refits the terminal rows; closing it restores the previous layout.
+They deliberately do not send `stty` to the target, so the remote tty keeps its
+size. The browser Web build still synchronizes rows and columns after login and
+on layout changes.
 
 ## About page
 
