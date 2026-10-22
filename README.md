@@ -54,7 +54,7 @@ All clients reach the same accessory; choose the workflow that suits your host.
 | --- | --- | --- |
 | Web terminal | A desktop browser, without installing a client | [User guide](docs/USAGE.md) |
 | Rust CLI / TUI | A keyboard-first desktop console, scripts, and agent sessions | [Host terminal](tools/linkr-tui/README.md) |
-| Android / iOS app | Native BLE with the shared Termux-style touch terminal: drag to scroll, tap to type, long press to select | [Mobile app](mobile/README.md) |
+| Android / iOS app | Native BLE with the shared Termux-style touch terminal: drag to scroll, tap to type, long press to freely select and copy | [Mobile app](mobile/README.md) |
 | HarmonyOS NEXT app | Phone and tablet layouts with a native BLE host | [HarmonyOS client](harmonyos/README.md) |
 | Python / C terminal | Existing desktop scripts and Linux / Buildroot integration | [Terminal tools](docs/DEVELOPMENT.md#ble-terminal) |
 
