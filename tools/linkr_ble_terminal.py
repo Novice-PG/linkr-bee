@@ -25,10 +25,12 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     termios = None
     tty = None
 
-__version__ = "1.0.0"
-DEFAULT_NAME = "Linkr BLE UART"
+__version__ = "0.1.2"
+DEFAULT_NAME = None  # Discover by service; --name is an explicit override.
+MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_PROTOCOL_UUID = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_DEVICE_ID_UUID = "4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_COMMAND_UUID = "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001"
@@ -37,6 +39,9 @@ RELIABLE_UART_RX_UUID = "4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001"
 RELIABLE_UART_TX_UUID = "4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001"
 RELIABLE_UART_STATE_UUID = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_HEADER = struct.Struct("<2sBBIHH")
+# The firmware's advertised-name limit, in UTF-8 bytes. The C client keeps the
+# same constant; tests/test_terminal_cli_c.py checks the two strings agree.
+BLE_NAME_MAX = 29
 RELIABLE_UART_HEADER = struct.Struct("<2sBBIHH")
 MGMT_API_MAJOR = 1
 MGMT_CAP_WIFI = 1 << 0
@@ -195,6 +200,33 @@ def ble_write_size(value: str) -> int:
     if not 0 <= parsed <= 244:
         raise argparse.ArgumentTypeError("BLE write size must be between 0 and 244")
     return parsed
+
+
+def normalize_ble_name(value: str) -> str:
+    """Validate an advertised BLE name before touching the radio.
+
+    The firmware stores the UTF-8 bytes verbatim and rejects C0/C1 controls,
+    DEL, embedded NUL, invalid UTF-8, and anything over 29 bytes. A prompt
+    whose answer is visually empty is treated the same way: trimming here is
+    what makes a name typed with a trailing space stable across reads.
+    """
+    name = value.strip()
+    if not name:
+        raise argparse.ArgumentTypeError(
+            "BLE name must be 1-29 UTF-8 bytes")
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise argparse.ArgumentTypeError(
+            "BLE name must be valid UTF-8") from exc
+    if len(encoded) > BLE_NAME_MAX:
+        raise argparse.ArgumentTypeError(
+            f"BLE name must be 1-{BLE_NAME_MAX} UTF-8 bytes; "
+            f"this one is {len(encoded)}")
+    if any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f for char in name):
+        raise argparse.ArgumentTypeError(
+            "BLE name must not contain control characters")
+    return name
 
 
 def normalize_uart_spec(spec: str) -> str:
@@ -403,14 +435,32 @@ def resolve_wifi_credentials(spec: str, key_file: str | None = None,
     )
 
 
+@dataclass
+class DiscoveredDevice:
+    name: str | None
+    address: str
+    rssi: int | None
+    service_uuids: tuple[str, ...]
+
+
+async def discover_devices(timeout: float) -> list[DiscoveredDevice]:
+    """Keep advertisement services alongside names, including for --scan reuse."""
+    import_bleak()
+    advertisements = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    return [
+        DiscoveredDevice(adv.local_name or device.name, device.address, adv.rssi,
+                         tuple(uuid.lower() for uuid in adv.service_uuids))
+        for device, adv in advertisements.values()
+    ]
+
+
 async def scan_devices(timeout: float) -> list:
     """List every nearby BLE device, named or not.
 
     Unnamed peripherals are exactly the ones a user cannot identify by name, so
     silently dropping them made an empty --scan output misleading.
     """
-    import_bleak()
-    devices = await BleakScanner.discover(timeout=timeout)
+    devices = await discover_devices(timeout)
     for dev in sorted(devices, key=device_sort_key):
         rssi = getattr(dev, "rssi", None)
         signal = f"{rssi} dBm" if isinstance(rssi, int) else "-"
@@ -429,16 +479,68 @@ def normalize_name_prefix(name: str) -> str:
     return name
 
 
-def match_device(devices, name: str) -> str | None:
-    """Return the best match's address, or None. Split out for testing."""
+def is_legacy_name(name: str | None) -> bool:
+    """Whether a name is one of the fixed legacy names.
+
+    The oldest NUS-only firmware had no per-device name and no Management
+    Service, so its fixed name is the only way to recognise it. A current
+    board can carry the same name, which is why this is a narrow exception
+    and not a rule.
+    """
+    return bool(re.match(r"^Linkr BLE UART(?:$|[- ])", (name or "").strip(), re.I))
+
+
+def is_linkr_device_id(device_id: bytes) -> bool:
+    """Whether a Device ID belongs to Linkr Bee.
+
+    The first ten bytes are the fixed Linkr namespace (`LINKRBLE`, version 1)
+    and the last six are the chip's hardware id. Checking the namespace is
+    what makes the Management Service a filter rather than a promise: any
+    device can advertise the same UUID.
+    """
+    return len(device_id) == 16 and device_id.startswith(b"LINKRBLE\x01\x00")
+
+
+def advertises_management(device) -> bool:
+    """Whether the advertisement carried the Linkr Management Service.
+
+    This is how a board is found now that its name is a label the owner can
+    change: the service is in the advertisement, the name is not an identity.
+    """
+    uuids = getattr(device, "service_uuids", None)
+    if uuids is None:
+        uuids = getattr(device, "services", None) or ()
+    for service in uuids:
+        if str(service).lower() == MGMT_SERVICE_UUID:
+            return True
+    return False
+
+
+def match_device(devices, name: str | None) -> str | None:
+    """Return the best match's address, or None. Split out for testing.
+
+    With no name asked for, the board is the one that speaks the Management
+    Service, and a legacy NUS-only board is the fallback. With a name, the
+    name is what the caller asked for - compared without regard to its case,
+    because a label is written by a person and the case in it is not a
+    promise.
+    """
+    if name is None:
+        managed = [dev for dev in devices if advertises_management(dev)]
+        legacy = [dev for dev in devices if is_legacy_name(dev.name)]
+        candidates = managed or legacy
+        if len(candidates) > 1:
+            warn("multiple Linkr devices found; use --address to select one")
+        return candidates[0].address if candidates else None
+
+    prefix = normalize_name_prefix(name).lower()
     for dev in devices:
-        if dev.name == name:
+        if dev.name and dev.name.lower() == prefix:
             return dev.address
 
-    prefix = normalize_name_prefix(name)
     prefixed = [
         dev for dev in devices
-        if dev.name and dev.name.startswith(prefix)
+        if dev.name and dev.name.lower().startswith(prefix)
     ]
     if not prefixed:
         return None
@@ -453,21 +555,76 @@ def match_device(devices, name: str) -> str | None:
     return prefixed[0].address
 
 
-async def find_device(name: str, address: str | None, timeout: float,
+def describe_devices(devices) -> str:
+    """The nearby boards as `name (address)`, for a message that must say
+    what to do next rather than only what did not happen."""
+    rows = [
+        f"  {dev.name or '(unknown)'} ({dev.address})"
+        for dev in devices
+    ]
+    if not rows:
+        return "  (nothing nearby was heard)"
+    return "\n".join(rows[:6])
+
+
+def parse_ble_name(text: str) -> str | None:
+    """The name out of `OK name=<name> custom=yes|no`.
+
+    The name may contain spaces, so the suffix is peeled off the right
+    rather than by splitting the line on whitespace.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.lower().startswith("ok name="):
+            continue
+        name = line[8:].strip()
+        marker = name.rfind(" custom=")
+        if marker >= 0 and name[marker + 8:].lower() in ("yes", "no"):
+            name = name[:marker].rstrip()
+        return name
+    return None
+
+
+async def find_device(name: str | None, address: str | None, timeout: float,
                       devices=None) -> str:
-    """Return the BLE address to connect to, reusing a completed scan."""
+    """Return the BLE address to connect to, reusing a completed scan.
+
+    With no name asked for, the board is found by the service it speaks and
+    not by the label it carries: the owner can change that at any time.
+    """
     if address:
         return address
 
-    import_bleak()
-    prefix = normalize_name_prefix(name)
+    criterion = (f"name {normalize_name_prefix(name)}*" if name is not None
+                 else "Linkr Management Service or legacy Linkr BLE UART name")
     if devices is None:
-        info(f"scanning for BLE device matching {prefix + '*'}")
-        devices = await BleakScanner.discover(timeout=timeout)
+        # bleak is only needed to listen. A caller that hands over a
+        # completed scan - the tests, and a host that scanned for something
+        # else - is answered without it.
+        import_bleak()
+        info(f"scanning for BLE device matching {criterion}")
+        devices = await discover_devices(timeout)
 
-    match = match_device(devices, name)
+    if name:
+        match = match_device(devices, name)
+        if match is None:
+            prefix = normalize_name_prefix(name)
+            raise RuntimeError(
+                f"no board matched {prefix + '*'}. The advertised name is a "
+                f"label the owner can change, so a renamed board is found by "
+                f"its address instead: pass --address. Nearby devices:\n"
+                f"{describe_devices(devices)}"
+            )
+        return match
+
+    match = match_device(devices, None)
     if match is None:
-        raise RuntimeError(f"device not found matching: {prefix + '*'}")
+        raise RuntimeError(
+            "no Linkr Bee was found nearby. The advertised name is a label "
+            "the owner can change, so a renamed board is found by its "
+            "address instead: pass --address. Nearby devices:\n"
+            f"{describe_devices(devices)}"
+        )
     return match
 
 
@@ -856,7 +1013,8 @@ def has_control_action(args: argparse.Namespace) -> bool:
     return any((
         args.query_info, args.query_uart, args.uart, args.wifi,
         args.wifi_scan, args.wifi_off, args.query_wifi, args.webdav,
-        args.webdav_off, args.query_webdav,
+        args.webdav_off, args.query_webdav, args.rename_ble,
+        args.reset_ble_name, args.query_ble_name,
         args.loopback_test is not None, args.pair,
     ))
 
@@ -1154,8 +1312,8 @@ async def run(args: argparse.Namespace) -> int:
             task.add_done_callback(geometry_tasks.discard)
 
     info("connecting...")
-    info("new host: hold Bee GPIO1 to GND before pairing. "
-         "Bonded hosts reconnect without GPIO1.")
+    info("new host: hold the Bee pairing GPIO to GND before pairing "
+         "(GPIO1 C3/C5, GPIO4 WROOM). Bonded hosts reconnect without it.")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
 
     try:
@@ -1209,8 +1367,8 @@ async def run(args: argparse.Namespace) -> int:
             if webdav_actions and not capabilities & MGMT_CAP_WEBDAV:
                 raise RuntimeError("device does not advertise WebDAV support")
             device_id = bytes(await client.read_gatt_char(MGMT_DEVICE_ID_UUID))
-            if len(device_id) != 16:
-                raise RuntimeError("invalid Linkr Device ID length")
+            if not is_linkr_device_id(device_id):
+                raise RuntimeError("invalid Linkr Device ID")
             info(
                 f"management API v{protocol[0]}.{protocol[1]}, "
                 f"device ID {device_id.hex()}"
@@ -1243,6 +1401,18 @@ async def run(args: argparse.Namespace) -> int:
             await client.start_notify(
                 RELIABLE_UART_TX_UUID, reliable.on_indication
             )
+
+            # The board's own name, not the label the air carried: the owner
+            # can change that label at any time, and a session that reported
+            # the old one would be naming a board it is not talking to.
+            try:
+                answer = await management.send(b"@n?")
+            except Exception as exc:  # a board that predates the command
+                info(f"the board did not report its name: {exc}")
+            else:
+                name = parse_ble_name(answer.decode(errors="replace"))
+                if name:
+                    info(f"board name: {name}")
 
             if args.query_info:
                 await management.send(b"@i?")
@@ -1280,6 +1450,15 @@ async def run(args: argparse.Namespace) -> int:
 
             if args.query_webdav:
                 await management.send(b"@d?")
+
+            if args.rename_ble is not None:
+                await management.send(f"@n={args.rename_ble}".encode())
+
+            if args.reset_ble_name:
+                await management.send(b"@n default")
+
+            if args.query_ble_name:
+                await management.send(b"@n?")
 
             if args.loopback_test is not None:
                 payload = args.loopback_test.encode()
@@ -1341,8 +1520,10 @@ def build_parser() -> argparse.ArgumentParser:
                         version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--name",
-        default=DEFAULT_NAME,
-        help="BLE device name or prefix; default matches Linkr BLE UART*",
+        default=None,
+        help="explicit BLE name/prefix filter; by default the board is found "
+             "by the Linkr Management Service, because the advertised name is "
+             "a label the owner can change",
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true",
@@ -1368,8 +1549,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
     parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
     parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
+    parser.add_argument("--query-ble-name", action="store_true",
+                        help="send @n? and print the advertised BLE name")
+    parser.add_argument("--rename-ble", type=normalize_ble_name, metavar="NAME",
+                        help="set a custom advertised BLE name (1-29 UTF-8 bytes)")
+    parser.add_argument("--reset-ble-name", action="store_true",
+                        help="restore the MAC-derived advertised BLE name")
     parser.add_argument("--pair", action="store_true",
-                        help="request OS bonding (hold Bee GPIO1 low); macOS pairs on encrypted reads")
+                        help="request OS bonding (hold pairing GPIO low: GPIO1 C3/C5, "
+                             "GPIO4 WROOM); macOS pairs on encrypted reads")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
     parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,
@@ -1384,7 +1572,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-completion", choices=COMPLETION_SHELLS,
                         help="print a shell completion script and exit")
     parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
-                        help="max bytes per BLE RX write; default auto")
+                        help="terminal write size; default auto; management uses at least 20")
     parser.add_argument("--write-response", action="store_true",
                         help="use GATT write-with-response")
     parser.add_argument("--write-delay-ms", type=nonnegative_float, default=5.0,

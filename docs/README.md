@@ -24,7 +24,7 @@ Screenshots are UI previews with sample output, not hardware acceptance evidence
 | [Development guide](DEVELOPMENT.zh-CN.md) | Chinese | Chinese edition of the development guide |
 | [Hardware requirements](HARDWARE.md) | Chinese | Pinout, electrical requirements, test points, and production notes |
 | [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) | Chinese | GATT services, framed requests, Reliable UART, and events |
-| [BLE pairing and recovery](BLE_PAIRING.md) | Chinese | GPIO1 authorization, persistent bonds, client steps, and recovery |
+| [BLE pairing and recovery](BLE_PAIRING.md) | Chinese | Pairing GPIO authorization (GPIO1 on C3/C5; WROOM optional GPIO4, off by default), persistent bonds, client steps, and recovery |
 | [HarmonyOS bridge protocol](../harmonyos/BRIDGE_PROTOCOL.md) | English | ArkWeb-to-ArkTS JSON bridge contract |
 | [Visual assets](../assets/README.md) | English | Logos, screenshot languages, and reproducible capture instructions |
 

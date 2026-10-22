@@ -20,7 +20,7 @@ use crate::theme::Theme;
 /// The documented reply from `docs/DEVELOPMENT.md`, which the web client's own
 /// tests use. `--sample` feeds exactly this to the grid.
 pub const SAMPLE: [&str; 6] = [
-    "@info fw version=0.2.0 zephyr=4.4.1",
+    "@info fw version=0.1.2 zephyr=4.4.1",
     "@info sys uptime_ms=123456 owner=0 security=1",
     "@info uart dropped=0 buffer=0/16384",
     "@info wifi state=connected ip=ready error=0",
@@ -491,7 +491,7 @@ mod tests {
         let (groups, done) = parse_info_lines(SAMPLE.iter().copied());
         assert!(done);
         assert_eq!(groups.len(), 5);
-        assert_eq!(groups["fw"]["version"], "0.2.0");
+        assert_eq!(groups["fw"]["version"], "0.1.2");
         assert_eq!(groups["fw"]["zephyr"], "4.4.1");
         assert_eq!(groups["sys"]["uptime_ms"], "123456");
         assert_eq!(groups["sys"]["owner"], "0");
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn renders_the_web_grid_values_exactly() {
         let groups = sample_groups();
-        assert_eq!(fmt_firmware(&groups), "0.2.0 · Z4.4.1");
+        assert_eq!(fmt_firmware(&groups), "0.1.2 · Z4.4.1");
         assert_eq!(fmt_uptime(&groups), "2m 3s");
         assert_eq!(fmt_ble_access(&groups, Lang::En), "open · link L1");
         assert_eq!(fmt_uart_buffer(&groups), "0/16384 · drop 0");
@@ -671,11 +671,11 @@ mod tests {
     #[test]
     fn grid_rows_are_labelled_and_clipped_to_the_width() {
         let theme = Theme::DARK;
-        let line = row_line("Firmware", "0.2.0 · Z4.4.1", 40, &theme);
+        let line = row_line("Firmware", "0.1.2 · Z4.4.1", 40, &theme);
         let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(joined.starts_with("Firmware"), "{joined}");
         assert!(joined.contains("│ "), "{joined}");
-        assert!(joined.contains("0.2.0 · Z4.4.1"), "{joined}");
+        assert!(joined.contains("0.1.2 · Z4.4.1"), "{joined}");
         assert!(text::columns(&joined) <= 40, "{joined}");
 
         let long = row_line("Firmware", &"x".repeat(200), 40, &theme);
@@ -692,7 +692,7 @@ mod tests {
         let theme = Theme::DARK;
         for width in 0u16..40 {
             for (label, value) in [
-                ("Firmware", "0.2.0 · Z4.4.1"),
+                ("Firmware", "0.1.2 · Z4.4.1"),
                 ("运行时间", "2m 3s"),
                 ("上传队列", "0 B · HTTP 201 · fail 0"),
             ] {
@@ -813,7 +813,7 @@ mod tests {
         assert!(text.contains("Diagnostics"), "{text}");
         assert!(text.contains("@i? · updated 19:08:06"), "{text}");
         assert!(text.contains("Firmware"), "{text}");
-        assert!(text.contains("0.2.0 · Z4.4.1"), "{text}");
+        assert!(text.contains("0.1.2 · Z4.4.1"), "{text}");
         assert!(text.contains("r refresh"), "{text}");
 
         app.lang = Lang::Zh;
@@ -890,7 +890,7 @@ mod tests {
         let theme = Theme::DARK;
         let mut app = connected_app(Lang::En);
         let lines_in = vec![
-            "@info fw version=0.2.0".to_string(),
+            "@info fw version=0.1.2".to_string(),
             "@info radio mode=ble mtu=244".to_string(),
             "@info done".to_string(),
         ];

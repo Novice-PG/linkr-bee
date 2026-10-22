@@ -9,7 +9,7 @@
 
 use ratatui::text::{Line, Span};
 
-use crate::accessory::{WebdavStatus, WifiStatus};
+use crate::accessory::{BleNameStatus, WebdavStatus, WifiStatus};
 use crate::app::App;
 use crate::dialogs::{self, ConfirmAction};
 use crate::text;
@@ -46,10 +46,18 @@ pub enum NetworkRow {
     WebdavOff,
     /// `@d?`.
     WebdavStatus,
+    /// The advertised BLE name, as the last `@n?` reported it.
+    BleName,
+    /// `@n=<name>`.
+    BleNameRename,
+    /// `@n default`.
+    BleNameDefault,
+    /// `@n?`.
+    BleNameStatus,
 }
 
 /// Every row that is always there, in the order the view draws them.
-pub const ROWS: [NetworkRow; 9] = [
+pub const ROWS: [NetworkRow; 13] = [
     NetworkRow::Ssid,
     NetworkRow::Scan,
     NetworkRow::Connect,
@@ -59,6 +67,10 @@ pub const ROWS: [NetworkRow; 9] = [
     NetworkRow::WebdavSet,
     NetworkRow::WebdavOff,
     NetworkRow::WebdavStatus,
+    NetworkRow::BleName,
+    NetworkRow::BleNameRename,
+    NetworkRow::BleNameDefault,
+    NetworkRow::BleNameStatus,
 ];
 
 /// How many of [`ROWS`] come before the scan results. The results are drawn
@@ -150,6 +162,8 @@ pub struct NetworkState {
     pub wifi: Option<WifiStatus>,
     /// The device's last reported WebDAV status (`@d?`).
     pub webdav: Option<WebdavStatus>,
+    /// The device's last reported advertised BLE name (`@n?`).
+    pub ble_name: Option<BleNameStatus>,
     /// The SSID typed into the form, echoed back verbatim.
     pub ssid_input: String,
     /// Scan results, as the device reported them.
@@ -167,6 +181,7 @@ impl Default for NetworkState {
         NetworkState {
             wifi: None,
             webdav: None,
+            ble_name: None,
             ssid_input: String::new(),
             scan_results: Vec::new(),
             loading: false,
@@ -547,6 +562,52 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
     }
 
     lines.push(Line::from(""));
+    lines.push(heading(s.net_ble_name_section, width, theme));
+    lines.push(note(s.net_ble_name_hint, width, theme));
+    let ble_name = state
+        .ble_name
+        .as_ref()
+        .map(|name| name.name.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(empty);
+    if on(NetworkRow::BleName) {
+        focused_line = lines.len();
+    }
+    lines.push(field_row(
+        &format!("{}{}", s.net_ble_name_label, s.label_separator),
+        ble_name,
+        on(NetworkRow::BleName),
+        width,
+        theme,
+    ));
+    for (row, word) in [
+        (NetworkRow::BleNameRename, s.net_ble_name_rename),
+        (NetworkRow::BleNameDefault, s.net_ble_name_default_action),
+        (NetworkRow::BleNameStatus, s.net_ble_name_status_action),
+    ] {
+        if on(row) {
+            focused_line = lines.len();
+        }
+        lines.push(action_row(word, s.net_ble_only, on(row), width, theme));
+    }
+    if let Some(name) = &state.ble_name {
+        let source = match name.custom {
+            Some(true) => s.net_ble_name_custom,
+            Some(false) => s.net_ble_name_default,
+            None => "",
+        };
+        lines.push(note(
+            &if source.is_empty() {
+                format!("BLE: {}", name.name)
+            } else {
+                format!("BLE: {} ({source})", name.name)
+            },
+            width,
+            theme,
+        ));
+    }
+
+    lines.push(Line::from(""));
     lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
     (lines, focused_line)
 }
@@ -649,6 +710,19 @@ fn activate(app: &mut App) {
                 });
             }
         }
+        NetworkRow::BleName | NetworkRow::BleNameRename => dialogs::prompt_ble_name(app),
+        NetworkRow::BleNameDefault => dialogs::ask(
+            app,
+            ConfirmAction::Accessory(crate::accessory::reset_ble_name_command()),
+        ),
+        NetworkRow::BleNameStatus => {
+            if let Err(why) = app.ask_device(Query::BleName) {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: crate::event::NoticeLevel::Error,
+                });
+            }
+        }
     }
 }
 
@@ -700,6 +774,10 @@ mod tests {
             "扫描结果",
             "暂无结果",
             "仅限 BLE",
+            "BLE 广播名",
+            "[修改名称]",
+            "[恢复默认]",
+            "[读取名称]",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in {text:?}");
         }
@@ -792,13 +870,17 @@ mod tests {
             NetworkRow::WebdavSet,
             NetworkRow::WebdavOff,
             NetworkRow::WebdavStatus,
+            NetworkRow::BleName,
+            NetworkRow::BleNameRename,
+            NetworkRow::BleNameDefault,
+            NetworkRow::BleNameStatus,
             NetworkRow::Ssid,
         ] {
             state.focus_next();
             assert_eq!(state.focus, expected);
         }
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::WebdavStatus);
+        assert_eq!(state.focus, NetworkRow::BleNameStatus);
 
         // With a network joined the results are unreachable, and the walk
         // never lands on one.
@@ -825,7 +907,7 @@ mod tests {
     fn the_focus_wraps_at_both_ends() {
         let mut state = NetworkState::default();
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::WebdavStatus);
+        assert_eq!(state.focus, NetworkRow::BleNameStatus);
         state.focus_next();
         assert_eq!(state.focus, NetworkRow::Ssid);
     }
@@ -1008,6 +1090,65 @@ mod tests {
         assert!(
             a.network.error.is_none(),
             "and nothing was said to be wrong"
+        );
+    }
+
+    /// The advertised-name section shows what `@n?` read, offers the three
+    /// actions, and puts the name into the prompt so a correction is small.
+    #[test]
+    fn the_ble_name_section_shows_its_actions_and_prefills_the_prompt() {
+        let theme = Theme::DARK;
+        let mut a = app(Lang::Zh);
+        a.network.ble_name = Some(BleNameStatus {
+            name: "测试😀".into(),
+            custom: Some(true),
+        });
+        let text = body_text(&lines(&a, &theme, 80));
+        for needle in [
+            "BLE 广播名",
+            "测试😀",
+            "[修改名称]",
+            "[恢复默认]",
+            "[读取名称]",
+            "自定义",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in {text:?}");
+        }
+        a.network.focus = NetworkRow::BleNameRename;
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        let Some(Dialog::Prompt(prompt)) = &a.dialog else {
+            panic!("the name prompt came up: {:?}", a.dialog);
+        };
+        assert_eq!(prompt.action, PromptAction::BleName);
+        assert_eq!(prompt.field.answer(), "测试😀");
+    }
+
+    /// The read action asks the bridge at once, and the default action asks
+    /// first because it writes a persisted value.
+    #[test]
+    fn ble_name_reads_are_direct_and_changes_are_confirmed() {
+        let mut a = app(Lang::En);
+        a.network.focus = NetworkRow::BleNameStatus;
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert!(a.dialog.is_none(), "no card for a read");
+
+        a.network.focus = NetworkRow::BleNameDefault;
+        assert!(handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        let Some(Dialog::Confirm(card)) = &a.dialog else {
+            panic!("the approval card came up: {:?}", a.dialog);
+        };
+        assert_eq!(
+            card.action,
+            ConfirmAction::Accessory("@n default".to_string())
         );
     }
 

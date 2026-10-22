@@ -175,6 +175,7 @@ const PROMPT_REVEAL: Duration = Duration::from_millis(1500);
 const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
 const WEBDAV_TITLE: Entry = [" WebDAV log upload ", " WebDAV 日志上传 "];
+const BLE_NAME_TITLE: Entry = [" BLE advertised name ", " BLE 广播名 "];
 const LAN_HOST_TITLE: Entry = [" LAN host ", " 局域网主机 "];
 const LAN_TOKEN_TITLE: Entry = [" LAN token ", " 局域网令牌 "];
 
@@ -722,6 +723,8 @@ pub enum PromptAction {
     WifiPassword,
     /// Where the bridge uploads its logs, using anonymous HTTP.
     WebdavUrl,
+    /// The name the bridge advertises to BLE scanners.
+    BleName,
     /// The address a LAN dial goes to, kept in the sidebar row it edits.
     LanHost,
     /// The token that dial carries. Held in the sidebar row and in the dial,
@@ -808,6 +811,10 @@ impl Prompt {
                 "Anonymous HTTP upload URL (http://)",
                 "匿名 HTTP 上传地址（http://）",
             ],
+            PromptAction::BleName => [
+                "1-29 UTF-8 bytes; Chinese and emoji are allowed",
+                "1–29 个 UTF-8 字节，支持中文和 emoji",
+            ],
             PromptAction::LanHost => [
                 "The bridge's LAN address (the board's WiFi IP)",
                 "桥接的局域网地址（板子的 WiFi IP）",
@@ -829,6 +836,7 @@ impl Prompt {
                 "for example http://dav.example.com/logs/",
                 "例如 http://dav.example.com/logs/",
             ],
+            PromptAction::BleName => ["for example Bench Bee 078C", "例如 测试😀"],
             PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
             PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
         }
@@ -1076,6 +1084,23 @@ pub fn prompt_webdav_url(app: &mut App) {
         .map(|status| status.url.as_str())
         .unwrap_or("");
     let prompt = Prompt::with_text(WEBDAV_TITLE, PromptAction::WebdavUrl, current);
+    raise(app, Dialog::Prompt(prompt));
+}
+
+/// Ask for the advertised BLE name. The field starts with the name last read
+/// from the bridge, so a small correction does not mean retyping it.
+pub fn prompt_ble_name(app: &mut App) {
+    // The name the board last reported, and the label the air carried when
+    // the board has not been asked yet: a prompt that opens empty invites a
+    // user to retype a name the interface already knows.
+    let current = app
+        .network
+        .ble_name
+        .as_ref()
+        .map(|status| status.name.as_str())
+        .or(app.advertised_name.as_deref())
+        .unwrap_or("");
+    let prompt = Prompt::with_text(BLE_NAME_TITLE, PromptAction::BleName, current);
     raise(app, Dialog::Prompt(prompt));
 }
 
@@ -2178,6 +2203,24 @@ fn start(app: &mut App, prompt: Prompt) {
                 Err(why) => {
                     app.push_notice(crate::app::Notice {
                         text: why,
+                        level: NoticeLevel::Error,
+                    });
+                    return;
+                }
+            };
+            ask(app, ConfirmAction::Accessory(command));
+        }
+        // The advertised name is checked here in the firmware's own units — a
+        // name that is 30 bytes is refused before a round trip — and the
+        // change still goes through the approval card because it is persisted
+        // and survives a reboot.
+        PromptAction::BleName => {
+            let command = match crate::accessory::ble_name_command(&answer) {
+                Ok(command) => command,
+                Err(_) => {
+                    let text = app.strings().net_ble_name_invalid.to_string();
+                    app.push_notice(crate::app::Notice {
+                        text,
                         level: NoticeLevel::Error,
                     });
                     return;

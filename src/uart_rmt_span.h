@@ -39,6 +39,9 @@
 
 #include "uart_autobaud.h" /* the follower's gate, and only that */
 
+/* Also visible to the disabled-feature inline stubs below. */
+struct linkr_uart_span;
+
 #if LINKR_UART_AUTOBAUD
 
 /**

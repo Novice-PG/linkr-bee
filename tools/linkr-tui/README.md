@@ -60,7 +60,7 @@ three rules:
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
 | `serve.rs` | The resident session: the request grammar, the one-link loop, and the begin/end frame a caller correlates its answers by |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
-| `views/network.rs` | The WiFi and WebDAV form: nine rows the keyboard walks, each action raising an approval card that names the change rather than the command |
+| `views/network.rs` | The WiFi, WebDAV and BLE-name form: thirteen rows the keyboard walks, each action raising an approval card that names the change rather than the command |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -137,10 +137,21 @@ cargo run -- --ble-name Linkr --query-info --query-uart --json
 cargo run -- --ble-name Linkr --uart 921600,8,n,1,none
 cargo run -- --ble-name Linkr --wifi BenchNet --wifi-key-file ~/.wifi
 cargo run -- --ble-name Linkr --wifi-scan --loopback-test --no-terminal
+cargo run -- --ble-name Linkr --query-ble-name --json
+cargo run -- --ble-name Linkr --rename-ble "测试😀" --json
+cargo run -- --ble-name Linkr --reset-ble-name --json
 cargo run -- --print-completion zsh
 cargo run -- --scan --timeout 5
 cargo run -- --ble-name Linkr --serve
 ```
+
+The advertised BLE name has an entry in the terminal as well: the network view
+carries the current name, *Rename*, *Restore default* and *Read name*. A name
+is 1–29 UTF-8 bytes; the prompt checks it in the firmware's own units before a
+card asks for approval, so Chinese and emoji are accepted and a name the board
+would refuse never leaves the host. The write is confirmed by the board and
+read back, and the row then says whether the name is the MAC-derived default
+or a custom one.
 
 `--no-terminal` is implied by any flag that asks for something: a command line
 naming `--query-info` wants an answer, not an interface. Each request is sent
@@ -200,7 +211,7 @@ dial is seconds:
 
 ```console
 $ bee --ble-name Linkr --serve
-{"event":"ready","program":"bee","version":"0.5.0","link":"ble:name:Linkr",
+{"event":"ready","program":"bee","version":"0.1.2","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
         "lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
@@ -320,9 +331,9 @@ and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.5.0-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.5.0-x86_64-pc-windows-gnu.zip
-dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.5.0_armhf.deb
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.1.2-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.1.2-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.1.2_armhf.deb
 ```
 
 A Linux target other than the host links *that* target's libdbus, which is not

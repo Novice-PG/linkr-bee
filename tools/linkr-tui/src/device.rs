@@ -63,6 +63,8 @@ pub enum Query {
     WifiScan,
     /// `@d?` — whether the bridge uploads its logs over WebDAV, and where.
     Webdav,
+    /// `@n?` — the advertised BLE name, and whether it is custom.
+    BleName,
     /// `@s?` — LAN access state, and the token the bridge expects.
     Lan,
 }
@@ -76,6 +78,7 @@ impl Query {
             Query::Wifi => crate::accessory::WIFI_QUERY_COMMAND,
             Query::WifiScan => crate::accessory::WIFI_SCAN_COMMAND,
             Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
+            Query::BleName => crate::accessory::BLE_NAME_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
         }
     }
@@ -107,7 +110,7 @@ impl Query {
                         .error
                         .is_empty()
             }
-            Query::Uart | Query::Wifi | Query::Webdav | Query::Lan => {
+            Query::Uart | Query::Wifi | Query::Webdav | Query::BleName | Query::Lan => {
                 // One parse: either half of the verdict ends the question.
                 let status = crate::accessory::reply_status(&lines.join("\n"));
                 status.ok || !status.error.is_empty()
@@ -352,12 +355,13 @@ mod tests {
         assert_eq!(Query::Uart.command(), "@u?");
         assert_eq!(Query::Wifi.command(), "@w?");
         assert_eq!(Query::WifiScan.command(), "@w scan");
+        assert_eq!(Query::BleName.command(), "@n?");
     }
 
     #[test]
     fn a_read_ends_at_the_line_that_says_it_ends() {
         assert!(Query::Diagnostics.complete(&["@info sys uptime_ms=1".into(), "@info done".into()]));
-        assert!(!Query::Diagnostics.complete(&["@info fw version=0.2.0".into()]));
+        assert!(!Query::Diagnostics.complete(&["@info fw version=0.1.2".into()]));
         assert!(Query::Uart.complete(&["OK uart=115200,8,N,1,none".into()]));
         // An error is an ending too: the answer arrived, it just said no.
         assert!(Query::Wifi.complete(&["ERR ssid too long".into()]));
@@ -370,6 +374,9 @@ mod tests {
         assert!(Query::WifiScan.complete(&["@scan done".into()]));
         assert!(Query::WifiScan.complete(&["@scan error".into()]));
         assert!(Query::WifiScan.complete(&["ERR scan=-16".into()]));
+        assert!(Query::BleName.complete(&["OK name=Bench Bee custom=no".into()]));
+        assert!(Query::BleName.complete(&["ERR name expected 1-29 UTF-8 bytes".into()]));
+        assert!(!Query::BleName.complete(&[]));
     }
 
     #[test]
@@ -382,7 +389,7 @@ mod tests {
         // A scan is the radio walking channels.
         assert_eq!(Query::WifiScan.patience(), SCAN_TIMEOUT);
         // The rest are answered out of the bridge's own state in milliseconds.
-        for query in [Query::Uart, Query::Wifi, Query::Lan] {
+        for query in [Query::Uart, Query::Wifi, Query::BleName, Query::Lan] {
             assert_eq!(query.patience(), REPLY_TIMEOUT, "{query:?}");
         }
     }
@@ -420,7 +427,7 @@ mod tests {
         let (id, _) = talk.ask(Query::Diagnostics, start);
         let (header, body) = response(
             id,
-            "@info fw version=0.2.0\n@info sys uptime_ms=123456\n@info done",
+            "@info fw version=0.1.2\n@info sys uptime_ms=123456\n@info done",
             MGMT_FLAG_FINAL,
         );
         assert!(talk.offer(&header, &body));
@@ -447,7 +454,7 @@ mod tests {
         let start = Instant::now();
         let mut talk = Conversation::new();
         let (id, _) = talk.ask(Query::Diagnostics, start);
-        let (head, part) = response(id, "@info fw version=0.2.0\n", 0);
+        let (head, part) = response(id, "@info fw version=0.1.2\n", 0);
         assert!(talk.offer(&head, &part));
         assert!(
             talk.take_reply().is_none(),
@@ -471,11 +478,11 @@ mod tests {
         let (head, part) = response(id, "@info fw vers", 0);
         assert!(talk.offer(&head, &part));
         assert!(talk.take_reply().is_none(), "half a word is not a read");
-        let (tail, rest) = response(id, "ion=0.2.0\n@info done", MGMT_FLAG_FINAL);
+        let (tail, rest) = response(id, "ion=0.1.2\n@info done", MGMT_FLAG_FINAL);
         assert!(talk.offer(&tail, &rest));
         let reply = talk.take_reply().expect("whole now");
         assert_eq!(reply.lines.len(), 2, "the halves are one line each");
-        assert_eq!(reply.lines[0], "@info fw version=0.2.0");
+        assert_eq!(reply.lines[0], "@info fw version=0.1.2");
         assert_eq!(reply.lines[1], "@info done");
     }
 

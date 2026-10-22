@@ -108,10 +108,15 @@ The UART side is 3.3 V logic, not RS-232. See the
    Super Mini the bridge uses GPIO20 (RX) and GPIO21 (TX); other boards are in the
    [hardware requirements](docs/HARDWARE.md#3-引脚分配).
 
-3. Power both sides. The blue LED flashes while bytes cross the bridge.
+3. Power both sides. The blue activity LED flashes while bytes cross the bridge
+   on every board (WROOM: GPIO2). On WROOM the optional autobaud key is GPIO13;
+   it is used only when `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y` (off in the
+   default build).
 
-4. Authorize this host: hold **GPIO1 to GND**, connect, and accept the pairing
-   prompt. Release GPIO1 afterwards; the host is remembered.
+4. Authorize this host if the board requires it: hold the pairing GPIO to GND
+   (**GPIO1** on C3/C5), connect, and accept the pairing prompt. WROOM ships
+   with pairing authorization disabled, so no GPIO4 press is needed; enable
+   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` to require it.
 
 5. Open a client. For the web terminal:
 
@@ -186,8 +191,10 @@ network. Use LAN mode on a network you trust.
 
 ## Pairing and security
 
-- The Bluetooth LE link is encrypted and bonded. Each new host is authorized once by
-  holding **GPIO1 to GND** during pairing.
+- The Bluetooth LE link is encrypted and bonded. On C3/C5 each new host is
+  authorized once by holding **GPIO1** to GND during pairing. WROOM disables the
+  physical pairing check by default; GPIO4 is optional when
+  `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` is enabled.
 - Eight hosts are remembered across reboots and are not evicted automatically, so
   remove an unused host or factory-reset before adding a ninth.
 - Pairing uses LE Secure Connections Just Works, which has no man-in-the-middle
@@ -206,13 +213,18 @@ network. Use LAN mode on a network you trust.
 | No output | Target TX to accessory RX, target is printing, baud rate matches |
 | Output but no input | Target RX to accessory TX; hardware flow control off unless CTS and RTS are both wired |
 | Garbled output | UART format matches the target: baud rate, data bits, parity, stop bits |
-| No pairing prompt | GPIO1 grounded before connecting |
+| No pairing prompt | On C3/C5, ground GPIO1 before connecting; WROOM needs no GPIO press unless its optional pairing check is enabled |
 | LAN mode fails | Accessory on 2.4 GHz, host on the same network, token matches the one reported over Bluetooth LE |
 
 ## Limits
 
-- Devices are matched by the Linkr management service, so any `Linkr BLE UART-*`
-  suffix works.
+- Current firmware is matched by the Linkr Management Service, not by its
+  advertised name. The default name is `Linkr Bee XXXX`, where `XXXX` is the
+  last four hex digits of the hardware MAC (for example
+  `58:BF:25:33:07:8C` → `078C`); custom names are display-only and can be set
+  with `@n`. The TUI and Web clients also accept the fixed
+  `Linkr BLE UART...` name of pre-service, NUS-only firmware as a terminal-only
+  compatibility fallback; a `Linkr Bee...` name without the service is refused.
 - Web Bluetooth means Chrome or Chromium. Safari and Firefox do not implement it.
 - WiFi provisioning is 2.4 GHz only.
 - iOS simulators cannot do Bluetooth LE; use a real device.

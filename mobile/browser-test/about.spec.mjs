@@ -22,7 +22,7 @@ async function openAbout(page) {
 test("the About page lists components, licences and contributors", async ({ page }) => {
   await openAbout(page);
   await expect(page.locator("#controlsPanel")).toHaveAttribute("data-settings-active", "about");
-  await expect(page.locator("#aboutMeta")).toContainText("0.1.0");
+  await expect(page.locator("#aboutMeta")).toContainText("0.1.2");
   await expect(page.locator("#aboutMeta")).toContainText("Apache-2.0");
 
   // Dependency upgrades can add or remove transitive components.
@@ -62,7 +62,9 @@ test("switching sections hides About and the language switch re-renders it", asy
   await page.locator('[data-settings-target="connection"]').tap();
   await expect(page.locator("#controlsPanel")).toHaveAttribute("data-settings-active", "connection");
   await expect(page.locator("#aboutPage")).toBeHidden();
-  await expect(page.locator('section[data-settings-page="connection"]')).toBeVisible();
+  // The connection page now has more than one card (the BLE-name settings are
+  // separate); target the original controls card, not an arbitrary first one.
+  await expect(page.locator('section[data-i18n-aria="connectionControls"]')).toBeVisible();
 
   await page.locator('[data-settings-target="about"]').tap();
   await page.locator("#drawerLangButton").tap();
@@ -81,6 +83,6 @@ test.describe("desktop", () => {
     await rail.click();
     await expect(page.locator("#aboutPage")).toBeVisible();
     await expect(rail).toHaveAttribute("aria-current", "page");
-    await expect(page.locator('section[data-settings-page="connection"]')).toBeHidden();
+    await expect(page.locator('section[data-i18n-aria="connectionControls"]')).toBeHidden();
   });
 });

@@ -28,8 +28,8 @@
  * as 0x21 ('!') with *zero* unprintable bytes at 19200 vs 115200, and as only
  * 21/96 at 115200 vs 921600, while 50-52% cases sat right on the threshold.
  * Those two links stayed broken and the firmware never noticed. Byte content
- * is a guess; the pulse width is a measurement, so the detector is armed
- * continuously and every window is judged on what the line actually did.
+ * is a guess; the pulse width is a measurement, so a requested pass arms the
+ * receiver and judges every window on what the line actually did.
  *
  * The window is 400 ms rather than a few tens: the peer's traffic is bursty
  * (measured: a burst about every 200 ms), a capture is only complete once a
@@ -154,6 +154,15 @@
 LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 
 #define AUTOBAUD_WINDOW_MS	400 /* >= one peer burst period (measured 200) */
+/*
+ * A pass is a bounded, user-requested operation, not a background follower.
+ * Five seconds without a capture is long enough for a 400 ms window, the
+ * two-window confirmation and a slow peer's burst gap, and short enough that
+ * a button press or @a does not leave the port being rewritten minutes later.
+ * A capture restarts the clock: a line that is still talking is evidence that
+ * the pass is still worth running.
+ */
+#define AUTOBAUD_TIMEOUT_MS	5000
 #define AUTOBAUD_CONFIRM	2	  /* agreeing windows before touching it */
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
 #define AUTOBAUD_REFUSED_MAX	6	  /* badly measured windows before saying so */
@@ -215,11 +224,21 @@ static uint8_t autobaud_refused;
 static uint8_t autobaud_quiet;
 /*
  * The line has been read within 2% of what the port is set to, so we know the
- * two agree. Set by a match, dropped by every reconfiguration — a port we
- * just changed has not been measured at its new rate yet, and a guess that
- * came out wrong has to stay correctable.
+ * two agree. Set by a match, dropped when this module reconfigures the port —
+ * a rate we just programmed has not been measured yet, and a guess that came
+ * out wrong has to stay correctable.
  */
 static bool autobaud_verified;
+
+/* A pass is started by a BLE command or the GPIO key, never by boot. The
+ * request flags are the only state the starter writes; the tick owns
+ * everything else, so an ISR never touches the decision variables. */
+static atomic_t autobaud_start_req;
+static atomic_t autobaud_stop_req;
+static atomic_t autobaud_running;
+static uint32_t autobaud_deadline;
+static bool autobaud_span_initialized;
+static linkr_uart_autobaud_callback_t autobaud_callback;
 
 static uart_dev_t *autobaud_hw(void)
 {
@@ -234,6 +253,109 @@ static void autobaud_forget(void)
 {
 	autobaud_confirm = 0;
 	autobaud_candidate = 0;
+}
+
+/*
+ * Begin one bounded pass. Runs on the system workqueue, the only writer of
+ * the decision state. The RMT receiver is armed lazily, so a board that never
+ * asks for a pass does not capture bursts nobody will read.
+ */
+static void autobaud_begin(uint32_t now)
+{
+	struct linkr_uart_span discard;
+
+	autobaud_forget();
+	autobaud_refused = 0;
+	autobaud_quiet = 0;
+	/*
+	 * Do not reset autobaud_verified here. init() trusts the rate the port
+	 * was configured to, but a rate this code applied is deliberately left
+	 * unverified until a later capture matches it. If every new pass
+	 * re-trusted that rate, a peer that had since moved to one of our
+	 * divisors (for example 921600 -> 115200) would be refused as a
+	 * missing-bit artifact and the manual pass could never put it back.
+	 */
+	autobaud_cooldown_until = now;
+	autobaud_warned_at = now - AUTOBAUD_WARN_MS;
+	autobaud_deadline = now + AUTOBAUD_TIMEOUT_MS;
+
+	if (!autobaud_span_initialized) {
+		linkr_uart_rmt_span_init(autobaud_reg);
+		autobaud_span_initialized = true;
+	} else {
+		/* A capture left over from the previous pass is not evidence
+		 * about this one. */
+		(void)linkr_uart_rmt_span_poll(&discard);
+	}
+
+	atomic_set(&autobaud_running, 1);
+	LOG_INF("UART autobaud: pass started (%u ms inactivity timeout)",
+		AUTOBAUD_TIMEOUT_MS);
+}
+
+/*
+ * Stop the pass and publish its result. Keep autobaud_running set while the
+ * callback runs: a new @a must not claim the previous pass's request ID
+ * before the callback has read it. The tick returns immediately after this,
+ * so the flag is cleared on the same system-workqueue visit.
+ */
+static void autobaud_finish(enum linkr_uart_autobaud_result result,
+			    uint32_t old_baud, uint32_t new_baud)
+{
+	if (!atomic_get(&autobaud_running)) {
+		return;
+	}
+
+	autobaud_forget();
+	if (autobaud_callback) {
+		autobaud_callback(result, old_baud, new_baud);
+	}
+	atomic_set(&autobaud_running, 0);
+}
+
+void linkr_uart_autobaud_set_callback(linkr_uart_autobaud_callback_t callback)
+{
+	autobaud_callback = callback;
+}
+
+int linkr_uart_autobaud_request(void)
+{
+	if (atomic_get(&autobaud_running) || atomic_get(&autobaud_start_req)) {
+		return -EALREADY;
+	}
+	if (!atomic_cas(&autobaud_start_req, 0, 1)) {
+		return -EALREADY;
+	}
+
+	/* A start supersedes a stop that has not been consumed yet. */
+	atomic_set(&autobaud_stop_req, 0);
+	k_work_reschedule(&autobaud_work, K_NO_WAIT);
+	return 0;
+}
+
+int linkr_uart_autobaud_stop(void)
+{
+	if (!linkr_uart_autobaud_running()) {
+		return -EALREADY;
+	}
+
+	atomic_set(&autobaud_stop_req, 1);
+	k_work_reschedule(&autobaud_work, K_NO_WAIT);
+	return 0;
+}
+
+bool linkr_uart_autobaud_running(void)
+{
+	/* A queued pass is already running from the caller's point of view:
+	 * @a? and a second @a must not race the workqueue between the request
+	 * and the first tick. */
+	return atomic_get(&autobaud_running) != 0 ||
+	       atomic_get(&autobaud_start_req) != 0;
+}
+
+uint32_t linkr_uart_autobaud_timeout_ms(void)
+{
+	return AUTOBAUD_TIMEOUT_MS;
 }
 
 /*
@@ -342,10 +464,38 @@ static void autobaud_tick(struct k_work *work)
 	uint32_t artifact_max_factor, max_factor;
 	struct linkr_uart_span span;
 	bool captured;
+	bool start_pass, stop_pass;
 	int line_level;
 	uint64_t measured;
 
 	ARG_UNUSED(work);
+
+	/*
+	 * Consume the starter's flags on the system workqueue. A stop and a
+	 * start can land in the same visit (a stop racing the first tick), so
+	 * begin first and then stop: the session gets its one final event
+	 * instead of the command's response waiting for a pass that never
+	 * existed.
+	 */
+	start_pass = atomic_cas(&autobaud_start_req, 1, 0);
+	stop_pass = atomic_cas(&autobaud_stop_req, 1, 0);
+
+	if (start_pass) {
+		autobaud_begin(now);
+	}
+	if (stop_pass) {
+		if (atomic_get(&autobaud_running)) {
+			uint32_t baud = linkr_uart_config_current();
+
+			LOG_INF("UART autobaud: pass stopped");
+			autobaud_finish(LINKR_UART_AUTOBAUD_STOPPED, baud, baud);
+		}
+		return;
+	}
+
+	if (!atomic_get(&autobaud_running)) {
+		return; /* idle: no timer, no RMT receiver, no work */
+	}
 
 	/*
 	 * Take the capture that completed since the last visit and recommit to
@@ -357,6 +507,19 @@ static void autobaud_tick(struct k_work *work)
 	 */
 	captured = linkr_uart_rmt_span_poll(&span);
 	line_level = linkr_uart_rmt_span_line_level();
+
+	if (captured) {
+		/* Still talking: the pass stays alive while the line supplies
+		 * measurements, even if a candidate is not confirmed yet. */
+		autobaud_deadline = now + AUTOBAUD_TIMEOUT_MS;
+	} else if ((int32_t)(now - autobaud_deadline) >= 0) {
+		uint32_t baud = linkr_uart_config_current();
+
+		LOG_WRN("UART autobaud: no measurable traffic for %u ms, "
+			"keeping %u", AUTOBAUD_TIMEOUT_MS, baud);
+		autobaud_finish(LINKR_UART_AUTOBAUD_TIMEOUT, baud, baud);
+		return;
+	}
 
 	k_work_reschedule(&autobaud_work, K_MSEC(AUTOBAUD_WINDOW_MS));
 
@@ -470,6 +633,10 @@ static void autobaud_tick(struct k_work *work)
 		 */
 		autobaud_verified = true;
 		autobaud_forget(); /* we already match the line */
+		LOG_INF("UART autobaud: line already matches %u, port unchanged",
+			old_baud);
+		autobaud_finish(LINKR_UART_AUTOBAUD_UNCHANGED, old_baud,
+				old_baud);
 		return;
 	}
 
@@ -584,6 +751,7 @@ static void autobaud_tick(struct k_work *work)
 	if (linkr_uart_config_reconfigure(next)) {
 		autobaud_forget();
 		LOG_WRN("UART autobaud: uart_configure(%u) rejected", next);
+		autobaud_finish(LINKR_UART_AUTOBAUD_FAILED, old_baud, next);
 		return;
 	}
 
@@ -601,40 +769,43 @@ static void autobaud_tick(struct k_work *work)
 		old_baud, next, div_meas8 >> 8, autobaud_hundredths(div_meas8),
 		span.runs, span.dmin, hw->clk_div.div_int,
 		hw->clk_div.div_frag);
+	autobaud_finish(LINKR_UART_AUTOBAUD_APPLIED, old_baud, next);
 }
 
 void linkr_uart_autobaud_init(uintptr_t reg_addr)
 {
 	autobaud_reg = reg_addr;
+	autobaud_forget();
 	/*
 	 * The configured rate is the working assumption: both ends were set to
-	 * it, so the first reading that disagrees is the one that has to
-	 * explain itself. Starting out *un*verified instead made the very first
-	 * window free to move the port on a reading of our own rate over a run
-	 * longer than one bit — 0xCC arriving from reset computes 57600 from a
-	 * 115200 line, moves the port there, and then reads as a match at the
-	 * rate it just moved to, so no later window ever disagrees with the
-	 * guess and the link stays broken. Downward is still the one direction
-	 * a believed port refuses; a reading that is none of current / k is
-	 * followed here exactly as it always was.
+	 * it, so the first reading that disagrees has to explain itself. A rate
+	 * this module applies is left unverified until a later capture matches
+	 * it, and a new pass preserves that state (see autobaud_begin), so a
+	 * divisor-shaped wrong guess stays correctable. The artifact bound in
+	 * autobaud_reads_like_a_missing_bit() still refuses a busy line's
+	 * current / 2..5 shapes even while the port is unverified.
 	 */
 	autobaud_verified = true;
 	autobaud_quiet = 0;
+	autobaud_refused = 0;
 	/* Relative to now, so the wrap-safe comparison in the tick stays
 	 * valid however long the board has already been up. */
 	autobaud_cooldown_until = k_uptime_get_32();
-	/* Backdate the first warning too, so an implausible reading right
-	 * after reset is reported rather than swallowed by the rate limit. */
+	/* Backdate the first warning too, so an implausible reading in the
+	 * first pass is reported rather than swallowed by the rate limit. */
 	autobaud_warned_at = k_uptime_get_32() - AUTOBAUD_WARN_MS;
+	autobaud_deadline = 0;
+	autobaud_span_initialized = false;
+	atomic_set(&autobaud_start_req, 0);
+	atomic_set(&autobaud_stop_req, 0);
+	atomic_set(&autobaud_running, 0);
 
 	k_work_init_delayable(&autobaud_work, autobaud_tick);
 
-	/* Start listening immediately: the peer's rate is known a window
-	 * after reset rather than only after something has already gone
-	 * wrong. The span module logs and stays out of the way if it cannot
-	 * find the line to watch. */
-	linkr_uart_rmt_span_init(reg_addr);
-	k_work_reschedule(&autobaud_work, K_MSEC(AUTOBAUD_WINDOW_MS));
+	/* No RMT arming and no work item here: the detector is idle until the
+	 * user asks for a pass with @a or the trigger input. The first pass
+	 * arms the span module after the port has been configured. */
+	LOG_INF("UART autobaud: idle (start with @a or the trigger input)");
 }
 
 #endif /* LINKR_UART_AUTOBAUD */

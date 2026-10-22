@@ -209,7 +209,9 @@ struct Args {
     transport: Option<Transport>,
     /// The process bridge to dial, as `--bridge` names it.
     bridge: Option<String>,
-    /// The advertised name of the board to look for, as `--ble-name` gives it.
+    /// The advertised name of the board to look for, as `--ble-name` gives
+    /// it. A label the owner can change, so it selects a board and never
+    /// identifies one: the address does that.
     ble_name: Option<String>,
     /// The address of the board to dial, as `--ble-address` gives it. This
     /// wins over a name when both are given: a name finds a board *like* the
@@ -693,6 +695,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-uart" => args.requests.queries.push(device::Query::Uart),
             "--query-wifi" => args.requests.queries.push(device::Query::Wifi),
             "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
+            "--query-ble-name" => args.requests.queries.push(device::Query::BleName),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
@@ -710,6 +713,8 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--wifi-scan" => args.requests.wifi_scan = true,
             "--webdav" => args.requests.webdav = Some(value("--webdav")),
             "--webdav-off" => args.requests.webdav_off = true,
+            "--rename-ble" => args.requests.ble_name = Some(value("--rename-ble")),
+            "--reset-ble-name" => args.requests.ble_name_default = true,
             "--loopback-test" => {
                 // `nargs="?"` in the reference client: `--loopback-test` alone
                 // sends `A`, which is the shortest thing that can fail in an
@@ -994,8 +999,8 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"query-webdav\",\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
-                "\"webdav\",\"webdav-off\",",
+                "\"query-webdav\",\"query-ble-name\",\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"webdav\",\"webdav-off\",\"rename-ble\",\"reset-ble-name\",",
                 "\"exec\",\"send\",\"doctor\",\"loopback-test\",\"link-state\"{}],",
                 // The subcommands are the same runs written as words, and a
                 // caller that reads them here can write either form: the list
@@ -1035,10 +1040,12 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "\n",
                 "scan        --scan                     list what is on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
-                "            --query-wifi --query-webdav --wifi-scan --query-lan\n",
+                "            --query-wifi --query-webdav --query-ble-name --wifi-scan\n",
+                "            --query-lan\n",
                 "state       --link-state               this link: live, counters, transport\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
                 "            --webdav --webdav-off\n",
+                "            --rename-ble NAME --reset-ble-name\n",
                 "execute     --exec COMMAND             run a shell command on the target\n",
                 "            --idle WINDOW              end it when the output goes quiet\n",
                 "            --retry N                  resend it after a timeout\n",
@@ -3024,6 +3031,25 @@ mod tests {
     fn args(list: &[&str]) -> Args {
         let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
         parse_args("bee", &owned)
+    }
+
+    /// The BLE name is read, set, and restored from the command line, and the
+    /// three are separate requests: a name and a reset are not both asked for.
+    #[test]
+    fn the_ble_name_flags_reach_the_request_they_name() {
+        let read = args(&["--query-ble-name"]);
+        assert_eq!(
+            read.requests.queries,
+            vec![linkr_tui::device::Query::BleName]
+        );
+
+        let set = args(&["--rename-ble", "Bench Bee"]);
+        assert_eq!(set.requests.ble_name.as_deref(), Some("Bench Bee"));
+        assert!(!set.requests.ble_name_default);
+
+        let reset = args(&["--reset-ble-name"]);
+        assert!(reset.requests.ble_name_default);
+        assert!(reset.requests.ble_name.is_none());
     }
 
     /// `--exec` and its terms travel together, because they are one request

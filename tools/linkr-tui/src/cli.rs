@@ -160,7 +160,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::new(
         "--ble-name",
         Value::Free,
-        "dial the board whose name contains this",
+        "dial the board whose advertised name contains this (a label the owner can change; --ble-address is the identity)",
     ),
     Flag::new(
         "--lan-host",
@@ -275,6 +275,11 @@ pub const FLAGS: &[Flag] = &[
         "ask @d? and print the log-upload status",
     ),
     Flag::new(
+        "--query-ble-name",
+        Value::None,
+        "ask @n? and print the advertised BLE name",
+    ),
+    Flag::new(
         "--query-lan",
         Value::None,
         "ask @s? and print the bridge's LAN address and token state",
@@ -302,6 +307,16 @@ pub const FLAGS: &[Flag] = &[
         "set the HTTP upload URL for the log",
     ),
     Flag::new("--webdav-off", Value::None, "turn log upload off"),
+    Flag::new(
+        "--rename-ble",
+        Value::Free,
+        "set the advertised BLE name (1-29 UTF-8 bytes)",
+    ),
+    Flag::new(
+        "--reset-ble-name",
+        Value::None,
+        "restore the MAC-derived advertised BLE name",
+    ),
     Flag::new(
         "--loopback-test",
         Value::Optional,
@@ -373,10 +388,13 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
         "doctor",
         "one checkup: the link, the bridge, the loopback, the target",
     ),
-    ("query", "read one thing: info, uart, wifi, webdav or lan"),
+    (
+        "query",
+        "read one thing: info, uart, wifi, webdav, ble-name or lan",
+    ),
     (
         "set",
-        "change one thing and read it back: uart, wifi or webdav",
+        "change one thing and read it back: uart, wifi, webdav or ble-name",
     ),
     (
         "exec",
@@ -520,10 +538,11 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
                     "uart" => "--query-uart",
                     "wifi" => "--query-wifi",
                     "webdav" => "--query-webdav",
+                    "ble-name" => "--query-ble-name",
                     "lan" => "--query-lan",
                     other => {
                         return Err(format!(
-                        "query reads one of info, uart, wifi, webdav or lan; '{other}' is not one"
+                        "query reads one of info, uart, wifi, webdav, ble-name or lan; '{other}' is not one"
                     ))
                     }
                 }
@@ -534,15 +553,18 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
             let [what, value] = two_words(name, &words)?;
             if what == "webdav" && value.eq_ignore_ascii_case("off") {
                 translated.push("--webdav-off".to_string());
+            } else if what == "ble-name" && value.eq_ignore_ascii_case("default") {
+                translated.push("--reset-ble-name".to_string());
             } else {
                 translated.push(
                     match what.as_str() {
                         "uart" => "--uart",
                         "wifi" => "--wifi",
                         "webdav" => "--webdav",
+                        "ble-name" => "--rename-ble",
                         other => {
                             return Err(format!(
-                                "set changes one of uart, wifi or webdav; '{other}' is not one"
+                                "set changes one of uart, wifi, webdav or ble-name; '{other}' is not one"
                             ))
                         }
                     }
@@ -1000,10 +1022,10 @@ pub struct FoundDevice {
     /// and a path shown where an address belongs is a device name nobody can
     /// match against anything.
     pub address: String,
-    /// Whether it looks like a board this program can dial — it advertises
-    /// the UART or the management service, or carries the firmware's name.
-    /// See [`crate::transport::ble::is_board`] for why one signal is not
-    /// enough to ask every platform.
+    /// Whether the advertisement identifies a Linkr Bee. New firmware is
+    /// identified by the Linkr Management Service and confirmed by its Device
+    /// ID after connecting; the oldest NUS-only firmware remains identified
+    /// by its fixed legacy name. See [`crate::transport::ble::is_board`].
     pub board: bool,
     /// How strong the advertisement was heard, in dBm. `None` when the
     /// adapter's own report had no reading — a fresh scan on a busy adapter
@@ -1023,13 +1045,12 @@ pub enum Until {
     ABoardAnswers,
 }
 
-/// Listen for `timeout` and report every device that answered.
+/// Listen for `timeout` and report every Linkr Bee that answered.
 ///
 /// The scan is the one command that answers a question nothing else can — "is
-/// the board on the air at all" — so it runs before anything is dialled and
-/// prints even the devices it cannot use: a Linkr Bee that is advertising but
-/// not offering the serial service is a different problem from one that is
-/// switched off, and the list is how you tell them apart.
+/// the board on the air at all". New firmware is selected by the Linkr
+/// Management Service; the oldest NUS-only firmware is still listed when it
+/// uses its fixed `Linkr BLE UART` name. A new name alone is never enough.
 pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
     drain_scan(scan_stream(timeout, Until::TheWindowEnds))
 }
@@ -1037,7 +1058,7 @@ pub fn scan_devices(timeout: Duration) -> Result<Vec<FoundDevice>, String> {
 /// Listen until the first board answers, or `timeout` runs out.
 ///
 /// The shape the startup dial runs. The same list comes back, but the scan
-/// ends the moment a serial-service device is heard: a board in range answers
+/// ends the moment a board is heard: a board in range answers
 /// within a scan interval or two, and waiting out the whole window for a
 /// second board that may not exist is the difference between a start that
 /// feels instant and one the user goes looking at the radio for. A bench with
@@ -1267,13 +1288,13 @@ where
     Ok(found)
 }
 
-/// Most useful first: boards before strangers, then by name, then by signal.
+/// Most useful first: by name, then by signal. Every row is a Linkr Bee;
+/// unrelated NUS devices and new names without the management service never
+/// get here.
 fn sort_found(devices: &mut [FoundDevice]) {
     devices.sort_by(|left, right| {
-        right
-            .board
-            .cmp(&left.board)
-            .then_with(|| left.name.cmp(&right.name))
+        left.name
+            .cmp(&right.name)
             // Two boards with one name are told apart by who is
             // closer: the stronger reading is the one the user is
             // probably standing next to.
@@ -1366,12 +1387,17 @@ fn rows_of_heard(
         let Some(reading) = heard.get(&id) else {
             continue;
         };
-        let board =
-            crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref());
+        // The picker is a Linkr Bee picker, not a dump of every radio nearby.
+        // New firmware must carry the management service; the oldest images
+        // are allowed through only by their fixed legacy name.
+        if !crate::transport::ble::is_board(&properties.services, properties.local_name.as_deref())
+        {
+            continue;
+        }
         found.push(FoundDevice {
-            name: properties.local_name,
+            name: crate::transport::ble::display_name(properties.local_name.as_deref()),
             address: properties.address.to_string(),
-            board,
+            board: true,
             // The reading the advertisement that was just heard carried, or
             // the last one the daemon has on file when that event carried
             // none — an advertisement that only changed a service list, say.
@@ -1402,6 +1428,10 @@ pub struct Requests {
     pub webdav: Option<String>,
     /// `@d off`.
     pub webdav_off: bool,
+    /// `@n=<name>`, when `--rename-ble` named one.
+    pub ble_name: Option<String>,
+    /// `@n default`.
+    pub ble_name_default: bool,
 }
 
 impl Requests {
@@ -1414,6 +1444,8 @@ impl Requests {
             && !self.wifi_scan
             && self.webdav.is_none()
             && !self.webdav_off
+            && self.ble_name.is_none()
+            && !self.ble_name_default
     }
 }
 
@@ -1502,6 +1534,18 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match result {
             Err(why) => failed += report(format, "webdav", false, &why),
             Ok(()) => failed += wait_and_report(app, crate::device::Query::Webdav, format),
+        }
+    }
+    if requests.ble_name.is_some() || requests.ble_name_default {
+        let result = match (requests.ble_name.as_deref(), requests.ble_name_default) {
+            (Some(_), true) => Err("choose either --rename-ble or --reset-ble-name".to_string()),
+            (Some(name), false) => app.set_ble_name(name),
+            (None, true) => app.reset_ble_name(),
+            (None, false) => unreachable!(),
+        };
+        match result {
+            Err(why) => failed += report(format, "ble-name", false, &why),
+            Ok(()) => failed += wait_and_report(app, crate::device::Query::BleName, format),
         }
     }
     if requests.wifi_scan {
@@ -1999,6 +2043,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Wifi => "wifi",
         crate::device::Query::WifiScan => "wifi-scan",
         crate::device::Query::Webdav => "webdav",
+        crate::device::Query::BleName => "ble-name",
         crate::device::Query::Lan => "lan",
     }
 }
@@ -2075,6 +2120,18 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
                 let url = url.strip_prefix("@d=").unwrap_or(&url);
                 format!("webdav={},url={}", dav.state, url)
             }
+            None => String::new(),
+        },
+        crate::device::Query::BleName => match &app.network.ble_name {
+            Some(name) => format!(
+                "name={},custom={}",
+                name.name,
+                match name.custom {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "unknown",
+                }
+            ),
             None => String::new(),
         },
         // The state is reported; the token never is. A CLI's output goes to a
@@ -2612,6 +2669,7 @@ mod tests {
             (&["query", "uart"], &["--query-uart"]),
             (&["query", "wifi"], &["--query-wifi"]),
             (&["query", "webdav"], &["--query-webdav"]),
+            (&["query", "ble-name"], &["--query-ble-name"]),
             (&["query", "lan"], &["--query-lan"]),
             (&["query", "info", "--json"], &["--query-info", "--json"]),
             (
@@ -2627,6 +2685,12 @@ mod tests {
                 &["--webdav", "http://dav.example/logs/"],
             ),
             (&["set", "webdav", "off"], &["--webdav-off"]),
+            (
+                &["set", "ble-name", "Bench Bee"],
+                &["--rename-ble", "Bench Bee"],
+            ),
+            (&["set", "ble-name", "测试😀"], &["--rename-ble", "测试😀"]),
+            (&["set", "ble-name", "default"], &["--reset-ble-name"]),
             (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
             (&["exec", "--", "echo", "hi"], &["--exec", "echo hi"]),
             (
@@ -2760,6 +2824,7 @@ mod tests {
         btleplug::api::PeripheralProperties {
             address: address.parse().expect("an address"),
             local_name: Some(name.to_string()),
+            services: vec![crate::transport::ble::MGMT_SERVICE],
             rssi,
             ..Default::default()
         }
@@ -2796,6 +2861,43 @@ mod tests {
             Some(-61),
             "the reading just heard beats the one the daemon has been keeping"
         );
+    }
+
+    /// A nearby keyboard, sensor, or another vendor's NUS bridge was heard,
+    /// but it does not advertise the Linkr Management Service and must not
+    /// appear in the Linkr Bee picker.
+    #[test]
+    fn a_stranger_is_not_listed_even_when_it_was_heard() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Some Keyboard", Some(-30));
+        properties.services.clear();
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        assert!(rows_of_heard(&heard, known).is_empty());
+    }
+
+    /// The oldest firmware advertised NUS only and a fixed name. It has no
+    /// Device ID to verify, but it is still a Linkr Bee and must remain
+    /// searchable so an owner can keep using it.
+    #[test]
+    fn legacy_nus_only_firmware_is_still_listed() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Linkr BLE UART-3", Some(-30));
+        properties.services = vec![crate::transport::ble::NUS_SERVICE];
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        let rows = rows_of_heard(&heard, known);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name.as_deref(), Some("Linkr BLE UART-3"));
+        assert!(rows[0].board);
+    }
+
+    /// A new-style name is not a substitute for the Management Service.
+    #[test]
+    fn a_new_name_without_the_service_is_not_listed() {
+        let mut properties = seen("AA:BB:CC:DD:EE:FF", "Linkr Bee 078C", Some(-30));
+        properties.services = vec![crate::transport::ble::NUS_SERVICE];
+        let known = vec![("/org/bluez/hci0/dev_AA".to_string(), properties)];
+        let heard = HashMap::from([("/org/bluez/hci0/dev_AA".to_string(), Some(-30))]);
+        assert!(rows_of_heard(&heard, known).is_empty());
     }
 
     /// An event that says a device is there without saying how loud it is — a
