@@ -1059,6 +1059,10 @@ body.terminal-fullscreen-fallback {
   height: 100%;
   /* FitAddon subtracts xterm padding, not its parent's padding. */
   padding: 10px;
+  /* xterm 6 has no touch scrolling and its DOM rows do not take pointer
+   * events; the terminal handles vertical drags itself in app.js. */
+  touch-action: none;
+  overscroll-behavior: contain;
 }
 
 .terminal-output .xterm-viewport {
