@@ -54,7 +54,9 @@ jobs:
   mobile:
     name: Web and mobile
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The Playwright browser download is the slow step; ten minutes is not
+    # enough on a loaded runner, and a cancelled job looks like a test failure.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: mobile
