@@ -312,7 +312,12 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_DYNAMIC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_MAX=29' "${config}"
-          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION="0.1.2"' "${config}"
+          # Keep the firmware guard on the same version as the rest of the
+          # tree; a hard-coded number would fail the first CI run after a
+          # bump.  The release assembler still checks the tag against it.
+          firmware_version="$(python3 -c \
+            'import json; print(json.load(open("app/mobile/package.json"))["version"])')"
+          grep -qx "CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"${firmware_version}\"" "${config}"
           grep -qx 'CONFIG_BT_SMP=y' "${config}"
           grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "${config}"
           grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "${config}"

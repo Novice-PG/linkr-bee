@@ -55,7 +55,8 @@ class BleNameTests(unittest.TestCase):
             + slice_between(main, "enum ble_name_persist_result {",
                             "SETTINGS_STATIC_HANDLER_DEFINE(",
                             ["ble_name_install_and_save",
-                             "ble_name_reset_and_delete"])
+                             "ble_name_reset_and_delete",
+                             "ble_name_parse_command"])
         )
         (directory / "ble_name_production.inc").write_text(block)
         # Compile the harness with the firmware's own limit. The harness no
@@ -80,6 +81,29 @@ class BleNameTests(unittest.TestCase):
             key, _, value = line.partition("=")
             fields[key] = value
         return fields
+
+    def test_the_name_command_spellings_are_the_documented_ones(self):
+        """`@n default` resets; `@n=default` and `@n  default` set a literal
+        name.  Lock the parser branch, not a source-order coincidence."""
+        fields = self.scenario("commands")
+        self.assertEqual(fields["query_name_cmd"], "query")
+        self.assertEqual(fields["query_n_cmd"], "query")
+        self.assertEqual(fields["query_name_q_cmd"], "query")
+        self.assertEqual(fields["query_n_q_cmd"], "query")
+        self.assertEqual(fields["reset_name_cmd"], "reset")
+        self.assertEqual(fields["reset_n_cmd"], "reset")
+        self.assertEqual(fields["set_eq_cmd"], "set")
+        self.assertEqual(fields["set_eq_value"], "default")
+        self.assertEqual(fields["set_n_eq_cmd"], "set")
+        self.assertEqual(fields["set_n_eq_value"], "default")
+        self.assertEqual(fields["set_two_spaces_cmd"], "set")
+        self.assertEqual(fields["set_two_spaces_value"], " default")
+        self.assertEqual(fields["set_name_cmd"], "set")
+        self.assertEqual(fields["set_name_value"], "Bench Bee")
+        self.assertEqual(fields["set_n_name_cmd"], "set")
+        self.assertEqual(fields["set_n_name_value"], "Bench Bee")
+        self.assertEqual(fields["none_cmd"], "none")
+        self.assertEqual(fields["null_cmd"], "none")
 
     def test_the_name_rules_are_the_firmware_ones(self):
         """One to 29 UTF-8 bytes, valid encoding, no controls."""

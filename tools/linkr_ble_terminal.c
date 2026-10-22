@@ -789,6 +789,70 @@ static void printable_ble_name(const char *name, char *out, size_t out_len)
     out[used] = '\0';
 }
 
+/* Parse the name out of a `@n?` reply: "OK name=<name> custom=yes|no".  A
+ * name may itself end in text that looks like the suffix, so only the final
+ * well-formed field is peeled.  Nothing is trimmed: the firmware stores
+ * trailing spaces verbatim, and a host that strips them would report a name
+ * the board never had. */
+static bool ble_name_query_value(const char *reply, char *out, size_t out_len)
+{
+    const char *line = reply;
+
+    if (!reply || !out || out_len == 0) {
+        return false;
+    }
+    while (line && *line) {
+        const char *newline = strchr(line, '\n');
+        size_t len = newline ? (size_t)(newline - line) : strlen(line);
+
+        if (len > 0 && line[len - 1] == '\r') {
+            len--;
+        }
+        if (len >= 8 && strncasecmp(line, "ok name=", 8) == 0) {
+            const char *name = line + 8;
+            size_t name_len = len - 8;
+
+            for (size_t i = name_len; i >= 8; i--) {
+                if (strncasecmp(name + i - 8, " custom=", 8) == 0) {
+                    const char *suffix = name + i;
+                    size_t suffix_len = name_len - i;
+
+                    if ((suffix_len == 3 &&
+                         strncasecmp(suffix, "yes", 3) == 0) ||
+                        (suffix_len == 2 &&
+                         strncasecmp(suffix, "no", 2) == 0)) {
+                        name_len = i - 8;
+                    }
+                    break;
+                }
+            }
+            if (name_len >= out_len) {
+                return false;
+            }
+            memcpy(out, name, name_len);
+            out[name_len] = '\0';
+            return true;
+        }
+        if (!newline) {
+            break;
+        }
+        line = newline + 1;
+    }
+    return false;
+}
+
+/* True when a readback is usable and, for a rename, matches the request.  A
+ * reset's default name carries a MAC suffix the host cannot predict, so
+ * expected == NULL only requires that the board answered. */
+static bool ble_name_readback_matches(const char *reply, const char *expected,
+                                      char *reported, size_t reported_len)
+{
+    if (!ble_name_query_value(reply, reported, reported_len)) {
+        return false;
+    }
+    return expected == NULL || strcmp(reported, expected) == 0;
+}
+
 static void timespec_add_ms(struct timespec *ts, long ms)
 {
     ts->tv_sec += ms / 1000;
@@ -2009,6 +2073,8 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
 {
     char reply[MGMT_MAX_PAYLOAD + 1];
     char command[BLE_NAME_MAX + 8];
+    char reported[BLE_NAME_MAX + 1];
+    const char *expected = NULL;
     bool changed = false;
 
     if (!start_mgmt_notifications(conn)) {
@@ -2026,7 +2092,7 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
             stop_mgmt_notifications(conn);
             return false;
         }
-        printf("%s\n", reply);
+        expected = opt->rename_ble;
         changed = true;
     }
     if (opt->reset_ble_name) {
@@ -2034,14 +2100,21 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
             stop_mgmt_notifications(conn);
             return false;
         }
-        printf("%s\n", reply);
+        expected = NULL; /* the board decides the MAC suffix */
         changed = true;
     }
     if (changed || opt->query_ble_name) {
         /* A write's reply echoes the request, not the state the board will
          * advertise; `@n?` is the authority, so read it back after a
-         * change. */
+         * change and compare it with what was asked for. */
         if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        if (changed &&
+            !ble_name_readback_matches(reply, expected, reported,
+                                       sizeof(reported))) {
+            err_msg("the board did not keep the requested BLE name");
             stop_mgmt_notifications(conn);
             return false;
         }
