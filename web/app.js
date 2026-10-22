@@ -122,6 +122,17 @@ const isHarmonyHost =
   document.documentElement.dataset.platform === "harmonyos";
 const prefersSettingsDrawer = isHarmonyHost || coarsePointerMedia.matches;
 
+/* Native shells shrink their own WebView when the soft keyboard opens. Keep
+ * that local: a resize caused by the keyboard is a display change, not a
+ * request to reflow the remote shell. Browsers still synchronize the remote
+ * tty with stty, because their viewport is the actual terminal window. */
+function handlesTerminalGeometryLocally() {
+  const platform =
+    window.LinkrNativeBle?.platform ||
+    globalThis.Capacitor?.getPlatform?.();
+  return platform === "android" || platform === "ios" || isHarmonyHost;
+}
+
 document.documentElement.classList.toggle(
   "settings-drawer-layout",
   prefersSettingsDrawer,
@@ -1142,6 +1153,9 @@ function markTerminalBusy() {
 }
 
 function scheduleTerminalGeometrySync() {
+  if (handlesTerminalGeometryLocally()) {
+    return;
+  }
   clearTerminalGeometrySyncTimer();
   const geometry = state.terminalGeometry;
   const session = state.terminalGeometrySession;
@@ -1325,6 +1339,7 @@ function initTerminal() {
   state.term.open(elements.terminalOutput);
   subscribeTerminalInput(state.term, onTerminalData);
   state.term.onResize(onTerminalResize);
+  state.term.onScroll(onTerminalScroll);
   applyTerminalFont(state.fontFamily);
   fitTerminal();
 
@@ -2187,21 +2202,232 @@ function setAutoScroll(value, scroll) {
   }
 }
 
-let terminalViewport = null;
-
-function onViewportScroll() {
-  // Scroll fires every frame while the log streams; re-querying the viewport (and
-  // re-resolving it after xterm re-opens) is cheaper than the three layout reads
-  // below, which must stay.
-  if (!terminalViewport || !terminalViewport.isConnected) {
-    terminalViewport = elements.terminalOutput.querySelector(".xterm-viewport");
-  }
-  const vp = terminalViewport;
-  if (!vp) {
+function onTerminalScroll() {
+  if (!state.term) {
     return;
   }
-  const atBottom = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 2;
-  setAutoScroll(atBottom, false);
+  // xterm 6 renders through .xterm-scrollable-element; .xterm-viewport is an
+  // empty legacy node whose scrollTop never changes. Follow the buffer instead.
+  const buffer = state.term.buffer.active;
+  setAutoScroll(buffer.viewportY >= buffer.baseY, false);
+}
+
+const TERMINAL_TOUCH_SLOP = 10;
+const TERMINAL_LONG_PRESS_MS = 480;
+const terminalTouch = {
+  active: false,
+  startX: 0,
+  startY: 0,
+  lastY: 0,
+  moved: false,
+  scrolling: false,
+  longPress: false,
+  blurOnEnd: false,
+  timer: 0,
+};
+
+function clearTerminalTouchTimer() {
+  if (terminalTouch.timer) {
+    clearTimeout(terminalTouch.timer);
+    terminalTouch.timer = 0;
+  }
+}
+
+function terminalCellAt(clientX, clientY) {
+  const term = state.term;
+  const screen = elements.terminalOutput.querySelector(".xterm-screen");
+  if (!term || !screen) {
+    return null;
+  }
+  const rect = screen.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  const x = Math.min(Math.max(clientX - rect.left, 0), rect.width - 1);
+  const y = Math.min(Math.max(clientY - rect.top, 0), rect.height - 1);
+  return {
+    col: Math.min(term.cols - 1, Math.floor((x / rect.width) * term.cols)),
+    row:
+      term.buffer.active.viewportY +
+      Math.min(term.rows - 1, Math.floor((y / rect.height) * term.rows)),
+    rowHeight: rect.height / term.rows,
+  };
+}
+
+function selectTerminalLineAt(clientX, clientY) {
+  const term = state.term;
+  const cell = terminalCellAt(clientX, clientY);
+  if (!term || !cell) {
+    return false;
+  }
+  const line = term.buffer.active.getLine(cell.row);
+  if (!line || !line.translateToString(true).trim()) {
+    return false;
+  }
+  // A touch has no drag handles, so a long press selects the whole line; the
+  // existing copy button then copies that selection.
+  term.selectLines(cell.row, cell.row);
+  return Boolean(term.getSelection());
+}
+
+function onTerminalTouchStart(event) {
+  if (!state.connected || !state.term || event.touches.length !== 1) {
+    return;
+  }
+  const touch = event.touches[0];
+  clearTerminalTouchTimer();
+  terminalTouch.active = true;
+  terminalTouch.startX = touch.clientX;
+  terminalTouch.startY = touch.clientY;
+  terminalTouch.lastY = touch.clientY;
+  terminalTouch.moved = false;
+  terminalTouch.scrolling = false;
+  terminalTouch.longPress = false;
+  state.term.clearSelection();
+  terminalTouch.timer = setTimeout(() => {
+    terminalTouch.timer = 0;
+    if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
+      return;
+    }
+    if (selectTerminalLineAt(touch.clientX, touch.clientY)) {
+      terminalTouch.longPress = true;
+      navigator.vibrate?.(8);
+    }
+  }, TERMINAL_LONG_PRESS_MS);
+}
+
+function onTerminalTouchMove(event) {
+  if (!terminalTouch.active) {
+    return;
+  }
+  const touch = event.touches[0];
+  if (!touch) {
+    return;
+  }
+  const dx = touch.clientX - terminalTouch.startX;
+  const dy = touch.clientY - terminalTouch.startY;
+
+  if (terminalTouch.longPress) {
+    event.preventDefault();
+    return;
+  }
+  if (
+    !terminalTouch.scrolling &&
+    Math.abs(dy) > TERMINAL_TOUCH_SLOP &&
+    Math.abs(dy) >= Math.abs(dx)
+  ) {
+    terminalTouch.scrolling = true;
+    clearTerminalTouchTimer();
+  }
+  if (terminalTouch.scrolling) {
+    // xterm 6 has no touch scrolling of its own; drive the buffer directly.
+    event.preventDefault();
+    const cell = terminalCellAt(touch.clientX, touch.clientY);
+    const rowHeight = cell?.rowHeight || 18;
+    const rows = Math.trunc((terminalTouch.lastY - touch.clientY) / rowHeight);
+    if (rows) {
+      state.term?.scrollLines(rows);
+      terminalTouch.lastY -= rows * rowHeight;
+      terminalTouch.moved = true;
+    }
+    return;
+  }
+  if (Math.abs(dx) > TERMINAL_TOUCH_SLOP || Math.abs(dy) > TERMINAL_TOUCH_SLOP) {
+    terminalTouch.moved = true;
+    clearTerminalTouchTimer();
+  }
+}
+
+function onTerminalTouchEnd(event) {
+  if (!terminalTouch.active) {
+    return;
+  }
+  const wasScrolling = terminalTouch.scrolling;
+  const wasLongPress = terminalTouch.longPress;
+  const wasMoved = terminalTouch.moved;
+  const blurOnEnd = terminalTouch.blurOnEnd;
+  clearTerminalTouchTimer();
+  terminalTouch.active = false;
+  terminalTouch.scrolling = false;
+  terminalTouch.longPress = false;
+  terminalTouch.moved = false;
+  terminalTouch.blurOnEnd = false;
+  if (wasScrolling || wasLongPress) {
+    // Keep the synthetic click/mousedown from focusing the hidden textarea and
+    // reopening the keyboard after a scroll or selection gesture.
+    if (blurOnEnd) {
+      state.term?.blur();
+    }
+    event.preventDefault();
+    return;
+  }
+  if (!wasMoved) {
+    window.requestAnimationFrame(() => {
+      if (state.connected) state.term?.focus();
+    });
+  }
+}
+
+function terminalCopyText() {
+  const term = state.term;
+  if (!term) {
+    return "";
+  }
+  const selected = term.getSelection();
+  if (selected) {
+    return selected;
+  }
+  const buffer = term.buffer.active;
+  const lines = [];
+  let current = "";
+  for (let i = 0; i < buffer.length; i += 1) {
+    const line = buffer.getLine(i);
+    if (!line) {
+      continue;
+    }
+    current += line.translateToString(true);
+    if (!line.isWrapped) {
+      lines.push(current);
+      current = "";
+    }
+  }
+  if (current) {
+    lines.push(current);
+  }
+  while (lines.length && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
+}
+
+async function copyToClipboard(text) {
+  if (!text) {
+    return false;
+  }
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_error) {
+      // Capacitor WebViews and non-secure origins can reject the async API.
+    }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.cssText =
+    "position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0";
+  document.body.append(area);
+  area.select();
+  area.setSelectionRange(0, area.value.length);
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_error) {
+    copied = false;
+  }
+  area.remove();
+  return copied;
 }
 
 let connectionInFlight = false;
@@ -3815,9 +4041,40 @@ function bind() {
     state.term?.focus();
   });
 
-  elements.terminalOutput.addEventListener("pointerdown", () => {
-    if (state.connected) {
-      window.requestAnimationFrame(() => state.term?.focus());
+  elements.terminalOutput.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") {
+      // xterm focuses its hidden textarea from pointerdown, which opens the
+      // keyboard before we know whether this is a scroll, long press or tap.
+      // A confirmed tap focuses after touchend instead.
+      terminalTouch.blurOnEnd = !terminalHasFocus();
+      event.stopPropagation();
+    }
+  }, true);
+  elements.terminalOutput.addEventListener("pointerdown", (event) => {
+    // Touch taps are handled after touchend, so a scroll or long press does
+    // not focus the hidden textarea and pop the keyboard open.
+    if (!state.connected || event.pointerType === "touch") {
+      return;
+    }
+    window.requestAnimationFrame(() => state.term?.focus());
+  });
+  elements.terminalOutput.addEventListener("touchstart", onTerminalTouchStart, {
+    passive: true,
+  });
+  elements.terminalOutput.addEventListener("touchmove", onTerminalTouchMove, {
+    passive: false,
+  });
+  elements.terminalOutput.addEventListener("touchend", onTerminalTouchEnd, {
+    passive: false,
+  });
+  elements.terminalOutput.addEventListener("touchcancel", onTerminalTouchEnd, {
+    passive: false,
+  });
+  elements.terminalOutput.addEventListener("contextmenu", (event) => {
+    // A long press selects a line through xterm; suppress the WebView's native
+    // canvas menu, which cannot copy the DOM-rendered terminal anyway.
+    if (coarsePointerMedia.matches) {
+      event.preventDefault();
     }
   });
 
@@ -3933,17 +4190,18 @@ function bind() {
     if (!state.term) {
       return;
     }
-    const sel = state.term.getSelection();
-    if (sel) {
-      if (!navigator.clipboard?.writeText) {
-        toast(t("copyFailed"), "error");
-        return;
-      }
-      navigator.clipboard.writeText(sel).then(
-        () => toast(t("copied")),
-        () => toast(t("copyFailed"), "error"),
-      );
+    // With no selection, copy the whole transcript. This is the only reliable
+    // path in a WebView where native text selection does not reach xterm's
+    // DOM renderer.
+    const text = terminalCopyText();
+    if (!text) {
+      toast(t("copyFailed"), "error");
+      return;
     }
+    copyToClipboard(text).then(
+      (copied) => toast(t(copied ? "copied" : "copyFailed"), copied ? undefined : "error"),
+      () => toast(t("copyFailed"), "error"),
+    );
   });
 
   elements.themeButton.addEventListener("click", toggleTheme);
@@ -4181,12 +4439,6 @@ function init() {
     mobileMedia.addEventListener("change", syncSidebarForViewport);
   } else if (mobileMedia.addListener) {
     mobileMedia.addListener(syncSidebarForViewport);
-  }
-  if (state.term) {
-    const vp = elements.terminalOutput.querySelector(".xterm-viewport");
-    if (vp) {
-      vp.addEventListener("scroll", onViewportScroll, { passive: true });
-    }
   }
   appendLine(t("welcome"));
   if (state.mode === "ble") {

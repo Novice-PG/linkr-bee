@@ -1326,9 +1326,9 @@ button,
     display: none;
   }
 
-  /* Six tools is a desktop toolbar. Keep the two a thumb actually reaches. */
+  /* Keep copy within thumb reach; auto-scroll and the xterm credit are not
+   * useful enough to spend the narrow header on. */
   .term-tools #autoscrollBtn,
-  .term-tools #copyBtn,
   .term-tools .term-hint {
     display: none;
   }
