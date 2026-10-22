@@ -103,6 +103,25 @@ test("touch drag scrolls the xterm history and turns auto-scroll off", async ({ 
     .toContain("xterm-helper-textarea");
 });
 
+test("a tap focuses the terminal for typing", async ({ page, context }) => {
+  await openTerminal(page);
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const client = await context.newCDPSession(page);
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 3 }],
+  });
+  await page.waitForTimeout(40);
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [],
+  });
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+});
+
 test("the keyboard button toggles the terminal focus", async ({ page }) => {
   await openTerminal(page);
   const keyboardButton = page.locator("#focusTerminalButton");

@@ -2378,7 +2378,10 @@ function onTerminalTouchStart(event) {
   }
   const touch = event.touches[0];
   clearTerminalTouchTimer();
-  releaseTerminalFocusSuppression();
+  // Hold focus off for the whole gesture. A tap releases it in touchend, while
+  // a scroll or long press keeps it suppressed so WebView cannot flash the
+  // keyboard before we know which gesture this is.
+  suppressTerminalFocus(5000);
   terminalTouch.active = true;
   terminalTouch.startX = touch.clientX;
   terminalTouch.startY = touch.clientY;
@@ -2476,6 +2479,7 @@ function onTerminalTouchEnd(event) {
     return;
   }
   if (!wasMoved) {
+    releaseTerminalFocusSuppression();
     window.requestAnimationFrame(() => {
       if (state.connected) state.term?.focus();
     });
