@@ -579,6 +579,27 @@ static void scenario_a_busy_line_is_not_silent(void)
 	}
 }
 
+/* A busy line whose gaps are too short for the receiver never produces a
+ * capture. The pin sample renews the inactivity clock, so twelve seconds of
+ * traffic must not end the pass the way five seconds of genuine silence
+ * does. */
+static void scenario_a_busy_line_renews_the_timeout(void)
+{
+	for (int i = 0; i < 30; i++) {
+		window_quiet(0);
+	}
+}
+
+/* The renewal is not unbounded: a line that never goes quiet would otherwise
+ * hold the port open forever. At sixty seconds the pass gives up and keeps
+ * the configured rate. */
+static void scenario_a_busy_line_hits_the_hard_deadline(void)
+{
+	for (int i = 0; i < 160; i++) { /* 64 s, past the 60 s cap */
+		window_quiet(0);
+	}
+}
+
 static void scenario_raw_rmt_jitter(bool disagrees)
 {
 	static const uint8_t runs[] = {1}; /* 8N1 0x55 */
@@ -703,6 +724,10 @@ int main(int argc, char **argv)
 		scenario_the_shortest_run_refuses_what_the_estimate_cannot();
 	} else if (strcmp(scenario, "a_busy_line_is_not_silent") == 0) {
 		scenario_a_busy_line_is_not_silent();
+	} else if (strcmp(scenario, "a_busy_line_renews_the_timeout") == 0) {
+		scenario_a_busy_line_renews_the_timeout();
+	} else if (strcmp(scenario, "a_busy_line_hits_the_hard_deadline") == 0) {
+		scenario_a_busy_line_hits_the_hard_deadline();
 	} else {
 		fprintf(stderr, "unknown scenario: %s\n", scenario);
 		return 2;

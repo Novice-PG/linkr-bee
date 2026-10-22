@@ -163,6 +163,13 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
  * the pass is still worth running.
  */
 #define AUTOBAUD_TIMEOUT_MS	5000
+/*
+ * A line that keeps talking without ever going idle long enough for the
+ * receiver to begin a capture produces no measurements, but it is not silent
+ * either. The pin sample keeps that pass alive; this cap is what stops a
+ * permanently busy line from holding the port open forever.
+ */
+#define AUTOBAUD_HARD_TIMEOUT_MS 60000
 #define AUTOBAUD_CONFIRM	2	  /* agreeing windows before touching it */
 #define AUTOBAUD_COOLDOWN_MS	1000 /* after a change, let the line settle */
 #define AUTOBAUD_REFUSED_MAX	6	  /* badly measured windows before saying so */
@@ -237,6 +244,7 @@ static atomic_t autobaud_start_req;
 static atomic_t autobaud_stop_req;
 static atomic_t autobaud_running;
 static uint32_t autobaud_deadline;
+static uint32_t autobaud_hard_deadline;
 static bool autobaud_span_initialized;
 static linkr_uart_autobaud_callback_t autobaud_callback;
 
@@ -278,6 +286,7 @@ static void autobaud_begin(uint32_t now)
 	autobaud_cooldown_until = now;
 	autobaud_warned_at = now - AUTOBAUD_WARN_MS;
 	autobaud_deadline = now + AUTOBAUD_TIMEOUT_MS;
+	autobaud_hard_deadline = now + AUTOBAUD_HARD_TIMEOUT_MS;
 
 	if (!autobaud_span_initialized) {
 		linkr_uart_rmt_span_init(autobaud_reg);
@@ -508,11 +517,28 @@ static void autobaud_tick(struct k_work *work)
 	captured = linkr_uart_rmt_span_poll(&span);
 	line_level = linkr_uart_rmt_span_line_level();
 
-	if (captured) {
-		/* Still talking: the pass stays alive while the line supplies
-		 * measurements, even if a candidate is not confirmed yet. */
+	/*
+	 * A capture, or a pin sample that found the line in space, is proof
+	 * that something is still talking. A busy line whose gaps are too
+	 * short for the receiver never produces a capture, so without the
+	 * sample its pass would time out even though it was never silent.
+	 * The hard deadline below still bounds a line that never goes quiet.
+	 */
+	if (captured || line_level == 0) {
 		autobaud_deadline = now + AUTOBAUD_TIMEOUT_MS;
-	} else if ((int32_t)(now - autobaud_deadline) >= 0) {
+	}
+
+	if ((int32_t)(now - autobaud_hard_deadline) >= 0) {
+		uint32_t baud = linkr_uart_config_current();
+
+		LOG_WRN("UART autobaud: pass exceeded %u ms, keeping %u",
+			AUTOBAUD_HARD_TIMEOUT_MS, baud);
+		autobaud_finish(LINKR_UART_AUTOBAUD_TIMEOUT, baud, baud);
+		return;
+	}
+
+	if (!captured && line_level != 0 &&
+	    (int32_t)(now - autobaud_deadline) >= 0) {
 		uint32_t baud = linkr_uart_config_current();
 
 		LOG_WRN("UART autobaud: no measurable traffic for %u ms, "

@@ -715,7 +715,8 @@ static bool ble_name_valid(const char *name)
             (extra == 2 && cp < 0x800) ||
             (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
             (cp >= 0xd800 && cp <= 0xdfff) ||
-            (cp >= 0x80 && cp <= 0x9f)) {
+            (cp >= 0x80 && cp <= 0x9f) ||
+            cp == 0x2028 || cp == 0x2029) {
             return false;
         }
         i += extra + 1;
@@ -743,6 +744,115 @@ static bool normalize_ble_name(const char *value, char *out, size_t out_len)
     memcpy(out, start, len);
     out[len] = '\0';
     return ble_name_valid(out);
+}
+
+/* A name heard over the air is chosen by anyone nearby. Drop C0, DEL and the
+ * C1 pair (ESC included) before it reaches stderr, so an advertisement cannot
+ * drive the terminal. */
+static void printable_ble_name(const char *name, char *out, size_t out_len)
+{
+    size_t used = 0;
+
+    if (!out || out_len == 0) {
+        return;
+    }
+    /* An unnamed peripheral is a normal scan result, not an error: fall
+     * through to the same "(unknown)" a name of only controls gets. Returning
+     * early here left the caller's buffer uninitialized and then printed it
+     * with %s. */
+    if (!name) {
+        name = "";
+    }
+    for (size_t i = 0; name[i] != '\0' && used + 1 < out_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+
+        if (c < 0x20 || c == 0x7f) {
+            continue;
+        }
+        if (c == 0xc2 && (unsigned char)name[i + 1] >= 0x80 &&
+            (unsigned char)name[i + 1] <= 0x9f) {
+            i++;
+            continue;
+        }
+        out[used++] = (char)c;
+    }
+    if (used == 0 && out_len > 1) {
+        const char *fallback = "(unknown)";
+        size_t fallback_len = strlen(fallback);
+
+        if (fallback_len > out_len - 1) {
+            fallback_len = out_len - 1;
+        }
+        memcpy(out, fallback, fallback_len);
+        used = fallback_len;
+    }
+    out[used] = '\0';
+}
+
+/* Parse the name out of a `@n?` reply: "OK name=<name> custom=yes|no".  A
+ * name may itself end in text that looks like the suffix, so only the final
+ * well-formed field is peeled.  Nothing is trimmed: the firmware stores
+ * trailing spaces verbatim, and a host that strips them would report a name
+ * the board never had. */
+static bool ble_name_query_value(const char *reply, char *out, size_t out_len)
+{
+    const char *line = reply;
+
+    if (!reply || !out || out_len == 0) {
+        return false;
+    }
+    while (line && *line) {
+        const char *newline = strchr(line, '\n');
+        size_t len = newline ? (size_t)(newline - line) : strlen(line);
+
+        if (len > 0 && line[len - 1] == '\r') {
+            len--;
+        }
+        if (len >= 8 && strncasecmp(line, "ok name=", 8) == 0) {
+            const char *name = line + 8;
+            size_t name_len = len - 8;
+
+            for (size_t i = name_len; i >= 8; i--) {
+                if (strncasecmp(name + i - 8, " custom=", 8) == 0) {
+                    const char *suffix = name + i;
+                    size_t suffix_len = name_len - i;
+
+                    if ((suffix_len == 3 &&
+                         strncasecmp(suffix, "yes", 3) == 0) ||
+                        (suffix_len == 2 &&
+                         strncasecmp(suffix, "no", 2) == 0)) {
+                        name_len = i - 8;
+                    }
+                    break;
+                }
+            }
+            /* The firmware never advertises an empty name, and a reset's
+             * "readable is enough" check must not accept one. */
+            if (name_len == 0 || name_len >= out_len) {
+                return false;
+            }
+            memcpy(out, name, name_len);
+            out[name_len] = '\0';
+            return true;
+        }
+        if (!newline) {
+            break;
+        }
+        line = newline + 1;
+    }
+    return false;
+}
+
+/* True when a readback is usable and, for a rename, matches the request.  A
+ * reset's default name carries a MAC suffix the host cannot predict, so
+ * expected == NULL only requires that the board answered. */
+static bool ble_name_readback_matches(const char *reply, const char *expected,
+                                      char *reported, size_t reported_len)
+{
+    if (!ble_name_query_value(reply, reported, reported_len)) {
+        return false;
+    }
+    return expected == NULL || strcmp(reported, expected) == 0;
 }
 
 static void timespec_add_ms(struct timespec *ts, long ms)
@@ -823,6 +933,22 @@ static bool consider_device(struct device_match *match, const char *path,
                             const char *name, const char *addr, bool has_nus,
                             bool has_mgmt)
 {
+    char printable[MAX_NAME_LEN];
+
+    printable_ble_name(name, printable, sizeof(printable));
+
+    /* Every device that got this far was heard, whether or not it matched
+     * the requested name. Record it before any early return, otherwise the
+     * "not found" message has nothing to offer the user. */
+    if (match->nearby_count < NEARBY_MAX) {
+        size_t at = match->nearby_count++;
+
+        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
+                 printable);
+        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
+                 "%s", addr ? addr : "");
+    }
+
     if (match->address) {
         char wanted[16];
         char found[16];
@@ -834,7 +960,7 @@ static bool consider_device(struct device_match *match, const char *path,
              * would otherwise keep the previous tail. */
             snprintf(match->path, sizeof(match->path), "%s", path);
             snprintf(match->found_name, sizeof(match->found_name), "%s",
-                     name ? name : "");
+                     printable);
             snprintf(match->found_address, sizeof(match->found_address), "%s",
                      addr ? addr : "");
             match->found = true;
@@ -860,7 +986,7 @@ static bool consider_device(struct device_match *match, const char *path,
                 match->best_rank = rank;
                 snprintf(match->path, sizeof(match->path), "%s", path);
                 snprintf(match->found_name, sizeof(match->found_name), "%s",
-                         name ? name : "");
+                         printable);
                 snprintf(match->found_address, sizeof(match->found_address),
                          "%s", addr ? addr : "");
                 match->found = true;
@@ -876,21 +1002,12 @@ static bool consider_device(struct device_match *match, const char *path,
             match->best_rank = rank;
             snprintf(match->path, sizeof(match->path), "%s", path);
             snprintf(match->found_name, sizeof(match->found_name), "%s",
-                     name ? name : "");
+                     printable);
             snprintf(match->found_address, sizeof(match->found_address), "%s",
                      addr ? addr : "");
             match->found = true;
             match->found_has_nus = has_nus;
         }
-    }
-
-    if (match->nearby_count < NEARBY_MAX) {
-        size_t at = match->nearby_count++;
-
-        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
-                 name && name[0] ? name : "(unknown)");
-        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
-                 "%s", addr ? addr : "");
     }
     return false;
 }
@@ -1110,10 +1227,13 @@ static void list_devices(DBusConnection *conn)
                     dbus_message_iter_next(&prop_entry);
                 }
                 if (addr) {
+                    char printable[MAX_NAME_LEN];
+
                     /* Unnamed peripherals used to be dropped here, which made an
                      * empty list look like "nothing is nearby". They are exactly
                      * the devices a user cannot identify by looking at names. */
-                    printf("%s\t%s\n", addr, (name && name[0]) ? name : "(unknown)");
+                    printable_ble_name(name, printable, sizeof(printable));
+                    printf("%s\t%s\n", addr, printable);
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -1214,6 +1334,16 @@ static void disconnect_device(DBusConnection *conn)
     g_state.connected = false;
 }
 
+/* A rename needs all four Management characteristics, while a terminal-only
+ * session needs only the NUS pair. Keep the decision in one place so the
+ * discovery loop and the final refusal cannot disagree about what "ready"
+ * means for a legacy NUS-only board. */
+static bool management_paths_complete(bool protocol, bool device_id,
+                                      bool command, bool response)
+{
+    return protocol && device_id && command && response;
+}
+
 static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 {
     DBusMessage *reply;
@@ -1253,10 +1383,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
         clock_gettime(CLOCK_MONOTONIC, &dstart);
         while (delapsed < 5.0) {
             bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
-            bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
-                              g_state.mgmt_device_id_path[0] &&
-                              g_state.mgmt_command_path[0] &&
-                              g_state.mgmt_response_path[0];
+            bool mgmt_ready = management_paths_complete(
+                g_state.mgmt_protocol_path[0],
+                g_state.mgmt_device_id_path[0],
+                g_state.mgmt_command_path[0],
+                g_state.mgmt_response_path[0]);
 
             if (nus_ready && (!need_mgmt || mgmt_ready)) {
                 break;
@@ -1347,10 +1478,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 
             {
                 bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
-                bool mgmt_ready = g_state.mgmt_protocol_path[0] &&
-                                  g_state.mgmt_device_id_path[0] &&
-                                  g_state.mgmt_command_path[0] &&
-                                  g_state.mgmt_response_path[0];
+                bool mgmt_ready = management_paths_complete(
+                    g_state.mgmt_protocol_path[0],
+                    g_state.mgmt_device_id_path[0],
+                    g_state.mgmt_command_path[0],
+                    g_state.mgmt_response_path[0]);
 
                 if (nus_ready && (!need_mgmt || mgmt_ready)) {
                     break;
@@ -1368,10 +1500,11 @@ static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
         msg("NUS RX/TX characteristics not found");
         return false;
     }
-    if (need_mgmt && (!g_state.mgmt_protocol_path[0] ||
-                      !g_state.mgmt_device_id_path[0] ||
-                      !g_state.mgmt_command_path[0] ||
-                      !g_state.mgmt_response_path[0])) {
+    if (need_mgmt && !management_paths_complete(
+            g_state.mgmt_protocol_path[0],
+            g_state.mgmt_device_id_path[0],
+            g_state.mgmt_command_path[0],
+            g_state.mgmt_response_path[0])) {
         msg("Management Service characteristics not found; legacy NUS-only "
             "firmware cannot read or change the BLE name");
         return false;
@@ -1942,6 +2075,9 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
 {
     char reply[MGMT_MAX_PAYLOAD + 1];
     char command[BLE_NAME_MAX + 8];
+    char reported[BLE_NAME_MAX + 1];
+    const char *expected = NULL;
+    bool changed = false;
 
     if (!start_mgmt_notifications(conn)) {
         err_msg("cannot subscribe to Management responses");
@@ -1952,23 +2088,35 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
         return false;
     }
 
-    if (opt->query_ble_name) {
-        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
-            stop_mgmt_notifications(conn);
-            return false;
-        }
-        printf("%s\n", reply);
-    }
     if (opt->rename_ble) {
         snprintf(command, sizeof(command), "@n=%s", opt->rename_ble);
         if (!mgmt_send(conn, command, opt, reply, sizeof(reply))) {
             stop_mgmt_notifications(conn);
             return false;
         }
-        printf("%s\n", reply);
+        expected = opt->rename_ble;
+        changed = true;
     }
     if (opt->reset_ble_name) {
         if (!mgmt_send(conn, "@n default", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        expected = NULL; /* the board decides the MAC suffix */
+        changed = true;
+    }
+    if (changed || opt->query_ble_name) {
+        /* A write's reply echoes the request, not the state the board will
+         * advertise; `@n?` is the authority, so read it back after a
+         * change and compare it with what was asked for. */
+        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        if (changed &&
+            !ble_name_readback_matches(reply, expected, reported,
+                                       sizeof(reported))) {
+            err_msg("the board did not keep the requested BLE name");
             stop_mgmt_notifications(conn);
             return false;
         }

@@ -176,7 +176,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::new(
         "--scan",
         Value::None,
-        "list nearby Bluetooth devices and exit",
+        "list nearby Linkr Bee boards and exit (not every Bluetooth device)",
     ),
     Flag::new(
         "--timeout",

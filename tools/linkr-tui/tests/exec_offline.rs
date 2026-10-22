@@ -262,6 +262,21 @@ fn the_loopback_refuses_a_pipeline_instead_of_faking_one() {
     assert!(out.contains("\"rc\":2"), "{out}");
 }
 
+/// A name and a reset are two answers to one question, so the command line is
+/// a usage error. It used to be noticed only after the dial and exited 1; a
+/// script must see the same code 2 as every other bad argument, with no radio
+/// work in between.
+#[test]
+fn a_name_and_a_reset_are_refused_before_the_dial() {
+    let output = bee(&["--rename-ble", "Bench Bee", "--reset-ble-name"]);
+    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("choose either --rename-ble or --reset-ble-name"),
+        "{err}"
+    );
+}
+
 /// The first number written for `key`, which is as much JSON as these
 /// assertions need: the shape is this module's, and the contract is the key.
 fn number(out: &str, key: &str) -> Option<i64> {

@@ -215,6 +215,15 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 | `@linkr target=<UUID>` | 保存小写、带连字符的 36 字符 UUID；相同值不重复写入 |
 | `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
 
+名称规则：固件只裁剪首尾的空格、Tab、CR、LF，拒绝 C0、DEL、C1 与
+U+2028/U+2029，长度按 UTF-8 字节计（1–29）。只有 `@n` 后恰好一个空格时的
+`@n default` 才是恢复默认；`@n=default`（以及两个空格的 `@n  default`）会设置
+一个名字字面为 `default` 的自定义名。`@n?` 的回复是
+`OK name=<name> custom=yes|no`；设置/恢复的回复是 `OK name=<name>`，不带
+`custom=`，需要来源时客户端应再查询一次。名称允许零宽或格式字符（例如
+U+200B、U+200E、U+FEFF），这类名字在扫描列表里可能看起来是空白；如果希望
+用户一眼能认出板子，请不要只用这类字符。
+
 长形式 `@linkr info?`、`@linkr wifi=...` 等仍可使用。WebDAV 查询响应使用完整
 Management payload，不再受旧 NUS 128 字节响应缓冲区截断。
 

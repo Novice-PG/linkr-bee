@@ -24,7 +24,9 @@ async function mockBoard(page, { name = "Linkr Bee 078C", id = "bee-1", readErro
   return page.evaluate(async ({ name, id, readError }) => {
     const { bleTransport } = window.__test;
     const protocol = new Uint8Array([1, 0, 0, 2, 40, 0, 0, 0, 0, 0]);
-    const deviceId = new Uint8Array(16);
+    const deviceId = new Uint8Array([
+      0x4c, 0x49, 0x4e, 0x4b, 0x52, 0x42, 0x4c, 0x45, 0x01, 0x00, 0, 0, 0, 0, 0, 0,
+    ]);
     const reliable = new Uint8Array([1, 0, 232, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     Object.assign(bleTransport, {
       isAvailable: () => true,
@@ -71,6 +73,73 @@ test("the name the board reports is the name the page shows", async ({ page }) =
   await expect(page.locator("#deviceName")).toHaveText("测试😀");
   await expect(page.locator("#bleNameStatus")).toContainText("测试😀");
   await expect(page.locator("#bleNameInput")).toHaveValue("测试😀");
+});
+
+test("set and restore show the name the board reads back", async ({ page }) => {
+  await openApp(page);
+  await mockBoard(page);
+  await page.evaluate(async () => {
+    const { state, connect } = window.__test;
+    state.device = null;
+    await connect();
+    let current = "Original";
+    let custom = false;
+    const seen = [];
+    window.__test.setControl(async (command) => {
+      seen.push(command);
+      if (command === "@n?") {
+        return `OK name=${current} custom=${custom ? "yes" : "no"}`;
+      }
+      if (command === "@n default") {
+        current = "Linkr Bee 078C";
+        custom = false;
+        return `OK name=${current}`;
+      }
+      current = command.slice(3);
+      custom = true;
+      return `OK name=${current}`;
+    });
+    window.__seenCommands = seen;
+  });
+  await page.locator("#panelToggle").tap();
+  await expect(page.locator("#controlsPanel #bleNameInput")).toBeVisible();
+  await page.fill("#bleNameInput", "Bench Bee");
+  await page.click("#bleNameSetButton");
+  await expect(page.locator("#bleNameInput")).toHaveValue("Bench Bee");
+  await expect(page.locator("#bleNameStatus")).toContainText("Bench Bee");
+  await page.click("#bleNameDefaultButton");
+  await expect(page.locator("#bleNameInput")).toHaveValue("Linkr Bee 078C");
+  await expect(page.locator("#bleNameStatus")).toContainText("Linkr Bee 078C");
+  expect(await page.evaluate(() => window.__seenCommands)).toEqual([
+    "@n=Bench Bee",
+    "@n?",
+    "@n default",
+    "@n?",
+  ]);
+});
+
+test("a rename the board does not read back is not a success", async ({ page }) => {
+  await openApp(page);
+  await mockBoard(page);
+  await page.evaluate(async () => {
+    const { state, connect } = window.__test;
+    state.device = null;
+    await connect();
+    // The write echoes the requested name; the authoritative read reports
+    // another one, which is the only state the page may show.
+    window.__test.setControl(async (command) =>
+      command === "@n?" ? "OK name=Different custom=yes" : "OK name=Requested");
+  });
+  await page.locator("#panelToggle").tap();
+  await expect(page.locator("#controlsPanel #bleNameInput")).toBeVisible();
+  await page.fill("#bleNameInput", "Requested");
+  await page.click("#bleNameSetButton");
+  await expect(page.locator("#bleNameInput")).toHaveValue("Different");
+  await expect(page.locator("#bleNameStatus")).toContainText(
+    "Could not read the BLE name.",
+  );
+  await expect(page.locator(".toast").filter({ hasText: "BLE name updated" }))
+    .toHaveCount(0);
 });
 
 test("a board wearing a legacy name is not taken for a legacy board", async ({ page }) => {

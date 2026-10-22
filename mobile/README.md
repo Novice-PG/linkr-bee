@@ -322,6 +322,13 @@ The output is written to `mobile/dist/`. In a normal browser the build continues
 to use Web Bluetooth. Inside Capacitor it uses
 `@capacitor-community/bluetooth-le`.
 
+The native plugin accepts one filter shape, so the app scans by the Linkr
+Management Service. That finds every current board whatever name the owner
+gave it, but an old NUS-only board (fixed `Linkr BLE UART...` name, no
+Management Service) is deliberately out of scope on native: reach it with the
+Web build in Chrome/Edge or with the desktop TUI/CLI, which can scan for both
+shapes.
+
 ## Generate native projects
 
 ```sh

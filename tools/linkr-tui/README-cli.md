@@ -22,8 +22,8 @@ this build has no interface and exits with status 2.
 
 | Transport | Flag |
 |---|---|
-| Bluetooth address | `--ble-address EE:C7:42:34:48:CF` |
-| Bluetooth name fragment | `--ble-name "UART-"` (C3/C5: `UART-3`; WROOM: `UART-XXXX`; use the full suffix when several units are nearby) |
+| Bluetooth address | `--ble-address EE:C7:42:34:48:CF` (the board's identity) |
+| Bluetooth name fragment | `--ble-name "Linkr Bee"` or any custom label (a display name the owner can change; use `--ble-address` when several boards are nearby) |
 | LAN WebSocket | `--lan-host 192.168.0.102` |
 | LAN token | `--lan-token <TOKEN>`, `--lan-token-file <FILE>` or `$LINKR_LAN_TOKEN` |
 | Offline loopback | `--bridge -` |
@@ -35,7 +35,7 @@ and exit with status 1.
 ## Common requests
 
 ```sh
-bee-cli --scan                         # list nearby Bluetooth devices
+bee-cli --scan                         # list nearby Linkr Bee boards
 bee-cli --query-info                   # @i?
 bee-cli --query-uart                   # @u?
 bee-cli --query-wifi                   # @w?
@@ -67,6 +67,9 @@ bee-cli set ble-name default           # --reset-ble-name
 The name is 1–29 UTF-8 bytes and is checked on the host before anything is
 sent, so Chinese and emoji are accepted and a name the firmware would refuse
 fails without a round trip. A write is confirmed by the board and read back.
+For a rename or reset the C reference client prints only the board's `@n?`
+readback, not the write reply; a rename exits non-zero when the board reports
+a different name.
 
 A command line may contain several requests; they are sent one at a time
 because the bridge answers one management question at a time. Add `--json` for
@@ -94,8 +97,8 @@ With `--idle`, output is returned without a verified exit status.
 input ends or a request says `quit`:
 
 ```sh
-bee-cli --ble-name "UART-" --serve
-{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:name:UART-","ops":[…]}
+bee-cli --ble-name "Linkr Bee" --serve
+{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:name:Linkr Bee","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

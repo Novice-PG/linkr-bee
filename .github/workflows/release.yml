@@ -9,6 +9,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and assemble everything, but do not touch the release"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -18,14 +24,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Require a version tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # `workflow_dispatch` can be run from any ref; the release shape needs a
+      # v* tag, because that is what the version, notes template and asset
+      # names are built from.  Fail here instead of after the build matrix.
+      - name: Require a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*) ;;
+            *)
+              echo "run this workflow from a v* tag, not ${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
   build:
     name: Firmware, Web and APK
+    needs: preflight
     permissions:
       contents: read
     uses: ./.github/workflows/build.yml
 
   desktop:
     name: Desktop matrix
+    needs: preflight
     permissions:
       # The called workflow keeps its own linkr-tui-v* release job. It is
       # skipped for a project tag, but the permission is declared here so the
@@ -35,7 +63,7 @@ jobs:
 
   publish:
     name: Assemble and publish
-    needs: [build, desktop]
+    needs: [preflight, build, desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -92,6 +120,7 @@ jobs:
             --apk-version "${version}"
 
       - name: Create or update the release
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -106,6 +135,7 @@ jobs:
           fi
 
       - name: Drop assets this build does not carry
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -120,6 +150,7 @@ jobs:
           done < /tmp/release-assets
 
       - name: Upload every asset and the checksums
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -127,6 +158,7 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" release/* --clobber
 
       - name: The release carries this build
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

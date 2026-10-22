@@ -85,6 +85,12 @@ jobs:
       - name: Build Android and iOS web assets
         run: npm run build
 
+      # The bundle inlines this module, so the built tree no longer carries the
+      # file the release assembler reads its version from. Copy the source
+      # manifest into the artifact; it is the version the build used.
+      - name: Record the shipped Web version
+        run: cp ../web/about-data.js dist/about-data.js
+
       - name: Build HarmonyOS web assets
         run: npm run build:harmony
 
@@ -155,11 +161,31 @@ jobs:
         run: ./gradlew --no-daemon assembleDebug
         working-directory: mobile/android
 
+      - name: Check the version the APK carries, then name it
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test -n "${version}"
+          # package.json decides the new file name, but the installed app
+          # reports versionName from build.gradle. Read the built APK itself so
+          # those two cannot drift into a release named for a version it does
+          # not carry.
+          aapt="$(find "${ANDROID_HOME}/build-tools" -type f -name aapt | sort -V | tail -1)"
+          test -x "${aapt}"
+          built="$("${aapt}" dump badging android/app/build/outputs/apk/debug/app-debug.apk \
+            | sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p")"
+          if [ "${built}" != "${version}" ]; then
+            echo "APK versionName '${built}' does not match package.json '${version}'" >&2
+            exit 1
+          fi
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+            "android/app/build/outputs/apk/debug/linkr-bee-v${version}-android-debug.apk"
+
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
           name: linkr-bee-apk
-          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          path: mobile/android/app/build/outputs/apk/debug/linkr-bee-*.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -286,7 +312,12 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_DYNAMIC=y' "${config}"
           grep -qx 'CONFIG_BT_DEVICE_NAME_MAX=29' "${config}"
-          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION="0.1.2"' "${config}"
+          # Keep the firmware guard on the same version as the rest of the
+          # tree; a hard-coded number would fail the first CI run after a
+          # bump.  The release assembler still checks the tag against it.
+          firmware_version="$(python3 -c \
+            'import json; print(json.load(open("app/mobile/package.json"))["version"])')"
+          grep -qx "CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"${firmware_version}\"" "${config}"
           grep -qx 'CONFIG_BT_SMP=y' "${config}"
           grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "${config}"
           grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "${config}"

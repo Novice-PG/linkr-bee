@@ -544,7 +544,14 @@ fn action_for(request: &Request) -> Result<Action, String> {
                 requests.ble_name = Some(name);
             }
             (None, Some(Value::Bool(true))) => requests.ble_name_default = true,
-            (None, Some(Value::Bool(false))) => {}
+            // `"default": false` asks for nothing; answering it as a
+            // successful no-op would tell a caller its request was heard
+            // when it was not a request at all.
+            (None, Some(Value::Bool(false))) => {
+                return Err(
+                    "ble-name takes \"name\", \"default\": true, or neither to read".to_string(),
+                )
+            }
             (None, Some(_)) => return Err("default must be true or false".to_string()),
             (None, None) => requests.queries.push(Query::BleName),
         },
@@ -1228,6 +1235,7 @@ mod tests {
             (r#"{"op":"ble-name","name":""}"#, "1-29"),
             (r#"{"op":"ble-name","name":"😀😀😀😀😀😀😀😀"}"#, "1-29"),
             (r#"{"op":"ble-name","name":"one\ntwo"}"#, "control"),
+            (r#"{"op":"ble-name","default":false}"#, "default"),
             (r#"{"op":"ble-name","default":"yes"}"#, "true or false"),
         ] {
             let error = action_for(&request(line)).expect_err(line);

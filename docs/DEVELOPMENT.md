@@ -119,12 +119,22 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 
 ### GitHub Actions build
 
-The workflow in `.github/workflows/build.yml` builds the default WiFi + BLE
-configuration for `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and
-`esp32c5_devkitc/esp32c5/hpcore`. It runs on pushes to `main`, version tags,
-pull requests, and manual dispatches using Zephyr
-v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
-only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
+The workflow in `.github/workflows/build.yml` builds each board's default
+WiFi + BLE configuration for `esp32c3_supermini`, `esp32c3_devkitm`,
+`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, and
+`esp32_devkitc/esp32/procpu` (ESP32-WROOM-32). It runs on pushes to `main`,
+pull requests, and manual dispatches using Zephyr v4.4.1 with Zephyr SDK
+1.0.1. To keep runner disk usage bounded, each job installs only the
+toolchain its board needs — `riscv64-zephyr-elf` for the RISC-V targets and
+`xtensa-espressif_esp32_zephyr-elf` for the WROOM — instead of the full Zephyr
+CI image.
+
+A project release starts from a `v*` tag. `.github/workflows/release.yml`
+reuses this workflow and the desktop matrix, then
+`tools/assemble_release.py` checks the version carried by each artifact and
+assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
+release dispatch can run the same assembly as a dry run from a tag without
+touching the GitHub release.
 
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
@@ -134,6 +144,7 @@ linkr-bee-esp32c3-supermini.bin
 linkr-bee-esp32c3-devkitm.bin
 linkr-bee-esp32c3-devkitc.bin
 linkr-bee-esp32c5-devkitc.bin
+linkr-bee-esp32-wroom-32.bin
 ```
 
 On macOS or Linux, extract the artifact, install
@@ -151,9 +162,9 @@ If more than one serial device is connected, select it explicitly:
 ```
 
 The script infers the target from the standard image name and writes C3 at
-`0x0` or C5 at `0x2000` without a full-chip erase. Only image sectors are
-rewritten, so normal upgrades preserve the BLE identity and saved
-configuration. Use the board-specific factory-reset input when those settings
+`0x0`, C5 at `0x2000`, or WROOM at `0x1000` without a full-chip erase. Only
+image sectors are rewritten, so normal upgrades preserve the BLE identity and
+saved configuration. Use the board-specific factory-reset input when those settings
 must be cleared. The artifact also contains `FLASHING.txt`,
 `firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
@@ -213,8 +224,10 @@ ERR format: @u=115200,8,n,1,n
 
 ### On-demand UART autobaud (ESP32-WROOM)
 
-The WROOM build enables `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`, but the
-detector is idle at boot. It does not follow the line rate until asked:
+The WROOM build supports `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD`, but its
+board default leaves the option off (`=n`) so a release image never rewrites
+the UART settings on its own. Enable it explicitly in the build; even then the
+detector is idle at boot and does not follow the line rate until asked:
 
 ```text
 @a?          query: OK autobaud state=idle|running baud=... timeout_ms=5000
@@ -225,9 +238,12 @@ detector is idle at boot. It does not follow the line rate until asked:
 A pass samples one 400 ms RMT window at a time and requires two agreeing
 windows before it calls `uart_configure()`. It ends on a confirmed match
 (`applied` or `unchanged`), a failed reconfigure (`error`), no measurable
-capture for 5 seconds (`timeout`), or `@a stop` (`stopped`). Every capture
-resets the 5-second clock, so a line that is still talking keeps the pass
-alive. A completed pass is never restarted automatically.
+capture for 5 seconds (`timeout`), or `@a stop` (`stopped`). Every capture,
+and every pin sample that finds the line active, resets the 5-second clock,
+so a line that is still talking keeps the pass alive even when its gaps are
+too short for the receiver to begin a capture. A 60-second hard deadline still
+bounds a line that never goes quiet. A completed pass is never restarted
+automatically.
 
 The start response is non-final. The result arrives later as a type=3
 Management event with the same request ID and `FINAL`:
@@ -430,7 +446,13 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 `58:BF:25:33:07:8C` becomes `078C`). Names are limited by UTF-8 bytes, not
 characters: Chinese is allowed, and emoji are valid too (a typical emoji uses
 four bytes, so seven fit in 28 bytes while eight exceed the 29-byte limit).
-Control characters and invalid UTF-8 are rejected. For current firmware the
+The firmware trims only space, tab, CR and LF from the value, and rejects C0,
+DEL, C1 and U+2028/U+2029; hosts apply the same rule and byte count before
+sending. `@n default` is the reset form only with exactly one space after
+`@n`; `@n=default` (and `@n  default` with two spaces) sets a custom name
+literally called `default`. A query answers `OK name=<name> custom=yes|no`;
+a set or reset answers `OK name=<name>` without the provenance field, so a
+client that needs to know where the name came from queries again. For current firmware the
 name is display-only: hosts must discover the Management Service UUID and
 verify Device ID, never match on the advertised name. The TUI and Web clients
 keep one narrow compatibility exception: a pre-service device with the fixed
