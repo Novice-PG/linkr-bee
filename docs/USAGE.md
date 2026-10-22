@@ -71,6 +71,12 @@ The terminal remains the main workspace. Settings use a drawer on touch devices
 and narrow windows. Scroll the accessory key row sideways for additional keys;
 tap Ctrl, Alt, or Shift before the next key, and tap again to cancel the modifier.
 
+Touch follows the Termux model: drag vertically to scroll history without opening
+the keyboard, tap to open the keyboard, and long press to select a word. Keep the
+finger down and drag to extend the selection by character or across lines. The
+Copy button copies the selection, or the whole terminal buffer when nothing is
+selected. The accessory row also has a keyboard toggle.
+
 The assistant stacks below the terminal in narrow windows and moves beside it
 when enough width is available. When the system keyboard is editing an assistant
 question or setting, the terminal can collapse to preserve the input area; return
@@ -83,8 +89,8 @@ preview as a real-device result.
 
 ## Serial input and display
 
-- Click the terminal before typing. Use the accessory keys when a system keyboard
-  does not offer Esc, Tab, arrows, or Ctrl combinations.
+- Click or tap the terminal before typing. Use the accessory keys when a system
+  keyboard does not offer Esc, Tab, arrows, or Ctrl combinations.
 - The target must support ANSI sequences to produce colored or full-screen
   output. The Web terminal uses xterm.js for 256-color rendering and cursor control.
 - The browser client synchronizes terminal rows/columns at supported shell

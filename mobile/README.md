@@ -17,11 +17,15 @@ an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
 shells that support it. Paste uses the clipboard when available. Both rows stay
 above the soft keyboard and are shared with the Web and HarmonyOS clients.
 
-Long press the terminal to select a line. The toolbar Copy button copies that
-selection, or the whole terminal buffer when nothing is selected; narrow screens
-keep the button visible. Drag vertically inside the terminal to move through
-scrollback; the gesture drives `term.scrollLines()`. These touch paths live in the
-shared web UI because WebView text selection cannot reach xterm's rendered rows.
+Touch follows the Termux model: drag vertically to scroll history, tap to open
+the soft keyboard, and long press to select the word under the finger. Keep the
+finger down and drag to extend the selection by character or across lines. The
+toolbar Copy button copies that selection, or the whole terminal buffer when
+nothing is selected; narrow screens keep the button visible. Scrolling and
+selection do not open the keyboard, including the delayed focus some Android
+WebViews perform after `touchend`. The accessory row also has a keyboard toggle.
+These touch paths live in the shared web UI because WebView text selection cannot
+reach xterm's rendered rows.
 
 The native shells handle the soft keyboard locally. Opening it shrinks the
 WebView and refits the terminal rows; closing it restores the previous layout.

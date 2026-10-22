@@ -88,24 +88,74 @@ test("touch drag scrolls the xterm history and turns auto-scroll off", async ({ 
   expect(after.viewportY).toBeLessThan(before.viewportY);
   expect(after.viewportY).toBeLessThan(before.baseY);
   expect(after.auto).toBe(false);
-  // Dragging history must not pop the soft keyboard.
+  // Dragging history must not pop the soft keyboard, including when Android
+  // WebView focuses the hidden textarea just after touchend.
   expect(after.focused).not.toContain("xterm-helper-textarea");
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .not.toContain("xterm-helper-textarea");
+
+  // The guard is short-lived, so an explicit keyboard button/tap still works.
+  await page.waitForTimeout(700);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
 });
 
-test("long press selects a line and the phone copy button copies it", async ({ page, context }) => {
+test("the keyboard button toggles the terminal focus", async ({ page }) => {
+  await openTerminal(page);
+  const keyboardButton = page.locator("#focusTerminalButton");
+  await expect(keyboardButton).toBeVisible();
+  await keyboardButton.tap();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+  await keyboardButton.tap();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .not.toContain("xterm-helper-textarea");
+});
+
+test("long press selects a word and dragging extends the selection", async ({ page, context }) => {
   await openTerminal(page);
   const box = await page.locator(".xterm-screen").boundingBox();
+  const termSize = await page.evaluate(() => ({
+    rows: window.__terminalTest.state.term.rows,
+    cols: window.__terminalTest.state.term.cols,
+  }));
   const client = await context.newCDPSession(page);
-  const x = box.x + box.width / 2;
+  // Column 12 is inside "abcdefghijklmnopqrstuvwxyz" in the fixture lines.
+  const x = box.x + (box.width / termSize.cols) * 12;
   const y = box.y + box.height - 50;
+  const rowHeight = box.height / termSize.rows;
+
   await client.send("Input.dispatchTouchEvent", {
     type: "touchStart",
     touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 2 }],
   });
   await page.waitForTimeout(900);
-  const selected = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  const word = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(word).toBe("abcdefghijklmnopqrstuvwxyz");
+
+  // Keep the finger down after the long-press word selection and drag upward.
+  for (let i = 1; i <= 8; i += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{
+        x,
+        y: y - rowHeight * 3 * (i / 8),
+        radiusX: 8,
+        radiusY: 8,
+        force: 1,
+        id: 2,
+      }],
+    });
+  }
   await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  expect(selected).toMatch(/^line \d{3} /);
+
+  const selected = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(selected).toContain("\n");
+  expect(selected.split("\n").length).toBeGreaterThan(1);
+  expect(selected.length).toBeGreaterThan(word.length);
   await expect(page.locator("#copyBtn")).toBeVisible();
   await page.locator("#copyBtn").click();
   await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);

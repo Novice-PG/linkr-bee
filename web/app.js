@@ -2222,7 +2222,11 @@ const terminalTouch = {
   moved: false,
   scrolling: false,
   longPress: false,
+  selectionStart: null,
+  selectionEnd: null,
   blurOnEnd: false,
+  suppressClick: false,
+  suppressFocusUntil: 0,
   timer: 0,
 };
 
@@ -2230,6 +2234,26 @@ function clearTerminalTouchTimer() {
   if (terminalTouch.timer) {
     clearTimeout(terminalTouch.timer);
     terminalTouch.timer = 0;
+  }
+}
+
+function suppressTerminalFocus(ms = 600) {
+  terminalTouch.suppressClick = true;
+  terminalTouch.suppressFocusUntil = performance.now() + ms;
+}
+
+function releaseTerminalFocusSuppression() {
+  terminalTouch.suppressClick = false;
+  terminalTouch.suppressFocusUntil = 0;
+}
+
+function terminalFocusSuppressed() {
+  return performance.now() < terminalTouch.suppressFocusUntil;
+}
+
+function blurTerminalIfFocusSuppressed() {
+  if (terminalFocusSuppressed()) {
+    state.term?.blur();
   }
 }
 
@@ -2254,20 +2278,98 @@ function terminalCellAt(clientX, clientY) {
   };
 }
 
-function selectTerminalLineAt(clientX, clientY) {
-  const term = state.term;
-  const cell = terminalCellAt(clientX, clientY);
-  if (!term || !cell) {
+function terminalCellIsWordChar(line, col) {
+  const cell = line.getCell(col);
+  if (!cell) {
     return false;
+  }
+  // A wide character occupies two cells; the trailing cell has width zero and
+  // belongs to the same word as the character before it.
+  if (cell.getWidth() === 0) {
+    return true;
+  }
+  return Boolean(cell.getChars()) && !/\s/.test(cell.getChars());
+}
+
+function terminalWordRangeAt(cell) {
+  const term = state.term;
+  if (!term || !cell) {
+    return null;
   }
   const line = term.buffer.active.getLine(cell.row);
-  if (!line || !line.translateToString(true).trim()) {
+  if (!line) {
+    return null;
+  }
+  const col = Math.min(cell.col, Math.max(0, line.length - 1));
+  if (!terminalCellIsWordChar(line, col)) {
+    return {
+      start: { row: cell.row, col },
+      end: { row: cell.row, col },
+    };
+  }
+  let start = col;
+  let end = col;
+  while (start > 0 && terminalCellIsWordChar(line, start - 1)) {
+    start -= 1;
+  }
+  while (end + 1 < line.length && terminalCellIsWordChar(line, end + 1)) {
+    end += 1;
+  }
+  return {
+    start: { row: cell.row, col: start },
+    end: { row: cell.row, col: end },
+  };
+}
+
+function setTerminalSelection(start, end) {
+  const term = state.term;
+  if (!term || !start || !end) {
     return false;
   }
-  // A touch has no drag handles, so a long press selects the whole line; the
-  // existing copy button then copies that selection.
-  term.selectLines(cell.row, cell.row);
-  return Boolean(term.getSelection());
+  let first = start;
+  let last = end;
+  if (
+    first.row > last.row ||
+    (first.row === last.row && first.col > last.col)
+  ) {
+    [first, last] = [last, first];
+  }
+  // xterm's public select() takes a linear cell count. Include the cell under
+  // the finger so dragging to a character selects that character too.
+  const length =
+    (last.row - first.row) * term.cols + (last.col - first.col) + 1;
+  term.select(first.col, first.row, length);
+  return term.hasSelection();
+}
+
+function extendTerminalSelection(clientX, clientY) {
+  const cell = terminalCellAt(clientX, clientY);
+  if (!cell || !terminalTouch.selectionStart || !terminalTouch.selectionEnd) {
+    return;
+  }
+  const anchorStart = terminalTouch.selectionStart;
+  const anchorEnd = terminalTouch.selectionEnd;
+  const beforeAnchor =
+    cell.row < anchorStart.row ||
+    (cell.row === anchorStart.row && cell.col < anchorStart.col);
+  // Keep the initially selected word in the range when the finger crosses its
+  // start, then let the focus cell define the other edge. This gives free
+  // character-level selection in either direction without native handles.
+  setTerminalSelection(
+    beforeAnchor ? cell : anchorStart,
+    beforeAnchor ? anchorEnd : cell,
+  );
+}
+
+function selectTerminalWordAt(clientX, clientY) {
+  const cell = terminalCellAt(clientX, clientY);
+  const range = terminalWordRangeAt(cell);
+  if (!range) {
+    return false;
+  }
+  terminalTouch.selectionStart = range.start;
+  terminalTouch.selectionEnd = range.end;
+  return setTerminalSelection(range.start, range.end);
 }
 
 function onTerminalTouchStart(event) {
@@ -2276,6 +2378,7 @@ function onTerminalTouchStart(event) {
   }
   const touch = event.touches[0];
   clearTerminalTouchTimer();
+  releaseTerminalFocusSuppression();
   terminalTouch.active = true;
   terminalTouch.startX = touch.clientX;
   terminalTouch.startY = touch.clientY;
@@ -2283,14 +2386,17 @@ function onTerminalTouchStart(event) {
   terminalTouch.moved = false;
   terminalTouch.scrolling = false;
   terminalTouch.longPress = false;
+  terminalTouch.selectionStart = null;
+  terminalTouch.selectionEnd = null;
   state.term.clearSelection();
   terminalTouch.timer = setTimeout(() => {
     terminalTouch.timer = 0;
     if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
       return;
     }
-    if (selectTerminalLineAt(touch.clientX, touch.clientY)) {
+    if (selectTerminalWordAt(touch.clientX, touch.clientY)) {
       terminalTouch.longPress = true;
+      suppressTerminalFocus();
       navigator.vibrate?.(8);
     }
   }, TERMINAL_LONG_PRESS_MS);
@@ -2309,6 +2415,7 @@ function onTerminalTouchMove(event) {
 
   if (terminalTouch.longPress) {
     event.preventDefault();
+    extendTerminalSelection(touch.clientX, touch.clientY);
     return;
   }
   if (
@@ -2317,6 +2424,7 @@ function onTerminalTouchMove(event) {
     Math.abs(dy) >= Math.abs(dx)
   ) {
     terminalTouch.scrolling = true;
+    suppressTerminalFocus();
     clearTerminalTouchTimer();
   }
   if (terminalTouch.scrolling) {
@@ -2350,13 +2458,19 @@ function onTerminalTouchEnd(event) {
   terminalTouch.active = false;
   terminalTouch.scrolling = false;
   terminalTouch.longPress = false;
+  terminalTouch.selectionStart = null;
+  terminalTouch.selectionEnd = null;
   terminalTouch.moved = false;
   terminalTouch.blurOnEnd = false;
   if (wasScrolling || wasLongPress) {
-    // Keep the synthetic click/mousedown from focusing the hidden textarea and
-    // reopening the keyboard after a scroll or selection gesture.
+    // Keep the synthetic click/mousedown and any delayed WebView focus from
+    // reopening the keyboard after a scroll or selection gesture. The next
+    // touchstart releases the guard, so a deliberate tap still opens it.
+    suppressTerminalFocus(650);
     if (blurOnEnd) {
       state.term?.blur();
+      window.setTimeout(blurTerminalIfFocusSuppressed, 0);
+      window.setTimeout(blurTerminalIfFocusSuppressed, 120);
     }
     event.preventDefault();
     return;
@@ -3668,6 +3782,13 @@ function terminalHasFocus() {
   return Boolean(active && elements.terminalOutput.contains(active));
 }
 
+function syncKeyboardButtonState() {
+  elements.focusTerminalButton?.setAttribute(
+    "aria-pressed",
+    String(terminalHasFocus()),
+  );
+}
+
 function syncSoftKeyboardLayout() {
   const { width, height } = viewportSize();
   if (
@@ -3995,6 +4116,12 @@ function bind() {
 
   // Keep the terminal textarea focused when a pointer activates an accessory
   // key. Focus synchronously on click so iOS can retain/open its soft keyboard.
+  elements.terminalKeyBar.addEventListener("pointerdown", (event) => {
+    // A key press is an explicit input action. Drop the scroll/long-press
+    // focus guard before the button handlers below run.
+    releaseTerminalFocusSuppression();
+    if (event.target.closest("button")) event.preventDefault();
+  }, true);
   elements.terminalKeyBar.addEventListener("mousedown", (event) => {
     if (event.target.closest("button")) event.preventDefault();
   });
@@ -4038,8 +4165,39 @@ function bind() {
   });
 
   elements.focusTerminalButton.addEventListener("click", () => {
-    state.term?.focus();
+    releaseTerminalFocusSuppression();
+    if (terminalHasFocus()) {
+      state.term?.blur();
+    } else {
+      state.term?.focus();
+    }
+    syncKeyboardButtonState();
   });
+  elements.terminalOutput.addEventListener("focusin", syncKeyboardButtonState);
+  elements.terminalOutput.addEventListener("focusout", () => {
+    window.requestAnimationFrame(syncKeyboardButtonState);
+  });
+
+  // A scroll or long press can make Android WebView focus the hidden textarea
+  // after our touchend handler. Reject that focus until the next touch starts.
+  elements.terminalOutput.addEventListener("focusin", (event) => {
+    if (!terminalFocusSuppressed()) {
+      return;
+    }
+    event.stopPropagation();
+    if (event.target instanceof HTMLElement) {
+      event.target.blur();
+    }
+  }, true);
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    elements.terminalOutput.addEventListener(type, (event) => {
+      if (!terminalTouch.suppressClick) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+  }
 
   elements.terminalOutput.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "touch") {
@@ -4056,6 +4214,7 @@ function bind() {
     if (!state.connected || event.pointerType === "touch") {
       return;
     }
+    releaseTerminalFocusSuppression();
     window.requestAnimationFrame(() => state.term?.focus());
   });
   elements.terminalOutput.addEventListener("touchstart", onTerminalTouchStart, {
@@ -4071,7 +4230,7 @@ function bind() {
     passive: false,
   });
   elements.terminalOutput.addEventListener("contextmenu", (event) => {
-    // A long press selects a line through xterm; suppress the WebView's native
+    // A long press selects a word through xterm; suppress the WebView's native
     // canvas menu, which cannot copy the DOM-rendered terminal anyway.
     if (coarsePointerMedia.matches) {
       event.preventDefault();
