@@ -1063,6 +1063,19 @@ body.terminal-fullscreen-fallback {
    * events; the terminal handles vertical drags itself in app.js. */
   touch-action: none;
   overscroll-behavior: contain;
+  -webkit-touch-callout: none;
+}
+
+/* The rows are real text, so a WebView long press would start its own
+ * selection and take the gesture away from the xterm selection the app
+ * drives. The app copies the selection itself. */
+.terminal-output,
+.terminal-output .xterm-rows,
+.terminal-output .xterm-screen,
+.terminal-output .xterm-helper-textarea {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .terminal-output .xterm-viewport {

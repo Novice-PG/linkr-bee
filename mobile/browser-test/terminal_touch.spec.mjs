@@ -172,12 +172,108 @@ test("long press selects a word and dragging extends the selection", async ({ pa
   await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
   const selected = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
-  expect(selected).toContain("\n");
-  expect(selected.split("\n").length).toBeGreaterThan(1);
+  const lines = selected.split("\n");
+  expect(lines.length).toBeGreaterThan(1);
   expect(selected.length).toBeGreaterThan(word.length);
+  // The drag is anchored on the exact cell under the finger, not on the word
+  // edge, so the box starts part-way through the word on the row it reached.
+  expect(lines[0]).not.toBe(word);
+  expect(word.endsWith(lines[0])).toBe(true);
+  expect(lines[0].length).toBeGreaterThan(4);
+  expect(lines.at(-1)).toMatch(/^line \d{3} abc/);
   await expect(page.locator("#copyBtn")).toBeVisible();
   await page.locator("#copyBtn").click();
   await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
+});
+
+test("long press with the keyboard open selects and copies without closing it", async ({ page, context }) => {
+  await openTerminal(page);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const termSize = await page.evaluate(() => ({
+    rows: window.__terminalTest.state.term.rows,
+    cols: window.__terminalTest.state.term.cols,
+  }));
+  const client = await context.newCDPSession(page);
+  const x = box.x + (box.width / termSize.cols) * 12;
+  const y = box.y + box.height - 50;
+  const rowHeight = box.height / termSize.rows;
+
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 5 }],
+  });
+  await page.waitForTimeout(900);
+  expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection()))
+    .toBe("abcdefghijklmnopqrstuvwxyz");
+
+  for (let i = 1; i <= 8; i += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{
+        x,
+        y: y - rowHeight * 3 * (i / 8),
+        radiusX: 8,
+        radiusY: 8,
+        force: 1,
+        id: 5,
+      }],
+    });
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const selected = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(selected).toContain("\n");
+  // The soft keyboard was open before the gesture and must still be open.
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  await page.locator("#copyBtn").click();
+  await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
+});
+
+test("swiping history keeps an open keyboard open", async ({ page, context }) => {
+  await openTerminal(page);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  const before = await page.evaluate(() => ({
+    viewportY: window.__terminalTest.state.term.buffer.active.viewportY,
+    baseY: window.__terminalTest.state.term.buffer.active.baseY,
+  }));
+  await touchDrag(context, page, { deltaY: 240 });
+  const after = await page.evaluate(() => ({
+    viewportY: window.__terminalTest.state.term.buffer.active.viewportY,
+    focused: document.activeElement?.className || "",
+  }));
+  expect(after.viewportY).toBeLessThan(before.viewportY);
+  expect(after.viewportY).toBeLessThan(before.baseY);
+  expect(after.focused).toContain("xterm-helper-textarea");
+});
+
+test("a cancelled long press still selects and does not open the keyboard", async ({ page, context }) => {
+  await openTerminal(page);
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const client = await context.newCDPSession(page);
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height - 50;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 6 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchCancel",
+    touchPoints: [],
+  });
+  expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection()))
+    .not.toBe("");
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .not.toContain("xterm-helper-textarea");
 });
 
 test("copy with no selection falls back to the whole transcript", async ({ page }) => {
