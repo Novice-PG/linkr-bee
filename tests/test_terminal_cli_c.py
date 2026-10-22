@@ -335,8 +335,11 @@ class CHarnessTests(unittest.TestCase):
                         "static void describe_escape(", ["normalize_enter"])
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
                                  ["describe_escape"])
+        # Stop before the readback helpers: this harness only exercises the
+        # sanitiser, and the new helpers have their own harness.  Slicing
+        # through them would trip -Werror=unused-function.
         sanitizer = extract(source, "static void printable_ble_name(",
-                            "static void timespec_add_ms(",
+                            "static bool ble_name_query_value(",
                             ["printable_ble_name"])
         validators = extract(source, "static const char *parse_escape(",
                              "static void usage(", [
@@ -723,14 +726,22 @@ class CParityTests(unittest.TestCase):
         self.assertLess(record, body.index("return false"))
 
     def test_c_sanitizes_names_heard_over_the_air(self):
-        """An advertisement is attacker-controlled input: ESC and C1 must not
-        reach the terminal from the scan list, the found line or nearby list."""
-        self.assertIn("static void printable_ble_name", self.c_source)
+        """An advertisement is attacker-controlled input: every path that
+        prints a heard name must go through the one sanitiser.
+
+        Its behaviour (ESC/C1/NULL) is covered by test_ble_name_client.py;
+        this only pins the call sites the D-Bus client actually uses.
+        """
         self.assertGreaterEqual(self.c_source.count("printable_ble_name("), 3)
         self.assertIn('printf("%s\\t%s\\n", addr, printable);', self.c_source)
 
     def test_c_reads_the_name_back_after_changing_it(self):
-        """A write reply echoes the request; only @n? proves the board state."""
+        """A write reply echoes the request; only @n? proves the board state.
+
+        The comparison itself is covered by test_ble_name_client.py; here we
+        pin the ordering in the D-Bus path and that only the authoritative
+        readback is printed.
+        """
         body = re.search(r"static bool run_ble_name_actions\(.*?\n\}",
                          self.c_source, re.S).group(0)
         write = body.index('snprintf(command, sizeof(command), "@n=%s"')
@@ -739,6 +750,8 @@ class CParityTests(unittest.TestCase):
         self.assertLess(write, read)
         self.assertLess(reset, read)
         self.assertIn("changed || opt->query_ble_name", body)
+        self.assertIn("ble_name_readback_matches(reply, expected", body)
+        self.assertEqual(body.count('printf("%s\\n", reply);'), 1)
 
     def test_c_refuses_a_legacy_nus_only_board_for_name_actions(self):
         """A board without the Management quartet is still a terminal, but a

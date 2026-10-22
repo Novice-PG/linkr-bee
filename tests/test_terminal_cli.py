@@ -178,6 +178,49 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("bleak", result.stderr.lower())
 
 
+class BleNameVerifyTests(unittest.IsolatedAsyncioTestCase):
+    """The write path must ask the board, not trust the write reply."""
+
+    def management(self, answer):
+        calls = []
+
+        class FakeManagement:
+            async def send(self, command):
+                calls.append(command)
+                return answer
+
+        return FakeManagement(), calls
+
+    async def test_a_rename_is_verified_with_a_query(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Bench Bee custom=yes\r\n")
+        await module.verify_ble_name(management, "Bench Bee")
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_a_board_that_reports_another_name_fails_the_rename(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Old Name custom=yes\r\n")
+        with self.assertRaisesRegex(RuntimeError, "reports"):
+            await module.verify_ble_name(management, "Bench Bee")
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_a_reset_only_requires_a_readable_name(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Linkr Bee 078C custom=no\r\n")
+        await module.verify_ble_name(management, None)
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_an_unreadable_answer_fails_even_a_reset(self):
+        module = load_terminal()
+        management, calls = self.management(b"ERR name=1\r\n")
+        with self.assertRaisesRegex(RuntimeError, "did not report"):
+            await module.verify_ble_name(management, None)
+        self.assertEqual(calls, [b"@n?"])
+
+
 class CompletionTests(unittest.TestCase):
     """--print-completion must stay in step with the parser it describes."""
 

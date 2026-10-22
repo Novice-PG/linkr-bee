@@ -183,9 +183,52 @@ static void print_state(const char *label)
 	printf("%s_length=%u\n", label, (unsigned int)sd[0].data_len);
 }
 
+static const char *command_name(enum ble_name_command command)
+{
+	switch (command) {
+	case BLE_NAME_COMMAND_QUERY:
+		return "query";
+	case BLE_NAME_COMMAND_RESET:
+		return "reset";
+	case BLE_NAME_COMMAND_SET:
+		return "set";
+	default:
+		return "none";
+	}
+}
+
+static void print_command(const char *label, const char *body)
+{
+	const char *value = NULL;
+	enum ble_name_command command = ble_name_parse_command(body, &value);
+
+	printf("%s_cmd=%s\n", label, command_name(command));
+	printf("%s_value=%s\n", label, value ? value : "");
+}
+
 int main(int argc, char **argv)
 {
 	const char *scenario = argc > 1 ? argv[1] : "validate";
+
+	if (!strcmp(scenario, "commands")) {
+		/* The spellings the API document promises.  `name default` is
+		 * a reset; `name=default` and `name  default` are literal
+		 * names that the handler trims. */
+		print_command("query_name", "name");
+		print_command("query_n", "n");
+		print_command("query_name_q", "name?");
+		print_command("query_n_q", "n?");
+		print_command("reset_name", "name default");
+		print_command("reset_n", "n default");
+		print_command("set_eq", "name=default");
+		print_command("set_n_eq", "n=default");
+		print_command("set_two_spaces", "name  default");
+		print_command("set_name", "name=Bench Bee");
+		print_command("set_n_name", "n Bench Bee");
+		print_command("none", "nomatch");
+		print_command("null", NULL);
+		return 0;
+	}
 
 	if (!strcmp(scenario, "validate")) {
 		/* The rules the firmware applies to a name, as the firmware
