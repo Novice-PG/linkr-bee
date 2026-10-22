@@ -213,7 +213,7 @@ dial is seconds:
 $ bee --ble-name Linkr --serve
 {"event":"ready","program":"bee","version":"0.1.2","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
-        "lan","exec","loopback-test","state","quit"]}
+        "ble-name","lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}
@@ -237,7 +237,8 @@ either way.
 The operations are the request flags, spelled as JSON: `info`, `uart` (a
 `"value"` like `"921600,8,n,1,none"` writes, none reads), `wifi` (an `"ssid"`
 and optional `"pass"` write, none reads), `wifi-off`, `wifi-scan`, `webdav` (a
-`"url"` writes, none reads), `webdav-off`, `lan`, `exec` (`"cmd"`, and optional
+`"url"` writes, none reads), `webdav-off`, `ble-name` (a `"name"` writes,
+`"default": true` restores the MAC-derived name, neither reads), `lan`, `exec` (`"cmd"`, and optional
 `"timeout_ms"`, `"idle_ms"`, `"retry"`), `loopback-test` (`"data"`, and optional
 `"timeout_ms"`), `state` and `quit`. WebDAV is part of the protocol even though
 a particular firmware build may leave it out (the ESP32-WROOM build disables it

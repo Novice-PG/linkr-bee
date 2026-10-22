@@ -1097,21 +1097,61 @@ async fn find(
         let _ = adapter.stop_scan().await;
     }
 
-    let chosen = chosen.ok_or_else(|| match selection {
-        Selection::Any => "no board was found within {} s — is the board powered?"
-            .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
-        // The name is a label the owner can change, so a name that matches
-        // nothing is a board that was renamed, not a board that is missing.
-        Selection::Name(name) => format!(
-            "no board named “{name}” was found — the advertised name is a label that can be changed, so a renamed board is dialled by its address (--ble-address)"
-        ),
-        Selection::Address(address) => {
-            format!("no board at {address} was found")
+    let chosen = match chosen {
+        Some(chosen) => chosen,
+        None => {
+            let mut message = match selection {
+                Selection::Any => "no board was found within {} s — is the board powered?"
+                    .replace("{}", &SCAN_TIMEOUT.as_secs().to_string()),
+                // The name is a label the owner can change, so a name that
+                // matches nothing is a board that was renamed, not a board
+                // that is missing.
+                Selection::Name(name) => format!(
+                    "no board named “{name}” was found — the advertised name is a label that can be changed, so a renamed board is dialled by its address (--ble-address)"
+                ),
+                Selection::Address(address) => {
+                    format!("no board at {address} was found")
+                }
+            };
+            // "Dial it by address" is only useful if the addresses heard are
+            // on screen; a scan already paid for them.
+            if matches!(selection, Selection::Name(_)) {
+                let heard = heard_boards(&adapter).await;
+                if !heard.is_empty() {
+                    message.push_str("\nheard nearby: ");
+                    message.push_str(&heard.join(", "));
+                }
+            }
+            return Err(message);
         }
-    })?;
+    };
 
     let dialled_here = dial(&chosen, dial_attempt(window, started.elapsed())).await?;
     Ok((chosen, dialled_here))
+}
+
+/// The boards the adapter has heard, as `name (address)`, for a message whose
+/// next step is "dial one of these by address". At most six, like the scan
+/// picker: a list longer than the screen is not an answer.
+async fn heard_boards(adapter: &btleplug::platform::Adapter) -> Vec<String> {
+    let Ok(peripherals) = adapter.peripherals().await else {
+        return Vec::new();
+    };
+    let mut heard = Vec::new();
+    for peripheral in peripherals {
+        let Ok(Some(properties)) = peripheral.properties().await else {
+            continue;
+        };
+        if !is_board(&properties.services, properties.local_name.as_deref()) {
+            continue;
+        }
+        let name = display_name(properties.local_name.as_deref())
+            .unwrap_or_else(|| "Linkr Bee".to_string());
+        heard.push(format!("{name} ({})", peripheral.address()));
+    }
+    heard.sort();
+    heard.truncate(6);
+    heard
 }
 
 /// The first device that is a board this interface can talk to — see
@@ -1156,6 +1196,42 @@ async fn pick(
     Ok(None)
 }
 
+/// The identity gate that runs before the terminal is wired.
+///
+/// A device that advertises the Management Service must answer with the Linkr
+/// Device ID namespace; a device without it is accepted only under the fixed
+/// legacy NUS name. The checks take plain values instead of a `Peripheral` so
+/// they can be exercised without a radio.
+fn check_identity(
+    has_management: bool,
+    characteristics: &[Uuid],
+    device_id: Option<&[u8]>,
+    local_name: Option<&str>,
+) -> Result<(), String> {
+    if has_management {
+        if !characteristics.contains(&MGMT_DEVICE_ID) {
+            return Err(
+                "the Linkr Management service does not expose a Device ID characteristic"
+                    .to_string(),
+            );
+        }
+        let id = device_id.ok_or_else(|| "the Linkr Device ID could not be read".to_string())?;
+        if !is_linkr_device_id(id) {
+            return Err(
+                "the device's Device ID does not belong to the Linkr Bee namespace — refusing it"
+                    .to_string(),
+            );
+        }
+    } else if !is_legacy_name(local_name) {
+        return Err(
+            "the device does not offer the Linkr Management service and does not use the \
+             legacy Linkr BLE UART name — it is not a Linkr Bee"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Discover the service and subscribe to the characteristic that carries the
 /// target's output.
 async fn wire(peripheral: &Peripheral) -> Result<(), String> {
@@ -1168,6 +1244,10 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         .iter()
         .any(|service| service.uuid == MGMT_SERVICE);
     let characteristics = peripheral.characteristics();
+    let characteristic_uuids: Vec<Uuid> = characteristics
+        .iter()
+        .map(|characteristic| characteristic.uuid)
+        .collect();
 
     if has_management {
         let device_id = characteristics
@@ -1183,12 +1263,7 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         let id = retry_busy(|| async { peripheral.read(device_id).await })
             .await
             .map_err(|why| format!("the Linkr Device ID could not be read: {why}"))?;
-        if !is_linkr_device_id(&id) {
-            return Err(
-                "the device's Device ID does not belong to the Linkr Bee namespace — refusing it"
-                    .to_string(),
-            );
-        }
+        check_identity(true, &characteristic_uuids, Some(&id), None)?;
     } else {
         // Pre-Management-Service firmware is a terminal-only bridge. It never
         // had the Device ID to read, so its fixed legacy name is the only
@@ -1201,13 +1276,7 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
         let name = properties
             .as_ref()
             .and_then(|properties| properties.local_name.as_deref());
-        if !is_legacy_name(name) {
-            return Err(
-                "the device does not offer the Linkr Management service and does not use the \
-                 legacy Linkr BLE UART name — it is not a Linkr Bee"
-                    .to_string(),
-            );
-        }
+        check_identity(false, &characteristic_uuids, None, name)?;
     }
 
     for wanted in [NUS_TX, NUS_RX] {
@@ -1673,6 +1742,52 @@ mod tests {
             b"OTHERBLE\x01\x00\x01\x02\x03\x04\x05\x06"
         ));
         assert!(!is_linkr_device_id(&[]));
+    }
+
+    /// The management path must carry the Device ID characteristic and answer
+    /// in the Linkr namespace; a copied service UUID is not enough.
+    #[test]
+    fn the_identity_gate_requires_a_linkr_device_id_for_management() {
+        let valid = [NUS_TX, NUS_RX, MGMT_DEVICE_ID];
+        let good = b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05\x06";
+        assert!(check_identity(true, &valid, Some(good), None).is_ok());
+
+        let without_id = [NUS_TX, NUS_RX];
+        let error = check_identity(true, &without_id, None, None).unwrap_err();
+        assert!(error.contains("does not expose a Device ID characteristic"));
+
+        for wrong in [
+            b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05".as_slice(),
+            b"OTHERBLE\x01\x00\x01\x02\x03\x04\x05\x06".as_slice(),
+            b"".as_slice(),
+        ] {
+            let error = check_identity(true, &valid, Some(wrong), None).unwrap_err();
+            assert!(error.contains("Device ID does not belong"), "{error}");
+        }
+
+        let error = check_identity(true, &valid, None, None).unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
+    }
+
+    /// A board without the Management Service is a terminal only while it
+    /// still uses a name from the pre-rename firmware. A new-style name on a
+    /// NUS-only device is evidence of an impostor.
+    #[test]
+    fn the_identity_gate_keeps_legacy_nus_only_boards_and_rejects_impostors() {
+        let nus_only = [NUS_TX, NUS_RX];
+        for name in ["Linkr BLE UART", "Linkr BLE UART-3", "linkr ble uart 7F2C"] {
+            assert!(
+                check_identity(false, &nus_only, None, Some(name)).is_ok(),
+                "{name} should be accepted"
+            );
+        }
+        for name in [Some("Linkr Bee 078C"), Some("Other"), None] {
+            let error = check_identity(false, &nus_only, None, name).unwrap_err();
+            assert!(
+                error.contains("legacy Linkr BLE UART name"),
+                "{name:?}: {error}"
+            );
+        }
     }
 
     /// Control characters are removed before a scan result reaches a

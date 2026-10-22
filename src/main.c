@@ -134,6 +134,7 @@ static struct bt_conn *current_conn;
 static struct k_mutex conn_lock;
 static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
+static atomic_t advertise_refresh_req;
 static atomic_t nus_notify_enabled;
 static uint8_t linkr_identity = BT_ID_DEFAULT;
 static atomic_t wifi_scan_request_id;
@@ -571,6 +572,79 @@ static int ble_name_settings_set(const char *name, size_t len,
 	return 0;
 }
 
+enum ble_name_persist_result {
+	BLE_NAME_PERSIST_OK = 0,
+	BLE_NAME_PERSIST_INSTALL_FAILED,
+	BLE_NAME_PERSIST_SAVE_FAILED,
+};
+
+static enum ble_name_persist_result
+ble_name_install_and_save(const char *value, size_t len, int *err)
+{
+	char previous[BLE_NAME_MAX + 1];
+	bool previous_custom = ble_name_custom;
+	size_t previous_len = strlen(ble_name);
+	int ret;
+
+	memcpy(previous, ble_name, previous_len + 1);
+	/* Install first, then persist. A stored name that the stack refused
+	 * would answer @n? with the old one and come back as the new one after
+	 * a reboot. */
+	ret = ble_name_apply(value);
+	if (ret) {
+		*err = ret;
+		return BLE_NAME_PERSIST_INSTALL_FAILED;
+	}
+	ret = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);
+	if (ret) {
+		(void)ble_name_apply(previous);
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_SAVE_FAILED;
+	}
+	ble_name_custom = true;
+	return BLE_NAME_PERSIST_OK;
+}
+
+static enum ble_name_persist_result
+ble_name_reset_and_delete(int *err)
+{
+	char previous[BLE_NAME_MAX + 1];
+	bool previous_custom = ble_name_custom;
+	uint8_t previous_sd_len = sd[0].data_len;
+	size_t previous_len = strlen(ble_name);
+	int ret;
+
+	memcpy(previous, ble_name, previous_len + 1);
+	ble_name_make_default();
+	/* The scan response length follows the buffer here, before the name
+	 * is handed to the stack: a failure below must not leave the old
+	 * length beside the new bytes, which would advertise a truncated
+	 * name. */
+	sd[0].data_len = (uint8_t)strlen(ble_name);
+	ret = bt_set_name(ble_name);
+	if (ret) {
+		memcpy(ble_name, previous, previous_len + 1);
+		sd[0].data_len = previous_sd_len;
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_INSTALL_FAILED;
+	}
+	/* Persist only after the name is in effect: deleting the stored name
+	 * while the install fails would make @n? report one name and the next
+	 * boot another. */
+	ret = settings_delete(BLE_NAME_SETTINGS_KEY);
+	if (ret && ret != -ENOENT) {
+		(void)bt_set_name(previous);
+		memcpy(ble_name, previous, previous_len + 1);
+		sd[0].data_len = previous_sd_len;
+		ble_name_custom = previous_custom;
+		*err = ret;
+		return BLE_NAME_PERSIST_SAVE_FAILED;
+	}
+	return BLE_NAME_PERSIST_OK;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(linkr_ble, "linkr/ble", NULL,
 			       ble_name_settings_set, NULL, NULL);
 #else
@@ -766,6 +840,19 @@ static void advertise_retry(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	if (atomic_cas(&advertise_refresh_req, 1, 0)) {
+		err = bt_le_adv_stop();
+		if (err && err != -EINVAL && err != -EALREADY) {
+			LOG_WRN("BLE advertising stop failed: %d", err);
+			/* The old scan response is still on the air.
+			 * Leaving it there would advertise a name the board
+			 * no longer answers to, so ask for another try. */
+			atomic_set(&advertise_refresh_req, 1);
+			k_work_reschedule(&advertise_work, K_MSEC(500));
+			return;
+		}
+	}
+
 	err = advertise_start();
 	if (err && err != -EALREADY) {
 		k_work_reschedule(&advertise_work, K_MSEC(500));
@@ -791,14 +878,12 @@ static void advertise_schedule(k_timeout_t delay)
  */
 static void ble_name_advertise_refresh(void)
 {
-	int err;
-
-	err = bt_le_adv_stop();
-	if (err && err != -EINVAL) {
-		LOG_WRN("BLE advertising stop failed: %d", err);
-		return;
-	}
-	advertise_start();
+	/* Serialized with the advertising work. The refresh happens on the
+	 * BT RX workqueue while advertise_work runs on the system one, and
+	 * both touch the legacy advertising API; a request flag keeps the
+	 * stop/start pair in one place. */
+	atomic_set(&advertise_refresh_req, 1);
+	advertise_schedule(K_NO_WAIT);
 }
 #endif
 
@@ -1525,21 +1610,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		return true;
 	}
 	if (!strcmp(body, "name default") || !strcmp(body, "n default")) {
-		err = settings_delete(BLE_NAME_SETTINGS_KEY);
-		if (err && err != -ENOENT) {
-			(void)send_control_response(conn, "ERR name save=%d\r\n",
-						    err);
-			return true;
-		}
-		ble_name_make_default();
-		/* The scan response length follows the buffer here, before the
-		 * name is handed to the stack: a failure below must not leave
-		 * the old length beside the new bytes, which would advertise a
-		 * truncated name. */
-		sd[0].data_len = (uint8_t)strlen(ble_name);
-		err = bt_set_name(ble_name);
-		if (err) {
-			(void)send_control_response(conn, "ERR name=%d\r\n", err);
+		enum ble_name_persist_result result;
+
+		result = ble_name_reset_and_delete(&err);
+		if (result != BLE_NAME_PERSIST_OK) {
+			(void)send_control_response(
+				conn,
+				result == BLE_NAME_PERSIST_SAVE_FAILED ?
+					"ERR name save=%d\r\n" :
+					"ERR name=%d\r\n",
+				err);
 			return true;
 		}
 		ble_name_advertise_refresh();
@@ -1560,6 +1640,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 			value = body + 2;
 		}
 		if (value) {
+			enum ble_name_persist_result result;
 			size_t len;
 
 			value = trim_spaces((char *)value);
@@ -1571,20 +1652,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					BLE_NAME_MAX);
 				return true;
 			}
-			err = settings_save_one(BLE_NAME_SETTINGS_KEY, value, len);
-			if (err) {
-				(void)send_control_response(conn,
-							    "ERR name save=%d\r\n",
-							    err);
+			result = ble_name_install_and_save(value, len, &err);
+			if (result != BLE_NAME_PERSIST_OK) {
+				(void)send_control_response(
+					conn,
+					result == BLE_NAME_PERSIST_SAVE_FAILED ?
+						"ERR name save=%d\r\n" :
+						"ERR name=%d\r\n",
+					err);
 				return true;
 			}
-			err = ble_name_apply(value);
-			if (err) {
-				(void)send_control_response(conn,
-							    "ERR name=%d\r\n", err);
-				return true;
-			}
-			ble_name_custom = true;
 			ble_name_advertise_refresh();
 			(void)send_control_response(conn, "OK name=%s\r\n",
 						    ble_name);

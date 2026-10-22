@@ -275,7 +275,7 @@ config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 
 config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
 	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"
-	depends on BT
+	depends on BT && SETTINGS
 	default y
 	select BT_DEVICE_NAME_DYNAMIC
 	help

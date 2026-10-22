@@ -13,6 +13,7 @@ import {
   parseUartSettings,
   parseWebdavStatus,
   parseWifiStatus,
+  printableDeviceName,
   redactCommand,
   replyStatus,
   setUartCommand,
@@ -1727,11 +1728,14 @@ function updateBleNameControls() {
 }
 
 function renderBleNameStatus() {
-  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
+  if (!state.connected || state.mode !== "ble") {
     elements.bleNameStatus.textContent = t("bleNameUnknown");
     return;
   }
-  if (state.bleNameSupported === false) {
+  // A legacy NUS-only board is connected; it simply has no Management
+  // Service, so "connect over BLE" would be untrue. Say the firmware does
+  // not support renaming instead.
+  if (!state.mgmtReady || state.bleNameSupported === false) {
     elements.bleNameStatus.textContent = t("bleNameUnsupported");
     return;
   }
@@ -1740,7 +1744,9 @@ function renderBleNameStatus() {
     return;
   }
   const key = state.bleNameCustom ? "bleNameStateCustom" : "bleNameStateDefault";
-  elements.bleNameStatus.textContent = t(key).replace("{name}", state.bleName);
+  // A function replacement, not a string: a name containing `$&` or `$'`
+  // must not be interpreted as a replacement pattern.
+  elements.bleNameStatus.textContent = t(key).replace("{name}", () => state.bleName);
 }
 
 function applyBleName(parsed, { custom = null } = {}) {
@@ -1779,7 +1785,7 @@ async function readBleName({ quiet = false } = {}) {
     const reply = await sendControl(BLE_NAME_QUERY_COMMAND, {
       returnResponse: true,
     });
-    const parsed = parseBleName(reply);
+    const parsed = parseBleName(reply, { query: true });
     if (!parsed) {
       state.bleName = null;
       state.bleNameCustom = null;
@@ -1792,6 +1798,16 @@ async function readBleName({ quiet = false } = {}) {
     applyBleName(parsed);
     return parsed;
   } catch (error) {
+    // An old board answers the query with "ERR unknown command". That is not
+    // a transient read failure: the firmware simply has no rename command.
+    if (/^ERR\b/i.test(String(error.message))) {
+      state.bleName = null;
+      state.bleNameCustom = null;
+      state.bleNameSupported = false;
+      updateBleNameControls();
+      renderBleNameStatus();
+      return null;
+    }
     if (!quiet) {
       appendLine(`[error] ${error.message}`);
       toast(t("bleNameReadFailed"), "error");
@@ -1806,6 +1822,8 @@ async function changeBleName(command, successKey, custom) {
   if (!status.ok) {
     throw new Error(status.error || t("bleNameReadFailed"));
   }
+  // A write's reply has no `custom=` field, so it is parsed without the
+  // suffix rule and then verified by the read below.
   const parsed = parseBleName(reply);
   if (!parsed) {
     throw new Error(t("bleNameReadFailed"));
@@ -1814,8 +1832,14 @@ async function changeBleName(command, successKey, custom) {
   // The board is asked again, so the name on screen is the one the board
   // reports and not the one the write's own reply carried. A write's reply
   // has no `custom=` field, and the advertisement only carries the new name
-  // once the board has started broadcasting it.
-  await readBleName({ quiet: true });
+  // once the board has started broadcasting it. A reset's MAC suffix is not
+  // predictable here, so it only has to read back; a set must read back the
+  // name we asked for.
+  const expected = command === "@n default" ? null : command.slice(3);
+  const readBack = await readBleName({ quiet: true });
+  if (!readBack || (expected !== null && readBack.name !== expected)) {
+    throw new Error(t("bleNameReadFailed"));
+  }
   toast(t(successKey));
 }
 
@@ -2356,7 +2380,7 @@ async function restoreAuthorizedDevice() {
       return;
     }
     rememberDevice(device, true);
-    appendLine(`[restore] ${device.name || device.id}`);
+    appendLine(`[restore] ${printableDeviceName(device.name, device.id)}`);
     toast(t("authorizedDeviceReady"));
   } catch (error) {
     debugLine(`[restore] ${error.message}`);
@@ -3048,7 +3072,7 @@ async function adoptLegacyNus(device) {
   state.deviceRestored = false;
   elements.wsTokenInput.value = lanTokens.selectDevice("");
   setConnected(true, { preserveJournal: true });
-  appendLine(`[legacy] ${device.name || device.id}`);
+  appendLine(`[legacy] ${printableDeviceName(device.name, device.id)}`);
   appendLine(t("legacyHint"));
 }
 
@@ -3092,7 +3116,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     }
 
     appendLine(`[pairing] ${t("pairingHint")}`);
-    appendLine(`[connect] ${device.name || device.id}`);
+    appendLine(`[connect] ${printableDeviceName(device.name, device.id)}`);
     pairingAttempted = true;
     await bleTransport.connect(device.id, onDisconnected);
     transportConnected = true;
@@ -3138,14 +3162,19 @@ async function connectOnce({ chooseDevice = false } = {}) {
     if (deviceIdValue.byteLength !== 16) {
       throw new Error("Invalid Linkr Device ID length");
     }
-    state.deviceId = Array.from(
-      new Uint8Array(
-        deviceIdValue.buffer.slice(
-          deviceIdValue.byteOffset,
-          deviceIdValue.byteOffset + deviceIdValue.byteLength,
-        ),
-      ),
-      (byte) => byte.toString(16).padStart(2, "0"),
+    // Any device can advertise the Management Service UUID; the namespace is
+    // what makes the service a filter. Python and the C client check it too.
+    const deviceIdBytes = new Uint8Array(
+      deviceIdValue.buffer,
+      deviceIdValue.byteOffset,
+      deviceIdValue.byteLength,
+    );
+    const linkrNamespace = [0x4c, 0x49, 0x4e, 0x4b, 0x52, 0x42, 0x4c, 0x45, 0x01, 0x00];
+    if (!linkrNamespace.every((byte, index) => deviceIdBytes[index] === byte)) {
+      throw new Error("Device ID is not a Linkr Bee ID");
+    }
+    state.deviceId = Array.from(deviceIdBytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
     ).join("");
     elements.wsTokenInput.value = lanTokens.selectDevice(state.deviceId);
     // Notifications can arrive before startNotifications resolves. Start the

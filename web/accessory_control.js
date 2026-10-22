@@ -86,9 +86,17 @@ export function webdavCommand({ action = "on", url } = {}) {
  * hardware-MAC suffix instead of the UI trying to guess it. */
 export function bleNameCommand({ name, reset = false } = {}) {
   if (reset) return "@n default";
-  const value = String(name ?? "").trim();
+  // Trim only the four ASCII bytes the firmware trims; String.trim() would
+  // also remove NBSP and U+3000, making the same command store a different
+  // name depending on which host sent it.
+  const value = String(name ?? "").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
   if (!value) invalid("name is required");
-  if (/[\x00-\x1f\x7f]/.test(value)) invalid("name must not contain control characters");
+  // The firmware's reject set: C0, DEL, C1, and the two Unicode line
+  // separators. Keeping it in step here means a name the board would refuse
+  // is stopped before it leaves the browser.
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value)) {
+    invalid("name must not contain control characters");
+  }
   const bytes = new TextEncoder().encode(value).length;
   if (bytes > ACCESSORY_LIMITS.bleNameMaxBytes) {
     invalid(`name must be at most ${ACCESSORY_LIMITS.bleNameMaxBytes} UTF-8 bytes`);
@@ -169,23 +177,34 @@ export function parseWebdavStatus(text) {
 
 /* Query replies append "custom=yes|no"; set and reset replies do not. The name
  * itself may contain spaces, so only the fixed suffix is removed and the
- * remaining text is kept verbatim. */
-export function parseBleName(text) {
+ * remaining text is kept verbatim. A write's reply is parsed with
+ * `query: false`: a name that itself ends in " custom=yes" must survive. */
+export function parseBleName(text, { query = false } = {}) {
   const line = String(text ?? "")
     .split(/\r?\n/)
     .find((candidate) => /\bOK\s+name=/i.test(candidate)) || "";
   if (!line) return null;
   const prefix = line.match(/\bOK\s+name=/i);
   if (!prefix) return null;
-  let value = line.slice(prefix.index + prefix[0].length).replace(/\s+$/, "");
+  let value = line.slice(prefix.index + prefix[0].length).replace(/\r$/, "");
   let custom = null;
-  const suffix = value.match(/\s+custom=(yes|no)$/i);
-  if (suffix) {
-    custom = suffix[1].toLowerCase() === "yes";
-    value = value.slice(0, suffix.index).replace(/\s+$/, "");
+  if (query) {
+    const suffix = value.match(/ custom=(yes|no)$/i);
+    if (suffix) {
+      custom = suffix[1].toLowerCase() === "yes";
+      value = value.slice(0, suffix.index);
+    }
   }
   if (!value) return null;
   return { name: value, custom };
+}
+
+/* A device name comes from the radio, not from us: strip control bytes before
+ * it reaches a terminal line, so a nearby device cannot inject escape
+ * sequences into the journal. */
+export function printableDeviceName(name, fallback = "") {
+  const text = String(name ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  return text || String(fallback ?? "");
 }
 
 /* `@i?` answers with several "@info <group> key=value …" frames terminated by

@@ -925,6 +925,13 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             );
         }
     }
+    // Setting a name and restoring the MAC-derived one are two answers to
+    // one question. This used to be noticed only after the link came up, so
+    // a bad command line still paid for the dial and exited 1; a usage error
+    // is known before the radio is touched.
+    if args.requests.ble_name.is_some() && args.requests.ble_name_default {
+        fail(prog, "choose either --rename-ble or --reset-ble-name");
+    }
     args
 }
 
@@ -1038,7 +1045,7 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{} {} — run a Linkr Bee bridge from the command line.\n",
                 "\n",
-                "scan        --scan                     list what is on the air\n",
+                "scan        --scan                     list Linkr Bee boards on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
                 "            --query-wifi --query-webdav --query-ble-name --wifi-scan\n",
                 "            --query-lan\n",

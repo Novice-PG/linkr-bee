@@ -206,11 +206,12 @@ def normalize_ble_name(value: str) -> str:
     """Validate an advertised BLE name before touching the radio.
 
     The firmware stores the UTF-8 bytes verbatim and rejects C0/C1 controls,
-    DEL, embedded NUL, invalid UTF-8, and anything over 29 bytes. A prompt
-    whose answer is visually empty is treated the same way: trimming here is
-    what makes a name typed with a trailing space stable across reads.
+    DEL, U+2028/U+2029, embedded NUL, invalid UTF-8, and anything over 29
+    bytes. It trims only the four ASCII whitespace bytes; trimming Unicode
+    whitespace here would make the same command store a different name
+    depending on which host sent it.
     """
-    name = value.strip()
+    name = value.strip(" \t\r\n")
     if not name:
         raise argparse.ArgumentTypeError(
             "BLE name must be 1-29 UTF-8 bytes")
@@ -223,7 +224,8 @@ def normalize_ble_name(value: str) -> str:
         raise argparse.ArgumentTypeError(
             f"BLE name must be 1-{BLE_NAME_MAX} UTF-8 bytes; "
             f"this one is {len(encoded)}")
-    if any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f for char in name):
+    if any(ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f or
+           ord(char) in (0x2028, 0x2029) for char in name):
         raise argparse.ArgumentTypeError(
             "BLE name must not contain control characters")
     return name
@@ -464,12 +466,27 @@ async def scan_devices(timeout: float) -> list:
     for dev in sorted(devices, key=device_sort_key):
         rssi = getattr(dev, "rssi", None)
         signal = f"{rssi} dBm" if isinstance(rssi, int) else "-"
-        print(f"{dev.address}\t{dev.name or '(unknown)'}\t{signal}")
+        print(f"{dev.address}\t{printable_device_name(dev.name)}\t{signal}")
     return devices
 
 
 def device_sort_key(device) -> tuple[str, str]:
     return ((device.name or "\uffff").lower(), device.address or "")
+
+
+def printable_device_name(name: str | None) -> str:
+    """A name heard over the air, safe to put on a terminal line.
+
+    Anyone nearby can choose the name a scan reports, including ESC and C1
+    bytes that a terminal would interpret. Drop them rather than let a
+    stranger's advertisement drive the console.
+    """
+    if not name:
+        return "(unknown)"
+    return "".join(
+        char for char in name
+        if not (ord(char) < 0x20 or 0x7f <= ord(char) <= 0x9f)
+    ) or "(unknown)"
 
 
 def normalize_name_prefix(name: str) -> str:
@@ -546,11 +563,13 @@ def match_device(devices, name: str | None) -> str | None:
         return None
     if len(prefixed) > 1:
         matches = ", ".join(
-            f"{dev.name} ({dev.address})" for dev in prefixed[:4]
+            f"{printable_device_name(dev.name)} ({dev.address})"
+            for dev in prefixed[:4]
         )
         warn(
             f"multiple devices match {prefix + '*'}; using "
-            f"{prefixed[0].name} ({prefixed[0].address}); matches: {matches}"
+            f"{printable_device_name(prefixed[0].name)} "
+            f"({prefixed[0].address}); matches: {matches}"
         )
     return prefixed[0].address
 
@@ -559,7 +578,7 @@ def describe_devices(devices) -> str:
     """The nearby boards as `name (address)`, for a message that must say
     what to do next rather than only what did not happen."""
     rows = [
-        f"  {dev.name or '(unknown)'} ({dev.address})"
+        f"  {printable_device_name(dev.name)} ({dev.address})"
         for dev in devices
     ]
     if not rows:
@@ -567,22 +586,45 @@ def describe_devices(devices) -> str:
     return "\n".join(rows[:6])
 
 
-def parse_ble_name(text: str) -> str | None:
-    """The name out of `OK name=<name> custom=yes|no`.
+def parse_ble_name(text: str, *, query: bool = False) -> str | None:
+    """The name out of `OK name=<name>`.
 
-    The name may contain spaces, so the suffix is peeled off the right
-    rather than by splitting the line on whitespace.
+    A query reply appends ` custom=yes|no`; a set or reset reply does not.
+    A name that itself ends in " custom=yes" must survive a write parse, so
+    the suffix is peeled only when the caller knows it read a query. Nothing
+    else is trimmed: the firmware stores trailing U+3000 and NBSP verbatim,
+    and a host that strips them would report a name the board never had.
     """
     for line in text.splitlines():
-        line = line.strip()
         if not line.lower().startswith("ok name="):
             continue
-        name = line[8:].strip()
-        marker = name.rfind(" custom=")
-        if marker >= 0 and name[marker + 8:].lower() in ("yes", "no"):
-            name = name[:marker].rstrip()
+        name = line[8:]
+        if query:
+            marker = name.rfind(" custom=")
+            if marker >= 0 and name[marker + 8:].lower() in ("yes", "no"):
+                name = name[:marker]
         return name
     return None
+
+
+async def verify_ble_name(management, expected: str | None) -> None:
+    """Read `@n?` after a rename and make sure the board agrees.
+
+    A write's own reply can echo the command whether or not the stored name
+    took effect; only the query reports the state the board will advertise.
+    `expected=None` means the reset form, whose MAC suffix the host cannot
+    predict, so only a readable answer is required.
+    """
+    answer = await management.send(b"@n?")
+    reported = parse_ble_name(answer.decode(errors="replace"), query=True)
+    if not reported:
+        raise RuntimeError(
+            "the board did not report its name after the change"
+        )
+    if expected is not None and reported != expected:
+        raise RuntimeError(
+            f"the board reports {reported!r} after writing {expected!r}"
+        )
 
 
 async def find_device(name: str | None, address: str | None, timeout: float,
@@ -1410,7 +1452,9 @@ async def run(args: argparse.Namespace) -> int:
             except Exception as exc:  # a board that predates the command
                 info(f"the board did not report its name: {exc}")
             else:
-                name = parse_ble_name(answer.decode(errors="replace"))
+                name = parse_ble_name(
+                    answer.decode(errors="replace"), query=True
+                )
                 if name:
                     info(f"board name: {name}")
 
@@ -1452,10 +1496,15 @@ async def run(args: argparse.Namespace) -> int:
                 await management.send(b"@d?")
 
             if args.rename_ble is not None:
+                # A write's reply echoes the requested name, not the state
+                # the board will advertise; read it back before saying it
+                # worked.
                 await management.send(f"@n={args.rename_ble}".encode())
+                await verify_ble_name(management, args.rename_ble)
 
             if args.reset_ble_name:
                 await management.send(b"@n default")
+                await verify_ble_name(management, None)
 
             if args.query_ble_name:
                 await management.send(b"@n?")
@@ -1594,6 +1643,11 @@ def main() -> int:
     global _QUIET
     parser = build_parser()
     args = parser.parse_args()
+    # Both flags used to send their command in turn, so the last one won and
+    # the requested name could be stored or erased depending on argument
+    # order. Reject the pair before any radio work; argparse exits 2.
+    if args.rename_ble is not None and args.reset_ble_name:
+        parser.error("--rename-ble and --reset-ble-name are mutually exclusive")
     _QUIET = args.quiet
     if args.print_completion:
         # Before any radio work: this must run on a host without bleak.

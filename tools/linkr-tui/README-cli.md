@@ -22,8 +22,8 @@ this build has no interface and exits with status 2.
 
 | Transport | Flag |
 |---|---|
-| Bluetooth address | `--ble-address EE:C7:42:34:48:CF` |
-| Bluetooth name fragment | `--ble-name "UART-"` (C3/C5: `UART-3`; WROOM: `UART-XXXX`; use the full suffix when several units are nearby) |
+| Bluetooth address | `--ble-address EE:C7:42:34:48:CF` (the board's identity) |
+| Bluetooth name fragment | `--ble-name "Linkr Bee"` or any custom label (a display name the owner can change; use `--ble-address` when several boards are nearby) |
 | LAN WebSocket | `--lan-host 192.168.0.102` |
 | LAN token | `--lan-token <TOKEN>`, `--lan-token-file <FILE>` or `$LINKR_LAN_TOKEN` |
 | Offline loopback | `--bridge -` |
@@ -35,7 +35,7 @@ and exit with status 1.
 ## Common requests
 
 ```sh
-bee-cli --scan                         # list nearby Bluetooth devices
+bee-cli --scan                         # list nearby Linkr Bee boards
 bee-cli --query-info                   # @i?
 bee-cli --query-uart                   # @u?
 bee-cli --query-wifi                   # @w?
@@ -94,8 +94,8 @@ With `--idle`, output is returned without a verified exit status.
 input ends or a request says `quit`:
 
 ```sh
-bee-cli --ble-name "UART-" --serve
-{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:name:UART-","ops":[…]}
+bee-cli --ble-name "Linkr Bee" --serve
+{"event":"ready","program":"bee-cli","version":"0.1.2","link":"ble:name:Linkr Bee","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

@@ -9,6 +9,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and assemble everything, but do not touch the release"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -45,6 +51,21 @@ jobs:
     steps:
       - name: Check out the tagged commit
         uses: actions/checkout@v4
+
+      # `workflow_dispatch` can be run from any ref; the release shape needs a
+      # v* tag, because that is what the version, notes template and asset
+      # names are built from.
+      - name: Require a version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*) ;;
+            *)
+              echo "run this workflow from a v* tag, not ${GITHUB_REF_NAME}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Download the desktop archives
         uses: actions/download-artifact@v4
@@ -92,6 +113,7 @@ jobs:
             --apk-version "${version}"
 
       - name: Create or update the release
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -106,6 +128,7 @@ jobs:
           fi
 
       - name: Drop assets this build does not carry
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -120,6 +143,7 @@ jobs:
           done < /tmp/release-assets
 
       - name: Upload every asset and the checksums
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -127,6 +151,7 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" release/* --clobber
 
       - name: The release carries this build
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

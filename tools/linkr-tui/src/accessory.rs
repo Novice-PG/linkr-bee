@@ -50,7 +50,10 @@ pub const LAN_QUERY_COMMAND: &str = "@s?";
 /// trailing spaces are invisible in a prompt and would otherwise be persisted
 /// as part of the name.
 pub fn ble_name_command(name: &str) -> Result<String, String> {
-    let name = name.trim();
+    // The four bytes the firmware trims, and only those: `str::trim` would
+    // also drop NBSP and U+3000 and make the same command store a different
+    // name depending on which host sent it.
+    let name = name.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     let bytes = name.len();
     if bytes == 0 {
         return Err("name must be 1-29 UTF-8 bytes".to_string());
@@ -61,7 +64,12 @@ pub fn ble_name_command(name: &str) -> Result<String, String> {
             AccessoryLimits::BLE_NAME_MAX
         ));
     }
-    if name.chars().any(char::is_control) {
+    // The firmware's reject set: C0, DEL, C1, and the two Unicode line
+    // separators. `char::is_control` covers the first three, not U+2028/29.
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
         return Err("name must not contain control characters".to_string());
     }
     Ok(format!("@n={name}"))
@@ -525,33 +533,33 @@ pub struct WifiStatus {
 /// The advertised BLE name, as `@n?` reports it.
 ///
 /// `custom` is `Some(false)` for the MAC-derived default and `Some(true)` for
-/// a name set with `@n=`. A write's `OK name=...` has no `custom=` field, so it
-/// is `None` there: the write says what is advertised, and the read that
-/// follows says where it came from.
+/// a name set with `@n=`. This parses a *query* reply; a write's
+/// `OK name=...` has no `custom=` field and is deliberately not parsed — the
+/// read that follows the write says what the board is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BleNameStatus {
     pub name: String,
     pub custom: Option<bool>,
 }
 
-/// Read `OK name=<name>` and, when present, the `custom=yes|no` suffix.
+/// Read `OK name=<name> custom=yes|no` from a query reply.
 ///
-/// The name may contain spaces, so the suffix is peeled off the right rather
-/// than splitting the line on whitespace. `name` is everything between the
-/// marker and that suffix, which keeps a name that ends in a word such as
-/// `custom` intact.
+/// The name may contain spaces, so only the final ` custom=` suffix is peeled
+/// off the right. Nothing else is trimmed: the firmware stores trailing
+/// NBSP and U+3000 verbatim, and a host that strips them would report a name
+/// the board never had.
 pub fn parse_ble_name(text: &str) -> Option<BleNameStatus> {
-    let line = text.lines().map(str::trim).find(|line| {
+    let line = text.lines().find(|line| {
         line.get(..8)
             .is_some_and(|head| head.eq_ignore_ascii_case("OK name="))
     })?;
-    let mut name = line.get(8..)?.trim();
+    let mut name = line.get(8..)?;
     let mut custom = None;
     if let Some(at) = name.rfind(" custom=") {
         let flag = &name[at + 8..];
         if flag.eq_ignore_ascii_case("yes") || flag.eq_ignore_ascii_case("no") {
             custom = Some(flag.eq_ignore_ascii_case("yes"));
-            name = name[..at].trim_end();
+            name = &name[..at];
         }
     }
     Some(BleNameStatus {
@@ -1101,8 +1109,18 @@ mod tests {
         assert!(ble_name_command("").is_err());
         assert!(ble_name_command("   ").is_err());
         assert!(ble_name_command("one\ntwo").is_err());
-        // Surrounding whitespace is trimmed rather than persisted.
+        // The firmware's full reject set, not only C0/DEL: C1 and the two
+        // Unicode line separators are refused before the command is sent.
+        assert!(ble_name_command("a\u{85}b").is_err());
+        assert!(ble_name_command("a\u{2028}b").is_err());
+        assert!(ble_name_command("a\u{2029}b").is_err());
+        // Surrounding ASCII whitespace is trimmed rather than persisted;
+        // NBSP and U+3000 are ordinary name bytes and survive.
         assert_eq!(ble_name_command("  Bee  ").unwrap(), "@n=Bee");
+        assert_eq!(
+            ble_name_command("\u{a0}Bee\u{3000}").unwrap(),
+            "@n=\u{a0}Bee\u{3000}"
+        );
     }
 
     #[test]
@@ -1113,15 +1131,19 @@ mod tests {
         let default = parse_ble_name("OK name=Linkr Bee 078C custom=no").unwrap();
         assert_eq!(default.name, "Linkr Bee 078C");
         assert_eq!(default.custom, Some(false));
-        // A write's confirmation has no custom field, and a name that ends in
-        // something resembling the suffix is not split unless it parses.
-        let written = parse_ble_name("OK name=测试😀").unwrap();
-        assert_eq!(written.name, "测试😀");
-        assert_eq!(written.custom, None);
+        // A name that itself ends in the suffix text survives: only the final
+        // ` custom=` field belongs to the reply.
+        let tricky = parse_ble_name("OK name=Bee custom=yes custom=no").unwrap();
+        assert_eq!(tricky.name, "Bee custom=yes");
+        assert_eq!(tricky.custom, Some(false));
         assert_eq!(
             parse_ble_name("OK name=Bee custom=maybe").unwrap().name,
             "Bee custom=maybe"
         );
+        // The parser strips the line ending, not Unicode whitespace the
+        // firmware would have stored.
+        let padded = parse_ble_name("OK name=Bee\u{3000} custom=no").unwrap();
+        assert_eq!(padded.name, "Bee\u{3000}");
         assert!(parse_ble_name("ERR name expected 1-29 UTF-8 bytes").is_none());
     }
 
