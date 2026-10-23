@@ -22,8 +22,9 @@ history, tap to open the soft keyboard, and long press to select. The word under
 the finger is selected at once and two draggable dots appear: drag a dot to move
 that edge precisely, character by character and across lines, and use the
 floating Copy pill (or the toolbar Copy button). Copy still returns the selected
-text if the WebView drops its own DOM selection during the hold, and tapping
-either copy control does not close the keyboard. The same gestures work while
+text if the WebView drops its own DOM selection during the hold, whole-transcript
+copy preserves wrapped lines and boundary spaces, and tapping either copy control
+does not close the keyboard or lose the fallback selection. The same gestures work while
 the soft keyboard is open: a long press still selects and copies, and a vertical
 drag still scrolls history without closing the keyboard. Scrolling and selection
 never open the keyboard, including the delayed focus some Android WebViews
