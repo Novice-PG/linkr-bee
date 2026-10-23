@@ -29,6 +29,9 @@ const labels = {
   update_task_plan: ["任务计划与验证记录", "Task plan and verification"],
   planAssessment: ["进度与证据记录；校验仅覆盖列出的预期", "Progress and evidence; verification covers only the listed expectations"],
   get_task_checkpoint: ["检查任务恢复点", "Inspect task checkpoint"],
+  load_tools: ["加载任务工具", "Load task tools"],
+  toolsLoaded: ["已加载：", "Loaded: "],
+  toolsNotExecuted: ["未执行命令；审批要求不变。", "No commands executed; approval requirements are unchanged."],
   steer: ["补充本轮", "Add to current task"], followUp: ["排队下一步", "Queue next step"],
   queueHelp: ["补充在当前工具结束后生效；排队在本轮结束后处理。停止会清空待处理消息。", "Add after the current tool finishes, or queue after this task. Stop clears pending messages."],
   clearQueue: ["清空待处理", "Clear pending"],
@@ -713,6 +716,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
             `${ref.id} · ${ref.availability} · ${ref.outcome}${ref.waitingFor ? ' · '+ref.waitingFor : ''}`).join('\n') ||
             (getLang().startsWith('zh') ? '没有待恢复的执行记录' : 'No pending execution references');
           if (event.toolName === "load_skill") preview = `${text(`skill-${value.name}`)}\n${text("skillLoaded")}`;
+          if (event.toolName === "load_tools") preview = `${text('toolsLoaded')}${value.groups.map(group=>group.name).join(', ')}\n${text('toolsNotExecuted')}`;
           if (event.toolName === "search_radxa_docs") preview = [
             text(`docs-${value.source}`),
             value.results?.length ? value.results.map(item => `${item.title}\n${item.url}`).join("\n\n") : text("noMatches"),

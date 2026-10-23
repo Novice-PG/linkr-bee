@@ -38,7 +38,7 @@ function makeAgent({ stream, journal, files = {}, getStatus = () => status }) {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     return btoa(binary);
   };
-  const agent = createSerialAgent({
+  const agent = createSerialAgent({ toolProfile: 'full',
     config, stream, runLimits: { maxTurns: 8, maxTools: 16 },
     device: {
       mode: "auto", getStatus, readLog: (options) => journal.read(options),

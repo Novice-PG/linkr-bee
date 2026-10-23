@@ -30,7 +30,7 @@ test("the Pi loop loads a skill, discovers documentation and reads evidence with
   let round = 0;
   const url = "https://docs.radxa.com/dragon/q8b/system-config/uart-debug";
   const call = (name, args) => ({ type: "toolCall", id: String(round), name, arguments: args });
-  const agent = createSerialAgent({ config: { endpoint: "https://model.test/v1", model: "test" },
+  const agent = createSerialAgent({ toolProfile: 'full', config: { endpoint: "https://model.test/v1", model: "test" },
     device: { mode: "auto", getStatus: () => ({ sessionId: 1, connected: true }), execute: () => assert.fail("documentation must not type UART") },
     docsSearch: async args => { assert.equal(args.board, "Q8B"); return { results: [{ url }], untrusted: true }; },
     webReader: async args => { assert.equal(args.url, url); return { url, text: "Observed official UART instructions", untrusted: true }; },

@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { withToolGroups } from './tool-loading.mjs';
 
 /* Phase three of the assistant: durable notes about a target, visible token
  * accounting, and a report you can hand to someone else. */
@@ -48,11 +49,11 @@ function sse({ text, tool, usage }) {
 
 async function mockModel(page, respond) {
   const bodies = [];
+  const reply=withToolGroups(request=>{bodies.push(request);return respond(bodies.length);});
   await page.route("https://agent.test/v1/chat/completions", async (route) => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
     if (route.request().method() === "OPTIONS") { await route.fulfill({ status: 204, headers }); return; }
-    bodies.push(route.request().postDataJSON());
-    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(respond(bodies.length)) });
+    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(await reply(route.request().postDataJSON())) });
   });
   return bodies;
 }

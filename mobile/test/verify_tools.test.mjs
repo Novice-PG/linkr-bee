@@ -39,7 +39,7 @@ const toolText = (message) => message.content.filter((part) => part.type === "te
  * command cannot be mistaken for its output. */
 function makeAgent({ stream, journal, outputs = {}, onEvent = undefined, getStatus = () => status }) {
   const sent = [];
-  const agent = createSerialAgent({
+  const agent = createSerialAgent({ toolProfile: 'full',
     config, stream, onEvent, runLimits: { maxTurns: 8, maxTools: 16 },
     device: {
       mode: "auto", getStatus, readLog: (options) => journal.read(options),
@@ -233,7 +233,7 @@ test("an unusable verify request is an error rather than a quiet pass", async ()
 
 test('multiple read-only comparisons remain valid when the plan is updated after both results',async()=>{
   let round=0,first,lastPath='',execution=0;
-  const agent=createSerialAgent({config,device:{mode:'auto',getStatus:()=>status,getRecords:()=>[],
+  const agent=createSerialAgent({toolProfile:'full',config,device:{mode:'auto',getStatus:()=>status,getRecords:()=>[],
     execute:async args=>{
       assert.equal(args.applicationReadOnly,true);
       lastPath=args.text.includes('/tmp/first')?'/tmp/first':'/tmp/second';

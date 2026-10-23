@@ -29,7 +29,7 @@ const toolCall = (name, args) => ({ type: "toolCall", id: `call-${name}`, name, 
 const toolResultText = (message) => message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 
 function makeAgent({ accessory, stream, getStatus = () => status, sendInput = () => assert.fail("accessory tests must not write UART") }) {
-  return createSerialAgent({
+  return createSerialAgent({ toolProfile: 'full',
     config, stream, accessory,
     runLimits: { maxTurns: 8, maxTools: 16 },
     device: { mode: "auto", getStatus, readLog: () => ({ text: "", cursor: 0 }), execute: sendInput,

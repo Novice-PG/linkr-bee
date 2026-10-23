@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { withToolGroups } from './tool-loading.mjs';
 
 /* Accessory tools configure Linkr Bee itself over the management channel. These
  * tests exercise the whole path in the shipped app: tool call → approval card →
@@ -42,11 +43,12 @@ function sse({ text, tool }) {
 }
 
 async function mockModel(page, respond) {
+  const reply=withToolGroups(respond);
   await page.route("https://agent.test/v1/chat/completions", async (route) => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
     if (route.request().method() === "OPTIONS") { await route.fulfill({ status: 204, headers }); return; }
     const body = route.request().postDataJSON();
-    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(respond(body)) });
+    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(await reply(body)) });
   });
 }
 

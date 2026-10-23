@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { withToolGroups } from './tool-loading.mjs';
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/app.js?*", async (route) => {
@@ -54,8 +55,10 @@ async function mockModelResponse(page, respond) {
   });
 }
 async function mockModel(page, respond) {
-  await mockModelResponse(page, async (request, round) => ({
-    contentType: "text/event-stream", body: sse(await respond(request, round)),
+  let round=0;
+  const reply=withToolGroups(request=>respond(request,++round));
+  await mockModelResponse(page, async (request) => ({
+    contentType: "text/event-stream", body: sse(await reply(request)),
   }));
 }
 async function chooseMode(page, mode) {
@@ -67,6 +70,30 @@ async function ask(page, question = "Why did the target fail to boot?") {
   await page.locator("#agentQuestion").fill(question);
   await page.locator("#agentAsk").click();
 }
+
+test('optional schemas are loaded explicitly without granting serial permission', async ({page})=>{
+  let round=0;
+  await mockModelResponse(page, async request=>{
+    const names=request.tools.map(tool=>tool.function.name);
+    round++;
+    if(round===1) {
+      expect(names).toContain('load_tools');
+      expect(names).not.toContain('verify_target_file');
+      expect(names).not.toContain('set_uart_config');
+      return {contentType:'text/event-stream',body:sse({tool:{name:'load_tools',args:{groups:['verification']}}})};
+    }
+    expect(names).toContain('verify_target_file');
+    expect(names).not.toContain('set_uart_config');
+    expect(JSON.parse(request.messages.at(-1).content).grantsPermission).toBe(false);
+    return {contentType:'text/event-stream',body:sse({text:'Tools loaded; no command executed.'})};
+  });
+  await ask(page,'Prepare to check a file, but do not execute yet');
+  await expect(page.locator('#agentMessages')).toContainText('Tools loaded; no command executed.');
+  await expect(page.locator('#agentMessages')).toContainText('Loaded: verification');
+  await expect(page.locator('#agentMessages')).not.toContainText('"availableTools"');
+  expect(round).toBe(2);
+  expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
 
 test("a built-in Radxa skill discovers and reads the correct board's official document", async ({ page }, testInfo) => {
   const base = "https://docs.radxa.com";
@@ -233,7 +260,7 @@ test("an interrupted partial assistant response is reported without replay", asy
 });
 
 test("assistant renders Markdown while user and tool input stay literal", async ({ page }, testInfo) => {
-  const markdown = '## 检查结果\n\n**连接正常**，请查看 [Radxa Docs](https://docs.radxa.com/)。\n\n1. 检查版本\n2. 查看日志\n\n```sh\nuname -a\nprintf "<tag>"\n' + 'x'.repeat(180) + '\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| UART | 正常 |\n\n> 保留日志以便核对。';
+  const markdown = '## 检查结果\n\n**连接正常**，请查看 [Radxa Docs](https://docs.radxa.com/)。\n\n1. 检查版本\n2. 查看日志\n\n```sh\nuname -a\nprintf "<tag>"\n' + 'x'.repeat(400) + '\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| UART | 正常 |\n\n> 保留日志以便核对。';
   await mockModel(page, () => ({ text: markdown }));
   await ask(page, "**原始问题**");
   const answer = page.locator(".agent-assistant .agent-markdown").last();
@@ -249,6 +276,8 @@ test("assistant renders Markdown while user and tool input stay literal", async 
     await expect.poll(() => answer.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
     await expect(page.locator("#agentMessages")).toHaveCSS("overflow-x", "hidden");
     await expect(answer.locator("pre")).toHaveCSS("overflow-x", "auto");
+    // The fixture must overflow even before the desktop split layout settles.
+    await expect.poll(()=>answer.locator('pre').evaluate(pre=>pre.scrollWidth>pre.clientWidth)).toBe(true);
     const scrolling = await answer.locator("pre").evaluate(pre => {
       pre.scrollLeft = 100;
       const messages = pre.closest("#agentMessages");

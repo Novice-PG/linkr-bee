@@ -70,7 +70,7 @@ test("Pi exposes web evidence to the next model turn without serial writes", asy
 
 // Exercise the Pi adapter separately from the SDK-independent device executor.
 function makeAgent({ getStatus, readLog, sendInput, ...options }) {
-  return createSerialAgent({ runLimits: { maxTurns: 8, maxTools: 16 }, ...options, device: {
+  return createSerialAgent({ toolProfile: 'full', runLimits: { maxTurns: 8, maxTools: 16 }, ...options, device: {
     mode: "auto", getStatus, readLog, execute: sendInput,
     inspectExecution: () => ({ executionStatus: "unknown" }),
   } });

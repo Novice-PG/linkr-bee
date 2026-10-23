@@ -64,7 +64,8 @@ test.afterAll(() => { server?.kill(); });
 function sse(text) {
   const chunk = (delta, finish) => JSON.stringify({ id: "chatcmpl-static", object: "chat.completion.chunk",
     created: 1, model: "test-model", choices: [{ index: 0, delta, finish_reason: finish }] });
-  return `data: ${chunk({ role: "assistant", content: text }, null)}\n\ndata: ${chunk({}, "stop")}\n\ndata: [DONE]\n\n`;
+  const delta=typeof text==='string' ? {role:'assistant',content:text} : {role:'assistant',tool_calls:[{index:0,id:'load-static',type:'function',function:{name:'load_tools',arguments:JSON.stringify({groups:['web']})}}]};
+  return `data: ${chunk(delta, null)}\n\ndata: ${chunk({}, typeof text==='string'?'stop':'tool_calls')}\n\ndata: [DONE]\n\n`;
 }
 
 test("the static terminal loads the vendored assistant runtime", async ({ page }) => {
@@ -91,7 +92,7 @@ test("a module that never loads is reported instead of a blank page", async ({ p
   await expect(page.locator("#bootNoticeReload")).toBeVisible();
 });
 
-test("the static terminal answers a question end to end", async ({ page }) => {
+test("the static terminal loads optional schemas and answers end to end", async ({ page }) => {
   await page.goto(`${staticBase}/`);
   await expect(page.locator("#agentButton")).toBeVisible();
   await page.locator("#agentButton").click();
@@ -103,17 +104,23 @@ test("the static terminal answers a question end to end", async ({ page }) => {
   await expect(page.locator("#agentSettingsStatus")).toContainText("saved");
   await page.locator("#drawerClose").click();
 
+  let round=0;
   await page.route("https://agent.test/v1/chat/completions", async (route) => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
     if (route.request().method() === "OPTIONS") {
       await route.fulfill({ status: 204, headers });
       return;
     }
-    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse("Static path answer.") });
+    const names=route.request().postDataJSON().tools.map(tool=>tool.function.name);
+    if(++round===1) {
+      expect(names).toContain('load_tools');expect(names).not.toContain('read_web_page');
+    } else expect(names).toContain('read_web_page');
+    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(round===1?{}:"Static path answer.") });
   });
   await page.locator("#agentQuestion").fill("Is the assistant available here?");
   await page.locator("#agentAsk").click();
   await expect(page.locator("#agentMessages")).toContainText("Static path answer.");
+  expect(round).toBe(2);
 });
 
 test("an unreachable endpoint explains the browser-side conditions", async ({ page }) => {

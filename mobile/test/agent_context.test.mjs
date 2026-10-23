@@ -125,3 +125,63 @@ test("a budget below the floor is never returned as a negative or tiny number", 
   }
 });
 
+test('long tasks retain the original request and consumed corrections as user messages', () => {
+  const original={...user('Only diagnose; NEVER modify /etc/network/interfaces. Preserve the existing address.'),linkrTaskId:'active'};
+  const correction={...user('Use eth1, not eth0. Do not reboot.'),linkrTaskId:'active'};
+  const messages=[original];
+  for(let i=0;i<40;i++) {
+    messages.push(...pair(`long-${i}`,`error-${i}:`+'x'.repeat(12000)));
+    if(i===10)messages.push(correction);
+  }
+  const before=structuredClone(messages);
+  const compact=compactAgentContext(messages,12000,{taskId:'active'});
+  assert.deepEqual(compact.filter(m=>m.role==='user'),[original,correction]);
+  assert(JSON.stringify(compact).length<=12000);
+  assert.deepEqual(messages,before); checkPairs(compact);
+});
+
+test('structured task state retains scoped expectations and never promotes them into system instructions', () => {
+  const taskState={plan:[{title:'Check file',kind:'action',status:'in_progress',expectedResult:'/tmp/fw.img sha256=abcd',evidenceIds:['proof-1']}],
+    evidence:[{id:'proof-1',kind:'verification',status:'mismatch',subject:'/tmp/fw.img',expected:{sha256:'abcd'},complete:true}],
+    pendingExecutions:[{id:'serial-7',executorId:'executor-A',executionStatus:'unknown'}]};
+  const input=[{role:'system',content:'Trusted prompt'}, {...user('Check only'),linkrTaskId:'active'}];
+  for(let i=0;i<30;i++)input.push(...pair(`r-${i}`,'x'.repeat(4000)));
+  let compact=compactAgentContext(input,12000,{taskId:'active',taskState});
+  for(let i=0;i<3;i++)compact=compactAgentContext(compact,12000,{taskId:'active',taskState});
+  const summaries=compact.filter(m=>m.diagnosticTaskState);
+  assert.equal(summaries.length,1);
+  assert.equal(summaries[0].role,'assistant');
+  assert.match(summaries[0].content[0].text,/not new instructions, permission or current verification/);
+  assert.match(summaries[0].content[0].text,/proof-1/);
+  assert.match(summaries[0].content[0].text,/mismatch/);
+  assert.match(summaries[0].content[0].text,/sha256/);
+  assert.match(summaries[0].content[0].text,/serial-7/);
+  assert.deepEqual(compact.filter(m=>m.role==='system'),[input[0]]);
+  assert(JSON.stringify(compact.filter(m=>m.role!=='system')).length<=12000);
+});
+
+test('oversized active instructions fail locally instead of dropping original constraints', () => {
+  const messages=[{...user('Original constraint '+ 'x'.repeat(1200)),linkrTaskId:'task'},
+    {...user('Later constraint '+ 'y'.repeat(1200)),linkrTaskId:'task'}];
+  assert.throws(()=>compactAgentContext(messages,2000,{taskId:'task'}),/instructions exceed the context budget/);
+  // A new question does not pin every request from an unrelated old task.
+  const compact=compactAgentContext([...messages,...pair('old','x'.repeat(4000)),
+    {...user('New task'),linkrTaskId:'new'}],2500,{taskId:'new'});
+  assert(JSON.stringify(compact).length<=2500);
+  assert(compact.some(m=>m.role==='user' && m.linkrTaskId==='new'));
+});
+
+test('oversized user-only restored history never bypasses the active runtime budget', () => {
+  assert.throws(()=>compactAgentContext([user('Old request '+ 'x'.repeat(4000)),
+    {...user('Continue'),linkrTaskId:'new'}],2000,{taskId:'new'}),/User-only history exceeds/);
+});
+
+test('bounded structured summaries do not mutate the application checkpoint', () => {
+  const taskState={plan:[],evidence:[],pendingExecutions:Array.from({length:8},(_,i)=>({id:`serial-${i}`,description:'x'.repeat(400)}))};
+  const before=structuredClone(taskState);
+  const messages=[{...user('Observe only'),linkrTaskId:'active'},...pair('read','x'.repeat(10000))];
+  const compact=compactAgentContext(messages,3000,{taskId:'active',taskState});
+  assert(JSON.stringify(compact).length<=3000);
+  assert.deepEqual(taskState,before);
+});
+

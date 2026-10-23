@@ -1,12 +1,13 @@
 import { PROFILE_PROBE } from "../../web/device_profile.js";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, createInitialSystemMessage, toToolDeclaration, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAiCompletions } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as streamAnthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as streamGoogleGenerativeAi } from "@earendil-works/pi-ai/api/google-generative-ai";
 import { AGENT_DEFAULT_CONTEXT_WINDOW, AGENT_DEFAULT_MAX_TOKENS, validateAgentConfig } from "../../web/agent_config.js";
 import { waitForSerialOutput, monitorSerialExecution } from "../../web/serial_observation.js";
-import { serialSystemPrompt } from "./agent-prompt.mjs";
+import { serialSystemPrompt, focusedSystemPrompt } from "./agent-prompt.mjs";
+import { CORE_TOOL_NAMES, toolGroupCatalog, toolCatalogPrompt } from "./agent-tool-groups.mjs";
 import { DOWNLOAD_PROBE, targetDownloadPlan } from "../../web/download_plan.js";
 import { MAX_READ_BYTES, TARGET_FILE_PROBE, parseFileRead, readFileCommand } from "../../web/target_files.js";
 import { MAX_VERIFY_PATTERN, MAX_VERIFY_PATH, parseServiceResult, parseVerifyResult, verifyFileCommand,
@@ -32,7 +33,8 @@ export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
 const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
   'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
-export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", runLimits = { maxTurns: 32, maxTools: 96 } }) {
+  if (!["focused", "full"].includes(toolProfile)) throw new Error("Unknown tool profile");
   config = validateAgentConfig(config);
   const provider = PROVIDER_STREAMS[config.provider] ? config.provider : "openai-completions";
   /* Tests inject a stream; a real run resolves one from the configured protocol. */
@@ -53,6 +55,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   let acceptingMessages = false;
   const taskEvidence = createTaskEvidence();
   let taskPlan = [], historicalCheckpoint = null, checkpointRound = null;
+  let taskId = null;
+  let catalog = [];
+  const requestedTools = new Set(CORE_TOOL_NAMES);
   const recoveryExecutions = new Map();
   const trackedExecutions = new Set();
   function trackExecution(id) {
@@ -80,7 +85,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   const modelStream = createModelStream({ stream: providerStream, checkSession, onEvent });
   const searchDocs = docsSearch || createRadxaDocsSearch();
 
-  const buildSystemPrompt = () => serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) });
+  const buildSystemPrompt = () => toolProfile === "full"
+    ? serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) })
+    : focusedSystemPrompt(executionMode, toolCatalogPrompt(catalog));
 
   /* A completed probe_tools check is evidence about what the target can do, so a
    * digest request that check already answered "no" to must not be sent at all:
@@ -113,7 +120,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
    * defaults are evaluated per call, which is also why this must not be used
    * before `agent` exists. */
   const compact = (messages, prompt = buildSystemPrompt(), toolList = agent.state.tools) =>
-    compactAgentContext(messages, historyBudget(prompt, toolList));
+    compactAgentContext(messages, historyBudget(prompt, toolList), { taskId,
+      taskState: { plan: taskPlan, evidence: taskEvidence.list(),
+        pendingExecutions: taskCheckpoint().pendingExecutions } });
 
   const tools = [
     {
@@ -529,7 +538,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   /* A conversation restored from storage is history, not evidence: it is
    * compacted and marked the same way an interrupted run is. */
   let restored = Array.isArray(restoredMessages) && restoredMessages.length
-    ? compactAgentContext(settleAgentHistory(restoredMessages), historyBudget(buildSystemPrompt(), tools))
+    ? settleAgentHistory(restoredMessages)
     : null;
 
   /* Some tools only make sense once the target is known to have the commands
@@ -543,6 +552,12 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   const unlockedTools = new Set();
   let toolsUnlocked = false;
   const gatedToolObjects = {};
+  const selectedTools = () => [...tools, ...[...unlockedTools].map(name => gatedToolObjects[name])]
+    .filter(tool => tool && (toolProfile === "full" ? tool.name !== 'load_tools' : requestedTools.has(tool.name)));
+  function refreshTools() {
+    agent.state.tools = selectedTools();
+    toolsUnlocked = true;
+  }
   function unlockTools(observedNames) {
     if (!observedNames) return [];
     const observed = new Set([...observedNames].map((name) => String(name).toLowerCase()));
@@ -555,10 +570,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       added.push(name);
     }
     if (added.length) {
-      agent.state.tools = [...agent.state.tools, ...added.map((name) => gatedToolObjects[name])];
-      toolsUnlocked = true;
+      refreshTools();
     }
-    return added;
+    return added.filter(name => toolProfile === 'full' || requestedTools.has(name));
   }
 
   const PRINTABLE = /^[\t\n\r\x20-\x7e\u00a0-\uffff]*$/;
@@ -746,6 +760,24 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
 
   tools.push(watchTool);
 
+  catalog = toolGroupCatalog([...tools.map(tool => tool.name), ...Object.keys(gatedToolObjects)]);
+  tools.push({
+    name: "load_tools", label: "Load task tools", executionMode: "sequential",
+    description: "Enable only the relevant optional tool groups listed in the system prompt. This sends no UART input and grants no execution permission. Loading is idempotent; file tools still require an observed capability probe.",
+    parameters: Type.Object({ groups: Type.Array(Type.Union(catalog.map(group => Type.Literal(group.name))),
+      { minItems: 1, maxItems: 4 }) }, { additionalProperties: false }),
+    execute: (_id, { groups }, signal) => {
+      checkSession(signal);
+      if (!Array.isArray(groups) || !groups.length || groups.length > 4) throw new Error('Select one to four tool groups');
+      const selected = groups.map(name => catalog.find(group => group.name === name));
+      if (selected.some(group => !group)) throw new Error("Tool group unavailable for this client");
+      for (const group of selected) for (const name of group.tools) requestedTools.add(name);
+      refreshTools();
+      return result({ groups: selected, availableTools: agent.state.tools.map(tool => tool.name),
+        grantsPermission: false, note: "Existing approval, recovery, capability, sequential-input and verification gates are unchanged." });
+    },
+  });
+
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt(),
@@ -760,11 +792,18 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         maxTokens: config.maxTokens || AGENT_DEFAULT_MAX_TOKENS,
         compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" },
       },
-      tools,
+      tools: selectedTools(),
     },
     streamFn: (model, context, options) => {
       checkSession(options?.signal);
       modelRound++;
+      const currentTools = getCurrentTools(context.messages);
+      const promptChars = getCurrentSystemPrompt(context.messages).length;
+      const schemaChars = toolContextChars(currentTools);
+      onEvent?.({ type: "context_metrics", modelRound, toolCount: currentTools.length,
+        promptChars, schemaChars, fixedChars: promptChars + schemaChars,
+        historyChars: JSON.stringify(context.messages.filter(message => message.role !== "system")).length,
+        historyBudgetChars: historyBudget(buildSystemPrompt(), currentTools) });
       // Only release recovery once both observations reach a later model turn.
       if (recovering && statusRound !== null && logRound !== null &&
           statusRound < modelRound && logRound < modelRound &&
@@ -863,7 +902,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       if(!['steer','followUp'].includes(kind) || typeof text!=='string' || !text.trim() || text.length>4000) throw new Error('Invalid queued message.');
       if(queued.size>=8) throw new Error('Queue is full (8 messages). Clear pending messages or wait.');
       const id=crypto.randomUUID(),item={id,kind,text:text.trim()};
-      const message={role:'user',content:item.text,timestamp:Date.now(),linkrQueuedId:id};
+      const message={role:'user',content:item.text,timestamp:Date.now(),linkrQueuedId:id,linkrTaskId:taskId};
       queued.set(id,item);
       if(kind==='steer')agent.steer(message);else agent.followUp(message);
       publishQueue();return item;
@@ -889,33 +928,17 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         }
       }
       taskEvidence.clear(); taskPlan = []; checkpointRound = null;
-      /* Compaction runs after the prompt is refreshed so the budget comes from
-       * the prompt and tools this request will actually carry. */
-      if (restored) {
-        agent.state.messages = compact(settleAgentHistory([...restored, ...agent.state.messages]));
-        restored = null;
-      }
-      agent.state.messages = compact(settleAgentHistory(agent.state.messages));
-      /* pi-agent-core 0.87 made `state.systemPrompt` read-only: the prompt is
-       * replayed by merging every system message's text and the tool
-       * declarations replay in order from the same messages. A restore merge
-       * leaves two baselines — the snapshot's and this runner's — so every
-       * request would carry the prompt twice, with a stale copy that never
-       * refreshes. Keep the last content-bearing baseline: this runner's own,
-       * whose toolsAdded matches the tools it can execute, refreshed with the
-       * current prompt. Empty-content tool deltas (mid-run unlocks) stay. */
-      const history = [];
-      let baseline = null;
-      for (const message of agent.state.messages) {
-        if (message.role === "system" && message.content) {
-          baseline = message;
-          continue;
-        }
-        history.push(message);
-      }
+      taskId = crypto.randomUUID();
+      requestedTools.clear();
+      for (const name of CORE_TOOL_NAMES) requestedTools.add(name);
+      agent.state.tools = selectedTools();
+      // Rebuild declarations from this runtime, never from a saved transcript.
+      // Optional groups are task-local; old tool deltas cannot re-enable them.
+      const history = settleAgentHistory([...(restored || []), ...agent.state.messages])
+        .filter(message => message.role !== 'system');
+      restored = null;
       agent.state.messages = [
-        baseline ? { ...baseline, content: buildSystemPrompt() }
-          : { role: "system", content: buildSystemPrompt(), timestamp: Date.now() },
+        createInitialSystemMessage(buildSystemPrompt(), agent.state.tools.map(toToolDeclaration)),
         ...history,
       ];
       downloadStage = false;
@@ -927,7 +950,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       limitReached = false;
       modelStream.reset();
       acceptingMessages = true;
-      try { await agent.prompt(question); }
+      try { await agent.prompt({role:"user",content:[{type:"text",text:question}],timestamp:Date.now(),linkrTaskId:taskId}); }
       finally { acceptingMessages=false; clearQueue(); agent.state.messages = compact(settleAgentHistory(agent.state.messages)); }
       if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
       return { limitReached, unresolvedExecutions:taskCheckpoint().pendingExecutions.length };
