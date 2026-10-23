@@ -291,6 +291,16 @@ jobs:
           config="${GITHUB_WORKSPACE}/app/build/zephyr/.config"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS=30000' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WATCHDOG=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WATCHDOG_TIMEOUT_MS=60000' "${config}"
+          grep -qx 'CONFIG_WATCHDOG=y' "${config}"
+          grep -qx 'CONFIG_WDT_ESP32=y' "${config}"
+          grep -qx 'CONFIG_TASK_WDT=y' "${config}"
+          grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK=y' "${config}"
+          grep -qx 'CONFIG_TASK_WDT_CHANNELS=6' "${config}"
+          grep -qx 'CONFIG_TASK_WDT_MIN_TIMEOUT=5000' "${config}"
+          grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "${config}"
+          grep -qx '# CONFIG_TASK_WDT_DUMMY is not set' "${config}"
           if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
             grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "${config}"
           else
@@ -353,6 +363,7 @@ jobs:
           set -euo pipefail
           output="${GITHUB_WORKSPACE}/app/dist"
           zephyr="${GITHUB_WORKSPACE}/app/build/zephyr"
+          python3 "${GITHUB_WORKSPACE}/app/tools/esp_simpleboot_image.py" --check "${zephyr}/zephyr.bin"
           rm -rf "${output}"
           mkdir -p "${output}"
 

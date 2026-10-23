@@ -19,6 +19,7 @@
 #include <zephyr/sys/util.h>
 
 #include "ble_mgmt.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 
@@ -320,6 +321,9 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 		(void)k_sem_take(&indication_done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
+	if (indication_result == 0) {
+		linkr_watchdog_feed(LINKR_WDT_MGMT_TX);
+	}
 	return indication_result;
 }
 
@@ -389,7 +393,10 @@ static void request_thread(void)
 	struct linkr_mgmt_request request;
 
 	for (;;) {
-		k_msgq_get(&request_queue, &request, K_FOREVER);
+		linkr_watchdog_feed(LINKR_WDT_MGMT_REQUEST);
+		if (k_msgq_get(&request_queue, &request, K_SECONDS(1)) != 0) {
+			continue;
+		}
 		if (request_handler) {
 			request_handler(request.conn, request.request_id,
 					request.payload, request.payload_len);
@@ -405,7 +412,10 @@ static void tx_thread(void)
 	struct linkr_mgmt_tx_message *message;
 
 	for (;;) {
-		k_msgq_get(&tx_queue, &message, K_FOREVER);
+		linkr_watchdog_feed(LINKR_WDT_MGMT_TX);
+		if (k_msgq_get(&tx_queue, &message, K_SECONDS(1)) != 0) {
+			continue;
+		}
 		if (message && message->conn) {
 			tx_message_send(message);
 		}

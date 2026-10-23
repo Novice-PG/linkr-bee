@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <setjmp.h>
 #include <string.h>
+#include "../src/watchdog.h"
 
 #define IS_ENABLED(x) 0
 #define UART_RX_CHUNK 232

@@ -41,6 +41,7 @@
 #include "uart_autobaud.h"
 #include "uart_bulk_tx.h"
 #include "ws_bridge.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
@@ -2173,7 +2174,10 @@ static void ble_to_uart_thread(void)
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
 	for (;;) {
-		k_msgq_get(&ble_to_uart_queue, &packet, K_FOREVER);
+		linkr_watchdog_feed(LINKR_WDT_UART_TX);
+		if (k_msgq_get(&ble_to_uart_queue, &packet, K_SECONDS(1)) != 0) {
+			continue;
+		}
 
 #if LINKR_UART_BULK_TX
 		/*
@@ -2327,7 +2331,8 @@ static void uart_to_ble_thread(void)
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 	LOG_INF("UART-to-BLE RX thread disabled during loopback verify");
 	for (;;) {
-		k_sleep(K_SECONDS(60));
+		linkr_watchdog_feed(LINKR_WDT_UART_RX);
+		k_sleep(K_SECONDS(1));
 	}
 #else
 	uint8_t buf[UART_RX_CHUNK];
@@ -2341,6 +2346,8 @@ static void uart_to_ble_thread(void)
 		uint32_t dropped;
 		uint32_t got;
 		unsigned int key;
+
+		linkr_watchdog_feed(LINKR_WDT_UART_RX);
 
 		dropped = atomic_set(&uart_rx_dropped, 0);
 		if (dropped) {
@@ -2617,6 +2624,7 @@ int main(void)
 	k_sem_give(&bridge_start_sem);
 	LOG_INF("Linkr UART loopback verify ready on %s", bridge_uart->name);
 	printk("Linkr UART loopback verify ready on %s\n", bridge_uart->name);
+	linkr_watchdog_boot_complete();
 	return 0;
 #endif
 
@@ -2700,6 +2708,7 @@ int main(void)
 	k_sem_give(&bridge_start_sem);
 #endif
 	LOG_INF("Linkr Bee UART bridge ready on %s", bridge_uart->name);
+	linkr_watchdog_boot_complete();
 
 	return 0;
 }

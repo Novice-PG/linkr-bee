@@ -31,6 +31,37 @@ config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	  Human-readable application version returned by the diagnostic command
 	  and included in release metadata.
 
+config LINKR_BLE_BRIDGE_WATCHDOG
+	bool "Restart after fatal errors or stalled critical tasks"
+	default y
+	select WATCHDOG
+	select TASK_WDT
+	select TASK_WDT_HW_FALLBACK
+	help
+	  Supervise startup, the system workqueue, UART RX/TX, and management
+	  request/TX workers independently, with the board's hardware watchdog
+	  as fallback when interrupts or the scheduler stop. Fatal exceptions
+	  and detected stack overflows also reboot instead of halting forever.
+	  Disable only for debugging. Reboots do not erase saved settings.
+
+config LINKR_BLE_BRIDGE_WATCHDOG_TIMEOUT_MS
+	int "Critical task watchdog timeout (ms)"
+	depends on LINKR_BLE_BRIDGE_WATCHDOG
+	default 60000
+	range 30000 600000
+	help
+	  Maximum time without a critical worker reaching a progress checkpoint.
+	  Allow slow UART framing, flash writes, and Bluetooth indication cleanup.
+
+config TASK_WDT_CHANNELS
+	default 6 if LINKR_BLE_BRIDGE_WATCHDOG
+
+config TASK_WDT_MIN_TIMEOUT
+	default 5000 if LINKR_BLE_BRIDGE_WATCHDOG
+
+config TASK_WDT_HW_FALLBACK_DELAY
+	default 5000 if LINKR_BLE_BRIDGE_WATCHDOG
+
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
 	default 232

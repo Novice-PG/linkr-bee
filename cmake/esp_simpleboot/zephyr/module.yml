@@ -1,0 +1,3 @@
+name: linkr_simpleboot
+build:
+  cmake: .

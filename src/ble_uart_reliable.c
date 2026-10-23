@@ -17,6 +17,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "ble_uart_reliable.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(linkr_ble_uart_reliable, LOG_LEVEL_INF);
 
@@ -341,6 +342,9 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	 * climbing while `slept_ms` stays flat means the stall is elsewhere. */
 	diag_note_max(&diag_ind_wait_max_ms,
 		      (uint32_t)(k_uptime_get() - started_at));
+	if (indication_result == 0) {
+		linkr_watchdog_feed(LINKR_WDT_UART_RX);
+	}
 	return indication_result;
 }
 

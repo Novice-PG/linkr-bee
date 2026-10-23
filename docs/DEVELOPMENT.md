@@ -39,6 +39,7 @@ repository owns the accessory firmware and reference clients.
   - [Shell completion](#shell-completion)
 - [Web Bluetooth Terminal](#web-bluetooth-terminal)
 - [Mobile Apps](#mobile-apps)
+- [Watchdog and fault recovery](#watchdog-and-fault-recovery)
 - [Validation Status](#validation-status)
 - [Configuration Reference](#configuration-reference)
 
@@ -1109,6 +1110,62 @@ only when `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. See
 [pairing and recovery](BLE_PAIRING.md) for the authorization and recovery rules.
 
 ---
+
+## Watchdog and fault recovery
+
+Default firmware enables `CONFIG_LINKR_BLE_BRIDGE_WATCHDOG=y`. Six independent
+task-watchdog channels supervise startup, the system workqueue, UART RX/TX, and
+management request/TX. A worker that stops reaching progress checkpoints for
+60 seconds triggers a cold reboot. Idle queues wake once per second to report
+that their worker is alive; UART silence and a disconnected BLE/WiFi link do not
+count as failures. Confirmed BLE fragments also report progress during long
+transfers. Heartbeats are throttled to once per second to keep UART overhead low.
+
+The board's `watchdog0` is the hardware fallback, with a configured window of
+10 seconds (`TASK_WDT_MIN_TIMEOUT=5000` plus `TASK_WDT_HW_FALLBACK_DELAY=5000`).
+It resets the chip if the kernel timer/interrupt path stops running; actual reset
+timing depends on the SoC driver's watchdog stages. CPU exceptions, kernel
+panics and detected stack overflows use a fatal handler that flushes available
+logs and reboots. The hardware fallback remains armed if the fatal log path hangs.
+Boot logs report the reset-cause bitmask when the hardware supports it.
+
+Recovery does not erase settings, BLE bonds, WiFi credentials, or the bound
+target ID. It does interrupt active transfers. This detects stalled supervised
+workers, not every possible network or application fault; a live worker does
+not prove that a remote service is reachable.
+
+For debugging, disable `CONFIG_LINKR_BLE_BRIDGE_WATCHDOG` in a local extra config.
+The task timeout can be changed with
+`CONFIG_LINKR_BLE_BRIDGE_WATCHDOG_TIMEOUT_MS` (default `60000`, minimum `30000`).
+Host tests cover heartbeat isolation, startup completion, timeout/fatal recovery,
+and initialization failures. On 2026-10-23, an ESP32-C3 AZ with 4 MiB flash passed
+one-shot physical fault injection: blocking the system workqueue rebooted after
+59.0 s, a kernel panic and an illegal CPU instruction each rebooted in about
+0.04 s, and disabling interrupts in an infinite loop produced `TG0WDT_SYS_RST`
+after 20.0 s. The latter is the observed two-stage hardware reset latency, not
+the configured 10 s window. Each case reached bridge-ready again. Production
+firmware was restored without injection hooks, its bytes matched flash readback,
+and encrypted BLE diagnostics succeeded after more than 75 s of stable operation.
+BLE identity, bond keys, and the bound target record retained their original
+values; GATT cache metadata and new default settings were updated normally.
+C5 and WROOM reset behaviour still require physical verification.
+
+Simple-boot images now include the ROM-visible SHA-256 digest. Zephyr v4.4.1's
+`elf2image --ram-only-header` output omits it; Linkr's build module fills existing
+zero padding with the digest and adjusts the loader's scan past it. File size
+and the addresses of the hidden Flash segments remain unchanged. The module
+copies the pinned loader into the build directory, leaving the external Zephyr
+checkout untouched, and stops configuration if the expected upstream code changes.
+MCUboot and builds without binary output are excluded.
+
+`python3 tools/esp_simpleboot_image.py --check build/zephyr/zephyr.bin` verifies the RAM
+checksum and ROM digest; CI checks every packaged firmware image. As specified
+in the [ESP image format](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/advanced-topics/firmware-image-format.html),
+this simple-boot digest covers the ROM-visible RAM image, not the hidden mapped
+Flash segments; release `SHA256SUMS` and flash readback still check the whole
+file. Do not apply the formatter alone to an old image without the matching
+loader. C3 startup and fault recovery are verified with the warning absent;
+the other supported boards have build and image-format verification only.
 
 ## Validation status
 
