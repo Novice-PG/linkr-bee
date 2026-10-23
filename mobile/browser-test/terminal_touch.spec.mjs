@@ -122,17 +122,108 @@ test("a tap focuses the terminal for typing", async ({ page, context }) => {
     .toContain("xterm-helper-textarea");
 });
 
-test("the keyboard button toggles the terminal focus", async ({ page }) => {
+test("the keyboard button follows the keyboard, not just focus", async ({ page }) => {
   await openTerminal(page);
   const keyboardButton = page.locator("#focusTerminalButton");
   await expect(keyboardButton).toBeVisible();
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "false");
   await keyboardButton.tap();
   await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
     .toContain("xterm-helper-textarea");
+
+  // An Android IME opening shrinks the visual viewport. Only then is the
+  // button allowed to say the keyboard is up.
+  await page.evaluate(() => {
+    Object.defineProperty(visualViewport, "height", {
+      configurable: true,
+      get: () => 420,
+    });
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "true");
+
   await keyboardButton.tap();
   await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
     .not.toContain("xterm-helper-textarea");
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "false");
+
+  // Android's own hide button removes the IME without blurring the textarea.
+  // The button must go back to unpressed, and pressing it must ask again.
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => {
+    Object.defineProperty(visualViewport, "height", {
+      configurable: true,
+      get: () => 844,
+    });
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "false");
+  await keyboardButton.tap();
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
 });
+
+test("long press shows draggable handles and dragging one trims precisely", async ({ page, context }) => {
+  await openTerminal(page);
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const termSize = await page.evaluate(() => ({
+    rows: window.__terminalTest.state.term.rows,
+    cols: window.__terminalTest.state.term.cols,
+  }));
+  const client = await context.newCDPSession(page);
+  const x = box.x + (box.width / termSize.cols) * 12;
+  const y = box.y + box.height - 50;
+
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 11 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const word = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(word).toBe("abcdefghijklmnopqrstuvwxyz");
+  await expect(page.locator(".terminal-selection-handle")).toHaveCount(2);
+  await expect(page.locator(".terminal-selection-handle-start")).toBeVisible();
+  await expect(page.locator(".terminal-selection-handle-end")).toBeVisible();
+  await expect(page.locator(".terminal-selection-copy")).toBeVisible();
+
+  // Drag the start dot two cells to the right: exactly the first two letters
+  // leave the selection, which is the precision the phone's own handles give.
+  const handle = await page.locator(".terminal-selection-handle-start").boundingBox();
+  const cellWidth = box.width / termSize.cols;
+  const hx = handle.x + handle.width / 2;
+  const hy = handle.y + handle.height / 2;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x: hx, y: hy, radiusX: 6, radiusY: 6, force: 1, id: 12 }],
+  });
+  for (let i = 1; i <= 6; i += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{
+        x: hx + (cellWidth * 2 * i) / 6,
+        y: hy,
+        radiusX: 6,
+        radiusY: 6,
+        force: 1,
+        id: 12,
+      }],
+    });
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(80);
+
+  const trimmed = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(trimmed).toBe("cdefghijklmnopqrstuvwxyz");
+  await expect(page.locator(".terminal-selection-copy")).toBeVisible();
+
+  await page.locator(".terminal-selection-copy").click();
+  await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(trimmed);
+});
+
 
 test("long press selects a word and dragging extends the selection", async ({ page, context }) => {
   await openTerminal(page);

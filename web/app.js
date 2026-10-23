@@ -1339,7 +1339,17 @@ function initTerminal() {
   state.term.open(elements.terminalOutput);
   subscribeTerminalInput(state.term, onTerminalData);
   state.term.onResize(onTerminalResize);
-  state.term.onScroll(onTerminalScroll);
+  state.term.onScroll(() => {
+    onTerminalScroll();
+    positionTerminalSelectionHandles();
+  });
+  state.term.onSelectionChange(() => {
+    if (!state.term?.hasSelection()) {
+      hideTerminalSelectionHandles();
+    } else {
+      positionTerminalSelectionHandles();
+    }
+  });
   applyTerminalFont(state.fontFamily);
   fitTerminal();
 
@@ -2223,12 +2233,22 @@ const terminalTouch = {
   moved: false,
   scrolling: false,
   longPress: false,
-  selectionAnchor: null,
+  selectionBase: null,
   blurOnEnd: false,
   cancelled: false,
   suppressClick: false,
   suppressFocusUntil: 0,
   timer: 0,
+};
+
+// The two draggable dots and the floating Copy pill shown after a long press.
+// The endpoints are buffer cells, so the dots follow the same text the way the
+// phone's own selection handles do.
+const terminalSelection = {
+  start: null,
+  end: null,
+  drag: null,
+  ui: null,
 };
 
 function clearTerminalTouchTimer() {
@@ -2322,6 +2342,213 @@ function terminalWordRangeAt(cell) {
   };
 }
 
+function terminalCellGeometry(cell) {
+  const term = state.term;
+  const screen = elements.terminalOutput.querySelector(".xterm-screen");
+  if (!term || !screen || !cell) {
+    return null;
+  }
+  const viewportRow = cell.row - term.buffer.active.viewportY;
+  if (viewportRow < 0 || viewportRow >= term.rows) {
+    return null;
+  }
+  const rect = screen.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  const cellWidth = rect.width / term.cols;
+  const cellHeight = rect.height / term.rows;
+  return {
+    left: rect.left + cell.col * cellWidth,
+    right: rect.left + Math.min(term.cols, cell.col + 1) * cellWidth,
+    top: rect.top + viewportRow * cellHeight,
+    bottom: rect.top + (viewportRow + 1) * cellHeight,
+    cellWidth,
+    cellHeight,
+    screen: rect,
+  };
+}
+
+function positionTerminalSelectionHandles() {
+  const ui = terminalSelection.ui;
+  const { start, end } = terminalSelection;
+  if (!ui || !start || !end) {
+    if (ui) {
+      ui.root.hidden = true;
+    }
+    return;
+  }
+  const startGeo = terminalCellGeometry(start);
+  const endGeo = terminalCellGeometry(end);
+  if (!startGeo || !endGeo) {
+    // The selection scrolled out of the viewport; the dots would be wrong.
+    ui.root.hidden = true;
+    return;
+  }
+  ui.root.hidden = false;
+  const vv = window.visualViewport;
+  const margin = 14;
+  const viewLeft = vv?.offsetLeft || 0;
+  const viewTop = vv?.offsetTop || 0;
+  const viewRight = viewLeft + (vv?.width || window.innerWidth);
+  const viewBottom = viewTop + (vv?.height || window.innerHeight);
+  const clampX = (x) =>
+    Math.min(viewRight - margin, Math.max(viewLeft + margin, x));
+  const clampY = (y) =>
+    Math.min(viewBottom - margin, Math.max(viewTop + margin, y));
+
+  // The start dot sits above the first selected cell and the end dot below the
+  // last one, so neither dot covers the text being selected.
+  ui.start.style.left = `${clampX(startGeo.left)}px`;
+  ui.start.style.top = `${clampY(startGeo.top - 16)}px`;
+  ui.end.style.left = `${clampX(endGeo.right)}px`;
+  ui.end.style.top = `${clampY(endGeo.bottom + 16)}px`;
+
+  const selectionTop = Math.min(startGeo.top, endGeo.top);
+  const selectionBottom = Math.max(startGeo.bottom, endGeo.bottom);
+  const copyAbove = selectionTop - viewTop > 64;
+  ui.copy.classList.toggle("terminal-selection-copy-below", !copyAbove);
+  ui.copy.style.left = `${clampX((startGeo.left + endGeo.right) / 2)}px`;
+  ui.copy.style.top = `${copyAbove ? selectionTop - 10 : selectionBottom + 10}px`;
+}
+
+function hideTerminalSelectionHandles() {
+  terminalSelection.start = null;
+  terminalSelection.end = null;
+  terminalSelection.drag = null;
+  if (terminalSelection.ui) {
+    terminalSelection.ui.root.hidden = true;
+  }
+}
+
+function onSelectionHandleDown(event) {
+  const which = event.currentTarget.dataset.selectionHandle;
+  const start = terminalSelection.start;
+  const end = terminalSelection.end;
+  if (!start || !end || (which !== "start" && which !== "end")) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const endpoint = which === "start" ? start : end;
+  const geometry = terminalCellGeometry(endpoint);
+  // The opposite endpoint stays put while this dot moves the active edge.
+  terminalSelection.drag = {
+    which,
+    fixed: which === "start" ? { ...end } : { ...start },
+    row: endpoint.row,
+    col: endpoint.col,
+    pointerX: event.clientX,
+    pointerY: event.clientY,
+    cellWidth: geometry?.cellWidth || 8,
+    cellHeight: geometry?.cellHeight || 16,
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function onSelectionHandleMove(event) {
+  const drag = terminalSelection.drag;
+  if (!drag) {
+    return;
+  }
+  event.preventDefault();
+  const term = state.term;
+  if (!term) {
+    return;
+  }
+  // Measure from the grabbed cell, not from the dot's pixel position: the
+  // start dot sits on the left edge and the end dot on the right edge, so an
+  // absolute lookup would jump one cell on the first move. Rounding also lets
+  // small finger jitter stay on the same character.
+  const viewportY = term.buffer.active.viewportY;
+  const rowDelta = Math.round((event.clientY - drag.pointerY) / drag.cellHeight);
+  const colDelta = Math.round((event.clientX - drag.pointerX) / drag.cellWidth);
+  const cell = {
+    row: Math.min(
+      viewportY + term.rows - 1,
+      Math.max(viewportY, drag.row + rowDelta),
+    ),
+    col: Math.min(term.cols - 1, Math.max(0, drag.col + colDelta)),
+  };
+  if (drag.which === "start") {
+    setTerminalSelection(cell, drag.fixed);
+  } else {
+    setTerminalSelection(drag.fixed, cell);
+  }
+}
+
+function onSelectionHandleUp(event) {
+  if (!terminalSelection.drag) {
+    return;
+  }
+  const handle = event.currentTarget;
+  if (handle?.releasePointerCapture && event.pointerId != null) {
+    try {
+      handle.releasePointerCapture(event.pointerId);
+    } catch (_error) {
+      // The capture was already released.
+    }
+  }
+  terminalSelection.drag = null;
+  positionTerminalSelectionHandles();
+}
+
+function ensureTerminalSelectionUi() {
+  if (terminalSelection.ui) {
+    return terminalSelection.ui;
+  }
+  const root = document.createElement("div");
+  root.className = "terminal-selection-ui";
+  root.hidden = true;
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "terminal-selection-copy";
+  copy.textContent = t("copy");
+  copy.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const text = terminalCopyText();
+    if (!text) {
+      toast(t("copyFailed"), "error");
+      return;
+    }
+    copyToClipboard(text).then(
+      (copied) =>
+        toast(t(copied ? "copied" : "copyFailed"), copied ? undefined : "error"),
+      () => toast(t("copyFailed"), "error"),
+    );
+  });
+
+  const handles = {};
+  for (const which of ["start", "end"]) {
+    const handle = document.createElement("span");
+    handle.className = `terminal-selection-handle terminal-selection-handle-${which}`;
+    handle.dataset.selectionHandle = which;
+    handle.setAttribute("aria-hidden", "true");
+    handle.addEventListener("pointerdown", onSelectionHandleDown);
+    handles[which] = handle;
+  }
+  root.append(copy, handles.start, handles.end);
+  document.body.append(root);
+  terminalSelection.ui = { root, copy, start: handles.start, end: handles.end };
+
+  window.addEventListener("pointermove", onSelectionHandleMove, {
+    passive: false,
+  });
+  window.addEventListener("pointerup", onSelectionHandleUp);
+  window.addEventListener("pointercancel", onSelectionHandleUp);
+  window.addEventListener("resize", positionTerminalSelectionHandles, {
+    passive: true,
+  });
+  window.visualViewport?.addEventListener(
+    "resize",
+    positionTerminalSelectionHandles,
+    { passive: true },
+  );
+  return terminalSelection.ui;
+}
+
 function setTerminalSelection(start, end) {
   const term = state.term;
   if (!term || !start || !end) {
@@ -2340,19 +2567,39 @@ function setTerminalSelection(start, end) {
   const length =
     (last.row - first.row) * term.cols + (last.col - first.col) + 1;
   term.select(first.col, first.row, length);
-  return term.hasSelection();
+  if (!term.hasSelection()) {
+    hideTerminalSelectionHandles();
+    return false;
+  }
+  terminalSelection.start = { row: first.row, col: first.col };
+  terminalSelection.end = { row: last.row, col: last.col };
+  ensureTerminalSelectionUi();
+  positionTerminalSelectionHandles();
+  return true;
 }
 
 function extendTerminalSelection(clientX, clientY) {
   const cell = terminalCellAt(clientX, clientY);
-  const anchor = terminalTouch.selectionAnchor;
-  if (!cell || !anchor) {
+  const base = terminalTouch.selectionBase;
+  if (!cell || !base) {
     return;
   }
-  // Free box selection: the region between the anchor under the finger and
-  // the cell the finger is on now. It is character precise and may cross
-  // lines, and dragging back over the anchor keeps the anchor included.
-  setTerminalSelection(anchor, cell);
+  // Native-style extension: the long-pressed word stays selected and the drag
+  // grows the range from the word edge nearest the finger. Moving back inside
+  // the word leaves just the word selected.
+  const beforeWord =
+    cell.row < base.start.row ||
+    (cell.row === base.start.row && cell.col < base.start.col);
+  const afterWord =
+    cell.row > base.end.row ||
+    (cell.row === base.end.row && cell.col > base.end.col);
+  if (beforeWord) {
+    setTerminalSelection(cell, base.end);
+  } else if (afterWord) {
+    setTerminalSelection(base.start, cell);
+  } else {
+    setTerminalSelection(base.start, base.end);
+  }
 }
 
 function selectTerminalWordAt(clientX, clientY) {
@@ -2361,10 +2608,9 @@ function selectTerminalWordAt(clientX, clientY) {
   if (!range) {
     return false;
   }
-  // The word under the finger is selected right away as feedback. The drag
-  // anchor stays on the exact cell under the finger, so a later drag is a
-  // free box selection rather than a word-snapped one.
-  terminalTouch.selectionAnchor = { row: cell.row, col: cell.col };
+  // The word under the finger is selected at once; the drag keeps that word
+  // and extends from its edge, exactly like the phone's own selection.
+  terminalTouch.selectionBase = range;
   return setTerminalSelection(range.start, range.end);
 }
 
@@ -2396,7 +2642,7 @@ function onTerminalTouchStart(event) {
   terminalTouch.moved = false;
   terminalTouch.scrolling = false;
   terminalTouch.longPress = false;
-  terminalTouch.selectionAnchor = null;
+  terminalTouch.selectionBase = null;
   // Read the keyboard state here, not in pointerdown: some WebViews deliver
   // only touch events. A keyboard that is already open must stay open while
   // the user selects text or scrolls.
@@ -2409,6 +2655,7 @@ function onTerminalTouchStart(event) {
     domSelection.removeAllRanges();
   }
   state.term.clearSelection();
+  hideTerminalSelectionHandles();
   terminalTouch.timer = setTimeout(() => {
     terminalTouch.timer = 0;
     if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
@@ -2483,7 +2730,7 @@ function finishTerminalTouch(event) {
   terminalTouch.active = false;
   terminalTouch.scrolling = false;
   terminalTouch.longPress = false;
-  terminalTouch.selectionAnchor = null;
+  terminalTouch.selectionBase = null;
   terminalTouch.moved = false;
   terminalTouch.blurOnEnd = false;
   terminalTouch.cancelled = false;
@@ -3831,10 +4078,23 @@ function terminalHasFocus() {
   return Boolean(active && elements.terminalOutput.contains(active));
 }
 
+function softKeyboardIsVisible() {
+  if (!terminalHasFocus()) {
+    return false;
+  }
+  // A focused hidden textarea does not mean the IME is showing: Android lets
+  // the user dismiss the keyboard with its own hide button while the textarea
+  // keeps focus. On touch devices the visual viewport is the only truth.
+  if (coarsePointerMedia.matches || isHarmonyHost) {
+    return softKeyboardLayout.active;
+  }
+  return true;
+}
+
 function syncKeyboardButtonState() {
   elements.focusTerminalButton?.setAttribute(
     "aria-pressed",
-    String(terminalHasFocus()),
+    String(softKeyboardIsVisible()),
   );
 }
 
@@ -3885,6 +4145,9 @@ function syncSoftKeyboardLayout() {
 
   softKeyboardLayout.active = active;
   document.documentElement.classList.toggle("soft-keyboard-open", active);
+  // The button must follow the keyboard the user actually sees, including a
+  // keyboard dismissed from Android's own hide button.
+  syncKeyboardButtonState();
   scheduleFit();
 }
 
@@ -3978,7 +4241,7 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   }
 
   if (focusDrawer && drawerOpen) {
-    requestAnimationFrame(() => elements.drawerClose.focus());
+    requestAnimationFrame(() => elements.drawerClose.focus({ preventScroll: true }));
   } else if (
     restoreToggle &&
     !drawerOpen &&
@@ -3991,6 +4254,14 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
 function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
   if (!usesSettingsDrawer()) {
     return;
+  }
+  if (open) {
+    // Close the IME before the drawer slides in. Otherwise the keyboard resize
+    // and the terminal refit underneath run during the slide and make it stutter.
+    state.term?.blur();
+    // The selection dots float above the terminal; they must not sit on top of
+    // the drawer.
+    hideTerminalSelectionHandles();
   }
   elements.appShell.classList.toggle("sidebar-open", open);
   syncSidebarAccessibility({
@@ -4022,6 +4293,7 @@ function toggleSidebar() {
 
 function openAgentSettings() {
   setSettingsPage("ai");
+  hideTerminalSelectionHandles();
   sidebarReturnFocus = $("agentSettingsButton");
   if (usesSettingsDrawer()) {
     setMobileSidebarOpen(true);
@@ -4215,12 +4487,21 @@ function bind() {
 
   elements.focusTerminalButton.addEventListener("click", () => {
     releaseTerminalFocusSuppression();
-    if (terminalHasFocus()) {
+    if (softKeyboardIsVisible()) {
       state.term?.blur();
+      elements.focusTerminalButton.setAttribute("aria-pressed", "false");
+    } else if (terminalHasFocus()) {
+      // The IME was dismissed with its own hide button while the textarea kept
+      // focus. Calling focus() again would be a no-op, so cycle the focus.
+      state.term?.blur();
+      window.setTimeout(() => {
+        state.term?.focus();
+      }, 40);
     } else {
       state.term?.focus();
     }
     syncKeyboardButtonState();
+    window.setTimeout(syncKeyboardButtonState, 350);
   });
   elements.terminalOutput.addEventListener("focusin", syncKeyboardButtonState);
   elements.terminalOutput.addEventListener("focusout", () => {
