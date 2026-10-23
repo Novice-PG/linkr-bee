@@ -1038,9 +1038,7 @@ body.terminal-fullscreen-fallback {
 }
 
 .term-hint {
-  font-size: 11.5px;
-  color: var(--placeholder);
-  letter-spacing: 0.03em;
+  display: none;
 }
 
 .terminal-output {
@@ -2579,6 +2577,38 @@ html.soft-keyboard-open .terminal-card .terminal-keyboard {
 
 /* Agent workspace shares the existing terminal; no second xterm or modal. */
 #agentButton[hidden] { display: none; }
+#agentButton {
+  --agent-button-from: rgba(104, 142, 228, 0.1);
+  --agent-button-to: rgba(157, 127, 214, 0.14);
+  --agent-button-ink: #d9d4f4;
+  --agent-button-film: rgba(255, 255, 255, 0.04);
+  --agent-button-edge: rgba(184, 172, 227, 0.3);
+  --agent-button-sheen: rgba(255, 255, 255, 0.16);
+  color: var(--agent-button-ink);
+  background: linear-gradient(135deg, var(--agent-button-from), var(--agent-button-to)) var(--agent-button-film);
+  border-color: var(--agent-button-edge);
+  box-shadow: inset 0 1px 0 var(--agent-button-sheen);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  backdrop-filter: blur(10px) saturate(120%);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+[data-theme="light"] #agentButton {
+  --agent-button-ink: #504571;
+  --agent-button-film: rgba(255, 255, 255, 0.36);
+  --agent-button-edge: rgba(121, 108, 171, 0.24);
+  --agent-button-sheen: rgba(255, 255, 255, 0.92);
+}
+#agentButton:hover {
+  --agent-button-from: rgba(104, 142, 228, 0.16);
+  --agent-button-to: rgba(157, 127, 214, 0.2);
+  border-color: rgba(143, 126, 201, 0.4);
+}
+#agentButton[aria-pressed="true"] {
+  --agent-button-from: rgba(104, 142, 228, 0.22);
+  --agent-button-to: rgba(157, 127, 214, 0.26);
+  border-color: rgba(143, 126, 201, 0.5);
+}
 .terminal-workspace { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .agent-panel[hidden], .agent-terminal-peek[hidden] { display: none; }
 .agent-panel { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; color: var(--text); background: var(--terminal); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
@@ -2610,7 +2640,6 @@ html.agent-mode .terminal-workspace[data-agent-layout="columns"] { grid-template
 html.agent-mode .terminal-card { height: 100%; min-width: 0; min-height: 0; }
 html.agent-mode .terminal-head { min-height: 44px; padding: 2px 6px; flex: 0 0 auto; }
 html.agent-mode .term-tool { min-width: 44px; min-height: 44px; height: 44px; }
-html.agent-mode #agentButton { color: var(--accent); border-color: var(--accent); background: var(--panel-3); }
 html.agent-mode #fullscreenBtn, html.agent-mode #zoomOutBtn, html.agent-mode #zoomInBtn,
 html.agent-mode .term-hint, html.agent-mode .terminal-input-hint { display: none; }
 html.agent-mode .terminal-card .terminal-input-bar { padding: 4px; }
