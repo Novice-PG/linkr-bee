@@ -2529,6 +2529,12 @@ function ensureTerminalSelectionUi() {
   copy.type = "button";
   copy.className = "terminal-selection-copy";
   copy.textContent = t("copy");
+  // Keep the terminal focused (and a soft keyboard open) while copying. The
+  // click still fires; only the focus stealing is suppressed.
+  copy.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
   copy.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -4738,6 +4744,10 @@ function bind() {
   });
   elements.autoscrollBtn.addEventListener("click", () => {
     setAutoScroll(!state.autoScroll, true);
+  });
+  elements.copyBtn.addEventListener("pointerdown", (event) => {
+    // Copying must not blur the terminal and close the keyboard.
+    event.preventDefault();
   });
   elements.copyBtn.addEventListener("click", () => {
     if (!state.term) {
