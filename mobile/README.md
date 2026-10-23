@@ -21,12 +21,16 @@ Touch follows the phone's own selection model: drag vertically to scroll
 history, tap to open the soft keyboard, and long press to select. The word under
 the finger is selected at once and two draggable dots appear: drag a dot to move
 that edge precisely, character by character and across lines, and use the
-floating Copy pill (or the toolbar Copy button). The same gestures work while
+floating Copy pill (or the toolbar Copy button). Copy still returns the selected
+text if the WebView drops its own DOM selection during the hold, and tapping
+either copy control does not close the keyboard. The same gestures work while
 the soft keyboard is open: a long press still selects and copies, and a vertical
 drag still scrolls history without closing the keyboard. Scrolling and selection
 never open the keyboard, including the delayed focus some Android WebViews
-perform after `touchend`, and the WebView's own long-press selection is
-suppressed so it cannot take over the gesture. The keyboard button mirrors the
+perform after `touchend`; any hold past the long-press threshold is always
+treated as a selection, never a keyboard-opening tap, and the WebView's own
+long-press selection is suppressed so it cannot take over the gesture. The
+keyboard button mirrors the
 IME the user actually sees, including a keyboard dismissed from Android's own
 hide button, and pressing it asks the IME to show again instead of doing nothing.
 These touch paths live in the shared web UI because WebView text selection cannot
