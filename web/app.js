@@ -2847,8 +2847,11 @@ function terminalCopyText() {
     if (!line) {
       continue;
     }
-    current += line.translateToString(true);
-    if (!line.isWrapped) {
+    // isWrapped belongs to the continuation, not to the row it follows.
+    // Keep boundary spaces inside a wrapped line; only trim its final row.
+    const continues = buffer.getLine(i + 1)?.isWrapped;
+    current += line.translateToString(!continues);
+    if (!continues) {
       lines.push(current);
       current = "";
     }
@@ -2874,22 +2877,27 @@ async function copyToClipboard(text) {
       // Capacitor WebViews and non-secure origins can reject the async API.
     }
   }
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.cssText =
-    "position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0";
-  document.body.append(area);
-  area.select();
-  area.setSelectionRange(0, area.value.length);
+  // Supply the requested text through the browser's copy event. Selecting a
+  // temporary textarea would steal terminal focus and dismiss the soft IME.
   let copied = false;
+  const onCopy = (event) => {
+    if (!event.clipboardData) {
+      return;
+    }
+    event.clipboardData.setData("text/plain", text);
+    event.preventDefault();
+    // xterm's own copy handler must not replace a snapshot or whole transcript.
+    event.stopImmediatePropagation();
+    copied = true;
+  };
+  document.addEventListener("copy", onCopy, true);
   try {
-    copied = document.execCommand("copy");
+    return document.execCommand("copy") && copied;
   } catch (_error) {
-    copied = false;
+    return false;
+  } finally {
+    document.removeEventListener("copy", onCopy, true);
   }
-  area.remove();
-  return copied;
 }
 
 let connectionInFlight = false;
