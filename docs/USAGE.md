@@ -76,8 +76,9 @@ without opening the keyboard, tap to open the keyboard, and long press to select
 The word under the finger is selected at once and two draggable dots appear; drag
 a dot to adjust that edge precisely, character by character and across lines, then
 copy with the floating pill or the Copy button. If the WebView drops its own
-selection during the hold, Copy still returns the selected text, and copying does
-not take focus or close the keyboard. The same gestures work while the
+selection during the hold, Copy still returns the selected text; whole-transcript
+copy preserves wrapped lines, and the clipboard fallback keeps focus and does not
+close the keyboard. The same gestures work while the
 keyboard is open: a long press still selects and copies, and a vertical drag still
 scrolls history without closing the keyboard. The Copy button copies the selection,
 or the whole terminal buffer when nothing is selected. On Android the app never
