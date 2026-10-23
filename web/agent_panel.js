@@ -907,6 +907,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   $("agentClearQueue").addEventListener('click',()=>runner?.clearQueue());
   // Capture before xterm so the focus shortcut never becomes target UART input.
   document.addEventListener("keydown", (event) => {
+    // Modal editors own their keyboard focus until they are dismissed.
+    if (event.target?.closest?.("dialog[open]")) return;
     if (event.isComposing || event.keyCode === 229 || event.altKey || !event.shiftKey || !(event.ctrlKey || event.metaKey) || event.code !== "KeyK") return;
     event.preventDefault(); event.stopImmediatePropagation();
     if (event.repeat) return;

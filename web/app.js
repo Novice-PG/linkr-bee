@@ -36,6 +36,7 @@ import {
 } from "./management_protocol.js";
 import { applyInputModifiers, terminalKeySequence } from "./terminal_keys.js";
 import { subscribeTerminalInput } from "./terminal_input.js";
+import { createTerminalKeyPreferences } from "./terminal_key_preferences.js";
 import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
@@ -53,6 +54,7 @@ const terminalSessionTracker = createTerminalSessionTracker();
 const agentJournal = new SerialJournal();
 let agentPanel = null;
 let agentSettings = null;
+let terminalKeyPreferences = null;
 let aboutPage = null;
 let serialInputRevision = 0;
 let serialInputPending = false;
@@ -1112,6 +1114,7 @@ function applyLang() {
   updateModifierButtons();
   agentPanel?.refreshLang();
   agentSettings?.refreshLang();
+  terminalKeyPreferences?.refreshLang();
   aboutPage?.refreshLang();
 }
 
@@ -4207,6 +4210,7 @@ function syncSoftKeyboardLayout() {
   }
 
   softKeyboardLayout.active = active;
+  if (active) terminalKeyPreferences?.collapse();
   document.documentElement.classList.toggle("soft-keyboard-open", active);
   // The button must follow the keyboard the user actually sees, including a
   // keyboard dismissed from Android's own hide button.
@@ -4955,6 +4959,14 @@ function init() {
   }
   setConnected(false);
   bind();
+  // Keep the same buttons and UART listeners when changing their visual order.
+  // Storage denial must not prevent the terminal itself from starting.
+  let keyStorage;
+  try { keyStorage = localStorage; } catch { keyStorage = { getItem: () => null, setItem: () => { throw new Error("Storage unavailable"); } }; }
+  terminalKeyPreferences = createTerminalKeyPreferences({
+    bar: elements.terminalKeyBar, getLang: () => lang, storage: keyStorage,
+    onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); state.term?.blur(); },
+  });
   agentPanel = createAgentPanel({
     button: $("agentButton"), getLang: () => lang,
     settings: agentSettings,

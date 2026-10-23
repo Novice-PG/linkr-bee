@@ -1,0 +1,144 @@
+/* Compact controls share the terminal's existing palette and button vocabulary. */
+:root { --mobile-control-surface: #111822; }
+[data-theme="light"] { --mobile-control-surface: #fff; }
+.terminal-keys-toggle,
+.terminal-keys-customize { display: none; }
+
+.agent-advanced-settings {
+  margin: 14px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.agent-advanced-settings > summary {
+  padding: 14px 0;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.agent-advanced-fields { padding-bottom: 6px; }
+.agent-settings-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 10px 0 2px;
+  background: var(--mobile-control-surface);
+  border-top: 1px solid var(--line);
+}
+.agent-settings-actions .field-hint:empty { display: none; }
+.agent-settings-actions .field-hint { margin-bottom: 4px; }
+.agent-settings-actions .btn-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+
+.terminal-key-preferences {
+  width: min(460px, calc(100vw - 24px));
+  max-height: calc(var(--terminal-viewport-height, 100vh) - 32px);
+  box-sizing: border-box;
+  padding: 20px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--mobile-control-surface);
+  color: var(--text);
+}
+.terminal-key-preferences::backdrop { background: rgba(0, 0, 0, .5); }
+.terminal-key-preferences h2 { margin: 0; font-size: 18px; }
+.terminal-key-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin-block: 16px;
+}
+.terminal-key-choices .check { min-height: 48px; padding: 4px; margin: 0; overflow-wrap: anywhere; }
+.terminal-key-choices input { flex: 0 0 auto; }
+.terminal-key-preferences-actions {
+  position: sticky;
+  bottom: -20px;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding-block: 12px;
+  background: var(--mobile-control-surface);
+}
+.terminal-key-preferences-actions .btn { min-height: 48px; }
+.terminal-key-preferences :focus-visible,
+.agent-advanced-settings > summary:focus-visible,
+.terminal-keys-customize:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+@media (max-width: 900px) {
+  #agentSettingsForm {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(var(--terminal-viewport-height, 100vh) - 190px);
+    min-height: 0;
+  }
+  .agent-settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 3px; }
+  .agent-settings-actions { flex: 0 0 auto; position: relative; padding-bottom: 6px; }
+  html.soft-keyboard-open #agentSettings > .card-title { display: none; }
+  html.soft-keyboard-open .app-shell.sidebar-open .controls .settings-tabs { display: none; }
+  html.soft-keyboard-open #agentSettingsForm { max-height: calc(var(--terminal-viewport-height, 100vh) - 90px); }
+  .terminal-card .terminal-input-bar { flex-direction: column; align-items: stretch; gap: 0; }
+  .terminal-card .terminal-input-actions { align-items: flex-start; gap: 5px; }
+  .terminal-key-scroll { gap: 5px; padding-bottom: 2px; }
+  .terminal-key-scroll .terminal-key-group { display: contents; }
+  .terminal-key-scroll button { order: var(--favorite-key-order, 100); }
+  .terminal-input-actions:not(.keys-expanded) .terminal-key-scroll button:not([data-favorite-key]) { display: none; }
+  .terminal-card .terminal-key,
+  .terminal-card .terminal-keyboard,
+  .terminal-card #breakButton { min-height: 48px; height: 48px; min-width: 48px; padding-inline: 10px; }
+  .terminal-card #breakButton { min-width: 58px; }
+  .terminal-card .terminal-keys-toggle { display: inline-flex; flex: 0 0 auto; font-family: inherit; }
+  .terminal-keys-customize:not([hidden]) {
+    display: block;
+    min-height: 44px;
+    margin-left: auto;
+    padding: 6px 4px;
+    color: var(--accent-strong);
+    font: inherit;
+    font-size: 12px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  .terminal-input-bar:has(.keys-expanded) { max-height: 45%; overflow-y: auto; }
+  .keys-expanded .terminal-key-scroll {
+    display: grid;
+    grid-template-rows: repeat(2, 48px);
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+  }
+  .terminal-card .terminal-input-hint { display: none; }
+  .agent-advanced-settings > summary { min-height: 48px; box-sizing: border-box; }
+}
+
+@media (min-width: 360px) {
+  .terminal-key-choices { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 8px; }
+}
+
+/* Hide redundant rows in the short viewport without hiding connection actions. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .terminal-card .presets,
+  .terminal-card .terminal-input-hint,
+  .term-tools .term-hint { display: none; }
+  .topbar { padding-block: 4px; }
+  .terminal-head { padding-block: 2px; }
+  .statusbar { padding-block: 0; }
+}
+
+@media (pointer: coarse), (max-width: 900px) {
+  /* A small visible dot with a larger hit target, centered on the same cell. */
+  .terminal-selection-handle { width: 48px; height: 48px; border: 0; background: transparent; box-shadow: none; }
+  .terminal-selection-handle::before {
+    content: "";
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    box-sizing: border-box;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    border: 2px solid var(--panel);
+    border-radius: 50%;
+    background: var(--accent-strong);
+  }
+  .terminal-selection-handle-start::after { top: calc(50% + 10px); }
+  .terminal-selection-handle-end::after { bottom: calc(50% + 10px); }
+}

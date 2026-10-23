@@ -21,6 +21,10 @@ test.beforeEach(async ({ page }) => {
     setConnected(true);
     state.term.focus();
   });
+  // The modifier cases exercise the complete keyboard, including low-use keys.
+  if (await page.locator("#terminalKeysToggle").isVisible()) {
+    await page.locator("#terminalKeysToggle").tap();
+  }
 });
 
 for (const phase of ["queued", "fragmented"]) {

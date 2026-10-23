@@ -99,6 +99,7 @@ test("token use and the estimated cost are shown for the conversation", async ({
 
 test("prices are validated in the settings form and survive a reload", async ({ page }) => {
   await page.locator("#agentSettingsButton").click();
+  await page.locator("#agentAdvancedSettings > summary").click();
   await page.locator("#agentPriceInput").fill("0.27");
   await page.locator("#agentPriceOutput").fill("1.1");
   await page.locator("#agentSettingsSave").click();
@@ -109,6 +110,7 @@ test("prices are validated in the settings form and survive a reload", async ({ 
   await page.locator("#agentSettingsButton").click();
   await expect(page.locator("#agentPriceInput")).toHaveValue("0.27");
   await expect(page.locator("#agentPriceOutput")).toHaveValue("1.1");
+  await page.locator("#agentAdvancedSettings > summary").click();
   await page.locator("#agentPriceInput").fill("-1");
   await page.locator("#agentSettingsSave").click();
   await expect(page.locator("#agentSettingsStatus")).toContainText(/Prices must be numbers|单价必须是/);

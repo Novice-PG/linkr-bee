@@ -8,14 +8,22 @@ the BLE transport is native.
 
 ## Touch terminal keys
 
-The terminal has a two-row accessory keyboard on phones and tablets. Keyboard,
-Esc, Tab and Shift/Ctrl/Alt stay on the left; the right side scrolls through an
-inverted-T arrow cluster, Home/End, Paste, Enter, Page Up/Down, Backspace, symbols
-and common Ctrl shortcuts. Tap a modifier before the next key; tap again to
+The accessory keyboard provides Esc, Tab, Shift/Ctrl/Alt, arrows, Home/End,
+Paste, Enter, Page Up/Down, Backspace, symbols and common Ctrl shortcuts.
+Tap a modifier before the next key; tap again to
 cancel. Modifiers reset after use or disconnect. For example, Ctrl then C sends
 an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
-shells that support it. Paste uses the clipboard when available. Both rows stay
-above the soft keyboard and are shared with the Web and HarmonyOS clients.
+shells that support it. Paste uses the clipboard when available. The key strip
+stays above the soft keyboard and is shared with the Web and HarmonyOS clients.
+On compact screens, favorite keys appear first; **More** exposes the complete
+keyboard and **Choose favorite keys** saves a local selection. The keyboard entry
+and pinned Ctrl-C remain accessible. Opening the IME collapses the extra keys to
+preserve terminal space; landscape also hides the preset-command row.
+
+AI settings keep the model connection in the basic form. Protocol, extra headers,
+reasoning, token limits and pricing are under **Advanced settings** on touch and
+compact screens. The form scrolls above a separate save area; a validation error
+in a collapsed section opens it and focuses the affected field.
 
 Touch follows the phone's own selection model: drag vertically to scroll
 history, tap to open the soft keyboard, and long press to select. The word under

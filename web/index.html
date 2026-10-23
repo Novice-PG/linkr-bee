@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="./style.css?v=20261021-cross-browser" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
+    <link rel="stylesheet" href="./mobile-ui.css?v=20261023-compact-controls" />
   </head>
   <body>
     <main class="app-shell">
@@ -391,70 +392,79 @@
         <section id="agentSettings" class="card agent-settings" data-settings-page="ai" aria-labelledby="agentSettingsTitle" hidden>
           <div class="card-title"><span class="dot"></span><span id="agentSettingsTitle" data-ai-setting="title">AI configuration</span></div>
           <form id="agentSettingsForm" novalidate>
-            <fieldset id="agentSettingsFields">
-              <label class="field"><span class="field-label" data-ai-setting="vendor">AI provider</span>
-                <select id="agentVendor" aria-describedby="agentVendorHint agentSettingsStatus"></select>
-                <span id="agentVendorHint" class="field-hint" data-ai-setting="vendorHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="endpoint">API base URL</span>
-                <input id="agentEndpoint" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="agentEndpointHint agentSettingsStatus">
-                <span id="agentEndpointHint" class="field-hint" data-ai-setting="endpointHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="model">Model ID</span>
-                <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" list="agentModelOptions" aria-describedby="agentModelHint agentSettingsStatus">
-                <!-- Filled by "Fetch model list" once the address and key are in; the
-                     input stays editable because a service may not offer the endpoint. -->
-                <datalist id="agentModelOptions"></datalist>
-                <span id="agentModelHint" class="field-hint" data-ai-setting="modelHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="key">API key</span>
-                <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
-                <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
-              </label>
-              <!-- Stored-key disclosure sits next to the field, not at the bottom of the
-                   card: the question "where does this go?" is asked while typing it. -->
-              <p class="key-note">
-                <svg class="key-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-                <span data-ai-setting="keyStorage"></span>
-              </p>
-              <!-- The hard-coded ids in the presets go stale; this reads the real list
-                   once the address and key are in, and never replaces the manual field. -->
-              <button id="agentModelFetch" class="btn model-fetch" type="button" data-ai-setting="fetchModels">Fetch model list</button>
-              <p id="agentModelStatus" class="field-hint model-fetch-status" role="status" aria-live="polite"></p>
-              <label class="field"><span class="field-label" data-ai-setting="headers">Extra request headers</span>
-                <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
-                <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="provider">API protocol</span>
-                <select id="agentProvider" aria-describedby="agentProviderHint agentSettingsStatus"></select>
-                <span id="agentProviderHint" class="field-hint" data-ai-setting="providerHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="reasoning">Reasoning effort</span>
-                <select id="agentReasoning" aria-describedby="agentReasoningHint agentSettingsStatus"></select>
-                <span id="agentReasoningHint" class="field-hint" data-ai-setting="reasoningHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="contextWindow">Context window in tokens (optional)</span>
-                <input id="agentContextWindow" type="number" min="0" max="2000000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentContextWindowHint agentSettingsStatus">
-                <span id="agentContextWindowHint" class="field-hint" data-ai-setting="contextWindowHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="maxTokens">Max output tokens (optional)</span>
-                <input id="agentMaxTokens" type="number" min="0" max="100000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentMaxTokensHint agentSettingsStatus">
-                <span id="agentMaxTokensHint" class="field-hint" data-ai-setting="limitsHint"></span>
-              </label>
-              <label class="field"><span class="field-label" data-ai-setting="pricing">Token prices per 1M (optional)</span>
-                <span class="field-row pricing">
-                  <input id="agentPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="input" aria-label="input price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
-                  <input id="agentPriceOutput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="output" aria-label="output price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
-                </span>
-                <span id="agentPricingHint" class="field-hint" data-ai-setting="pricingHint"></span>
-              </label>
+            <div class="agent-settings-scroll">
+              <fieldset id="agentSettingsFields">
+                <label class="field"><span class="field-label" data-ai-setting="vendor">AI provider</span>
+                  <select id="agentVendor" aria-describedby="agentVendorHint agentSettingsStatus"></select>
+                  <span id="agentVendorHint" class="field-hint" data-ai-setting="vendorHint"></span>
+                </label>
+                <label class="field"><span class="field-label" data-ai-setting="endpoint">API base URL</span>
+                  <input id="agentEndpoint" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="agentEndpointHint agentSettingsStatus">
+                  <span id="agentEndpointHint" class="field-hint" data-ai-setting="endpointHint"></span>
+                </label>
+                <label class="field"><span class="field-label" data-ai-setting="model">Model ID</span>
+                  <input id="agentModel" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="model-id" list="agentModelOptions" aria-describedby="agentModelHint agentSettingsStatus">
+                  <!-- Filled by "Fetch model list" once the address and key are in; the
+                       input stays editable because a service may not offer the endpoint. -->
+                  <datalist id="agentModelOptions"></datalist>
+                  <span id="agentModelHint" class="field-hint" data-ai-setting="modelHint"></span>
+                </label>
+                <label class="field"><span class="field-label" data-ai-setting="key">API key</span>
+                  <input id="agentApiKey" type="password" autocomplete="off" spellcheck="false" aria-describedby="agentKeyHint">
+                  <span id="agentKeyHint" class="field-hint" data-ai-setting="keyHint"></span>
+                </label>
+                <!-- Stored-key disclosure sits next to the field, not at the bottom of the
+                     card: the question "where does this go?" is asked while typing it. -->
+                <p class="key-note">
+                  <svg class="key-note-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                  <span data-ai-setting="keyStorage"></span>
+                </p>
+                <!-- The hard-coded ids in the presets go stale; this reads the real list
+                     once the address and key are in, and never replaces the manual field. -->
+                <button id="agentModelFetch" class="btn model-fetch" type="button" data-ai-setting="fetchModels">Fetch model list</button>
+                <p id="agentModelStatus" class="field-hint model-fetch-status" role="status" aria-live="polite"></p>
+                <details id="agentAdvancedSettings" class="agent-advanced-settings">
+                  <summary data-ai-setting="advanced">Advanced settings</summary>
+                  <div class="agent-advanced-fields">
+                    <label class="field"><span class="field-label" data-ai-setting="headers">Extra request headers</span>
+                      <textarea id="agentHeaders" rows="2" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="anthropic-dangerous-direct-browser-access: true" aria-describedby="agentHeadersHint agentSettingsStatus"></textarea>
+                      <span id="agentHeadersHint" class="field-hint" data-ai-setting="headersHint"></span>
+                    </label>
+                    <label class="field"><span class="field-label" data-ai-setting="provider">API protocol</span>
+                      <select id="agentProvider" aria-describedby="agentProviderHint agentSettingsStatus"></select>
+                      <span id="agentProviderHint" class="field-hint" data-ai-setting="providerHint"></span>
+                    </label>
+                    <label class="field"><span class="field-label" data-ai-setting="reasoning">Reasoning effort</span>
+                      <select id="agentReasoning" aria-describedby="agentReasoningHint agentSettingsStatus"></select>
+                      <span id="agentReasoningHint" class="field-hint" data-ai-setting="reasoningHint"></span>
+                    </label>
+                    <label class="field"><span class="field-label" data-ai-setting="contextWindow">Context window in tokens (optional)</span>
+                      <input id="agentContextWindow" type="number" min="0" max="2000000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentContextWindowHint agentSettingsStatus">
+                      <span id="agentContextWindowHint" class="field-hint" data-ai-setting="contextWindowHint"></span>
+                    </label>
+                    <label class="field"><span class="field-label" data-ai-setting="maxTokens">Max output tokens (optional)</span>
+                      <input id="agentMaxTokens" type="number" min="0" max="100000" step="1" inputmode="numeric" autocomplete="off" placeholder="0" aria-describedby="agentMaxTokensHint agentSettingsStatus">
+                      <span id="agentMaxTokensHint" class="field-hint" data-ai-setting="limitsHint"></span>
+                    </label>
+                    <label class="field"><span class="field-label" data-ai-setting="pricing">Token prices per 1M (optional)</span>
+                      <span class="field-row pricing">
+                        <input id="agentPriceInput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="input" aria-label="input price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
+                        <input id="agentPriceOutput" type="number" min="0" step="0.01" inputmode="decimal" placeholder="output" aria-label="output price per million tokens" aria-describedby="agentPricingHint agentSettingsStatus">
+                      </span>
+                      <span id="agentPricingHint" class="field-hint" data-ai-setting="pricingHint"></span>
+                    </label>
+                  </div>
+                </details>
+              </fieldset>
+            </div>
+            <div class="agent-settings-actions">
               <div class="btn-grid">
                 <button id="agentSettingsSave" class="btn btn-primary" type="submit" data-ai-setting="save">Save configuration</button>
                 <button id="agentSettingsClear" class="btn" type="button" data-ai-setting="clear">Clear configuration</button>
               </div>
-            </fieldset>
+              <p id="agentSettingsStatus" class="field-hint" role="status" aria-live="polite"></p>
+            </div>
           </form>
-          <p id="agentSettingsStatus" class="field-hint" role="status" aria-live="polite"></p>
           <p class="field-hint" data-ai-setting="storage"></p>
           <p class="field-hint" data-ai-setting="notice"></p>
           <section class="target-binding" aria-labelledby="targetBindingTitle">
@@ -604,7 +614,9 @@
                 </div>
               </div>
               <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-C" id="breakButton">Ctrl-C</button>
+              <button id="terminalKeysToggle" class="btn terminal-key terminal-keys-toggle" type="button" aria-expanded="false" aria-controls="terminalKeyBar terminalKeysCustomize">More</button>
             </div>
+            <button id="terminalKeysCustomize" class="terminal-keys-customize" type="button" hidden>Choose favorite keys</button>
           </div>
         </section>
         </div>

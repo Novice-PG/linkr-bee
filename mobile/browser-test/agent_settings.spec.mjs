@@ -10,6 +10,10 @@ async function fillSettings(page, value = config) {
   await page.locator("#agentEndpoint").fill(value.endpoint);
   await page.locator("#agentModel").fill(value.model);
   await page.locator("#agentApiKey").fill(value.apiKey);
+  // These compatibility cases also edit protocol/headers below the basic form.
+  if (await page.locator("#agentAdvancedSettings").getAttribute("open") === null) {
+    await page.locator("#agentAdvancedSettings > summary").tap();
+  }
 }
 async function saveSettings(page) {
   await page.locator("#agentSettingsSave").tap();

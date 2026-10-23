@@ -22,6 +22,7 @@ import {
 import { loadPricing, savePricing } from "./agent_usage.js";
 
 const labels = {
+  advanced: ["高级设置", "Advanced settings"],
   bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
   bindingTitle:["目标机绑定", "Target identity binding"],
   bindingHint:["优先使用已有的系统 ID，其次是用户 ID。首次绑定优先写入 /var/lib/linkr/device-id，需要权限时尝试 sudo；请在串口输入密码。sudo 不可用或失败时改用 ~/.local/share/linkr/device-id（随登录用户变化）。输入密码后请再次点击绑定，核实后才保存到 Bee Flash。", "Existing system IDs take priority, then existing user IDs. New IDs prefer /var/lib/linkr/device-id using sudo when needed; enter the password in the terminal. If sudo is unavailable or fails, use ~/.local/share/linkr/device-id (per user). After entering a password, click Bind again to verify before saving to Bee Flash."],
@@ -110,6 +111,13 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     contextWindow: $("agentContextWindow"), maxTokens: $("agentMaxTokens"),
   };
   const headersInput = $("agentHeaders");
+  const advanced = $("agentAdvancedSettings");
+  // Keep the compact form simple, while leaving desktop editors expanded.
+  advanced.open = !window.matchMedia("(pointer: coarse), (max-width: 900px)").matches;
+  function focusField(input) {
+    if (advanced.contains(input)) advanced.open = true;
+    input.focus();
+  }
   const priceInputs = { input: $("agentPriceInput"), output: $("agentPriceOutput") };
   // Every validated field reports through its own message; a wrong apiKey type
   // can only come from a stored record, never from this form, so it keeps the
@@ -157,7 +165,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     if (!isValidEndpoint(inputs.endpoint.value)) {
       inputs.endpoint.setAttribute("aria-invalid", "true");
       showModelStatus("fetchEndpoint", {}, true);
-      inputs.endpoint.focus();
+      focusField(inputs.endpoint);
       return;
     }
     let requestHeaders;
@@ -165,7 +173,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     catch {
       headersInput.setAttribute("aria-invalid", "true");
       showModelStatus("headersError", {}, true);
-      headersInput.focus();
+      focusField(headersInput);
       return;
     }
     fetchingModels = true;
@@ -264,20 +272,20 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     try { draft.headers = parseAgentHeaders(headersInput.value); } catch {
       headersInput.setAttribute("aria-invalid", "true");
       showStatus("headersError", true);
-      headersInput.focus();
+      focusField(headersInput);
       return;
     }
     try { validateAgentConfig(draft); } catch (error) {
       if (error.message === "headers") {
         headersInput.setAttribute("aria-invalid", "true");
         showStatus("headersError", true);
-        headersInput.focus();
+        focusField(headersInput);
         return;
       }
       const name = statusLabels[error.message] ? error.message : "endpoint";
       inputs[name].setAttribute("aria-invalid", "true");
       showStatus(statusLabels[error.message] || "endpointError", true);
-      inputs[name].focus();
+      focusField(inputs[name]);
       return;
     }
     const previous = config;
@@ -299,7 +307,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     catch {
       priceInputs.input.setAttribute("aria-invalid", "true");
       showStatus("pricingError", true);
-      priceInputs.input.focus();
+      focusField(priceInputs.input);
       return;
     }
     fill();
@@ -379,6 +387,13 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     refreshLang,
     connectionChanged() { $("targetBindingIdentity").textContent = ""; $("targetBindingStatus").textContent = text("bindingUnknown"); },
     getConfig: () => config && { ...config },
-    setBusy(value) { busy = value; $("agentSettingsFields").disabled = value; $("targetBindingFields").disabled = value; renderStatus(); },
+    setBusy(value) {
+      busy = value;
+      $("agentSettingsFields").disabled = value;
+      $("targetBindingFields").disabled = value;
+      $("agentSettingsSave").disabled = value;
+      $("agentSettingsClear").disabled = value;
+      renderStatus();
+    },
   };
 }
