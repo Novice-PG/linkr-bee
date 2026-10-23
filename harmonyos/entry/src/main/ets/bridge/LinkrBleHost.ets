@@ -6,7 +6,7 @@ import {
 import { webview } from '@kit.ArkWeb';
 import { promptAction, UIContext, window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { access, ble, constant } from '@kit.ConnectivityKit';
+import { access, ble, connection, constant } from '@kit.ConnectivityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /* Matches EntryAbility: the domain shared by all Linkr Bee hilog records. */
@@ -16,6 +16,7 @@ const BLUETOOTH_PERMISSION: Permissions = 'ohos.permission.ACCESS_BLUETOOTH';
 const MANAGEMENT_SERVICE = '4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001';
 const SCAN_DURATION_MS = 3000;
 const CONNECT_TIMEOUT_MS = 15000;
+const PAIRING_TIMEOUT_MS = 60000;
 const MTU_TIMEOUT_MS = 1500;
 const REQUESTED_MTU = 247;
 /* Each runJavaScript is an asynchronous IPC into the ArkWeb renderer. A
@@ -28,11 +29,11 @@ const NOTIFICATION_BATCH_BYTES = 4096;
  * the buffer is trimmed from the oldest end so memory stays bounded. This
  * mirrors the firmware's own UART ring behaviour. */
 const NOTIFICATION_BUFFER_LIMIT = 131072;
-/* Must stay comfortably above the host's worst case (scan + connect + MTU +
- * service discovery) so the page never abandons a connect the host is still
+/* Must stay comfortably above the host's worst case (scan + connect + pairing +
+ * MTU + service discovery) so the page never abandons a connect the host is still
  * completing. harmonyos/src/native-bootstrap.js keeps the client-side value. */
 const HOST_CONNECT_WORST_CASE_MS =
-  SCAN_DURATION_MS + CONNECT_TIMEOUT_MS + MTU_TIMEOUT_MS + 5000;
+  SCAN_DURATION_MS + CONNECT_TIMEOUT_MS + PAIRING_TIMEOUT_MS + MTU_TIMEOUT_MS + 5000;
 
 interface PendingNotification {
   deviceId: string;
@@ -78,6 +79,7 @@ export class LinkrBleHost {
   private scanActive: boolean = false;
   private operationTail: Promise<void> = Promise.resolve();
   private connectionGeneration: number = 0;
+  private cancelPairing: (() => void) | null = null;
   private pendingNotifications: Array<PendingNotification> = [];
   private pendingNotificationBytes: number = 0;
   private notificationFlushActive: boolean = false;
@@ -354,6 +356,9 @@ export class LinkrBleHost {
     try {
       await this.waitForConnection(client, deviceId);
       this.requireSession(client, generation);
+      hilog.info(DOMAIN, 'LinkrBee', 'BLE GATT connected; checking bond');
+      await this.ensureBonded(client, generation, deviceId);
+      this.requireSession(client, generation);
       await this.negotiateMtu(client);
       this.requireSession(client, generation);
       const services = await client.getServices();
@@ -372,12 +377,94 @@ export class LinkrBleHost {
       if (!this.hasService(MANAGEMENT_SERVICE)) {
         throw new Error('Linkr Management service is unavailable');
       }
+      hilog.info(DOMAIN, 'LinkrBee', 'BLE bonded; service discovery ready');
     } catch (error) {
+      hilog.error(DOMAIN, 'LinkrBee', 'BLE connect failed: %{public}s', this.errorMessage(error));
       if (this.client === client && this.connectionGeneration === generation) {
         this.closeClient(true);
       }
       throw new Error(this.errorMessage(error));
     }
+  }
+
+  private async ensureBonded(
+    client: ble.GattClientDevice,
+    generation: number,
+    deviceId: string,
+  ): Promise<void> {
+    this.requireSession(client, generation);
+    try {
+      if (connection.getPairState(deviceId) === connection.BondState.BOND_STATE_BONDED) {
+        return;
+      }
+    } catch (error) {
+      throw new Error(`Unable to query Bluetooth bond: ${this.errorMessage(error)}`);
+    }
+
+    hilog.info(DOMAIN, 'LinkrBee', 'BLE unbonded; waiting for system pairing (hold pairing GPIO low)');
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let subscribed = false;
+      let timer = 0;
+      const complete = (error: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (subscribed) {
+          try {
+            connection.off('bondStateChange', bondCallback);
+          } catch (_error) {
+            // The Bluetooth service may have stopped during pairing.
+          }
+        }
+        if (this.cancelPairing === cancel) this.cancelPairing = null;
+        if (error !== null) reject(error);
+        else resolve();
+      };
+      const cancel = (): void => complete(new Error('Bluetooth device session changed'));
+      const bondCallback = (change: connection.BondStateParam): void => {
+        if (change.deviceId.toLowerCase() !== deviceId.toLowerCase()) return;
+        try {
+          this.requireSession(client, generation);
+        } catch (error) {
+          complete(new Error(this.errorMessage(error)));
+          return;
+        }
+        if (change.state === connection.BondState.BOND_STATE_BONDED) {
+          complete(null);
+        } else if (change.state === connection.BondState.BOND_STATE_INVALID) {
+          complete(new Error(`Bluetooth pairing failed (cause ${change.cause}); hold the pairing GPIO low and retry`));
+        }
+      };
+      this.cancelPairing = cancel;
+      try {
+        connection.on('bondStateChange', bondCallback);
+        subscribed = true;
+        timer = setTimeout(() => complete(new Error('Bluetooth pairing timed out; accept the system pairing prompt')), PAIRING_TIMEOUT_MS);
+        // Recheck after subscribing so a concurrent system pairing cannot be missed.
+        const state = connection.getPairState(deviceId);
+        if (state === connection.BondState.BOND_STATE_BONDED) {
+          complete(null);
+        } else if (state !== connection.BondState.BOND_STATE_BONDING) {
+          connection.pairDevice(deviceId).then(() => {
+            if (settled) return;
+            try {
+              this.requireSession(client, generation);
+              if (connection.getPairState(deviceId) === connection.BondState.BOND_STATE_BONDED) {
+                complete(null);
+              }
+            } catch (error) {
+              complete(new Error(this.errorMessage(error)));
+            }
+          }, (error: BusinessError) => {
+            complete(new Error(`Bluetooth pairing failed: ${this.errorMessage(error)}`));
+          });
+        }
+      } catch (error) {
+        complete(new Error(`Bluetooth pairing failed: ${this.errorMessage(error)}`));
+      }
+    });
+    this.requireSession(client, generation);
   }
 
   private waitForConnection(
@@ -477,6 +564,7 @@ export class LinkrBleHost {
   private closeClient(suppressEvent: boolean): void {
     const client = this.client;
     this.connectionGeneration += 1;
+    if (this.cancelPairing !== null) this.cancelPairing();
     this.suppressDisconnectEvent = suppressEvent;
     this.client = null;
     this.connectedDeviceId = '';
@@ -731,7 +819,8 @@ export class LinkrBleHost {
 
   private errorMessage(error: Object): string {
     const businessError = error as BusinessError;
-    return businessError.message || String(error);
+    const message = businessError.message || String(error);
+    return businessError.code === undefined ? message : `${message} (code ${businessError.code})`;
   }
 
   private delay(milliseconds: number): Promise<void> {

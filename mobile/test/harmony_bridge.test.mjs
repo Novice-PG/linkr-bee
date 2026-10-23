@@ -168,10 +168,10 @@ test("Harmony bridge times out when the ArkTS host loses a response", async () =
 
   // A device menu or permission prompt waits on a human, so those requests must
   // not share the short IPC deadline; connect only has to outlast the host's own
-  // connect + MTU + discovery budget.
+  // connect + system pairing + MTU + discovery budget.
   assert.deepEqual(
     timers.map((timer) => timer.delay),
-    [180000, 180000, 60000],
+    [180000, 180000, 120000],
   );
 
   for (const timer of timers) {

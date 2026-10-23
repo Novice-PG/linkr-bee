@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import ts from "typescript";
 
 const source = await readFile(new URL("../../harmonyos/entry/src/main/ets/bridge/LinkrBleHost.ets", import.meta.url), "utf8");
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 });
+const hilog = { info() {}, warn() {}, error() {} };
 
 function createHost() {
   const context = {
     exports: {}, setTimeout, clearTimeout,
-    require: () => ({ ble: { GattWriteType: { WRITE: 1, WRITE_NO_RESPONSE: 0 } } }),
+    require: () => ({ ble: { GattWriteType: { WRITE: 1, WRITE_NO_RESPONSE: 0 } }, hilog }),
   };
   vm.runInNewContext(outputText, context);
   return new context.exports.LinkrBleHost({ runJavaScript: async () => "" });
@@ -56,7 +58,7 @@ test("Harmony completion from a retired connect cannot close its replacement", a
   let release;
   const context = { exports: {}, setTimeout, clearTimeout, require: () => ({ ble: {
     createGattClientDevice: () => ({ disconnect() {}, close() {}, getServices: async () => [] }),
-  } }) };
+  }, hilog }) };
   vm.runInNewContext(outputText, context);
   const connecting = new context.exports.LinkrBleHost({ runJavaScript: async () => "" });
   connecting.waitForConnection = () => new Promise(resolve => { release = resolve; });
@@ -69,4 +71,157 @@ test("Harmony completion from a retired connect cannot close its replacement", a
   await rejected;
   assert.equal(connecting.client, replacement);
   assert.equal(connecting.connectedDeviceId, "same-board");
+});
+
+const bondStates = { BOND_STATE_INVALID: 0, BOND_STATE_BONDING: 1, BOND_STATE_BONDED: 2 };
+const pairingDevice = "AA:BB:CC:DD:EE:FF";
+
+function createPairingHost(initialState = bondStates.BOND_STATE_INVALID) {
+  let state = initialState, resolvePair, rejectPair;
+  const calls = [], listeners = new Set(), timers = new Map();
+  const client = {
+    disconnect: () => calls.push("disconnect"), close: () => calls.push("close"),
+    getServices: async () => {
+      calls.push("services");
+      return [{ serviceUuid: "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001",
+        characteristics: [{ characteristicUuid: "protocol" }] }];
+    },
+  };
+  const connection = {
+    BondState: bondStates,
+    getPairState: () => state,
+    on(type, callback) { assert.equal(type, "bondStateChange"); listeners.add(callback); },
+    off(type, callback) { assert.equal(type, "bondStateChange"); listeners.delete(callback); },
+    pairDevice(id) {
+      assert.equal(id, pairingDevice);
+      calls.push("pair");
+      return new Promise((resolve, reject) => { resolvePair = resolve; rejectPair = reject; });
+    },
+  };
+  const context = { exports: {},
+    setTimeout(callback, delay) { const id = timers.size + 1; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    require: () => ({ ble: { createGattClientDevice: () => client }, connection, hilog }),
+  };
+  vm.runInNewContext(outputText, context);
+  const host = new context.exports.LinkrBleHost({ runJavaScript: async () => "" });
+  host.waitForConnection = async () => { calls.push("link"); };
+  host.negotiateMtu = async () => { assert.equal(state, bondStates.BOND_STATE_BONDED); calls.push("mtu"); };
+  return { host, client, connection, calls, listeners, timers,
+    resolvePair: () => resolvePair(), rejectPair: error => rejectPair(error),
+    emit(nextState, deviceId = pairingDevice, cause = 3) {
+      if (deviceId.toLowerCase() === pairingDevice.toLowerCase()) state = nextState;
+      for (const callback of [...listeners]) callback({ deviceId, state: nextState, cause });
+    },
+  };
+}
+
+test("Harmony bonded reconnect skips pairing", async () => {
+  const f = createPairingHost(bondStates.BOND_STATE_BONDED);
+  await f.host.connect(pairingDevice);
+  assert.deepEqual(f.calls, ["link", "mtu", "services"]);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.listeners.size, 0);
+});
+
+test("Harmony first host explicitly pairs and waits for its own bond before GATT", async () => {
+  const f = createPairingHost();
+  const connected = f.host.connect(pairingDevice);
+  await nextTurn();
+  assert.deepEqual(f.calls, ["link", "pair"]);
+  f.resolvePair();
+  await nextTurn();
+  assert.deepEqual(f.calls, ["link", "pair"], "a resolved request alone is not proof of a bond");
+  f.emit(bondStates.BOND_STATE_BONDED, "11:22:33:44:55:66");
+  assert.equal(f.listeners.size, 1);
+  f.emit(bondStates.BOND_STATE_BONDED, pairingDevice.toLowerCase());
+  await connected;
+  assert.deepEqual(f.calls, ["link", "pair", "mtu", "services"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony joins an existing system pairing without a duplicate pair request", async () => {
+  const f = createPairingHost(bondStates.BOND_STATE_BONDING);
+  const connected = f.host.connect(pairingDevice);
+  await nextTurn();
+  assert.deepEqual(f.calls, ["link"]);
+  f.emit(bondStates.BOND_STATE_BONDED);
+  await connected;
+  assert.deepEqual(f.calls, ["link", "mtu", "services"]);
+});
+
+test("Harmony catches a bond completed while its listener was being installed", async () => {
+  const f = createPairingHost();
+  let reads = 0;
+  f.connection.getPairState = () => ++reads === 1 ? bondStates.BOND_STATE_INVALID : bondStates.BOND_STATE_BONDED;
+  f.host.negotiateMtu = async () => f.calls.push("mtu");
+  await f.host.connect(pairingDevice);
+  assert.deepEqual(f.calls, ["link", "mtu", "services"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony rejected pairing closes the link without service access", async () => {
+  const f = createPairingHost();
+  const connected = f.host.connect(pairingDevice);
+  const failed = assert.rejects(connected, /pairing failed \(cause 3\)/);
+  await nextTurn();
+  f.emit(bondStates.BOND_STATE_INVALID);
+  await failed;
+  f.resolvePair();
+  await nextTurn();
+  assert.deepEqual(f.calls, ["link", "pair", "disconnect", "close"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony pairing API errors retain the native error code", async () => {
+  const f = createPairingHost();
+  const failed = assert.rejects(f.host.connect(pairingDevice), /pairing failed: Rejected \(code 2900099\)/);
+  await nextTurn();
+  f.rejectPair({ message: "Rejected", code: 2900099 });
+  await failed;
+  assert.deepEqual(f.calls, ["link", "pair", "disconnect", "close"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony bond lookup errors fail closed without starting pairing", async () => {
+  const f = createPairingHost();
+  f.connection.getPairState = () => { throw { message: "Bluetooth disabled", code: 2900003 }; };
+  await assert.rejects(f.host.connect(pairingDevice), /Unable to query Bluetooth bond: Bluetooth disabled \(code 2900003\)/);
+  assert.deepEqual(f.calls, ["link", "disconnect", "close"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony pairing timeout is bounded and removes its listener", async () => {
+  const f = createPairingHost();
+  const failed = assert.rejects(f.host.connect(pairingDevice), /pairing timed out/);
+  await nextTurn();
+  const [timer] = f.timers.values();
+  assert.equal(timer.delay, 60000);
+  timer.callback();
+  await failed;
+  assert.deepEqual(f.calls, ["link", "pair", "disconnect", "close"]);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+});
+
+test("Harmony retiring a pairing cannot complete or close a replacement session", async () => {
+  const f = createPairingHost();
+  const failed = assert.rejects(f.host.connect(pairingDevice), /session changed/);
+  await nextTurn();
+  f.host.closeClient(true);
+  const replacement = { disconnect() { assert.fail("replacement disconnected"); } };
+  f.host.client = replacement;
+  f.host.connectedDeviceId = pairingDevice;
+  f.emit(bondStates.BOND_STATE_BONDED);
+  f.resolvePair();
+  await failed;
+  assert.equal(f.host.client, replacement);
+  assert.equal(f.listeners.size, 0);
+  assert.equal(f.timers.size, 0);
+  assert.deepEqual(f.calls, ["link", "pair", "disconnect", "close"]);
 });

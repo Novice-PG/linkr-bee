@@ -19,7 +19,7 @@ const INTERACTIVE_TIMEOUT_MS = 180000;
 const METHOD_TIMEOUTS = {
   initialize: INTERACTIVE_TIMEOUT_MS,
   requestDevice: INTERACTIVE_TIMEOUT_MS,
-  connect: 60000,
+  connect: 120000,
 };
 const timeoutFor = (method) =>
   METHOD_TIMEOUTS[method] || REQUEST_TIMEOUT_MS;

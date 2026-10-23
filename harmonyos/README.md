@@ -76,13 +76,17 @@ npm test
 ```
 
 These tests cover request/result correlation, binary read/write conversion,
-indication forwarding, host errors, remote disconnect cleanup, and the 30-second
-native request timeout.
+indication forwarding, host errors, remote disconnect cleanup, and method-specific
+native request timeouts. Host callback tests also cover explicit first-host
+pairing, bonded reconnects, rejection, timeout, and stale-session cancellation.
 
 ## Validation boundary
 
-Firmware now requires encrypted, bonded BLE access. On C3/C5, hold GPIO1 to GND
-and pair in the system Bluetooth UI before connecting a new host. WROOM ships
+Firmware requires encrypted, bonded BLE access. On C3/C5, hold GPIO1 to GND
+before connecting a new host and accept the system pairing prompt. The app
+explicitly requests pairing for an unbonded host and waits up to 60 seconds for
+the bond before negotiating MTU or accessing GATT services. It reuses an existing
+bond and never deletes old bonds automatically. WROOM ships
 with pairing authorization disabled, so no GPIO4 press is needed there; GPIO4 is
 used only when `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. Existing bonded
 hosts do not need the pairing GPIO.
