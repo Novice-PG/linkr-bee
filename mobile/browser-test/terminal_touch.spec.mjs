@@ -13,7 +13,7 @@ async function openTerminal(page, { android = false } = {}) {
     await route.fulfill({
       response,
       body: (await response.text()) +
-        "\nwindow.__terminalTest = { state, setConnected, handleIncomingBytes };" +
+        "\nwindow.__terminalTest = { state, setConnected, handleIncomingBytes, setTerminalSelection };" +
         "\nwindow.__terminalCopied = null;" +
         "\nObject.defineProperty(navigator.clipboard, 'writeText', {" +
         "\n  configurable: true," +
@@ -425,6 +425,63 @@ test("copy with no selection falls back to the whole transcript", async ({ page 
   expect(copied).toContain("line 000 abcdefghijklmnopqrstuvwxyz");
   expect(copied).toContain("line 119 abcdefghijklmnopqrstuvwxyz");
 });
+
+test("whole transcript copy preserves wrapped lines and boundary spaces", async ({ page }) => {
+  await openTerminal(page);
+  // Flush the welcome output before resetting the buffer for this fixture.
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  const expected = await page.evaluate(async () => {
+    const { term } = window.__terminalTest.state;
+    const text = "A".repeat(term.cols * 2 + 5) + "\r\nNEXT\r\n" +
+      "B".repeat(term.cols - 1) + " TAIL\r\n\r\nEND";
+    await new Promise(resolve => term.write("\x1bc" + text, resolve));
+    return text.replaceAll("\r", "");
+  });
+  await page.locator("#copyBtn").click();
+  await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(expected);
+});
+
+for (const clipboard of ["missing", "rejected"]) {
+  for (const control of ["#copyBtn", ".terminal-selection-copy"]) {
+    test(`fallback copy keeps focus and selection (${clipboard}, ${control})`, async ({ page }) => {
+      await openTerminal(page);
+      const selected = await page.evaluate((clipboard) => {
+        const { state, setTerminalSelection } = window.__terminalTest;
+        Object.defineProperty(navigator.clipboard, "writeText", {
+          configurable: true,
+          value: clipboard === "missing" ? undefined : async () => {
+            throw new Error("clipboard permission denied");
+          },
+        });
+        // Observe the real browser copy event without replacing execCommand.
+        document.addEventListener("copy", (event) => {
+          const data = event.clipboardData;
+          if (!data) return;
+          const setData = data.setData.bind(data);
+          data.setData = (format, text) => {
+            if (format === "text/plain") window.__terminalCopied = text;
+            setData(format, text);
+          };
+        }, { capture: true });
+        state.term.focus();
+        const row = state.term.buffer.active.viewportY + state.term.rows - 4;
+        setTerminalSelection({ row, col: 9 }, { row, col: 13 });
+        window.__terminalBlurCount = 0;
+        state.term.textarea.addEventListener("blur", () => {
+          window.__terminalBlurCount += 1;
+        });
+        return state.term.getSelection();
+      }, clipboard);
+      expect(selected).not.toBe("");
+      await page.locator(control).tap();
+      await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+        .toContain("xterm-helper-textarea");
+      expect(await page.evaluate(() => window.__terminalBlurCount)).toBe(0);
+      await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
+      expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection())).toBe(selected);
+    });
+  }
+}
 
 test("native Android keeps keyboard resizes local instead of sending stty", async ({ page }) => {
   await openTerminal(page, { android: true });
