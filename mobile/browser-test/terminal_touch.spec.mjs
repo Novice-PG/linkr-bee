@@ -97,7 +97,7 @@ test("touch drag scrolls the xterm history and turns auto-scroll off", async ({ 
     .not.toContain("xterm-helper-textarea");
 
   // The guard is short-lived, so an explicit keyboard button/tap still works.
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(1300);
   await page.evaluate(() => window.__terminalTest.state.term.focus());
   await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
     .toContain("xterm-helper-textarea");
@@ -363,6 +363,56 @@ test("a cancelled long press still selects and does not open the keyboard", asyn
   });
   expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection()))
     .not.toBe("");
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .not.toContain("xterm-helper-textarea");
+});
+
+test("copy survives a WebView clearing the selection during a long press", async ({ page, context }) => {
+  await openTerminal(page);
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const termSize = await page.evaluate(() => ({
+    rows: window.__terminalTest.state.term.rows,
+    cols: window.__terminalTest.state.term.cols,
+  }));
+  const client = await context.newCDPSession(page);
+  const x = box.x + (box.width / termSize.cols) * 12;
+  const y = box.y + box.height - 50;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 21 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  const word = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(word).toBe("abcdefghijklmnopqrstuvwxyz");
+
+  // This is what several Android WebViews do: their own selection collapses
+  // and xterm drops the selection we made. The app must put it back.
+  await page.evaluate(() => window.__terminalTest.state.term.clearSelection());
+  await page.waitForTimeout(60);
+  expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection()))
+    .toBe(word);
+  await expect(page.locator(".terminal-selection-copy")).toBeVisible();
+
+  await page.locator("#copyBtn").click();
+  await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(word);
+});
+
+test("a long hold never opens the keyboard, even without a word selected", async ({ page, context }) => {
+  await openTerminal(page);
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const client = await context.newCDPSession(page);
+  // Far right of an empty area: no word to select there.
+  const x = box.x + box.width - 6;
+  const y = box.y + box.height - 20;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 31 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(250);
   expect(await page.evaluate(() => document.activeElement?.className || ""))
     .not.toContain("xterm-helper-textarea");
 });

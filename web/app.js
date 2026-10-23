@@ -1344,11 +1344,27 @@ function initTerminal() {
     positionTerminalSelectionHandles();
   });
   state.term.onSelectionChange(() => {
-    if (!state.term?.hasSelection()) {
-      hideTerminalSelectionHandles();
-    } else {
+    if (state.term?.hasSelection()) {
       positionTerminalSelectionHandles();
+      return;
     }
+    // A long press can make the WebView collapse its own DOM selection, which
+    // in turn clears the xterm selection we just made. Reapply it while the
+    // gesture is fresh so the highlight and Copy keep working; user input and
+    // a new touch clear the stored endpoints first, so those never reassert.
+    if (
+      !terminalSelection.reasserting &&
+      terminalSelection.start &&
+      terminalSelection.end &&
+      performance.now() - terminalSelection.stamp < 1500
+    ) {
+      const { start, end } = terminalSelection;
+      terminalSelection.reasserting = true;
+      setTerminalSelection(start, end);
+      terminalSelection.reasserting = false;
+      return;
+    }
+    hideTerminalSelectionHandles();
   });
   applyTerminalFont(state.fontFamily);
   fitTerminal();
@@ -2223,7 +2239,7 @@ function onTerminalScroll() {
 }
 
 const TERMINAL_TOUCH_SLOP = 10;
-const TERMINAL_LONG_PRESS_MS = 480;
+const TERMINAL_LONG_PRESS_MS = 400;
 const terminalTouch = {
   active: false,
   startX: 0,
@@ -2247,8 +2263,14 @@ const terminalTouch = {
 const terminalSelection = {
   start: null,
   end: null,
+  // The text is snapshotted when the selection is made. Android WebViews can
+  // collapse their DOM selection during a long press, which makes xterm clear
+  // its own selection; Copy must still return what the user selected.
+  text: "",
+  stamp: 0,
   drag: null,
   ui: null,
+  reasserting: false,
 };
 
 function clearTerminalTouchTimer() {
@@ -2415,6 +2437,8 @@ function positionTerminalSelectionHandles() {
 function hideTerminalSelectionHandles() {
   terminalSelection.start = null;
   terminalSelection.end = null;
+  terminalSelection.text = "";
+  terminalSelection.stamp = 0;
   terminalSelection.drag = null;
   if (terminalSelection.ui) {
     terminalSelection.ui.root.hidden = true;
@@ -2573,6 +2597,8 @@ function setTerminalSelection(start, end) {
   }
   terminalSelection.start = { row: first.row, col: first.col };
   terminalSelection.end = { row: last.row, col: last.col };
+  terminalSelection.text = term.getSelection();
+  terminalSelection.stamp = performance.now();
   ensureTerminalSelectionUi();
   positionTerminalSelectionHandles();
   return true;
@@ -2615,6 +2641,9 @@ function selectTerminalWordAt(clientX, clientY) {
 }
 
 function beginTerminalLongPress(clientX, clientY) {
+  if (terminalTouch.longPress || terminalSelection.start) {
+    return true;
+  }
   if (!selectTerminalWordAt(clientX, clientY)) {
     return false;
   }
@@ -2654,8 +2683,11 @@ function onTerminalTouchStart(event) {
   if (domSelection?.rangeCount) {
     domSelection.removeAllRanges();
   }
-  state.term.clearSelection();
+  // Clear our own selection UI first: clearSelection() fires the change event,
+  // and the endpoints must already be gone so the guard does not reassert the
+  // previous selection.
   hideTerminalSelectionHandles();
+  state.term.clearSelection();
   terminalTouch.timer = setTimeout(() => {
     terminalTouch.timer = 0;
     if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
@@ -2677,10 +2709,12 @@ function onTerminalTouchMove(event) {
   const dy = touch.clientY - terminalTouch.startY;
 
   if (terminalTouch.longPress) {
-    // Free box selection: keep the finger's cell as the moving edge. This
+    // Native-style selection: keep the finger's cell as the moving edge. This
     // also works while the soft keyboard is open, because the gesture never
-    // takes focus away from the terminal.
+    // takes focus away from the terminal. Mark the gesture as consumed so a
+    // later touchcancel can never turn it back into a tap or reset the word.
     event.preventDefault();
+    terminalTouch.moved = true;
     extendTerminalSelection(touch.clientX, touch.clientY);
     return;
   }
@@ -2738,20 +2772,26 @@ function finishTerminalTouch(event) {
   // A WebView may swallow the long-press timer or send touchcancel when its
   // own gesture detector fires. A stationary press that lasted long enough is
   // still a selection gesture, never a tap that opens the keyboard.
-  if (!wasLongPress && !wasScrolling && !wasMoved &&
-      heldMs >= TERMINAL_LONG_PRESS_MS - 20) {
+  const heldLongEnough = heldMs >= TERMINAL_LONG_PRESS_MS - 20;
+  if (!wasLongPress && !wasScrolling && !wasMoved && heldLongEnough) {
     wasLongPress = beginTerminalLongPress(startX, startY);
   }
+  // A selection that is already on screen proves this was a long press, even
+  // if the WebView reset the gesture state under us.
+  if (terminalSelection.start) {
+    wasLongPress = true;
+  }
 
-  if (wasScrolling || wasLongPress || wasCancelled) {
+  if (wasScrolling || wasLongPress || wasCancelled || (heldLongEnough && !wasMoved)) {
     // Keep the synthetic click/mousedown and any delayed WebView focus from
     // reopening the keyboard after a scroll or selection gesture. The next
     // touchstart releases the guard, so a deliberate tap still opens it.
-    suppressTerminalFocus(650);
+    suppressTerminalFocus(1200);
     if (blurOnEnd) {
       state.term?.blur();
-      window.setTimeout(blurTerminalIfFocusSuppressed, 0);
-      window.setTimeout(blurTerminalIfFocusSuppressed, 120);
+      for (const delay of [0, 120, 400, 800]) {
+        window.setTimeout(blurTerminalIfFocusSuppressed, delay);
+      }
     }
     event.preventDefault();
     return;
@@ -2771,7 +2811,8 @@ function onTerminalTouchCancel(event) {
   if (!terminalTouch.active) {
     return;
   }
-  if (!terminalTouch.moved && !terminalTouch.scrolling) {
+  if (!terminalTouch.longPress && !terminalTouch.moved &&
+      !terminalTouch.scrolling && !terminalSelection.start) {
     beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
   }
   terminalTouch.cancelled = true;
@@ -2786,6 +2827,11 @@ function terminalCopyText() {
   const selected = term.getSelection();
   if (selected) {
     return selected;
+  }
+  // Android may collapse its DOM selection right after a long press, which
+  // makes xterm drop the selection. The snapshot keeps Copy working.
+  if (terminalSelection.text) {
+    return terminalSelection.text;
   }
   const buffer = term.buffer.active;
   const lines = [];
@@ -3301,6 +3347,9 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
     return;
   }
   markTerminalBusy();
+  // Typing is an explicit end to the selection: do not keep stale handles or a
+  // stale copy snapshot around.
+  hideTerminalSelectionHandles();
   const modifiers = pendingModifiers();
   const modified = Object.values(modifiers).some(Boolean);
   if (modified) data = applyInputModifiers(data, modifiers);
@@ -4560,9 +4609,18 @@ function bind() {
   });
   elements.terminalOutput.addEventListener("contextmenu", (event) => {
     // A long press selects text through xterm; suppress the WebView's native
-    // canvas menu, which cannot copy the DOM-rendered terminal anyway.
-    if (coarsePointerMedia.matches) {
-      event.preventDefault();
+    // canvas menu, which cannot copy the DOM-rendered terminal anyway. Some
+    // WebViews swallow the touch timer and only signal the hold through this
+    // event, so use it as a backup for the selection gesture.
+    if (!coarsePointerMedia.matches && event.pointerType !== "touch") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const x = event.clientX || terminalTouch.startX;
+    const y = event.clientY || terminalTouch.startY;
+    if (beginTerminalLongPress(x, y)) {
+      suppressTerminalFocus(1200);
     }
   });
   elements.terminalOutput.addEventListener("selectstart", (event) => {
