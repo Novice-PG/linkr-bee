@@ -71,15 +71,16 @@ The terminal remains the main workspace. Settings use a drawer on touch devices
 and narrow windows. Scroll the accessory key row sideways for additional keys;
 tap Ctrl, Alt, or Shift before the next key, and tap again to cancel the modifier.
 
-Touch follows the Termux model: drag vertically to scroll history without opening
-the keyboard, tap to open the keyboard, and long press to select. The word under
-the finger is selected at once; keep the finger down and drag in any direction to
-extend the selection character by character and across lines. The same gestures
-work while the keyboard is open: a long press still selects and copies, and a
-vertical drag still scrolls history without closing the keyboard. The Copy
-button copies the selection, or the whole terminal buffer when nothing is
-selected. On Android the app never sends `stty rows/cols`; the local terminal
-resizes around the keyboard while the remote tty keeps its size.
+Touch follows the phone's own selection model: drag vertically to scroll history
+without opening the keyboard, tap to open the keyboard, and long press to select.
+The word under the finger is selected at once and two draggable dots appear; drag
+a dot to adjust that edge precisely, character by character and across lines, then
+copy with the floating pill or the Copy button. The same gestures work while the
+keyboard is open: a long press still selects and copies, and a vertical drag still
+scrolls history without closing the keyboard. The Copy button copies the selection,
+or the whole terminal buffer when nothing is selected. On Android the app never
+sends `stty rows/cols`; the local terminal resizes around the keyboard while the
+remote tty keeps its size.
 
 The assistant stacks below the terminal in narrow windows and moves beside it
 when enough width is available. When the system keyboard is editing an assistant
