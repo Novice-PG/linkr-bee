@@ -48,7 +48,7 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 | --- | --- | --- |
 | Web 终端 | 桌面浏览器直接使用，无需安装客户端 | [使用指南](docs/USAGE.zh-CN.md) |
 | Rust CLI / TUI | 键盘操作、桌面终端、脚本与 Agent 会话 | [主机终端](tools/linkr-tui/README.md)（英文） |
-| Android / iOS App | 原生 BLE 与共享触控终端 | [移动端](mobile/README.md)（英文） |
+| Android / iOS App | 原生 BLE 与共享触控终端：拖动滚动、轻点输入、长按出现双圆点精确框选并复制 | [移动端](mobile/README.md)（英文） |
 | HarmonyOS NEXT App | 手机和平板布局、原生 BLE 宿主 | [鸿蒙客户端](harmonyos/README.md)（英文） |
 | Python / C 终端 | 现有桌面脚本与 Linux / Buildroot 集成 | [终端工具](docs/DEVELOPMENT.zh-CN.md#ble-终端) |
 
@@ -132,9 +132,10 @@ UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 
 </details>
 
-UART 参数改完立即生效，目标机用非标准波特率启动时不用重新刷固件。终端还会在登录后和
-窗口变化时同步目标机的窗口大小，全屏程序依赖这个。如果有输出但输入没反应，先确认目标
-RX 接的是配件 TX，并且除非 CTS 和 RTS 都接了，否则关掉硬件流控。
+UART 参数改完立即生效，目标机用非标准波特率启动时不用重新刷固件。浏览器终端会在登录后
+和窗口变化时同步目标机的窗口大小，全屏程序依赖这个；原生手机 App 则只在软键盘开合时
+缩小或恢复本地画面，远端 TTY 尺寸保持不变。如果有输出但输入没反应，先确认目标 RX 接的
+是配件 TX，并且除非 CTS 和 RTS 都接了，否则关掉硬件流控。
 
 <p align="center">
   <img src="assets/screenshots/linkr-bee-terminal-mobile.jpg" alt="Linkr Bee 手机终端" width="360">

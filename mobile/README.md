@@ -14,9 +14,34 @@ inverted-T arrow cluster, Home/End, Paste, Enter, Page Up/Down, Backspace, symbo
 and common Ctrl shortcuts. Tap a modifier before the next key; tap again to
 cancel. Modifiers reset after use or disconnect. For example, Ctrl then C sends
 an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
-shells that support it. Paste uses the clipboard when available and otherwise
-prompts you to long-press the terminal. Both rows stay above the soft keyboard
-and are shared with the Web and HarmonyOS clients.
+shells that support it. Paste uses the clipboard when available. Both rows stay
+above the soft keyboard and are shared with the Web and HarmonyOS clients.
+
+Touch follows the phone's own selection model: drag vertically to scroll
+history, tap to open the soft keyboard, and long press to select. The word under
+the finger is selected at once and two draggable dots appear: drag a dot to move
+that edge precisely, character by character and across lines, and use the
+floating Copy pill (or the toolbar Copy button). Copy still returns the selected
+text if the WebView drops its own DOM selection during the hold, whole-transcript
+copy preserves wrapped lines and boundary spaces, and tapping either copy control
+does not close the keyboard or lose the fallback selection. The same gestures work while
+the soft keyboard is open: a long press still selects and copies, and a vertical
+drag still scrolls history without closing the keyboard. Scrolling and selection
+never open the keyboard, including the delayed focus some Android WebViews
+perform after `touchend`; any hold past the long-press threshold is always
+treated as a selection, never a keyboard-opening tap, and the WebView's own
+long-press selection is suppressed so it cannot take over the gesture. The
+keyboard button mirrors the
+IME the user actually sees, including a keyboard dismissed from Android's own
+hide button, and pressing it asks the IME to show again instead of doing nothing.
+These touch paths live in the shared web UI because WebView text selection cannot
+reach xterm's rendered rows.
+
+The native shells handle the soft keyboard locally. Opening it shrinks the
+WebView and refits the terminal rows; closing it restores the previous layout.
+They deliberately do not send `stty` to the target, so the remote tty keeps its
+size. Android in particular never runs `stty rows/cols`. The browser Web build
+still synchronizes rows and columns after login and on layout changes.
 
 ## About page
 

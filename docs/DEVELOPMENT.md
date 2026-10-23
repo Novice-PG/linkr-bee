@@ -1048,7 +1048,8 @@ The page can:
   for pending input and command text to the right of the cursor. Incoming login
   prompts and Linux boot banners invalidate the size cache even if the accessory
   stays connected. Prompt detection is heuristic and supports common plain-text
-  Linux consoles; custom prompts may not be recognized
+  Linux consoles; custom prompts may not be recognized. Native phone shells skip
+  this remote sync when the soft keyboard changes the local viewport
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
 
@@ -1075,6 +1076,18 @@ independent option.
 | Android | Capacitor and native BLE plugin | Project generated; web assets and plugin sync verified |
 | iOS | Capacitor and CoreBluetooth plugin | Project generated; web assets and plugin sync verified |
 | HarmonyOS NEXT | ArkWeb UI and ArkTS BLE host over `JavaScriptProxy` | API 26 Stage project implemented; ArkTS type check and unsigned HAP build verified, device validation pending |
+
+Terminal layout and touch behavior intentionally differ by surface:
+
+| Surface | Remote tty size | Soft keyboard | History and copy |
+| --- | --- | --- | --- |
+| Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
+| Android / iOS / HarmonyOS native shell | Android never sends `stty`; other native shells also keep the tty unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
+
+The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
+resize is local display state, not a request to reflow the remote console. On
+Android this means no `stty rows/cols` is sent at all. The browser build keeps the
+existing `stty rows <rows> cols <cols>` behavior.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 
@@ -1110,7 +1123,7 @@ hardware.
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
+| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, whole-transcript copy preserving wrapped lines and boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
 
 ---
 

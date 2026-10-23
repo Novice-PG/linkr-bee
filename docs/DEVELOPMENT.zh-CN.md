@@ -844,7 +844,8 @@ http://127.0.0.1:8765/
   `stty rows <行数> cols <列数>` 同步远端串口 TTY；同步要求普通终端缓冲区中的
   空输入行，并检查待输入状态及光标右侧的命令内容。收到登录提示或 Linux 启动
   标识时，即使桥接器连接未断开也会使尺寸缓存失效。提示符识别属于启发式判断，
-  支持常见纯文本 Linux 控制台，自定义提示符可能无法识别
+  支持常见纯文本 Linux 控制台，自定义提示符可能无法识别。原生手机壳在软键盘
+  改变本地 viewport 时跳过这项远端同步
 - 显示可选的本地回显和调试 I/O 跟踪
 - 将接收字节保存为日志文件
 
@@ -863,6 +864,17 @@ http://127.0.0.1:8765/
 | Android | Capacitor 与原生 BLE 插件 | 已生成工程，已验证网页构建和插件同步 |
 | iOS | Capacitor 与 CoreBluetooth 插件 | 已生成工程，已验证网页构建和插件同步 |
 | HarmonyOS NEXT | ArkWeb UI，通过 `JavaScriptProxy` 连接 ArkTS BLE host | 已实现 API 26 Stage 工程；ArkTS 类型检查和未签名 HAP 构建已通过，待真机验证 |
+
+各端的终端布局与触摸行为按运行环境分开处理：
+
+| 运行环境 | 远端 TTY 尺寸 | 软键盘 | 历史与复制 |
+| --- | --- | --- | --- |
+| 浏览器 Web / Pages | 登录后和布局变化时通过 `stty` 同步 | 跟随浏览器 viewport | 滚轮、触控板或触摸拖动；选中后复制 |
+| Android / iOS / HarmonyOS 原生壳 | 安卓端完全不发送 `stty`；其他原生壳在键盘开合时也保持远端 tty 尺寸不变 | 只缩小本地 WebView 并在本地重算行数，关闭后恢复；设置侧栏滑入前先收起输入法，并用 GPU 合成层做动画 | 上下拖动滚动 `term.scrollLines()`；轻点呼出键盘；长按选中手指下的单词并显示两个可拖动圆点，分别精确调整选区两端，可按字符、跨行扩展；浮动复制按钮复制选区，且长按达到阈值后绝不呼出键盘。即使 WebView 清空自己的 DOM 选区，复制仍返回刚才选中的文字；复制不会抢走焦点。键盘已打开时长按/拖动照样选中并复制，上下拖动照样查看历史。键盘按钮跟随屏幕上实际出现的输入法 |
+
+原生壳会有意跳过 `scheduleTerminalGeometrySync()`：软键盘引起的尺寸变化只是本地显示
+状态，不应让远端控制台重新排版。安卓端因此完全不发送 `stty rows/cols`。浏览器构建仍保留
+现有的 `stty rows <rows> cols <cols>` 同步。
 
 构建共享资源并同步 Android/iOS 原生工程：
 
@@ -896,7 +908,7 @@ GPIO4。浏览器设备选择授权与 BLE 绑定是两种独立状态。
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |
 | 助手（Agent 模式） | Node 与浏览器套件覆盖执行策略、证据处理与任务恢复 | 真实目标机上的命令执行与设备档案恢复，详见 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步 | Android、iOS、HarmonyOS 真机 Bluetooth LE |
+| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、整段复制保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |
 
 ---
 

@@ -71,6 +71,20 @@ The terminal remains the main workspace. Settings use a drawer on touch devices
 and narrow windows. Scroll the accessory key row sideways for additional keys;
 tap Ctrl, Alt, or Shift before the next key, and tap again to cancel the modifier.
 
+Touch follows the phone's own selection model: drag vertically to scroll history
+without opening the keyboard, tap to open the keyboard, and long press to select.
+The word under the finger is selected at once and two draggable dots appear; drag
+a dot to adjust that edge precisely, character by character and across lines, then
+copy with the floating pill or the Copy button. If the WebView drops its own
+selection during the hold, Copy still returns the selected text; whole-transcript
+copy preserves wrapped lines, and the clipboard fallback keeps focus and does not
+close the keyboard. The same gestures work while the
+keyboard is open: a long press still selects and copies, and a vertical drag still
+scrolls history without closing the keyboard. The Copy button copies the selection,
+or the whole terminal buffer when nothing is selected. On Android the app never
+sends `stty rows/cols`; the local terminal resizes around the keyboard while the
+remote tty keeps its size.
+
 The assistant stacks below the terminal in narrow windows and moves beside it
 when enough width is available. When the system keyboard is editing an assistant
 question or setting, the terminal can collapse to preserve the input area; return
@@ -83,13 +97,15 @@ preview as a real-device result.
 
 ## Serial input and display
 
-- Click the terminal before typing. Use the accessory keys when a system keyboard
-  does not offer Esc, Tab, arrows, or Ctrl combinations.
+- Click or tap the terminal before typing. Use the accessory keys when a system
+  keyboard does not offer Esc, Tab, arrows, or Ctrl combinations.
 - The target must support ANSI sequences to produce colored or full-screen
   output. The Web terminal uses xterm.js for 256-color rendering and cursor control.
-- The client synchronizes terminal rows/columns at supported shell prompts after
-  login and on layout changes. This is best effort on a UART, not an SSH PTY;
-  bootloaders and custom consoles may not support the shell resize command.
+- The browser client synchronizes terminal rows/columns at supported shell
+  prompts after login and on layout changes. This is best effort on a UART, not
+  an SSH PTY; bootloaders and custom consoles may not support the shell resize
+  command. Native phone apps keep the remote tty size unchanged when the soft
+  keyboard opens or closes; only the local WebView is resized.
 - If output is garbled, check UART framing and ground before changing fonts.
 - If output works but input does not, check target RX to Bee TX and the flow-control
   setting. Local echo alone does not prove the target received a byte.
