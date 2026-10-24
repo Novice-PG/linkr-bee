@@ -84,6 +84,34 @@ config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	help
 	  Flush a partially-filled UART RX packet after this idle period.
 
+config LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE
+	bool "Keep the LAN/log bridge independent of BLE delivery"
+	default n
+	help
+	  Normally the single UART-to-BLE thread feeds the log ring and the
+	  WebSocket bridge and then blocks in the Reliable UART indication.
+	  When the central schedules that indication slowly, the thread stops
+	  draining the UART ring for every chunk, so a LAN-only TUI or Web
+	  client sees the same lost bytes as the BLE client.
+
+	  With this option the thread stages the chunk for logging and the
+	  WebSocket bridge and hands the BLE copy to a small queue and a
+	  separate sender thread. The UART ring keeps draining even while BLE
+	  waits. If the queue fills, the BLE central is disconnected after the
+	  in-flight chunk so it can resynchronise instead of silently losing a
+	  sequence number; LAN output is unaffected.
+
+	  Enable only on a board whose memory budget has been checked.
+
+config LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH
+	int "BLE TX queue depth for the decoupled path"
+	default 8
+	range 2 32
+	depends on LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE
+	help
+	  Number of UART chunks that may wait for the BLE sender. At the
+	  default 8 x 232 bytes this is about 160 ms of UART at 115200.
+
 config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	int "UART RX buffering before BLE transmission"
 	default 16384

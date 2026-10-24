@@ -78,6 +78,12 @@ struct ws_client {
 	bool rx_fragmented;
 };
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+/* Cumulative across clients and connections. Per-client tx_dropped is cleared
+ * when a client connects, so it cannot answer "did the run I just watched
+ * lose bytes?" after a reconnect. */
+static atomic_t ws_tx_dropped_total;
+#endif
 static struct ws_client clients[WS_MAX_CLIENTS];
 static struct k_thread ws_handler_threads[WS_MAX_CLIENTS];
 K_THREAD_STACK_ARRAY_DEFINE(ws_client_stacks, WS_MAX_CLIENTS,
@@ -895,6 +901,9 @@ void linkr_ws_feed(const uint8_t *data, size_t len)
 		}
 		written = ring_buf_put(&client->tx_ring, src, keep);
 		atomic_add(&client->tx_dropped, discarded + keep - written);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+		atomic_add(&ws_tx_dropped_total, discarded + keep - written);
+#endif
 		if (written) {
 			k_sem_give(&client->tx_sem);
 		}
@@ -937,6 +946,16 @@ int linkr_ws_diagnostics(char *buf, size_t len)
 		rx += (uint32_t)atomic_get(&clients[i].rx_bytes);
 		dropped += (uint32_t)atomic_get(&clients[i].tx_dropped);
 	}
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	return snprintk(buf, len,
+			"state=%s port=%u clients=%d tx=%u rx=%u dropped=%u dropped_total=%u",
+			!atomic_get(&ws_enabled) ? "off"
+			: ws_service_is_listening() ? "up"
+						: "down",
+			ws_service_port, (int)atomic_get(&active_clients), tx,
+			rx, dropped,
+			(unsigned int)atomic_get(&ws_tx_dropped_total));
+#else
 	return snprintk(buf, len,
 			"state=%s port=%u clients=%d tx=%u rx=%u dropped=%u",
 			!atomic_get(&ws_enabled) ? "off"
@@ -944,6 +963,7 @@ int linkr_ws_diagnostics(char *buf, size_t len)
 						: "down",
 			ws_service_port, (int)atomic_get(&active_clients), tx,
 			rx, dropped);
+#endif
 }
 
 #endif /* CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE */

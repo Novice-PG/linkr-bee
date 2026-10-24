@@ -164,6 +164,11 @@ static struct {
 } mgmt_capture;
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+/* Never cleared: the per-loop value above is useful in a log line, but a
+ * post-hoc @i? needs the count since boot. */
+static atomic_t uart_rx_dropped_total;
+#endif
 static atomic_t uart_reliable_drop_no_conn;
 #endif
 /* Bytes linkr_uart_write() refused because ble_to_uart_queue was full.
@@ -206,6 +211,29 @@ static uint8_t uart_rx_storage[UART_RX_BUFFER_SIZE];
 struct ring_buf uart_rx_ring =
 	RING_BUF_INIT(uart_rx_storage, UART_RX_BUFFER_SIZE);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
+
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+/* One UART chunk on its way to BLE. The item is copied into the queue, so
+ * the UART thread can reuse its own buffer immediately and is never held up
+ * by an indication round trip. */
+struct ble_tx_chunk {
+	uint16_t len;
+	uint8_t data[UART_RX_CHUNK];
+};
+static uint8_t __aligned(4)
+	ble_tx_storage[sizeof(struct ble_tx_chunk) *
+		       CONFIG_LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH];
+STRUCT_SECTION_ITERABLE(k_msgq, ble_tx_queue) =
+	Z_MSGQ_INITIALIZER(ble_tx_queue, ble_tx_storage,
+			   sizeof(struct ble_tx_chunk),
+			   CONFIG_LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH);
+/* Chunks the queue refused. A sequence number cannot be skipped, so the
+ * sender disconnects the central after the in-flight chunk instead of
+ * letting it latch a desynchronised stream. */
+static atomic_t ble_tx_dropped;
+static atomic_t ble_tx_overflow;
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) || \
 	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
@@ -817,6 +845,9 @@ static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 
 		if (written < (uint32_t)rx_len) {
 			atomic_add(&uart_rx_dropped, rx_len - written);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+			atomic_add(&uart_rx_dropped_total, rx_len - written);
+#endif
 		}
 
 		k_sem_give(&uart_rx_sem);
@@ -1511,12 +1542,18 @@ static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
 	uint32_t dropped = 0;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	uint32_t dropped_total = 0;
+#endif
 	uint32_t dropped_no_conn = 0;
 	uint32_t buffered = ring_buf_size_get(&uart_rx_ring);
 	bt_security_t security = bt_conn_get_security(conn);
 
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	dropped = (uint32_t)atomic_get(&uart_rx_dropped);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	dropped_total = (uint32_t)atomic_get(&uart_rx_dropped_total);
+#endif
 	dropped_no_conn = (uint32_t)atomic_get(&uart_reliable_drop_no_conn);
 #endif
 	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
@@ -1526,9 +1563,16 @@ static void diagnostics_response(struct bt_conn *conn)
 				    "@info sys uptime_ms=%lld owner=%u security=%u\r\n",
 				    (long long)k_uptime_get(), 0U,
 				    (unsigned int)security);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	(void)send_control_response(conn,
+				    "@info uart dropped=%u dropped_total=%u dropped_no_conn=%u buffer=%u/%u\r\n",
+				    dropped, dropped_total, dropped_no_conn, buffered,
+				    UART_RX_BUFFER_SIZE);
+#else
 	(void)send_control_response(conn,
 				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",
 				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE);
+#endif
 
 	(void)linkr_wifi_diagnostics(status, sizeof(status));
 	(void)send_control_response(conn, "@info wifi %s\r\n", status);
@@ -1541,6 +1585,15 @@ static void diagnostics_response(struct bt_conn *conn)
 	 * and the web parser, both key on the group name). */
 	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
 				    (unsigned int)atomic_get(&uart_queue_dropped));
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+	(void)send_control_response(conn,
+				    "@info bletx dropped=%u uart_total=%u depth=%u mtu=%u\r\n",
+				    (unsigned int)atomic_get(&ble_tx_dropped),
+				    (unsigned int)atomic_get(&uart_rx_dropped_total),
+				    (unsigned int)k_msgq_num_used_get(&ble_tx_queue),
+				    (unsigned int)bt_gatt_get_mtu(conn));
+#endif
 	{
 		/* Whether the 40-92 ms handoff stalls come from the -EBUSY/-ENOMEM
 		 * retry backoff (slept_ms) or from waiting on the peer (wait_max_ms).
@@ -2288,6 +2341,26 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 		linkr_ws_feed(data, len);
 		*accounted = true;
 	}
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	{
+		struct ble_tx_chunk chunk;
+
+		BUILD_ASSERT(sizeof(chunk.data) >= UART_RX_CHUNK);
+		if (len > sizeof(chunk.data)) {
+			len = sizeof(chunk.data);
+		}
+		chunk.len = len;
+		memcpy(chunk.data, data, len);
+		if (k_msgq_put(&ble_tx_queue, &chunk, K_NO_WAIT) != 0) {
+			atomic_inc(&ble_tx_dropped);
+			atomic_set(&ble_tx_overflow, 1);
+		}
+	}
+	/* err belongs to the synchronous branch below; this path hands the
+	 * chunk to the sender thread and always reports success. */
+	(void)err;
+	return 0;
+#else
 	if (!linkr_uart_reliable_mode()) {
 		/* NUS is the compatibility, best-effort path. Preserve its previous
 		 * behavior: UART capture must not stall when no NUS central exists. */
@@ -2322,6 +2395,7 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}
 	return err;
+#endif /* CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE */
 }
 #endif
 
@@ -2392,6 +2466,62 @@ static void uart_to_ble_thread(void)
 	}
 #endif
 }
+
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+static void ble_tx_thread(void)
+{
+	k_sem_take(&bridge_start_sem, K_FOREVER);
+
+	for (;;) {
+		struct ble_tx_chunk chunk;
+		int err;
+
+		linkr_watchdog_feed(LINKR_WDT_UART_RX);
+		k_msgq_get(&ble_tx_queue, &chunk, K_FOREVER);
+
+		do {
+			if (!linkr_uart_reliable_mode()) {
+				/* The best-effort NUS path must not stall on a
+				 * central that is not subscribed. */
+				(void)nus_send_chunk(chunk.data, chunk.len);
+				err = 0;
+			} else {
+				err = reliable_send_chunk(chunk.data, chunk.len);
+				if (err == -ENOTCONN) {
+					if (IS_ENABLED(
+						    CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN)) {
+						atomic_inc(&uart_reliable_drop_no_conn);
+						err = 0;
+					}
+				} else if (err == -EINVAL) {
+					LOG_WRN("Dropping %u UART bytes the reliable path cannot carry",
+						chunk.len);
+					err = 0;
+				}
+			}
+			if (err) {
+				LOG_WRN("Reliable UART delivery retry: %d", err);
+				k_sleep(K_MSEC(10));
+			}
+		} while (err);
+
+		if (atomic_cas(&ble_tx_overflow, 1, 0)) {
+			struct bt_conn *conn;
+
+			k_mutex_lock(&conn_lock, K_FOREVER);
+			conn = current_conn ? bt_conn_ref(current_conn) : NULL;
+			k_mutex_unlock(&conn_lock);
+			if (conn) {
+				LOG_WRN("BLE TX queue overflow; disconnecting the central to resynchronise");
+				(void)bt_conn_disconnect(
+					conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+				bt_conn_unref(conn);
+			}
+		}
+	}
+}
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 static void uart_test_tx_thread(void)
@@ -2522,6 +2652,11 @@ K_THREAD_DEFINE(ble_to_uart_tid, 1024, ble_to_uart_thread, NULL, NULL, NULL,
 		7, 0, 0);
 K_THREAD_DEFINE(uart_to_ble_tid, 2048, uart_to_ble_thread, NULL, NULL, NULL,
 		7, 0, 0);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+K_THREAD_DEFINE(ble_tx_tid, 1024, ble_tx_thread, NULL, NULL, NULL,
+		8, 0, 0);
+#endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 K_THREAD_DEFINE(uart_test_tx_tid, 1024, uart_test_tx_thread, NULL, NULL, NULL,
 		7, 0, 0);
