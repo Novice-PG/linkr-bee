@@ -166,7 +166,7 @@ test("the keyboard button follows the keyboard, not just focus", async ({ page }
 });
 
 test("long press shows draggable handles and dragging one trims precisely", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -226,7 +226,7 @@ test("long press shows draggable handles and dragging one trims precisely", asyn
 
 
 test("long press selects a word and dragging extends the selection", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -278,7 +278,7 @@ test("long press selects a word and dragging extends the selection", async ({ pa
 });
 
 test("long press with the keyboard open selects and copies without closing it", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   await page.evaluate(() => window.__terminalTest.state.term.focus());
   await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
     .toContain("xterm-helper-textarea");
@@ -347,7 +347,7 @@ test("swiping history keeps an open keyboard open", async ({ page, context }) =>
 });
 
 test("a cancelled long press still selects and does not open the keyboard", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const client = await context.newCDPSession(page);
   const x = box.x + box.width / 2;
@@ -368,7 +368,7 @@ test("a cancelled long press still selects and does not open the keyboard", asyn
 });
 
 test("copy survives a WebView clearing the selection during a long press", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -400,7 +400,7 @@ test("copy survives a WebView clearing the selection during a long press", async
 });
 
 test("a long hold never opens the keyboard, even without a word selected", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const client = await context.newCDPSession(page);
   // Far right of an empty area: no word to select there.
@@ -417,16 +417,25 @@ test("a long hold never opens the keyboard, even without a word selected", async
     .not.toContain("xterm-helper-textarea");
 });
 
-test("copy with no selection falls back to the whole transcript", async ({ page }) => {
+test("copy with no selection copies nothing", async ({ page }) => {
   await openTerminal(page);
   await page.evaluate(() => window.__terminalTest.state.term.clearSelection());
   await page.locator("#copyBtn").click();
-  const copied = await page.evaluate(() => window.__terminalCopied);
-  expect(copied).toContain("line 000 abcdefghijklmnopqrstuvwxyz");
-  expect(copied).toContain("line 119 abcdefghijklmnopqrstuvwxyz");
+  await page.waitForTimeout(80);
+  // Falling back to the whole scrollback made a stray tap paste an unrelated
+  // transcript. With nothing selected, Copy must leave the clipboard alone.
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
 });
 
-test("whole transcript copy preserves wrapped lines and boundary spaces", async ({ page }) => {
+test("copy with no selection copies nothing in the native shell too", async ({ page }) => {
+  await openTerminal(page, { android: true });
+  await page.evaluate(() => window.__terminalTest.state.term.clearSelection());
+  await page.locator("#copyBtn").click();
+  await page.waitForTimeout(80);
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
+});
+
+test("selected wrapped lines keep their boundary spaces", async ({ page }) => {
   await openTerminal(page);
   // Flush the welcome output before resetting the buffer for this fixture.
   await page.evaluate(() => new Promise(requestAnimationFrame));
@@ -435,10 +444,35 @@ test("whole transcript copy preserves wrapped lines and boundary spaces", async 
     const text = "A".repeat(term.cols * 2 + 5) + "\r\nNEXT\r\n" +
       "B".repeat(term.cols - 1) + " TAIL\r\n\r\nEND";
     await new Promise(resolve => term.write("\x1bc" + text, resolve));
+    const buffer = term.buffer.active;
+    term.select(0, 0, buffer.cursorY * term.cols + buffer.cursorX);
     return text.replaceAll("\r", "");
   });
   await page.locator("#copyBtn").click();
   await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(expected);
+});
+
+test("a browser keeps native selection and draws no custom handles", async ({ page, context }) => {
+  await openTerminal(page);
+  await expect(page.locator("html")).toHaveClass(/browser-terminal-selection/);
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.querySelector(".xterm-rows")).userSelect,
+  )).toBe("text");
+
+  // A long press in a browser belongs to the browser: it shows its own handles
+  // and copy menu. The app must not add a second, conflicting pair of dots.
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const client = await context.newCDPSession(page);
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height - 50;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 41 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator(".terminal-selection-handle")).toHaveCount(0);
+  await expect(page.locator(".terminal-selection-copy")).toHaveCount(0);
 });
 
 for (const clipboard of ["missing", "rejected"]) {
