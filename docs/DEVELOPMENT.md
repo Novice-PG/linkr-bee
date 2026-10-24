@@ -1103,18 +1103,11 @@ If the pane shows `�` or a bottom status bar that looks like the update
 progress was mangled, the bytes are being lost before they reach the decoder,
 not mis-rendered. On a BLE or LAN link the bridge may have dropped them under
 load — `@i?` in Diagnostics reports the UART, Reliable UART and queue counters.
-A Reliable UART indication carries about 232 bytes, so at the 30 ms event
-spacing a phone often settles on the channel tops out near 7.7 KiB/s while the
-UART runs at 11.5 KiB/s; the 16 KiB RX ring then overflows during sustained
-output. WROOM-32 has carried that request since its board file shipped; 0.1.3 moves
-`CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS`, the preferred interval and the 8 s
-supervision timeout into `prj.conf` so C3 and C5 inherit it too. WROOM's
-effective configuration does not change, and the request alone does not explain
-or fix loss that was observed on WROOM with those values already in place. A
-central may also refuse it, so read the counters before treating anything as
-fixed, and keep the workarounds: lower the target console's baud rate, or use
-the browser client's Reliable UART channel. The TUI's legacy NUS path is
-best effort and has no retry.
+The reliable channel is capped at roughly 232 bytes per 30 ms indication
+(about 7.7 KiB/s) while the UART link can run at 11.5 KiB/s, so sustained
+high-rate output can overflow the 16 KiB RX ring. Lowering the target console's
+baud rate, or using the browser client's Reliable UART channel, is the
+workaround; the TUI's legacy NUS path is best effort and has no retry.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 

@@ -886,14 +886,10 @@ http://127.0.0.1:8765/
 
 如果窗格出现 `�`，或底部状态栏里的更新进度条看起来是乱码，说明字节在进入解码器之前就
 丢了，不是渲染错误。BLE 或 LAN 链路上的桥接在拥塞时可能丢字节——诊断视图的 `@i?` 会
-给出 UART、Reliable UART 和队列计数。每次 Reliable UART indication 约 232 字节，如果中央
-设备把事件间隔定在 30 ms，通道上限约 7.7 KiB/s，而 UART 链路可达 11.5 KiB/s，持续高速
-输出就会写满 16 KiB 的 RX 环形缓冲。WROOM-32 的板级文件一直带着这组请求；0.1.3 把它
-（`CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS`、首选间隔和 8 s 监督超时）提升到 `prj.conf`，
-让 C3/C5 也继承。WROOM 的有效配置不变，而且 WROOM 正是在这组值已经生效时仍出现过乱码，
-所以这个请求本身不能解释或修复那次丢字节。中央设备还可能拒绝该请求，判定前必须先读计数
-器，排查手段也仍然适用：降低目标控制台的波特率，或改用浏览器 Web 端的可靠 UART 通道；
-TUI 的 legacy NUS 通道只是尽力而为，没有重传。
+给出 UART、Reliable UART 和队列计数。可靠通道每 30 ms 一次 indication、每次约 232 字节
+（约 7.7 KiB/s），而 UART 链路可达 11.5 KiB/s，持续高速输出会写满 16 KiB 的 RX 环形
+缓冲。可降低目标控制台的波特率，或改用浏览器 Web 端的可靠 UART 通道；TUI 的 legacy NUS
+通道只是尽力而为，没有重传。
 
 构建共享资源并同步 Android/iOS 原生工程：
 

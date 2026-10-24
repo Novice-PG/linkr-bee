@@ -114,11 +114,9 @@ one line, and a dropped UTF-8 continuation byte becomes `�` — all three are 
 same loss seen at different points, not three rendering bugs. Diagnostics'
 `@i?` reports the UART, Reliable UART and queue counters that say which side
 dropped the bytes. Sustained output above roughly 7.7 KiB/s can outrun the
-Reliable UART indication ceiling or the 16 KiB RX ring. WROOM-32 already asked for a
-7.5–15 ms interval; 0.1.3 makes that request shared by C3 and C5 too. A central
-may refuse it, and WROOM's byte loss was observed with the request already in
-place, so trust the counters rather than assuming the ceiling moved. The TUI's legacy NUS path is best effort and has no retry, so the browser
-client's Reliable UART channel is the way to keep a full-speed console intact. `stdio` links get no
+Reliable UART indication ceiling or the 16 KiB RX ring; the TUI's legacy NUS
+path is best effort and has no retry, so the browser client's Reliable UART
+channel is the way to keep a full-speed console intact. `stdio` links get no
 bridge sentence: there is a pipe the user opened, not a bridge in the middle.
 
 On the old console the `�` is replaced by `?` by the pass above, because
