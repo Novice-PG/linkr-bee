@@ -114,7 +114,7 @@ one line, and a dropped UTF-8 continuation byte becomes `�` — all three are 
 same loss seen at different points, not three rendering bugs. Diagnostics'
 `@i?` reports the UART, Reliable UART and queue counters that say which side
 dropped the bytes. Sustained output above roughly 7.7 KiB/s can outrun the
-Reliable UART indication ceiling or the 16 KiB RX ring. Firmware 0.1.2 asks the
+Reliable UART indication ceiling or the 16 KiB RX ring. Firmware 0.1.3 asks the
 central for a 7.5–15 ms connection interval so that ceiling no longer sits below
 the 11.5 KiB/s UART; if the central refuses the request, the numbers still
 apply. The TUI's legacy NUS path is best effort and has no retry, so the browser
@@ -235,7 +235,7 @@ dial is seconds:
 
 ```console
 $ bee --ble-name Linkr --serve
-{"event":"ready","program":"bee","version":"0.1.2","link":"ble:name:Linkr",
+{"event":"ready","program":"bee","version":"0.1.3","link":"ble:name:Linkr",
  "ops":["info","uart","wifi","wifi-off","wifi-scan","webdav","webdav-off",
         "ble-name","lan","exec","loopback-test","state","quit"]}
 {"id":1,"op":"state"}
@@ -356,9 +356,9 @@ and the smaller of the two. Every path written is printed, one per line.
 
 ```sh
 cd tools/linkr-tui
-dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.1.2-x86_64-unknown-linux-gnu.tar.gz
-dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.1.2-x86_64-pc-windows-gnu.zip
-dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.1.2_armhf.deb
+dev/package.sh x86_64-unknown-linux-gnu           # → dist/linkr-bee-0.1.3-x86_64-unknown-linux-gnu.tar.gz
+dev/package.sh --cli x86_64-pc-windows-gnu        # → dist/linkr-bee-cli-0.1.3-x86_64-pc-windows-gnu.zip
+dev/package-deb.sh armv7-unknown-linux-gnueabihf  # → dist/linkr-bee_0.1.3_armhf.deb
 ```
 
 A Linux target other than the host links *that* target's libdbus, which is not

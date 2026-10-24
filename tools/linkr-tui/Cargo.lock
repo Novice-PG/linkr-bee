@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "linkr-tui"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bluez-async",
  "btleplug",

@@ -413,7 +413,7 @@ ERR format: @u=115200,8,n,1,n
 WebDAV 队列、丢弃、HTTP、失败和成功计数：
 
 ```text
-@info fw version=0.1.2 zephyr=4.4.1
+@info fw version=0.1.3 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -447,7 +447,7 @@ python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
 脚本化与安全注意事项：
 
 - `--json` 把管理响应与事件按行输出为 JSON，例如
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`；
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.3"],"command":"@i?"}`；
   `@w=`/`@d=` 这类命令在 JSON 里的 `command` 字段始终是 `<redacted>`。
 - `--quiet` 只抑制进度信息（`linkr: …`），错误与 `loopback PASS/FAIL` 仍然输出。
 - `--help` 与 `--version` 不需要安装 bleak，只有真正访问设备时才导入它。
@@ -888,7 +888,7 @@ http://127.0.0.1:8765/
 丢了，不是渲染错误。BLE 或 LAN 链路上的桥接在拥塞时可能丢字节——诊断视图的 `@i?` 会
 给出 UART、Reliable UART 和队列计数。每次 Reliable UART indication 约 232 字节，如果中央
 设备把事件间隔定在 30 ms，通道上限约 7.7 KiB/s，而 UART 链路可达 11.5 KiB/s，持续高速
-输出就会写满 16 KiB 的 RX 环形缓冲。固件 0.1.2 在每次连接后向中央设备请求 7.5–15 ms 的
+输出就会写满 16 KiB 的 RX 环形缓冲。固件 0.1.3 在每次连接后向中央设备请求 7.5–15 ms 的
 连接间隔（`prj.conf` 中的 `CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS`、首选间隔和 8 s 监督
 超时），让桥接侧排空得更快。五个固件板型都继承该请求，但中央设备可能拒绝，所以计数器和
 排查手段仍然适用：降低目标控制台的波特率，或改用浏览器 Web 端的可靠 UART 通道；TUI 的
@@ -1009,7 +1009,7 @@ C3 已验证启动和故障恢复时无此告警；其他支持板型目前仅�
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | 上报的固件版本 |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.3` | 上报的固件版本 |
 
 ### 测试配置
 

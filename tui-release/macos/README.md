@@ -1,11 +1,11 @@
 # macOS 产物
 
 这里放 macOS 的两份产物，由仓库的 GitHub Actions 工作流
-`.github/workflows/linkr-tui.yml` 在 macOS 运行器上构建（当前这批来自发布 tag `v0.1.2`，与 Releases 页同名附件同一工作流；具体提交以发布页说明为准），
+`.github/workflows/linkr-tui.yml` 在 macOS 运行器上构建（当前这批来自发布 tag `v0.1.3`，与 Releases 页同名附件同一工作流；具体提交以发布页说明为准），
 每种芯片各给两种打包格式（内容相同）：
 
-- `linkr-bee-0.1.2-aarch64-apple-darwin.dmg` / `…-aarch64-apple-darwin.tar.gz`（Apple Silicon）
-- `linkr-bee-0.1.2-x86_64-apple-darwin.dmg` / `…-x86_64-apple-darwin.tar.gz`（Intel）
+- `linkr-bee-0.1.3-aarch64-apple-darwin.dmg` / `…-aarch64-apple-darwin.tar.gz`（Apple Silicon）
+- `linkr-bee-0.1.3-x86_64-apple-darwin.dmg` / `…-x86_64-apple-darwin.tar.gz`（Intel）
 
 校验和见上一级的 `SHA256SUMS`。
 
@@ -15,8 +15,8 @@
 把窗口里的 `bee` 拖到 `~/bin` 或 `/usr/local/bin`；只想拿文件就解压 `.tar.gz`：
 
 ```sh
-open linkr-bee-0.1.2-aarch64-apple-darwin.dmg          # 或：tar xzf …-aarch64-apple-darwin.tar.gz
-./bee --version                                  # 应输出 bee 0.1.2
+open linkr-bee-0.1.3-aarch64-apple-darwin.dmg          # 或：tar xzf …-aarch64-apple-darwin.tar.gz
+./bee --version                                  # 应输出 bee 0.1.3
 ./bee                                             # 启动界面
 ```
 

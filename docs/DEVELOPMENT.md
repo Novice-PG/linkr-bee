@@ -527,7 +527,7 @@ dropped-byte count, WiFi/IP state, and WebDAV
 queue, drop, HTTP, failure, and success counters:
 
 ```text
-@info fw version=0.1.2 zephyr=4.4.1
+@info fw version=0.1.3 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -565,7 +565,7 @@ Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`.
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.3"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
@@ -1106,7 +1106,7 @@ load — `@i?` in Diagnostics reports the UART, Reliable UART and queue counters
 A Reliable UART indication carries about 232 bytes, so at the 30 ms event
 spacing a phone often settles on the channel tops out near 7.7 KiB/s while the
 UART runs at 11.5 KiB/s; the 16 KiB RX ring then overflows during sustained
-output. Firmware 0.1.2 asks the central for a 7.5–15 ms interval after every
+output. Firmware 0.1.3 asks the central for a 7.5–15 ms interval after every
 connect (`CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS` plus the preferred interval and
 8 s supervision timeout in `prj.conf`) so the bridge can drain the ring faster.
 All five firmware targets inherit the request, but a central may refuse it, so
@@ -1242,7 +1242,7 @@ hardware.
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.3` | Reported firmware version |
 
 ### Test Configuration
 

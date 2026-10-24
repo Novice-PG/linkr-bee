@@ -12,15 +12,15 @@ GitHub Actions downloaded; the script never reaches the network.
 
 Usage:
     tools/assemble_release.py \
-        --tag v0.1.2 --commit <sha> --run-id 123 \
+        --tag v0.1.3 --commit <sha> --run-id 123 \
         --desktop-dir artifacts/desktop \
         --firmware-dir artifacts/firmware \
         --apk-dir artifacts/apk \
         --web-dir artifacts/web \
         --out-dir release \
-        --notes-template docs/releases/v0.1.2.md \
+        --notes-template docs/releases/v0.1.3.md \
         --notes-out release-notes.md \
-        --web-version 0.1.2 --firmware-version 0.1.2 --apk-version 0.1.2
+        --web-version 0.1.3 --firmware-version 0.1.3 --apk-version 0.1.3
 """
 
 from __future__ import annotations
@@ -291,7 +291,7 @@ def main() -> int:
     out.mkdir(parents=True)
 
     # The tag names the release; the artifacts name the components. A build
-    # that says 0.1.3 under a v0.1.2 tag must fail here rather than ship a
+    # that says 0.1.4 under a v0.1.3 tag must fail here rather than ship a
     # manifest whose version only came from argv.
     tag_version = args.tag.removeprefix("v")
     for label, version in (
