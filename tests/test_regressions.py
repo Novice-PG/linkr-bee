@@ -273,5 +273,33 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         await self.exercise_terminal(loopback=True, fail_loopback=True)
 
 
+class ProjectConfigTests(unittest.TestCase):
+    def test_short_connection_interval_is_a_project_default(self):
+        # The Reliable UART drain must not be slower than the 11.5 KiB/s UART
+        # on any board, and a board file that silently overrides this would
+        # bring back the progress-bar byte loss on that target only.
+        config = {}
+        for line in (ROOT / "prj.conf").read_text().splitlines():
+            if line.startswith("CONFIG_") and "=" in line:
+                key, value = line.split("=", 1)
+                config[key] = value
+        self.assertEqual(config.get("CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS"), "y")
+        self.assertEqual(config.get("CONFIG_BT_PERIPHERAL_PREF_MIN_INT"), "6")
+        self.assertEqual(config.get("CONFIG_BT_PERIPHERAL_PREF_MAX_INT"), "12")
+        self.assertEqual(config.get("CONFIG_BT_PERIPHERAL_PREF_TIMEOUT"), "800")
+
+        promoted = {
+            "CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS",
+            "CONFIG_BT_PERIPHERAL_PREF_MIN_INT",
+            "CONFIG_BT_PERIPHERAL_PREF_MAX_INT",
+            "CONFIG_BT_PERIPHERAL_PREF_TIMEOUT",
+        }
+        for board in sorted((ROOT / "boards").glob("*.conf")):
+            for line in board.read_text().splitlines():
+                key = line.split("=", 1)[0]
+                if key in promoted:
+                    self.fail(f"{board.name} overrides project default {key}")
+
+
 if __name__ == "__main__":
     unittest.main()
