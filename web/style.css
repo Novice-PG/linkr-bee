@@ -1078,6 +1078,17 @@ body.terminal-fullscreen-fallback {
   -webkit-touch-callout: none;
 }
 
+/* The page in a browser keeps the platform's own text selection and copy
+ * menu; only the native shells draw the custom draggable dots. */
+.browser-terminal-selection .terminal-output,
+.browser-terminal-selection .terminal-output .xterm,
+.browser-terminal-selection .terminal-output .xterm-rows,
+.browser-terminal-selection .terminal-output .xterm-screen {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
 .terminal-output .xterm-viewport {
   background: var(--terminal) !important;
 }

@@ -257,7 +257,7 @@ WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,�
 - 端点:`ws://<设备 IP>/ws`(端口由 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` 决定,默认 80)
 - 协议:二进制 WebSocket 帧双向承载原始 UART 字节,没有任何额外封装——发什么就写进 UART,UART 收到什么就广播给所有已连接客户端
 - 客户端数:最多 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` 个(默认 2),每个客户端独立 TX 环形缓冲;慢客户端丢弃最旧数据,不会拖慢桥
-- 运行时控制:`@s on|off|?`、`@s token…`;开关状态与局域网访问令牌都持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`（不含令牌）
+- 运行时控制:`@s on|off|?`、`@s token…`;开关状态与局域网访问令牌都持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`（不含令牌;`dropped` 在客户端连接时清零,WROOM 还会给出开机累计的 `dropped_total`）
 - 局域网访问令牌:首次启动生成 128 位随机令牌并保存,默认不再对全网开放。`@s?` 经加密 BLE 通道返回,`@s token` 重新生成,`@s token=<32 位十六进制>` 指定,`@s token off` 回到无鉴权。握手协议见 [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) 第 8 节
 - 兼容开关:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN`（32 位小写十六进制）用于产线固定令牌,优先级高于自动生成
 - 可选门槛:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 要求客户端在 3 秒内把 token 作为首条文本帧发送
@@ -268,6 +268,16 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 出厂构建在所有板型上启用 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y`。
 BLE 会话断开后，UART 采集继续向 WebSocket 客户端和日志上传器转发；
 BLE 路径丢弃的数据不会在重连后补发。
+
+只有 ESP32-WROOM-32 构建启用
+`CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE=y`。原先唯一的 UART-to-BLE 线程会
+阻塞在 Reliable UART indication 上，而它同时负责喂给局域网桥和日志环，所以
+中心设备调度慢时，只用局域网的 TUI 或浏览器也会缺字节。解耦后该线程只把数据
+送入日志、WebSocket 和一个小队列，BLE 副本由独立发送线程处理，indication
+等待期间 UART 环照常排空。队列满时，发送线程会在当前 chunk 发完后断开中心
+设备，让客户端重新同步，而不是静默跳过序号；局域网输出不受影响。WROOM 的
+UART RX 环相应缩为 14336 字节，以便队列与它一起放进 DRAM0。C3/C5 保持上游
+的同步路径不变。
 
 ### 配对 GPIO、持久化与恢复出厂
 
@@ -409,17 +419,22 @@ ERR format: @u=115200,8,n,1,n
 ```
 
 诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
-访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态，以及
-WebDAV 队列、丢弃、HTTP、失败和成功计数：
+访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态、WebSocket 客户端
+与丢弃计数，以及 WebDAV 队列、丢弃、HTTP、失败和成功计数。WROOM 还会报告
+解耦后的 BLE 发送队列，以及开机累计的 UART/WebSocket 丢弃总数：
 
 ```text
 @info fw version=0.1.3 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
-@info uart dropped=0 buffer=0/16384
+@info uart dropped=0 dropped_total=0 dropped_no_conn=0 buffer=0/14336
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0 dropped_total=0
+@info bletx dropped=0 uart_total=0 depth=0 mtu=247
 @info done
 ```
+
+C3/C5 不输出 `dropped_total`、`bletx` 和 UART 行里的额外字段，其余内容不变。
 
 应用版本由 `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` 设置。
 
@@ -885,11 +900,13 @@ http://127.0.0.1:8765/
 `user@host:~$` 提示符折回同一行，看起来就像那一行被覆盖了。
 
 如果窗格出现 `�`，或底部状态栏里的更新进度条看起来是乱码，说明字节在进入解码器之前就
-丢了，不是渲染错误。BLE 或 LAN 链路上的桥接在拥塞时可能丢字节——诊断视图的 `@i?` 会
-给出 UART、Reliable UART 和队列计数。可靠通道每 30 ms 一次 indication、每次约 232 字节
-（约 7.7 KiB/s），而 UART 链路可达 11.5 KiB/s，持续高速输出会写满 16 KiB 的 RX 环形
-缓冲。可降低目标控制台的波特率，或改用浏览器 Web 端的可靠 UART 通道；TUI 的 legacy NUS
-通道只是尽力而为，没有重传。
+丢了，不是渲染错误。WROOM 上解耦后的 BLE 发送线程不再阻塞局域网和日志出口；
+`@i?` 会给出 `bletx dropped`（队列溢出）、`uart_total`（开机累计 RX 环溢出）、
+`depth`（等待发送的 chunk）和协商后的 `mtu`。所有板型的 `@i?` 也继续给出每轮
+UART、Reliable UART 和队列计数。可靠通道每次 indication 约 232 字节（30 ms 时
+约 7.7 KiB/s），而 UART 链路可达 11.5 KiB/s，持续高速输出仍可能写满 RX 环形
+缓冲。可降低目标控制台的波特率，或改用浏览器 Web 端的可靠 UART 通道；TUI 的
+legacy NUS 通道只是尽力而为，没有重传。
 
 构建共享资源并同步 Android/iOS 原生工程：
 
@@ -968,7 +985,8 @@ C3 已验证启动和故障恢复时无此告警；其他支持板型目前仅�
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |
 | 助手（Agent 模式） | Node 与浏览器套件覆盖执行策略、证据处理与任务恢复 | 真实目标机上的命令执行与设备档案恢复，详见 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、整段复制保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |
+| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、原生壳长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、浏览器保留原生选择且不绘制自定义圆点、无选区时不复制、复制选区保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |
+| WROOM BLE 发送解耦 | WROOM 构建通过与内存余量检查；C3 构建确认关闭该选项；诊断计数器由主机测试与构建验证 | WROOM 真机长时高速输出、中心设备慢调度与队列溢出断连 |
 
 ---
 

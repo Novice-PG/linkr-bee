@@ -141,9 +141,20 @@ function handlesTerminalGeometryLocally() {
   return platform === "android" || platform === "ios" || isHarmonyHost;
 }
 
+/* The two draggable dots exist because a WebView long press cannot reach the
+ * terminal's own selection. A browser already draws its native handles and
+ * copy menu, so drawing a second set there is both confusing and, after the
+ * native gesture collapses the DOM selection, unsafe: the two systems selected
+ * different text. Keep the custom UI for the native shells only. */
+const nativeSelectionShell = handlesTerminalGeometryLocally();
+
 document.documentElement.classList.toggle(
   "settings-drawer-layout",
   prefersSettingsDrawer,
+);
+document.documentElement.classList.toggle(
+  "browser-terminal-selection",
+  !nativeSelectionShell,
 );
 
 const encoder = new TextEncoder();
@@ -2705,13 +2716,15 @@ function onTerminalTouchStart(event) {
   // previous selection.
   hideTerminalSelectionHandles();
   state.term.clearSelection();
-  terminalTouch.timer = setTimeout(() => {
-    terminalTouch.timer = 0;
-    if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
-      return;
-    }
-    beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
-  }, TERMINAL_LONG_PRESS_MS);
+  if (nativeSelectionShell) {
+    terminalTouch.timer = setTimeout(() => {
+      terminalTouch.timer = 0;
+      if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
+        return;
+      }
+      beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
+    }, TERMINAL_LONG_PRESS_MS);
+  }
 }
 
 function onTerminalTouchMove(event) {
@@ -2790,12 +2803,13 @@ function finishTerminalTouch(event) {
   // own gesture detector fires. A stationary press that lasted long enough is
   // still a selection gesture, never a tap that opens the keyboard.
   const heldLongEnough = heldMs >= TERMINAL_LONG_PRESS_MS - 20;
-  if (!wasLongPress && !wasScrolling && !wasMoved && heldLongEnough) {
+  if (nativeSelectionShell && !wasLongPress && !wasScrolling && !wasMoved &&
+      heldLongEnough) {
     wasLongPress = beginTerminalLongPress(startX, startY);
   }
   // A selection that is already on screen proves this was a long press, even
   // if the WebView reset the gesture state under us.
-  if (terminalSelection.start) {
+  if (nativeSelectionShell && terminalSelection.start) {
     wasLongPress = true;
   }
 
@@ -2828,8 +2842,9 @@ function onTerminalTouchCancel(event) {
   if (!terminalTouch.active) {
     return;
   }
-  if (!terminalTouch.longPress && !terminalTouch.moved &&
-      !terminalTouch.scrolling && !terminalSelection.start) {
+  if (nativeSelectionShell && !terminalTouch.longPress &&
+      !terminalTouch.moved && !terminalTouch.scrolling &&
+      !terminalSelection.start) {
     beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
   }
   terminalTouch.cancelled = true;
@@ -2850,30 +2865,10 @@ function terminalCopyText() {
   if (terminalSelection.text) {
     return terminalSelection.text;
   }
-  const buffer = term.buffer.active;
-  const lines = [];
-  let current = "";
-  for (let i = 0; i < buffer.length; i += 1) {
-    const line = buffer.getLine(i);
-    if (!line) {
-      continue;
-    }
-    // isWrapped belongs to the continuation, not to the row it follows.
-    // Keep boundary spaces inside a wrapped line; only trim its final row.
-    const continues = buffer.getLine(i + 1)?.isWrapped;
-    current += line.translateToString(!continues);
-    if (!continues) {
-      lines.push(current);
-      current = "";
-    }
-  }
-  if (current) {
-    lines.push(current);
-  }
-  while (lines.length && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
-  return lines.join("\n");
+  // No selection and no snapshot: copy nothing. Falling back to the whole
+  // scrollback made a tap on Copy paste an unrelated transcript, which is far
+  // worse than telling the user there was nothing selected.
+  return "";
 }
 
 async function copyToClipboard(text) {
@@ -2897,7 +2892,7 @@ async function copyToClipboard(text) {
     }
     event.clipboardData.setData("text/plain", text);
     event.preventDefault();
-    // xterm's own copy handler must not replace a snapshot or whole transcript.
+    // xterm's own copy handler must not replace the snapshot we supply.
     event.stopImmediatePropagation();
     copied = true;
   };
@@ -4637,7 +4632,11 @@ function bind() {
     // A long press selects text through xterm; suppress the WebView's native
     // canvas menu, which cannot copy the DOM-rendered terminal anyway. Some
     // WebViews swallow the touch timer and only signal the hold through this
-    // event, so use it as a backup for the selection gesture.
+    // event, so use it as a backup for the selection gesture. In a browser,
+    // leave the native copy/paste menu alone.
+    if (!nativeSelectionShell) {
+      return;
+    }
     if (!coarsePointerMedia.matches && event.pointerType !== "touch") {
       return;
     }
@@ -4651,8 +4650,9 @@ function bind() {
   });
   elements.terminalOutput.addEventListener("selectstart", (event) => {
     // The WebView would start its own selection over the rendered rows and
-    // take the gesture away from the xterm selection the app drives.
-    if (coarsePointerMedia.matches) {
+    // take the gesture away from the xterm selection the app drives. A
+    // browser's native selection is the one the user expects, so keep it.
+    if (nativeSelectionShell && coarsePointerMedia.matches) {
       event.preventDefault();
     }
   });
@@ -4773,9 +4773,8 @@ function bind() {
     if (!state.term) {
       return;
     }
-    // With no selection, copy the whole transcript. This is the only reliable
-    // path in a WebView where native text selection does not reach xterm's
-    // DOM renderer.
+    // Copy only a live selection or the snapshot taken for it. A tap with
+    // nothing selected must not paste an unrelated whole-screen transcript.
     const text = terminalCopyText();
     if (!text) {
       toast(t("copyFailed"), "error");
