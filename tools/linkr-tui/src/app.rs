@@ -3875,7 +3875,11 @@ impl App {
     /// the prompt it just acted on or be counted as typing. A send that fails
     /// leaves the size owed, so the next prompt offers another chance.
     fn sync_terminal_geometry(&mut self) {
-        if !self.connected() {
+        // A script run owns the line from its first byte to its last answer.
+        // A prompt-looking tail in its output — a banner, an echo, the shell
+        // waiting for a password — is not an idle pane, and an `stty` typed
+        // into it would be a command the caller never asked for.
+        if self.collect_output || !self.connected() {
             return;
         }
         let Some(command) = self.geometry.take_pending_command() else {
@@ -5605,6 +5609,10 @@ mod tests {
 
         app.geometry.set_size(120, 40);
         assert!(app.type_bytes(true, "ls"));
+        // The writer runs on its own thread: wait for the typed bytes to land
+        // before clearing them, or they reappear in the next assertion.
+        assert!(pump_until(&mut app, |_| wire.sent_len() >= 2));
+        assert_eq!(wire.take_sent(), b"ls".to_vec());
         // The echo of the typed command is not an idle prompt.
         wire.feed(b"ls\r\n");
         for _ in 0..10 {
@@ -5621,6 +5629,34 @@ mod tests {
             wire.take_sent(),
             b"stty rows 40 cols 120 >/dev/null 2>&1\r".to_vec()
         );
+    }
+
+    /// A scripted run owns the line: a prompt in its output is not an idle pane.
+    /// Sending the size while `--exec` waits would type `stty` into whatever is
+    /// running — the password prompt in the field report was one such command.
+    #[test]
+    fn a_scripted_run_is_not_told_the_panes_size() {
+        let (mut app, wire) = connected(Lang::En);
+        app.collect_output = true;
+        app.geometry.set_size(117, 40);
+
+        wire.feed(b"[sudo] password for root: ");
+        assert!(pump_until(&mut app, |app| app.rx > 0));
+        // Give the writer thread every chance to put a queued `stty` on the
+        // wire, so the negative assertion is about what was sent, not timing.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(
+            !wire.take_sent().windows(4).any(|window| window == b"stty"),
+            "the size was typed into a command the script is waiting on"
+        );
+
+        // The byte the caller asked for still goes out untouched.
+        assert!(app.send_bytes(b"secret\r"));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"secret\r".to_vec());
     }
 
     /// Undecodable bytes are what a device speaking something that is not
