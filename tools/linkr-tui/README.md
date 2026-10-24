@@ -75,6 +75,16 @@ the pane emulates rather than lays out. `vt/` holds the emulator and
 emulator by the event loop, never by a paint, because a frame is a pure function
 of the state and may not reshape what it is drawing.
 
+The pane's size is also told to the *target*, because the target has a tty of
+its own and remembers the width an earlier client gave it. At an idle shell
+prompt — and only then, so the line cannot be typed into a running command —
+the TUI sends the web's own `stty rows <rows> cols <cols>` command. A resize,
+the rail, or the assistant panel changes the pane's width and the event loop
+queues that size; the next prompt sends it once. Without this, a shell left at
+57 columns wraps its long `user@host:~$` prompt back over itself in a wider
+pane. `serial/geometry.rs` holds the gate and its tests; it mirrors
+`web/terminal_geometry.js` and the Python client byte for byte.
+
 ### Text, and the bytes that are not
 
 The wire carries bytes and the pane has to say what they are. It says UTF-8,
@@ -96,6 +106,18 @@ serial dial the usual cause is a UART whose framing does not match what the
 device is sending — read it with `--query-uart`, set it with
 `--uart <baud>,<data>,<parity>,<stop>,<flow>` — and the other cause is a
 device that is not speaking UTF-8 at all.
+
+On a BLE or LAN link the notice adds a second sentence: bytes can be lost in
+the bridge before the decoder ever sees them. Missing `ESC` bytes turn SGR
+colours into literal `38;5;214m` text, a missing `\r` stacks progress bars on
+one line, and a dropped UTF-8 continuation byte becomes `�` — all three are the
+same loss seen at different points, not three rendering bugs. Diagnostics'
+`@i?` reports the UART, Reliable UART and queue counters that say which side
+dropped the bytes. Sustained output above roughly 7.7 KiB/s can outrun the
+Reliable UART indication ceiling or the 16 KiB RX ring; the TUI's legacy NUS
+path is best effort and has no retry, so the browser client's Reliable UART
+channel is the way to keep a full-speed console intact. `stdio` links get no
+bridge sentence: there is a pipe the user opened, not a bridge in the middle.
 
 On the old console the `�` is replaced by `?` by the pass above, because
 conhost draws `U+FFFD` two cells wide and one `�` per cell would shove the
