@@ -1086,6 +1086,24 @@ body.terminal-fullscreen-fallback {
   background: var(--terminal) !important;
 }
 
+/* xterm sets the scrollbar's inline width from overviewRuler.width (see
+ * initTerminal), so this only insets the painted thumb: the transparent border
+ * keeps the full track tappable while the visible slider stays a thin pill. */
+.terminal-output .xterm-scrollable-element > .scrollbar > .slider {
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  /* xterm's injected `background:` shorthand resets the clip, and it is added
+   * after this stylesheet, so this one property has to win explicitly. */
+  background-clip: padding-box !important;
+}
+
+/* The overview ruler borrows the same width option, but this terminal has no
+ * decorations, so its canvas would only paint a hairline over the slider. */
+.terminal-output .xterm-decoration-overview-ruler {
+  display: none;
+}
+
 /* ---------- Integrated terminal input ---------- */
 .terminal-input-bar {
   display: flex;
