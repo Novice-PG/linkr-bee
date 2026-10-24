@@ -17,5 +17,6 @@
 //! module at [`crate::watch`].
 
 pub mod console;
+pub mod geometry;
 pub mod journal;
 pub mod keys;

@@ -1083,12 +1083,31 @@ Terminal layout and touch behavior intentionally differ by surface:
 | Surface | Remote tty size | Soft keyboard | History and copy |
 | --- | --- | --- | --- |
 | Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
+| Desktop Rust TUI | Synchronized with the same `stty rows <rows> cols <cols>` command at the next idle shell prompt; re-sent when the window, the rail or the assistant panel changes the pane's width | The pane follows the terminal window | Pane scrollback, drag selection, and the copy chord; see `tools/linkr-tui/README.md` |
 | Android / iOS / HarmonyOS native shell | Android never sends `stty`; other native shells also keep the tty unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
 
 The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
 resize is local display state, not a request to reflow the remote console. On
 Android this means no `stty rows/cols` is sent at all. The browser build keeps the
 existing `stty rows <rows> cols <cols>` behavior.
+
+The desktop TUI sends the same command as the web and Python clients, and only
+at an idle shell prompt: local typing, a pending line-mode buffer, or any target
+output that is not a prompt clears the gate until the shell returns one. The
+pane is sized to the painted centre, so opening or closing the rail or the
+assistant panel changes the emulator width and queues the same size for the
+target. A target tty that keeps an old width wraps readline's prompt onto the
+same row, which is what makes a long `user@host:~$` prompt look overwritten.
+
+If the pane shows `�` or a bottom status bar that looks like the update
+progress was mangled, the bytes are being lost before they reach the decoder,
+not mis-rendered. On a BLE or LAN link the bridge may have dropped them under
+load — `@i?` in Diagnostics reports the UART, Reliable UART and queue counters.
+The reliable channel is capped at roughly 232 bytes per 30 ms indication
+(about 7.7 KiB/s) while the UART link can run at 11.5 KiB/s, so sustained
+high-rate output can overflow the 16 KiB RX ring. Lowering the target console's
+baud rate, or using the browser client's Reliable UART channel, is the
+workaround; the TUI's legacy NUS path is best effort and has no retry.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 
