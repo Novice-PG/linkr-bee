@@ -123,6 +123,12 @@ const isHarmonyHost =
   window.LinkrNativeBle?.platform === "harmonyos" ||
   document.documentElement.dataset.platform === "harmonyos";
 const prefersSettingsDrawer = isHarmonyHost || coarsePointerMedia.matches;
+/* xterm 6 derives its custom scrollbar width from overviewRuler.width in
+ * JavaScript (default 14 px), so a CSS-only override would desynchronise the
+ * slider. A phone loses too much of the output to the default track; use a
+ * narrower one there and keep the desktop track at the 10 px the native
+ * viewport scrollbar used to show. */
+const terminalScrollbarWidth = coarsePointerMedia.matches ? 8 : 10;
 
 /* Native shells shrink their own WebView when the soft keyboard opens. Keep
  * that local: a resize caused by the keyboard is a display change, not a
@@ -1334,6 +1340,8 @@ function initTerminal() {
     scrollback: 10000,
     // A burst of log lines must not queue an animation frame per scroll step.
     smoothScrollDuration: 0,
+    // The width has to reach xterm's own layout, not just CSS; see above.
+    overviewRuler: { width: terminalScrollbarWidth },
     tabStopWidth: 8,
     theme: theme === "dark" ? XTERM_DARK : XTERM_LIGHT,
   });
