@@ -735,6 +735,12 @@ pub struct App {
     pub agent_replies: Vec<crate::agent::runtime::PendingReply>,
     /// The device's own output, as the serial pane shows it.
     pub terminal: TerminalPane,
+    /// The target tty's size, and whether it is safe to tell it yet.
+    ///
+    /// Kept beside the pane because the two must agree: the pane wraps at the
+    /// width it was sized to, and the remote shell wraps at the width it was
+    /// last told. See [`crate::serial::geometry`].
+    pub geometry: crate::serial::geometry::TerminalGeometrySync,
     /// Whether the pane's first undecodable byte has already been announced.
     ///
     /// Said once, not once per read: a device that speaks something that is
@@ -890,6 +896,7 @@ impl Default for App {
             agent_client: None,
             agent_replies: Vec::new(),
             terminal: TerminalPane::new(),
+            geometry: crate::serial::geometry::TerminalGeometrySync::new(80, 24),
             decode_loss_noticed: false,
             enter: crate::serial::keys::EnterMode::default(),
             escape: 0x1d,
@@ -2399,6 +2406,8 @@ impl App {
                 LinkEvent::Data(bytes) => {
                     self.agent_serial.append(&self.agent_decoder.push(&bytes));
                     self.terminal.push(&bytes);
+                    // The same bytes carry the prompt the size sync waits for.
+                    self.geometry.observe(&String::from_utf8_lossy(&bytes));
                     self.note_decode_loss();
                     self.trace.rx(&bytes);
                     if self.collect_output {
@@ -2488,6 +2497,9 @@ impl App {
                 LinkEvent::Opened | LinkEvent::Closed(_) => {
                     self.wifi_write = None;
                     self.scan_retry = None;
+                    // A new link is a new tty: whatever the last one was told
+                    // says nothing about this one.
+                    self.geometry.reset_session();
                 }
             }
         }
@@ -2522,6 +2534,12 @@ impl App {
         for reply in self.terminal.take_replies() {
             self.session.send(&reply);
         }
+        // The target's tty is its own screen: it keeps the size an earlier
+        // client gave it until someone says otherwise. Say so now that the
+        // prompt is idle — never while a command owns the line, or the line
+        // would be typed into that command. After the replies, because those
+        // are answers a program is blocked on and this is housekeeping.
+        self.sync_terminal_geometry();
         let now_live = self.session.is_live();
         if self.dialing.is_some() {
             // A dial in flight is what the screen is about to be: the open
@@ -3850,6 +3868,29 @@ impl App {
         }
     }
 
+    /// Tell the target its tty size, if a size is due and the prompt is idle.
+    ///
+    /// Sent straight down the session rather than through [`Self::send_bytes`]:
+    /// this is the interface talking, not the user, so it must not invalidate
+    /// the prompt it just acted on or be counted as typing. A send that fails
+    /// leaves the size owed, so the next prompt offers another chance.
+    fn sync_terminal_geometry(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        let Some(command) = self.geometry.take_pending_command() else {
+            return;
+        };
+        let bytes = command.as_bytes();
+        if self.session.send(bytes) {
+            self.geometry.confirm_sent();
+            self.trace.tx(bytes);
+            self.tx = self.session.tx();
+        } else {
+            self.geometry.abort_sent();
+        }
+    }
+
     /// Send raw bytes. Silent when there is no link, because this is the path a
     /// *keystroke* takes and a toast per character would bury the screen.
     pub fn send_bytes(&mut self, bytes: &[u8]) -> bool {
@@ -3859,6 +3900,9 @@ impl App {
         if !self.session.send(bytes) {
             return false;
         }
+        // Typed input is a command line in the making; an `stty` line must not
+        // land in the middle of it.
+        self.geometry.mark_busy();
         self.trace.tx(bytes);
         // The counter is part of the *frame*, so it moves here rather than at
         // the next pump: a keystroke's byte should show in the top bar on the
@@ -3890,6 +3934,10 @@ impl App {
             return self.send_bytes(bytes.as_bytes());
         }
         if !ends_line && !bytes.is_empty() {
+            // Held locally, but still a command line the user is composing:
+            // the remote prompt is not idle any more as far as the size sync
+            // is concerned, even though nothing has been sent yet.
+            self.geometry.mark_busy();
             self.pending_line.push_str(bytes);
             // Echoed as it is held, so the line can be read back before it is
             // sent: local echo is the point of line mode, and a held line that
@@ -3957,7 +4005,16 @@ impl App {
             return;
         }
         self.decode_loss_noticed = true;
-        let text = crate::text::fill(self.strings().decode_loss_notice, &[lost.to_string()]);
+        let s = self.strings();
+        let mut text = crate::text::fill(s.decode_loss_notice, &[lost.to_string()]);
+        // A radio or a LAN bridge can drop bytes before they ever reach the
+        // decoder, so a loss that is not the device's own encoding is worth
+        // naming for those links. `stdio` is a pipe or a process the user
+        // started themselves: there is no bridge in the middle to blame.
+        if matches!(self.transport, Transport::Ble | Transport::Lan) {
+            text.push(' ');
+            text.push_str(s.decode_loss_bridge_hint);
+        }
         self.push_notice(Notice {
             text,
             level: NoticeLevel::Warn,
@@ -5504,6 +5561,68 @@ mod tests {
         (app, wire)
     }
 
+    /// The target's tty is told the pane's size at an idle prompt, and not told
+    /// the same size twice: a shell that reprints its prompt is not a resize.
+    #[test]
+    fn the_target_is_told_the_panes_size_at_an_idle_prompt() {
+        let (mut app, wire) = connected(Lang::En);
+        app.geometry.set_size(117, 40);
+
+        // A boot banner is not a prompt.
+        wire.feed(b"Linux target 6.6.0\r\n");
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(wire.take_sent().is_empty(), "the banner is not a prompt");
+
+        wire.feed(b"root@target:~$ ");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(
+            wire.take_sent(),
+            b"stty rows 40 cols 117 >/dev/null 2>&1\r".to_vec()
+        );
+
+        // The prompt the shell prints after running it changes nothing.
+        wire.feed(b"root@target:~$ ");
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(
+            wire.take_sent().is_empty(),
+            "a reprint of the same size is not a resize"
+        );
+    }
+
+    /// A resize waits for the next idle prompt, and typing in the meantime is
+    /// what makes that wait necessary: the line is not fed into a command.
+    #[test]
+    fn a_resize_waits_until_the_user_and_the_target_are_idle() {
+        let (mut app, wire) = connected(Lang::En);
+        app.geometry.set_size(100, 30);
+        wire.feed(b"root@target:~$ ");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        let _ = wire.take_sent();
+
+        app.geometry.set_size(120, 40);
+        assert!(app.type_bytes(true, "ls"));
+        // The echo of the typed command is not an idle prompt.
+        wire.feed(b"ls\r\n");
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(
+            !wire.take_sent().windows(4).any(|window| window == b"stty"),
+            "the size was typed into the command"
+        );
+
+        wire.feed(b"root@target:~$ ");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(
+            wire.take_sent(),
+            b"stty rows 40 cols 120 >/dev/null 2>&1\r".to_vec()
+        );
+    }
+
     /// Undecodable bytes are what a device speaking something that is not
     /// UTF-8 — or a serial frame that does not match what the device sends —
     /// looks like from inside the app: the pane paints `�` for each byte, and
@@ -5557,6 +5676,33 @@ mod tests {
         wire.feed(b"\xfe");
         assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 1));
         assert_eq!(telling(&app), 2, "a fresh screen gets a fresh sentence");
+    }
+
+    /// A link with a bridge in the middle gets the extra sentence about the
+    /// bridge dropping bytes; a direct `stdio` link does not, because there is
+    /// nothing there but a pipe the user opened.
+    #[test]
+    fn only_a_bridged_link_blames_the_bridge_for_lost_bytes() {
+        let (mut app, wire) = connected_over_ble(Lang::En);
+        wire.feed(b"\xff\xfe");
+        assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 2));
+        let notice = app.notices.last().expect("the notice");
+        assert!(
+            notice.text.contains("the bridge may have dropped them"),
+            "a radio link says what can drop bytes: {:?}",
+            notice.text
+        );
+
+        let (mut app, wire) = connected(Lang::En);
+        assert_eq!(app.transport, Transport::Stdio);
+        wire.feed(b"\xff\xfe");
+        assert!(pump_until(&mut app, |app| app.terminal.decode_lost() == 2));
+        let notice = app.notices.last().expect("the notice");
+        assert!(
+            !notice.text.contains("the bridge may have dropped them"),
+            "a pipe is not a bridge: {:?}",
+            notice.text
+        );
     }
 
     /// Asking the bridge what it is must fill the grid it is drawn from.
