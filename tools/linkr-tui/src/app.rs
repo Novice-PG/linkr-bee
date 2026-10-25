@@ -4381,8 +4381,10 @@ mod tests {
     #[test]
     fn choosing_a_view_from_the_rail_moves_focus_to_the_content() {
         for view in View::ALL {
-            let mut app = App::default();
-            app.focus = Focus::Sidebar;
+            let mut app = App {
+                focus: Focus::Sidebar,
+                ..App::default()
+            };
             app.set_view(view);
             assert_eq!(app.focus, Focus::Terminal, "{view:?}");
             assert_eq!(app.view, view);
