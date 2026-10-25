@@ -4973,6 +4973,11 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.view, View::ALL[0], "the row opened its view");
 
+        // Choosing a view handed the keyboard to it, so come back to the rail
+        // before walking its rows. Leaving the focus in the content is the
+        // behaviour this test's sibling asserts.
+        app.focus = Focus::Sidebar;
+
         // Walk to the `reboot` row — the last one — and ask for it. It must not
         // fire: it must raise a confirmation.
         let last = app.sidebar_rows() - 1;
