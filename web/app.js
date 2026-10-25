@@ -78,7 +78,16 @@ const MGMT_CAP_WEBSOCKET = 1 << 2;
 const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
+const MGMT_CAP_PREFER_NUS = 1 << 6;
 const BLE_MAX_ATT_VALUE = 244;
+/* Start every connection at the universally available ATT payload. Probing a
+ * larger size first only works if the platform reports the rejection in a
+ * shape we recognise; a client that writes input immediately after connect can
+ * otherwise mistake that first oversized write for an ambiguous delivery and
+ * latch the terminal until it reconnects. 20 bytes is always valid on top of
+ * the default 23-byte ATT MTU, and the reliable framing handles the rest. */
+const RELIABLE_UART_WRITE_START = 20;
+const APP_BUILD = "Novice-PG";
 const LEGACY_BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 /* A Linkr Bee is a device that speaks the Management Service, and that is
  * how the picker finds one: the advertised name is a label the owner can
@@ -171,7 +180,7 @@ const state = {
   reliableRxSequence: 1,
   reliableRxDesync: false,
   reliableMaxPayload: 20,
-  reliableWriteSize: BLE_MAX_ATT_VALUE,
+  reliableWriteSize: RELIABLE_UART_WRITE_START,
   deviceId: "",
   mgmtCapabilities: 0,
   mgmtMaxPayload: 512,
@@ -3175,7 +3184,7 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
 
   const size = state.reliableReady
     ? state.reliableMaxPayload
-    : chunkSize();
+    : Math.min(chunkSize(), 20);
   for (let offset = 0; offset < bytes.length; offset += size) {
     assertWriteSession(generation, signal);
     const chunk = bytes.slice(offset, offset + size);
@@ -3239,13 +3248,20 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
   view.setUint16(10, 0, true);
   frame.set(payload, RELIABLE_UART_HEADER_SIZE);
 
-  const candidates = [
-    Math.min(state.reliableWriteSize, frame.length),
-    Math.min(182, frame.length),
-    Math.min(128, frame.length),
-    Math.min(62, frame.length),
-    Math.min(20, frame.length),
-  ].filter((size, index, values) => size > 0 && values.indexOf(size) === index);
+  /* A fragment shorter than the header can never start a frame; it is only a
+   * size we learned from a previous short frame, and asking the peer to parse
+   * it produces an ATT invalid-length error rather than useful data.
+   *
+   * Always use the 20-byte ATT-default payload. Probing a larger write first
+   * is unsafe on a fresh link: the MTU exchange may still be in flight, the
+   * stack refuses the oversized value before the firmware sees it, and a
+   * platform whose error text does not say "length" leaves the whole session
+   * latched as "delivery uncertain". A terminal frame is small, so the extra
+   * writes cost nothing next to never recovering. */
+  const minimumWrite = RELIABLE_UART_HEADER_SIZE + 1;
+  const candidates = [Math.min(RELIABLE_UART_WRITE_START, frame.length)].filter(
+    (size) => size >= minimumWrite,
+  );
   let lastError;
 
   for (const attSize of candidates) {
@@ -3274,7 +3290,7 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
         // An unfinished frame may consume the next command as its payload;
         // an unacknowledged complete frame may have advanced the peer sequence.
         // Preserve incoming logs but require a fresh session before any UART input.
-        state.uartWriteError = "Reliable UART delivery is uncertain; disconnect and reconnect before sending more input.";
+        state.uartWriteError = `Reliable UART delivery is uncertain; disconnect and reconnect before sending more input. (${error?.message || error})`;
         throw new Error(state.uartWriteError, { cause: error });
       }
       assertWriteSession(generation, signal);
@@ -3421,10 +3437,14 @@ async function sendControl(command, { returnResponse = false } = {}) {
     let writesCompleted = 0;
     let writesAttempted = 0;
     /* The first GATT write must contain the complete 12-byte management
-     * header. Keep 20 bytes as the minimum even if the terminal's raw UART
-     * chunk-size control is configured lower. */
+     * header, and a new ATT link starts at 23 bytes (20 payload) until the
+     * MTU exchange finishes. A learned or user-configured larger chunk size
+     * can therefore be refused on the first frame, which surfaces as a
+     * management write that "may or may not" have arrived. Management frames
+     * are small: always segment at the default payload so no command depends
+     * on the timing of the MTU exchange. */
     try {
-      const size = Math.max(20, chunkSize());
+      const size = 20;
       for (let offset = 0; offset < frame.length; offset += size) {
         assertWriteSession(generation);
         const chunk = frame.slice(offset, offset + size);
@@ -3450,7 +3470,7 @@ async function sendControl(command, { returnResponse = false } = {}) {
       if (generation === state.writeGeneration && state.connected &&
           writesAttempted > 0 && (writesCompleted > 0 || !isAttSizeRejection(error))) {
         // A partial management frame must not absorb a later settings request.
-        state.mgmtWriteError = "Management delivery is uncertain; disconnect and reconnect before sending more settings commands.";
+        state.mgmtWriteError = `Management delivery is uncertain; disconnect and reconnect before sending more settings commands. (${error?.message || error})`;
         error = new Error(state.mgmtWriteError, { cause: error });
       }
       responses.reject(requestId, error);
@@ -3571,7 +3591,7 @@ function onDisconnected() {
     elements.bleNameInput.value = "";
   }
   state.reliableMaxPayload = 20;
-  state.reliableWriteSize = BLE_MAX_ATT_VALUE;
+  state.reliableWriteSize = RELIABLE_UART_WRITE_START;
   // Drop any half-received frame: the next connection restarts the sequence.
   reliableReassembler.reset();
   mgmtReassembler.reset();
@@ -3856,8 +3876,9 @@ async function connectOnce({ chooseDevice = false } = {}) {
     if (!hasManagementCapability(MGMT_CAP_DEVICE_ID)) {
       throw new Error("Device does not advertise Device ID support");
     }
-    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART)) {
-      throw new Error("Device does not advertise Reliable UART support");
+    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART) &&
+        !hasManagementCapability(MGMT_CAP_PREFER_NUS)) {
+      throw new Error("Device does not advertise a UART transport");
     }
     const deviceIdValue = await bleTransport.read(
       device.id,
@@ -3901,47 +3922,93 @@ async function connectOnce({ chooseDevice = false } = {}) {
       },
     );
     state.mgmtReady = true;
-    const reliableState = await bleTransport.read(
-      device.id,
-      RELIABLE_UART_SERVICE,
-      RELIABLE_UART_STATE,
-    );
-    if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
-      throw new Error("Unsupported Reliable UART version");
+    /* Two transports are supported. Mainline boards keep the reliable UART
+     * channel; a board that advertises PREFER_NUS (the ESP32-CAM) uses the raw
+     * NUS pipe, and a board that loses the reliable service falls back to NUS
+     * instead of failing to connect. */
+    const preferNus = hasManagementCapability(MGMT_CAP_PREFER_NUS);
+    let useNus = preferNus || !hasManagementCapability(MGMT_CAP_RELIABLE_UART);
+
+    if (!useNus) {
+      try {
+        const reliableState = await bleTransport.read(
+          device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_STATE,
+        );
+        if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
+          throw new Error("Unsupported Reliable UART version");
+        }
+        const reliablePayloadLimit = reliableState.getUint16(2, true);
+        const reliableTxSequence = reliableState.getUint32(4, true);
+        const reliableRxSequence = reliableState.getUint32(8, true);
+        if (
+          reliablePayloadLimit === 0 ||
+          reliableTxSequence === 0 ||
+          reliableRxSequence === 0
+        ) {
+          throw new Error("Invalid Reliable UART state");
+        }
+        state.reliableMaxPayload = Math.max(
+          1,
+          Math.min(
+            reliablePayloadLimit,
+            BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
+          ),
+        );
+        state.reliableWriteSize = RELIABLE_UART_WRITE_START;
+        state.reliableTxSequence = reliableTxSequence;
+        state.reliableRxSequence = reliableRxSequence;
+        state.reliableRxDesync = false;
+        await bleTransport.startNotifications(
+          device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_TX,
+          (value) => {
+            if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
+          },
+        );
+        state.reliableReady = true;
+        state.nusReady = false;
+      } catch (error) {
+        useNus = true;
+        state.reliableReady = false;
+        appendLine(`[warn] Reliable UART unavailable (${error.message}); using NUS`);
+        try {
+          await bleTransport.stopNotifications(
+            device.id,
+            RELIABLE_UART_SERVICE,
+            RELIABLE_UART_TX,
+          );
+        } catch (_error) {
+          // The reliable path may have failed before subscribing.
+        }
+      }
     }
-    const reliablePayloadLimit = reliableState.getUint16(2, true);
-    const reliableTxSequence = reliableState.getUint32(4, true);
-    const reliableRxSequence = reliableState.getUint32(8, true);
-    if (
-      reliablePayloadLimit === 0 ||
-      reliableTxSequence === 0 ||
-      reliableRxSequence === 0
-    ) {
-      throw new Error("Invalid Reliable UART state");
+
+    if (useNus) {
+      await bleTransport.startNotifications(
+        device.id,
+        NUS_SERVICE,
+        NUS_TX,
+        (value) => {
+          if (bleNotificationSession !== notificationSession) return;
+          const bytes = new Uint8Array(
+            value.buffer.slice(
+              value.byteOffset,
+              value.byteOffset + value.byteLength,
+            ),
+          );
+          handleIncomingBytes(bytes);
+        },
+      );
+      state.nusReady = true;
+      state.reliableReady = false;
     }
-    state.reliableMaxPayload = Math.max(
-      1,
-      Math.min(
-        reliablePayloadLimit,
-        BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
-      ),
-    );
-    state.reliableWriteSize = BLE_MAX_ATT_VALUE;
-    state.reliableTxSequence = reliableTxSequence;
-    state.reliableRxSequence = reliableRxSequence;
-    state.reliableRxDesync = false;
-    await bleTransport.startNotifications(
-      device.id,
-      RELIABLE_UART_SERVICE,
-      RELIABLE_UART_TX,
-      (value) => {
-        if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
-      },
-    );
-    state.reliableReady = true;
+    state.legacy = false;
     state.deviceRestored = false;
     setConnected(true, { preserveJournal: true });
-    appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
+    appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId} transport=${state.reliableReady ? "RELIABLE" : "NUS"} build=${APP_BUILD}`);
     requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
@@ -4014,7 +4081,7 @@ async function disconnect() {
         // Ignore disconnect races.
       }
     }
-    if (state.legacy && state.device) {
+    if (state.nusReady && state.device) {
       try {
         await bleTransport.stopNotifications(
           state.device.id,

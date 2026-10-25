@@ -1418,6 +1418,12 @@ impl App {
         if self.focus == Focus::Assistant && view != View::Terminal {
             self.focus = Focus::Terminal;
         }
+        // Selecting a view from the rail must hand the keyboard to that view.
+        // Leaving the focus on the rail sends the next arrow key back into the
+        // list the user just left, so the pane never receives input.
+        if self.focus == Focus::Sidebar {
+            self.focus = Focus::Terminal;
+        }
         self.save_settings();
     }
 
@@ -4368,6 +4374,19 @@ mod tests {
         assert!(app.sidebar_visible);
         assert_eq!(app.focus, Focus::Sidebar);
         assert_eq!(notice.text, app.strings().sidebar_shown);
+    }
+
+    /// Choosing a view from the rail hands the keyboard to the content. The
+    /// rail keeps the focus only while it is the pane being used.
+    #[test]
+    fn choosing_a_view_from_the_rail_moves_focus_to_the_content() {
+        for view in View::ALL {
+            let mut app = App::default();
+            app.focus = Focus::Sidebar;
+            app.set_view(view);
+            assert_eq!(app.focus, Focus::Terminal, "{view:?}");
+            assert_eq!(app.view, view);
+        }
     }
 
     /// A paste is a typing gesture, so line mode holds it until Enter exactly
