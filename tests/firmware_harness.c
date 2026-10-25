@@ -11,6 +11,9 @@
 
 #define ARG_UNUSED(x) (void)(x)
 #define WEBDAV_UPLOAD_CHUNK 512
+/* The embedded build may place the upload chunk in PSRAM. The host test has
+ * no such section; the storage location is not part of the logic under test. */
+#define LINKR_EXT_RAM_BSS
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
 #define URL_MAX 192
 #define CRED_MAX 64
@@ -26,6 +29,9 @@ static int wifi_connected = 1, wifi_ip_ready = 1, webdav_configured = 1;
 static int webdav_generation = 1, upload_pending_bytes;
 static int upload_failures, upload_successes;
 static int cfg_lock, log_lock, upload_lock, log_ring;
+/* main.c keeps the NUS subscription flag next to the bridge state; the
+ * extracted production functions read it from here. */
+static int nus_notify_enabled;
 static bool log_boot_id_persisted = true;
 static uint64_t log_boot_id = 1;
 static uint32_t log_sequence;
