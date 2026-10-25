@@ -3,7 +3,7 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore"}
+boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore esp32_cam/esp32/procpu"}
 
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
@@ -25,7 +25,11 @@ for board in $boards; do
   grep -qx 'CONFIG_TASK_WDT_MIN_TIMEOUT=5000' "$config"
   grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "$config"
   grep -qx '# CONFIG_TASK_WDT_DUMMY is not set' "$config"
-  grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "$config"
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "$config"; then
+    grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "$config"
+  else
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "$config"
+  fi
   grep -qx 'CONFIG_NETWORKING=y' "$config"
   grep -qx 'CONFIG_NET_TCP=y' "$config"
   grep -qx '# CONFIG_NET_IPV6 is not set' "$config"
@@ -38,6 +42,9 @@ for board in $boards; do
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
   grep -qx 'CONFIG_BT_SMP=y' "$config"
   if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
+    grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
+  fi
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "$config"; then
     grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
   fi
   # The newer Espressif controller (C5 here) declares its own security symbols;

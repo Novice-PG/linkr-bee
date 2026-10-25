@@ -19,6 +19,72 @@
 #include "ble_uart_reliable.h"
 #include "watchdog.h"
 
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART)
+
+/*
+ * The raw NUS channel is the whole protocol on boards that disable this
+ * service. Keep the exported surface so the rest of the bridge compiles and
+ * simple mode is selected everywhere: no service to discover, no framing to
+ * reassemble, no sequence to get out of step.
+ */
+void linkr_uart_reliable_diag(uint32_t *total, uint32_t *retry, uint32_t *busy,
+			      uint32_t *nomem, uint32_t *slept_ms,
+			      uint32_t *timeout, uint32_t *wait_max_ms)
+{
+	if (total) {
+		*total = 0;
+	}
+	if (retry) {
+		*retry = 0;
+	}
+	if (busy) {
+		*busy = 0;
+	}
+	if (nomem) {
+		*nomem = 0;
+	}
+	if (slept_ms) {
+		*slept_ms = 0;
+	}
+	if (timeout) {
+		*timeout = 0;
+	}
+	if (wait_max_ms) {
+		*wait_max_ms = 0;
+	}
+}
+
+int linkr_uart_reliable_init(linkr_uart_reliable_write_fn write_fn)
+{
+	ARG_UNUSED(write_fn);
+	return 0;
+}
+
+void linkr_uart_reliable_disconnected(struct bt_conn *conn)
+{
+	ARG_UNUSED(conn);
+}
+
+bool linkr_uart_reliable_mode(void)
+{
+	return false;
+}
+
+void linkr_uart_reliable_nus_selected(void)
+{
+}
+
+int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
+			     uint16_t len)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+	return -ENOTCONN;
+}
+
+#else /* CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART */
+
 LOG_MODULE_REGISTER(linkr_ble_uart_reliable, LOG_LEVEL_INF);
 
 #define RX_TIMEOUT_MS 2000
@@ -167,6 +233,22 @@ static ssize_t state_read(struct bt_conn *conn,
 				 sizeof(state));
 }
 
+static bool rx_starts_frame(const uint8_t *bytes, uint16_t len)
+{
+	const struct reliable_header *header;
+
+	if (len < sizeof(*header)) {
+		return false;
+	}
+	header = (const struct reliable_header *)bytes;
+	return header->magic[0] == 'L' && header->magic[1] == 'R' &&
+	       header->version == LINKR_UART_RELIABLE_API_MAJOR &&
+	       sys_get_le16(header->payload_len_le) > 0 &&
+	       sys_get_le16(header->payload_len_le) <=
+		       LINKR_UART_RELIABLE_MAX_PAYLOAD &&
+	       len - sizeof(*header) <= sys_get_le16(header->payload_len_le);
+}
+
 static ssize_t rx_write(struct bt_conn *conn,
 			const struct bt_gatt_attr *attr, const void *buf,
 			uint16_t len, uint16_t offset, uint8_t flags)
@@ -186,6 +268,19 @@ static ssize_t rx_write(struct bt_conn *conn,
 	k_mutex_lock(&rx_lock, K_FOREVER);
 	if (rx_state.expected &&
 	    k_uptime_get() - rx_state.started_at > RX_TIMEOUT_MS) {
+		rx_reset_locked();
+	}
+
+	/* A client that gave up halfway through a frame (a failed write, a
+	 * reconnect, a canceled command) leaves this reassembler waiting for
+	 * continuation bytes. If the next ATT write starts a *new* frame, the
+	 * old code treated its 12-byte header as payload, then rejected it as
+	 * too long, and every later write failed until the two-second timeout
+	 * expired. The client had already latched on the first error, so the
+	 * session looked permanently dead. Recognise a frame start and abandon
+	 * the stale frame instead; a raw continuation fragment passing all the
+	 * header checks is vanishingly unlikely. */
+	if (rx_state.expected && rx_starts_frame(bytes, len)) {
 		rx_reset_locked();
 	}
 
@@ -226,11 +321,28 @@ static ssize_t rx_write(struct bt_conn *conn,
 	if (rx_state.received == rx_state.expected) {
 		if (rx_state.sequence == rx_next_sequence) {
 			err = uart_write_fn(rx_state.payload, rx_state.expected);
-			if (!err) {
+			if (!err || err == -ENOMEM) {
+				/* -ENOMEM means the frame is complete but the downstream
+				 * queue was full and counted the loss. The peer has
+				 * already advanced its sequence, so refusing the write
+				 * cannot recover the bytes; it only leaves clients that
+				 * treat a write failure as ambiguous latched until they
+				 * reconnect. Acknowledge and keep the session alive. */
 				rx_next_sequence = sequence_next(rx_next_sequence);
+				err = 0;
 			}
 		} else if (rx_state.sequence != previous_sequence) {
-			err = -EILSEQ;
+			/* The peer's sequence does not match ours, usually because a
+			 * previous session ended with the two sides disagreeing. The
+			 * old behaviour returned an ATT error, which those same
+			 * clients latch on. Re-baseline on the sequence the peer
+			 * actually sent; a terminal should keep working across one
+			 * lost frame, and the peer advances from here. */
+			err = uart_write_fn(rx_state.payload, rx_state.expected);
+			if (!err || err == -ENOMEM) {
+				rx_next_sequence = sequence_next(rx_state.sequence);
+				err = 0;
+			}
 		}
 		rx_reset_locked();
 		if (err) {
@@ -367,6 +479,10 @@ void linkr_uart_reliable_disconnected(struct bt_conn *conn)
 	}
 	k_mutex_unlock(&rx_lock);
 	atomic_clear(&indication_enabled);
+	/* The next central may select NUS instead of the reliable channel.
+	 * Keeping this set would route its output into indications nobody
+	 * subscribed to. The channel is selected again by the CCC callback. */
+	atomic_clear(&reliable_mode);
 }
 
 bool linkr_uart_reliable_mode(void)
@@ -376,9 +492,13 @@ bool linkr_uart_reliable_mode(void)
 
 void linkr_uart_reliable_nus_selected(void)
 {
-	if (!atomic_get(&indication_enabled)) {
-		atomic_clear(&reliable_mode);
-	}
+	/* The central selected the raw NUS channel. Zephyr may restore a saved
+	 * reliable-UART CCC from an earlier session for the same bond, which makes
+	 * indication_enabled true even though this client is not handling
+	 * indications. Sending there would leave the client with no output and
+	 * eventually trip the indication timeout (a silent disconnect), so a NUS
+	 * subscription always selects NUS. */
+	atomic_clear(&reliable_mode);
 }
 
 int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
@@ -440,3 +560,5 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	tx_next_sequence = sequence_next(tx_next_sequence);
 	return 0;
 }
+
+#endif /* CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART */
