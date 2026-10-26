@@ -2412,8 +2412,7 @@ impl App {
                 LinkEvent::Data(bytes) => {
                     self.agent_serial.append(&self.agent_decoder.push(&bytes));
                     self.terminal.push(&bytes);
-                    // The same bytes carry the prompt the size sync waits for.
-                    self.geometry.observe(&String::from_utf8_lossy(&bytes));
+                    self.geometry.observe_screen(self.terminal.vt());
                     self.note_decode_loss();
                     self.trace.rx(&bytes);
                     if self.collect_output {
@@ -3877,15 +3876,14 @@ impl App {
     /// Tell the target its tty size, if a size is due and the prompt is idle.
     ///
     /// Sent straight down the session rather than through [`Self::send_bytes`]:
-    /// this is the interface talking, not the user, so it must not invalidate
-    /// the prompt it just acted on or be counted as typing. A send that fails
-    /// leaves the size owed, so the next prompt offers another chance.
+    /// this is housekeeping, not user input. A send that fails leaves the
+    /// size owed, so the next parsed idle prompt offers another chance.
     fn sync_terminal_geometry(&mut self) {
         // A script run owns the line from its first byte to its last answer.
         // A prompt-looking tail in its output — a banner, an echo, the shell
         // waiting for a password — is not an idle pane, and an `stty` typed
         // into it would be a command the caller never asked for.
-        if self.collect_output || !self.connected() {
+        if self.collect_output || !self.connected() || !self.pending_line.is_empty() {
             return;
         }
         let Some(command) = self.geometry.take_pending_command() else {
@@ -3912,7 +3910,7 @@ impl App {
         }
         // Typed input is a command line in the making; an `stty` line must not
         // land in the middle of it.
-        self.geometry.mark_busy();
+        self.geometry.note_input(bytes);
         self.trace.tx(bytes);
         // The counter is part of the *frame*, so it moves here rather than at
         // the next pump: a keystroke's byte should show in the top bar on the
@@ -5634,6 +5632,9 @@ mod tests {
         // before clearing them, or they reappear in the next assertion.
         assert!(pump_until(&mut app, |_| wire.sent_len() >= 2));
         assert_eq!(wire.take_sent(), b"ls".to_vec());
+        assert!(app.send_bytes(b"\r"));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"\r".to_vec());
         // The echo of the typed command is not an idle prompt.
         wire.feed(b"ls\r\n");
         for _ in 0..10 {
@@ -5678,6 +5679,40 @@ mod tests {
         assert!(app.send_bytes(b"secret\r"));
         assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
         assert_eq!(wire.take_sent(), b"secret\r".to_vec());
+    }
+
+    #[test]
+    fn geometry_never_submits_a_redrawn_command_or_an_alternate_screen() {
+        for output in [
+            "root@target:~$ ls",
+            "root@target:~$ ls\x1b[2D",
+            "\x1b[?1049hroot@target:~$ ",
+        ] {
+            let (mut app, wire) = connected(Lang::En);
+            app.geometry.set_size(117, 40);
+            wire.feed(output.as_bytes());
+            assert!(pump_until(&mut app, |app| app.rx >= output.len() as u64));
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            app.pump();
+            assert!(
+                wire.take_sent().is_empty(),
+                "geometry wrote into {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_preserves_a_locally_buffered_line_when_the_prompt_reappears() {
+        let (mut app, wire) = connected(Lang::En);
+        app.line_mode = true;
+        app.geometry.set_size(117, 40);
+        assert!(app.type_bytes(false, "ls"));
+        wire.feed(b"root@target:~$ ");
+        assert!(pump_until(&mut app, |app| app.rx > 0));
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        app.pump();
+        assert!(wire.take_sent().is_empty());
+        assert_eq!(app.pending_line, "ls");
     }
 
     /// Undecodable bytes are what a device speaking something that is not

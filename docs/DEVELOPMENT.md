@@ -323,8 +323,7 @@ WebSocket endpoint so LAN clients bypass BLE range and MTU limits entirely:
   access token are persisted in settings.
   `@i?` reports
   `@info ws state=up port=80 clients=N tx=… rx=… dropped=…` (no token)
-  (`dropped` is cleared when a client connects; WROOM builds also report
-  `dropped_total` since boot)
+  (`dropped` is cleared when a client connects)
 - Protocol: after the upgrade the bridge sends a text frame announcing whether a
   token is required (`@ws auth=none` / `@ws auth=required`), and `@ws auth=ok`
   once access is granted. UART bytes always travel as binary frames. See
@@ -349,18 +348,6 @@ The shipped configuration enables
 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y` on every board. After a BLE
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
-
-The ESP32-WROOM-32 build alone enables
-`CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE=y`. Its single UART-to-BLE thread used
-to block in the Reliable UART indication, and because the same thread feeds the
-LAN bridge and log ring, a slow central also starved a LAN-only TUI or browser.
-With decoupling the thread stages each chunk for those sinks and hands the BLE
-copy to a small queue and a dedicated sender thread, so the UART ring keeps
-draining while one indication is in flight. A full queue disconnects the
-central after the in-flight chunk instead of skipping a sequence number, which
-lets it resynchronise; LAN output is unaffected. WROOM's UART RX ring is
-14336 bytes so the queue fits beside it in DRAM0. C3 and C5 keep the upstream
-synchronous path unchanged.
 
 ### Pairing GPIO, persistence, and factory reset
 
@@ -538,22 +525,22 @@ ERR format: @u=115200,8,n,1,n
 The diagnostic command is read-only. It reports the application and Zephyr
 versions, uptime, the open BLE access/security state, UART buffer usage and
 dropped-byte count, WiFi/IP state, WebSocket clients and drops, and WebDAV
-queue, drop, HTTP, failure, and success counters. WROOM also reports the
-decoupled BLE queue and the cumulative UART/WebSocket drop totals:
+queue, drop, HTTP, failure, and success counters. The queue and Reliable UART
+groups expose UART TX drops and BLE indication timing:
 
 ```text
 @info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
-@info uart dropped=0 dropped_total=0 dropped_no_conn=0 buffer=0/14336
+@info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
-@info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0 dropped_total=0
-@info bletx dropped=0 uart_total=0 depth=0 mtu=247
+@info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0
+@info queue dropped=0
+@info rel ind=0 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=0
 @info done
 ```
 
-C3/C5 report the same rows without `dropped_total`, `bletx`, or the extra UART
-field, so their output is unchanged.
+Buffer sizes and enabled services depend on the board configuration.
 
 The application version comes from
 `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION`.
@@ -1119,17 +1106,15 @@ assistant panel changes the emulator width and queues the same size for the
 target. A target tty that keeps an old width wraps readline's prompt onto the
 same row, which is what makes a long `user@host:~$` prompt look overwritten.
 
-If the pane shows `�` or a bottom status bar that looks like the update
-progress was mangled, the bytes are being lost before they reach the decoder,
-not mis-rendered. On WROOM the decoupled BLE sender no longer stalls the LAN
-and log sinks; `@i?` reports `bletx dropped` (queue overflow), `uart_total`
-(cumulative RX-ring overflow since boot), `depth` (chunks waiting) and the
-negotiated `mtu`. On any board `@i?` also reports the per-loop UART,
-Reliable UART and queue counters. The reliable channel is capped at roughly
-232 bytes per indication (about 7.7 KiB/s at 30 ms) while the UART link can run
-at 11.5 KiB/s, so sustained high-rate output can still fill the RX ring. Lower
-the target console's baud rate, or use the browser client's Reliable UART
-channel; the TUI's legacy NUS path is best effort and has no retry.
+If the pane shows `�` or a broken progress bar, inspect the actual diagnostic
+counters before attributing it to transport loss or rendering. `@i?` reports
+UART RX drops, disconnected BLE drops, UART TX queue drops, and Reliable UART
+indication retries, timeouts and maximum wait time. Sustained high-rate output
+can fill the UART RX ring when BLE delivery cannot keep up. UART forwarding,
+WebSocket and log capture still share the same worker; this firmware does not
+include a separate BLE sender or guarantee that a slow central cannot stall
+the other sinks. Reduce the target console's baud rate if drops increase;
+the TUI's legacy NUS path is best effort and has no retry.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 
@@ -1222,7 +1207,6 @@ hardware.
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
 | Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, native-shell long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, native browser selection without custom dots, Copy writing nothing with no selection, selected wrapped lines preserving boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
-| WROOM BLE TX decoupling | WROOM build and memory headroom check; a C3 build confirms the option stays off; diagnostics counters build and are exercised by host tests | WROOM long high-rate output on hardware, slow central scheduling, and overflow disconnect |
 
 ---
 

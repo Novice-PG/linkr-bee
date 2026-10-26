@@ -475,6 +475,85 @@ test("a browser keeps native selection and draws no custom handles", async ({ pa
   await expect(page.locator(".terminal-selection-copy")).toHaveCount(0);
 });
 
+async function selectBrowserTerminalText(page) {
+  await page.evaluate(() => new Promise(resolve =>
+    window.__terminalTest.state.term.write("\x1bcBrowser native selection", resolve)));
+  await page.waitForFunction(() =>
+    document.querySelector(".xterm-rows")?.firstElementChild?.textContent.includes("Browser native selection"));
+  return page.evaluate(() => {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector(".xterm-rows").firstElementChild);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString();
+  });
+}
+
+for (const clipboard of ["available", "missing", "rejected"]) {
+  test(`browser-owned selection reaches Copy (${clipboard})`, async ({ page }) => {
+    await openTerminal(page);
+    const selected = await selectBrowserTerminalText(page);
+    expect(selected).toContain("Browser native selection");
+    expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection())).toBe("");
+    if (clipboard !== "available") {
+      await page.evaluate(clipboard => {
+        Object.defineProperty(navigator.clipboard, "writeText", {
+          configurable: true,
+          value: clipboard === "missing" ? undefined : async () => { throw new Error("denied"); },
+        });
+        document.addEventListener("copy", event => {
+          const data = event.clipboardData;
+          if (!data) return;
+          const setData = data.setData.bind(data);
+          data.setData = (format, text) => {
+            if (format === "text/plain") window.__terminalCopied = text;
+            setData(format, text);
+          };
+        }, { capture: true });
+      }, clipboard);
+    }
+    await page.locator("#copyBtn").click();
+    await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
+    expect(await page.evaluate(() => document.getSelection().toString())).toBe(selected);
+  });
+}
+
+test("browser selection handle gestures are not cleared or turned into scrolling", async ({ page }) => {
+  await openTerminal(page);
+  const selected = await selectBrowserTerminalText(page);
+  const result = await page.evaluate(() => {
+    const output = document.getElementById("terminalOutput");
+    const bounds = output.getBoundingClientRect();
+    const touch = new Touch({ identifier: 41, target: output, clientX: bounds.left + 20, clientY: bounds.top + 20 });
+    const events = [
+      new TouchEvent("touchstart", { bubbles: true, cancelable: true, touches: [touch] }),
+      new TouchEvent("touchmove", { bubbles: true, cancelable: true, touches: [touch] }),
+      new TouchEvent("touchend", { bubbles: true, cancelable: true, touches: [] }),
+    ];
+    const before = window.__terminalTest.state.term.buffer.active.viewportY;
+    for (const event of events) output.dispatchEvent(event);
+    return { selected: document.getSelection().toString(), prevented: events.map(event => event.defaultPrevented),
+      before, after: window.__terminalTest.state.term.buffer.active.viewportY };
+  });
+  expect(result.selected).toBe(selected);
+  expect(result.prevented).toEqual([false, false, false]);
+  expect(result.after).toBe(result.before);
+});
+
+test("Copy ignores a DOM selection outside the terminal", async ({ page }) => {
+  await openTerminal(page);
+  await page.evaluate(() => {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector("h1"));
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.locator("#copyBtn").click();
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
+});
+
 for (const clipboard of ["missing", "rejected"]) {
   for (const control of ["#copyBtn", ".terminal-selection-copy"]) {
     test(`fallback copy keeps focus and selection (${clipboard}, ${control})`, async ({ page }) => {

@@ -2690,10 +2690,30 @@ function beginTerminalLongPress(clientX, clientY) {
   return true;
 }
 
+function browserTerminalSelectionText() {
+  if (nativeSelectionShell) return "";
+  const rows = elements.terminalOutput.querySelector(".xterm-rows");
+  const selection = document.getSelection?.();
+  if (!rows || !selection || selection.isCollapsed || selection.rangeCount !== 1) return "";
+  const range = selection.getRangeAt(0);
+  if (!rows.contains(range.startContainer) || !rows.contains(range.endContainer)) return "";
+  return selection.toString();
+}
+
+function preserveBrowserTerminalSelection() {
+  if (!browserTerminalSelectionText()) return false;
+  clearTerminalTouchTimer();
+  terminalTouch.active = false;
+  terminalTouch.scrolling = false;
+  releaseTerminalFocusSuppression();
+  return true;
+}
+
 function onTerminalTouchStart(event) {
   if (!state.connected || !state.term || event.touches.length !== 1) {
     return;
   }
+  if (preserveBrowserTerminalSelection()) return;
   const touch = event.touches[0];
   clearTerminalTouchTimer();
   // Hold focus off for the whole gesture. A tap releases it in touchend, while
@@ -2716,9 +2736,9 @@ function onTerminalTouchStart(event) {
   terminalTouch.cancelled = false;
   // Drop any WebView-owned DOM selection before xterm draws its own. A later
   // collapsed DOM selection inside the rows makes xterm clear the selection.
-  const domSelection = document.getSelection?.();
-  if (domSelection?.rangeCount) {
-    domSelection.removeAllRanges();
+  if (nativeSelectionShell) {
+    const domSelection = document.getSelection?.();
+    if (domSelection?.rangeCount) domSelection.removeAllRanges();
   }
   // Clear our own selection UI first: clearSelection() fires the change event,
   // and the endpoints must already be gone so the guard does not reassert the
@@ -2737,6 +2757,7 @@ function onTerminalTouchStart(event) {
 }
 
 function onTerminalTouchMove(event) {
+  if (preserveBrowserTerminalSelection()) return;
   if (!terminalTouch.active) {
     return;
   }
@@ -2788,6 +2809,7 @@ function onTerminalTouchMove(event) {
 }
 
 function finishTerminalTouch(event) {
+  if (preserveBrowserTerminalSelection()) return;
   if (!terminalTouch.active) {
     return;
   }
@@ -2865,6 +2887,8 @@ function terminalCopyText() {
   if (!term) {
     return "";
   }
+  const browserSelection = browserTerminalSelectionText();
+  if (browserSelection) return browserSelection;
   const selected = term.getSelection();
   if (selected) {
     return selected;

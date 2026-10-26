@@ -82,8 +82,11 @@ the TUI sends the web's own `stty rows <rows> cols <cols>` command. A resize,
 the rail, or the assistant panel changes the pane's width and the event loop
 queues that size; the next prompt sends it once. Without this, a shell left at
 57 columns wraps its long `user@host:~$` prompt back over itself in a wider
-pane. `serial/geometry.rs` holds the gate and its tests; it mirrors
-`web/terminal_geometry.js` and the Python client byte for byte.
+pane. `serial/geometry.rs` holds the gate and its tests. The command matches
+`web/terminal_geometry.js` and the Python client byte for byte; the TUI checks
+the parsed VT screen, rejects alternate screens and text to the right of or
+below the cursor, and waits for unfinished local input to be submitted or
+cancelled before treating a prompt as idle.
 
 ### Text, and the bytes that are not
 
@@ -108,16 +111,17 @@ device is sending — read it with `--query-uart`, set it with
 device that is not speaking UTF-8 at all.
 
 On a BLE or LAN link the notice adds a second sentence: bytes can be lost in
-the bridge before the decoder ever sees them. Missing `ESC` bytes turn SGR
-colours into literal `38;5;214m` text, a missing `\r` stacks progress bars on
-one line, and a dropped UTF-8 continuation byte becomes `�` — all three are the
-same loss seen at different points, not three rendering bugs. Diagnostics'
-`@i?` reports the UART, Reliable UART and queue counters that say which side
-dropped the bytes. Sustained output above roughly 7.7 KiB/s can outrun the
-Reliable UART indication ceiling or the 16 KiB RX ring; the TUI's legacy NUS
-path is best effort and has no retry, so the browser client's Reliable UART
-channel is the way to keep a full-speed console intact. `stdio` links get no
-bridge sentence: there is a pipe the user opened, not a bridge in the middle.
+the bridge before the decoder ever sees them. Missing `ESC` bytes can expose
+SGR colour parameters as literal text, and a dropped UTF-8 continuation byte
+can become `�`, but these symptoms alone do not prove transport loss.
+Inspect Diagnostics' `@i?` UART drops, UART TX queue drops and Reliable UART
+timing counters alongside the target's encoding and framing. Sustained output
+can fill the RX ring when forwarding cannot keep up; BLE, WebSocket and log
+delivery still share a worker. The TUI's legacy NUS path is best effort and
+has no retry. The browser's Reliable UART channel can detect sequence gaps,
+but neither path guarantees lossless capture at an arbitrary output rate.
+`stdio` links get no bridge sentence: there is a pipe the user opened, not a
+bridge in the middle.
 
 On the old console the `�` is replaced by `?` by the pass above, because
 conhost draws `U+FFFD` two cells wide and one `�` per cell would shove the
