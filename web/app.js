@@ -78,7 +78,16 @@ const MGMT_CAP_WEBSOCKET = 1 << 2;
 const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
+const MGMT_CAP_PREFER_NUS = 1 << 6;
 const BLE_MAX_ATT_VALUE = 244;
+/* Start every connection at the universally available ATT payload. Probing a
+ * larger size first only works if the platform reports the rejection in a
+ * shape we recognise; a client that writes input immediately after connect can
+ * otherwise mistake that first oversized write for an ambiguous delivery and
+ * latch the terminal until it reconnects. 20 bytes is always valid on top of
+ * the default 23-byte ATT MTU, and the reliable framing handles the rest. */
+const RELIABLE_UART_WRITE_START = 20;
+const APP_BUILD = "Novice-PG";
 const LEGACY_BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 /* A Linkr Bee is a device that speaks the Management Service, and that is
  * how the picker finds one: the advertised name is a label the owner can
@@ -123,6 +132,12 @@ const isHarmonyHost =
   window.LinkrNativeBle?.platform === "harmonyos" ||
   document.documentElement.dataset.platform === "harmonyos";
 const prefersSettingsDrawer = isHarmonyHost || coarsePointerMedia.matches;
+/* xterm 6 derives its custom scrollbar width from overviewRuler.width in
+ * JavaScript (default 14 px), so a CSS-only override would desynchronise the
+ * slider. A phone loses too much of the output to the default track; use a
+ * narrower one there and keep the desktop track at the 10 px the native
+ * viewport scrollbar used to show. */
+const terminalScrollbarWidth = coarsePointerMedia.matches ? 8 : 10;
 
 /* Native shells shrink their own WebView when the soft keyboard opens. Keep
  * that local: a resize caused by the keyboard is a display change, not a
@@ -135,9 +150,20 @@ function handlesTerminalGeometryLocally() {
   return platform === "android" || platform === "ios" || isHarmonyHost;
 }
 
+/* The two draggable dots exist because a WebView long press cannot reach the
+ * terminal's own selection. A browser already draws its native handles and
+ * copy menu, so drawing a second set there is both confusing and, after the
+ * native gesture collapses the DOM selection, unsafe: the two systems selected
+ * different text. Keep the custom UI for the native shells only. */
+const nativeSelectionShell = handlesTerminalGeometryLocally();
+
 document.documentElement.classList.toggle(
   "settings-drawer-layout",
   prefersSettingsDrawer,
+);
+document.documentElement.classList.toggle(
+  "browser-terminal-selection",
+  !nativeSelectionShell,
 );
 
 const encoder = new TextEncoder();
@@ -154,7 +180,7 @@ const state = {
   reliableRxSequence: 1,
   reliableRxDesync: false,
   reliableMaxPayload: 20,
-  reliableWriteSize: BLE_MAX_ATT_VALUE,
+  reliableWriteSize: RELIABLE_UART_WRITE_START,
   deviceId: "",
   mgmtCapabilities: 0,
   mgmtMaxPayload: 512,
@@ -1334,6 +1360,8 @@ function initTerminal() {
     scrollback: 10000,
     // A burst of log lines must not queue an animation frame per scroll step.
     smoothScrollDuration: 0,
+    // The width has to reach xterm's own layout, not just CSS; see above.
+    overviewRuler: { width: terminalScrollbarWidth },
     tabStopWidth: 8,
     theme: theme === "dark" ? XTERM_DARK : XTERM_LIGHT,
   });
@@ -2662,10 +2690,30 @@ function beginTerminalLongPress(clientX, clientY) {
   return true;
 }
 
+function browserTerminalSelectionText() {
+  if (nativeSelectionShell) return "";
+  const rows = elements.terminalOutput.querySelector(".xterm-rows");
+  const selection = document.getSelection?.();
+  if (!rows || !selection || selection.isCollapsed || selection.rangeCount !== 1) return "";
+  const range = selection.getRangeAt(0);
+  if (!rows.contains(range.startContainer) || !rows.contains(range.endContainer)) return "";
+  return selection.toString();
+}
+
+function preserveBrowserTerminalSelection() {
+  if (!browserTerminalSelectionText()) return false;
+  clearTerminalTouchTimer();
+  terminalTouch.active = false;
+  terminalTouch.scrolling = false;
+  releaseTerminalFocusSuppression();
+  return true;
+}
+
 function onTerminalTouchStart(event) {
   if (!state.connected || !state.term || event.touches.length !== 1) {
     return;
   }
+  if (preserveBrowserTerminalSelection()) return;
   const touch = event.touches[0];
   clearTerminalTouchTimer();
   // Hold focus off for the whole gesture. A tap releases it in touchend, while
@@ -2688,25 +2736,28 @@ function onTerminalTouchStart(event) {
   terminalTouch.cancelled = false;
   // Drop any WebView-owned DOM selection before xterm draws its own. A later
   // collapsed DOM selection inside the rows makes xterm clear the selection.
-  const domSelection = document.getSelection?.();
-  if (domSelection?.rangeCount) {
-    domSelection.removeAllRanges();
+  if (nativeSelectionShell) {
+    const domSelection = document.getSelection?.();
+    if (domSelection?.rangeCount) domSelection.removeAllRanges();
   }
   // Clear our own selection UI first: clearSelection() fires the change event,
   // and the endpoints must already be gone so the guard does not reassert the
   // previous selection.
   hideTerminalSelectionHandles();
   state.term.clearSelection();
-  terminalTouch.timer = setTimeout(() => {
-    terminalTouch.timer = 0;
-    if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
-      return;
-    }
-    beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
-  }, TERMINAL_LONG_PRESS_MS);
+  if (nativeSelectionShell) {
+    terminalTouch.timer = setTimeout(() => {
+      terminalTouch.timer = 0;
+      if (!terminalTouch.active || terminalTouch.moved || terminalTouch.scrolling) {
+        return;
+      }
+      beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
+    }, TERMINAL_LONG_PRESS_MS);
+  }
 }
 
 function onTerminalTouchMove(event) {
+  if (preserveBrowserTerminalSelection()) return;
   if (!terminalTouch.active) {
     return;
   }
@@ -2758,6 +2809,7 @@ function onTerminalTouchMove(event) {
 }
 
 function finishTerminalTouch(event) {
+  if (preserveBrowserTerminalSelection()) return;
   if (!terminalTouch.active) {
     return;
   }
@@ -2782,12 +2834,13 @@ function finishTerminalTouch(event) {
   // own gesture detector fires. A stationary press that lasted long enough is
   // still a selection gesture, never a tap that opens the keyboard.
   const heldLongEnough = heldMs >= TERMINAL_LONG_PRESS_MS - 20;
-  if (!wasLongPress && !wasScrolling && !wasMoved && heldLongEnough) {
+  if (nativeSelectionShell && !wasLongPress && !wasScrolling && !wasMoved &&
+      heldLongEnough) {
     wasLongPress = beginTerminalLongPress(startX, startY);
   }
   // A selection that is already on screen proves this was a long press, even
   // if the WebView reset the gesture state under us.
-  if (terminalSelection.start) {
+  if (nativeSelectionShell && terminalSelection.start) {
     wasLongPress = true;
   }
 
@@ -2820,8 +2873,9 @@ function onTerminalTouchCancel(event) {
   if (!terminalTouch.active) {
     return;
   }
-  if (!terminalTouch.longPress && !terminalTouch.moved &&
-      !terminalTouch.scrolling && !terminalSelection.start) {
+  if (nativeSelectionShell && !terminalTouch.longPress &&
+      !terminalTouch.moved && !terminalTouch.scrolling &&
+      !terminalSelection.start) {
     beginTerminalLongPress(terminalTouch.startX, terminalTouch.startY);
   }
   terminalTouch.cancelled = true;
@@ -2833,6 +2887,8 @@ function terminalCopyText() {
   if (!term) {
     return "";
   }
+  const browserSelection = browserTerminalSelectionText();
+  if (browserSelection) return browserSelection;
   const selected = term.getSelection();
   if (selected) {
     return selected;
@@ -2842,30 +2898,10 @@ function terminalCopyText() {
   if (terminalSelection.text) {
     return terminalSelection.text;
   }
-  const buffer = term.buffer.active;
-  const lines = [];
-  let current = "";
-  for (let i = 0; i < buffer.length; i += 1) {
-    const line = buffer.getLine(i);
-    if (!line) {
-      continue;
-    }
-    // isWrapped belongs to the continuation, not to the row it follows.
-    // Keep boundary spaces inside a wrapped line; only trim its final row.
-    const continues = buffer.getLine(i + 1)?.isWrapped;
-    current += line.translateToString(!continues);
-    if (!continues) {
-      lines.push(current);
-      current = "";
-    }
-  }
-  if (current) {
-    lines.push(current);
-  }
-  while (lines.length && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
-  return lines.join("\n");
+  // No selection and no snapshot: copy nothing. Falling back to the whole
+  // scrollback made a tap on Copy paste an unrelated transcript, which is far
+  // worse than telling the user there was nothing selected.
+  return "";
 }
 
 async function copyToClipboard(text) {
@@ -2889,7 +2925,7 @@ async function copyToClipboard(text) {
     }
     event.clipboardData.setData("text/plain", text);
     event.preventDefault();
-    // xterm's own copy handler must not replace a snapshot or whole transcript.
+    // xterm's own copy handler must not replace the snapshot we supply.
     event.stopImmediatePropagation();
     copied = true;
   };
@@ -3172,7 +3208,7 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
 
   const size = state.reliableReady
     ? state.reliableMaxPayload
-    : chunkSize();
+    : Math.min(chunkSize(), 20);
   for (let offset = 0; offset < bytes.length; offset += size) {
     assertWriteSession(generation, signal);
     const chunk = bytes.slice(offset, offset + size);
@@ -3236,13 +3272,20 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
   view.setUint16(10, 0, true);
   frame.set(payload, RELIABLE_UART_HEADER_SIZE);
 
-  const candidates = [
-    Math.min(state.reliableWriteSize, frame.length),
-    Math.min(182, frame.length),
-    Math.min(128, frame.length),
-    Math.min(62, frame.length),
-    Math.min(20, frame.length),
-  ].filter((size, index, values) => size > 0 && values.indexOf(size) === index);
+  /* A fragment shorter than the header can never start a frame; it is only a
+   * size we learned from a previous short frame, and asking the peer to parse
+   * it produces an ATT invalid-length error rather than useful data.
+   *
+   * Always use the 20-byte ATT-default payload. Probing a larger write first
+   * is unsafe on a fresh link: the MTU exchange may still be in flight, the
+   * stack refuses the oversized value before the firmware sees it, and a
+   * platform whose error text does not say "length" leaves the whole session
+   * latched as "delivery uncertain". A terminal frame is small, so the extra
+   * writes cost nothing next to never recovering. */
+  const minimumWrite = RELIABLE_UART_HEADER_SIZE + 1;
+  const candidates = [Math.min(RELIABLE_UART_WRITE_START, frame.length)].filter(
+    (size) => size >= minimumWrite,
+  );
   let lastError;
 
   for (const attSize of candidates) {
@@ -3271,7 +3314,7 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
         // An unfinished frame may consume the next command as its payload;
         // an unacknowledged complete frame may have advanced the peer sequence.
         // Preserve incoming logs but require a fresh session before any UART input.
-        state.uartWriteError = "Reliable UART delivery is uncertain; disconnect and reconnect before sending more input.";
+        state.uartWriteError = `Reliable UART delivery is uncertain; disconnect and reconnect before sending more input. (${error?.message || error})`;
         throw new Error(state.uartWriteError, { cause: error });
       }
       assertWriteSession(generation, signal);
@@ -3418,10 +3461,14 @@ async function sendControl(command, { returnResponse = false } = {}) {
     let writesCompleted = 0;
     let writesAttempted = 0;
     /* The first GATT write must contain the complete 12-byte management
-     * header. Keep 20 bytes as the minimum even if the terminal's raw UART
-     * chunk-size control is configured lower. */
+     * header, and a new ATT link starts at 23 bytes (20 payload) until the
+     * MTU exchange finishes. A learned or user-configured larger chunk size
+     * can therefore be refused on the first frame, which surfaces as a
+     * management write that "may or may not" have arrived. Management frames
+     * are small: always segment at the default payload so no command depends
+     * on the timing of the MTU exchange. */
     try {
-      const size = Math.max(20, chunkSize());
+      const size = 20;
       for (let offset = 0; offset < frame.length; offset += size) {
         assertWriteSession(generation);
         const chunk = frame.slice(offset, offset + size);
@@ -3447,7 +3494,7 @@ async function sendControl(command, { returnResponse = false } = {}) {
       if (generation === state.writeGeneration && state.connected &&
           writesAttempted > 0 && (writesCompleted > 0 || !isAttSizeRejection(error))) {
         // A partial management frame must not absorb a later settings request.
-        state.mgmtWriteError = "Management delivery is uncertain; disconnect and reconnect before sending more settings commands.";
+        state.mgmtWriteError = `Management delivery is uncertain; disconnect and reconnect before sending more settings commands. (${error?.message || error})`;
         error = new Error(state.mgmtWriteError, { cause: error });
       }
       responses.reject(requestId, error);
@@ -3568,7 +3615,7 @@ function onDisconnected() {
     elements.bleNameInput.value = "";
   }
   state.reliableMaxPayload = 20;
-  state.reliableWriteSize = BLE_MAX_ATT_VALUE;
+  state.reliableWriteSize = RELIABLE_UART_WRITE_START;
   // Drop any half-received frame: the next connection restarts the sequence.
   reliableReassembler.reset();
   mgmtReassembler.reset();
@@ -3853,8 +3900,9 @@ async function connectOnce({ chooseDevice = false } = {}) {
     if (!hasManagementCapability(MGMT_CAP_DEVICE_ID)) {
       throw new Error("Device does not advertise Device ID support");
     }
-    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART)) {
-      throw new Error("Device does not advertise Reliable UART support");
+    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART) &&
+        !hasManagementCapability(MGMT_CAP_PREFER_NUS)) {
+      throw new Error("Device does not advertise a UART transport");
     }
     const deviceIdValue = await bleTransport.read(
       device.id,
@@ -3898,47 +3946,93 @@ async function connectOnce({ chooseDevice = false } = {}) {
       },
     );
     state.mgmtReady = true;
-    const reliableState = await bleTransport.read(
-      device.id,
-      RELIABLE_UART_SERVICE,
-      RELIABLE_UART_STATE,
-    );
-    if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
-      throw new Error("Unsupported Reliable UART version");
+    /* Two transports are supported. Mainline boards keep the reliable UART
+     * channel; a board that advertises PREFER_NUS (the ESP32-CAM) uses the raw
+     * NUS pipe, and a board that loses the reliable service falls back to NUS
+     * instead of failing to connect. */
+    const preferNus = hasManagementCapability(MGMT_CAP_PREFER_NUS);
+    let useNus = preferNus || !hasManagementCapability(MGMT_CAP_RELIABLE_UART);
+
+    if (!useNus) {
+      try {
+        const reliableState = await bleTransport.read(
+          device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_STATE,
+        );
+        if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
+          throw new Error("Unsupported Reliable UART version");
+        }
+        const reliablePayloadLimit = reliableState.getUint16(2, true);
+        const reliableTxSequence = reliableState.getUint32(4, true);
+        const reliableRxSequence = reliableState.getUint32(8, true);
+        if (
+          reliablePayloadLimit === 0 ||
+          reliableTxSequence === 0 ||
+          reliableRxSequence === 0
+        ) {
+          throw new Error("Invalid Reliable UART state");
+        }
+        state.reliableMaxPayload = Math.max(
+          1,
+          Math.min(
+            reliablePayloadLimit,
+            BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
+          ),
+        );
+        state.reliableWriteSize = RELIABLE_UART_WRITE_START;
+        state.reliableTxSequence = reliableTxSequence;
+        state.reliableRxSequence = reliableRxSequence;
+        state.reliableRxDesync = false;
+        await bleTransport.startNotifications(
+          device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_TX,
+          (value) => {
+            if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
+          },
+        );
+        state.reliableReady = true;
+        state.nusReady = false;
+      } catch (error) {
+        useNus = true;
+        state.reliableReady = false;
+        appendLine(`[warn] Reliable UART unavailable (${error.message}); using NUS`);
+        try {
+          await bleTransport.stopNotifications(
+            device.id,
+            RELIABLE_UART_SERVICE,
+            RELIABLE_UART_TX,
+          );
+        } catch (_error) {
+          // The reliable path may have failed before subscribing.
+        }
+      }
     }
-    const reliablePayloadLimit = reliableState.getUint16(2, true);
-    const reliableTxSequence = reliableState.getUint32(4, true);
-    const reliableRxSequence = reliableState.getUint32(8, true);
-    if (
-      reliablePayloadLimit === 0 ||
-      reliableTxSequence === 0 ||
-      reliableRxSequence === 0
-    ) {
-      throw new Error("Invalid Reliable UART state");
+
+    if (useNus) {
+      await bleTransport.startNotifications(
+        device.id,
+        NUS_SERVICE,
+        NUS_TX,
+        (value) => {
+          if (bleNotificationSession !== notificationSession) return;
+          const bytes = new Uint8Array(
+            value.buffer.slice(
+              value.byteOffset,
+              value.byteOffset + value.byteLength,
+            ),
+          );
+          handleIncomingBytes(bytes);
+        },
+      );
+      state.nusReady = true;
+      state.reliableReady = false;
     }
-    state.reliableMaxPayload = Math.max(
-      1,
-      Math.min(
-        reliablePayloadLimit,
-        BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
-      ),
-    );
-    state.reliableWriteSize = BLE_MAX_ATT_VALUE;
-    state.reliableTxSequence = reliableTxSequence;
-    state.reliableRxSequence = reliableRxSequence;
-    state.reliableRxDesync = false;
-    await bleTransport.startNotifications(
-      device.id,
-      RELIABLE_UART_SERVICE,
-      RELIABLE_UART_TX,
-      (value) => {
-        if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
-      },
-    );
-    state.reliableReady = true;
+    state.legacy = false;
     state.deviceRestored = false;
     setConnected(true, { preserveJournal: true });
-    appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
+    appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId} transport=${state.reliableReady ? "RELIABLE" : "NUS"} build=${APP_BUILD}`);
     requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
@@ -4011,7 +4105,7 @@ async function disconnect() {
         // Ignore disconnect races.
       }
     }
-    if (state.legacy && state.device) {
+    if (state.nusReady && state.device) {
       try {
         await bleTransport.stopNotifications(
           state.device.id,
@@ -4629,7 +4723,11 @@ function bind() {
     // A long press selects text through xterm; suppress the WebView's native
     // canvas menu, which cannot copy the DOM-rendered terminal anyway. Some
     // WebViews swallow the touch timer and only signal the hold through this
-    // event, so use it as a backup for the selection gesture.
+    // event, so use it as a backup for the selection gesture. In a browser,
+    // leave the native copy/paste menu alone.
+    if (!nativeSelectionShell) {
+      return;
+    }
     if (!coarsePointerMedia.matches && event.pointerType !== "touch") {
       return;
     }
@@ -4643,8 +4741,9 @@ function bind() {
   });
   elements.terminalOutput.addEventListener("selectstart", (event) => {
     // The WebView would start its own selection over the rendered rows and
-    // take the gesture away from the xterm selection the app drives.
-    if (coarsePointerMedia.matches) {
+    // take the gesture away from the xterm selection the app drives. A
+    // browser's native selection is the one the user expects, so keep it.
+    if (nativeSelectionShell && coarsePointerMedia.matches) {
       event.preventDefault();
     }
   });
@@ -4765,9 +4864,8 @@ function bind() {
     if (!state.term) {
       return;
     }
-    // With no selection, copy the whole transcript. This is the only reliable
-    // path in a WebView where native text selection does not reach xterm's
-    // DOM renderer.
+    // Copy only a live selection or the snapshot taken for it. A tap with
+    // nothing selected must not paste an unrelated whole-screen transcript.
     const text = terminalCopyText();
     if (!text) {
       toast(t("copyFailed"), "error");

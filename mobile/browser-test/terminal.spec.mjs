@@ -173,7 +173,7 @@ for (const [platform, rejection] of [
       await enqueueBytes(new Uint8Array(80).fill(65));
       return { attempts, accepted, nextSequence: state.reliableTxSequence, writeError: state.uartWriteError };
     }, rejection);
-    expect(result.attempts).toEqual([92, 62, 20, 20, 20, 20, 12]);
+    expect(result.attempts).toEqual([20, 20, 20, 20, 12]);
     expect(result.accepted.slice(12)).toEqual(new Array(80).fill(65));
     expect(result.nextSequence).toBe(2);
     expect(result.writeError).toBe("");

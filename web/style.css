@@ -27,6 +27,12 @@
   --terminal: #05080d;
   --input-bg: #0e131c;
   --btn-hover: #232c3d;
+  /* The floating selection Copy pill sits over live terminal text, so it needs
+   * its own opaque surface: skin-v2 makes --panel-3 translucent glass. */
+  --selection-copy-bg: #1f2735;
+  --selection-copy-border: rgba(255, 255, 255, 0.22);
+  --selection-copy-text: #eef4fc;
+  --selection-copy-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
     "Liberation Mono", monospace;
@@ -62,6 +68,10 @@
   --terminal: #f8fafc;
   --input-bg: #ffffff;
   --btn-hover: #e4ebf4;
+  --selection-copy-bg: #ffffff;
+  --selection-copy-border: rgba(15, 32, 56, 0.22);
+  --selection-copy-text: #0f1c2e;
+  --selection-copy-shadow: 0 6px 20px rgba(15, 35, 70, 0.24);
 }
 
 /* ---------- Header right cluster ---------- */
@@ -1078,12 +1088,41 @@ body.terminal-fullscreen-fallback {
   -webkit-touch-callout: none;
 }
 
+/* The page in a browser keeps the platform's own text selection and copy
+ * menu; only the native shells draw the custom draggable dots. */
+.browser-terminal-selection .terminal-output,
+.browser-terminal-selection .terminal-output .xterm,
+.browser-terminal-selection .terminal-output .xterm-rows,
+.browser-terminal-selection .terminal-output .xterm-screen {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
 .terminal-output .xterm-viewport {
   background: var(--terminal) !important;
 }
 
 .terminal-output .xterm-scrollable-element {
   background: var(--terminal) !important;
+}
+
+/* xterm sets the scrollbar's inline width from overviewRuler.width (see
+ * initTerminal), so this only insets the painted thumb: the transparent border
+ * keeps the full track tappable while the visible slider stays a thin pill. */
+.terminal-output .xterm-scrollable-element > .scrollbar > .slider {
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  /* xterm's injected `background:` shorthand resets the clip, and it is added
+   * after this stylesheet, so this one property has to win explicitly. */
+  background-clip: padding-box !important;
+}
+
+/* The overview ruler borrows the same width option, but this terminal has no
+ * decorations, so its canvas would only paint a hairline over the slider. */
+.terminal-output .xterm-decoration-overview-ruler {
+  display: none;
 }
 
 /* ---------- Integrated terminal input ---------- */
@@ -2833,14 +2872,14 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
   transform: translate(-50%, -100%);
   padding: 8px 18px;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--panel-3);
-  color: var(--text);
+  border: 1px solid var(--selection-copy-border);
+  background: var(--selection-copy-bg);
+  color: var(--selection-copy-text);
   font: inherit;
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--selection-copy-shadow);
   pointer-events: auto;
   touch-action: manipulation;
   z-index: 71;

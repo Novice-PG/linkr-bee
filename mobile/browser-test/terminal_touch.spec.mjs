@@ -166,7 +166,7 @@ test("the keyboard button follows the keyboard, not just focus", async ({ page }
 });
 
 test("long press shows draggable handles and dragging one trims precisely", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -226,7 +226,7 @@ test("long press shows draggable handles and dragging one trims precisely", asyn
 
 
 test("long press selects a word and dragging extends the selection", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -278,7 +278,7 @@ test("long press selects a word and dragging extends the selection", async ({ pa
 });
 
 test("long press with the keyboard open selects and copies without closing it", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   await page.evaluate(() => window.__terminalTest.state.term.focus());
   await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
     .toContain("xterm-helper-textarea");
@@ -347,7 +347,7 @@ test("swiping history keeps an open keyboard open", async ({ page, context }) =>
 });
 
 test("a cancelled long press still selects and does not open the keyboard", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const client = await context.newCDPSession(page);
   const x = box.x + box.width / 2;
@@ -368,7 +368,7 @@ test("a cancelled long press still selects and does not open the keyboard", asyn
 });
 
 test("copy survives a WebView clearing the selection during a long press", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const termSize = await page.evaluate(() => ({
     rows: window.__terminalTest.state.term.rows,
@@ -400,7 +400,7 @@ test("copy survives a WebView clearing the selection during a long press", async
 });
 
 test("a long hold never opens the keyboard, even without a word selected", async ({ page, context }) => {
-  await openTerminal(page);
+  await openTerminal(page, { android: true });
   const box = await page.locator(".xterm-screen").boundingBox();
   const client = await context.newCDPSession(page);
   // Far right of an empty area: no word to select there.
@@ -417,16 +417,25 @@ test("a long hold never opens the keyboard, even without a word selected", async
     .not.toContain("xterm-helper-textarea");
 });
 
-test("copy with no selection falls back to the whole transcript", async ({ page }) => {
+test("copy with no selection copies nothing", async ({ page }) => {
   await openTerminal(page);
   await page.evaluate(() => window.__terminalTest.state.term.clearSelection());
   await page.locator("#copyBtn").click();
-  const copied = await page.evaluate(() => window.__terminalCopied);
-  expect(copied).toContain("line 000 abcdefghijklmnopqrstuvwxyz");
-  expect(copied).toContain("line 119 abcdefghijklmnopqrstuvwxyz");
+  await page.waitForTimeout(80);
+  // Falling back to the whole scrollback made a stray tap paste an unrelated
+  // transcript. With nothing selected, Copy must leave the clipboard alone.
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
 });
 
-test("whole transcript copy preserves wrapped lines and boundary spaces", async ({ page }) => {
+test("copy with no selection copies nothing in the native shell too", async ({ page }) => {
+  await openTerminal(page, { android: true });
+  await page.evaluate(() => window.__terminalTest.state.term.clearSelection());
+  await page.locator("#copyBtn").click();
+  await page.waitForTimeout(80);
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
+});
+
+test("selected wrapped lines keep their boundary spaces", async ({ page }) => {
   await openTerminal(page);
   // Flush the welcome output before resetting the buffer for this fixture.
   await page.evaluate(() => new Promise(requestAnimationFrame));
@@ -435,10 +444,114 @@ test("whole transcript copy preserves wrapped lines and boundary spaces", async 
     const text = "A".repeat(term.cols * 2 + 5) + "\r\nNEXT\r\n" +
       "B".repeat(term.cols - 1) + " TAIL\r\n\r\nEND";
     await new Promise(resolve => term.write("\x1bc" + text, resolve));
+    const buffer = term.buffer.active;
+    term.select(0, 0, buffer.cursorY * term.cols + buffer.cursorX);
     return text.replaceAll("\r", "");
   });
   await page.locator("#copyBtn").click();
   await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(expected);
+});
+
+test("a browser keeps native selection and draws no custom handles", async ({ page, context }) => {
+  await openTerminal(page);
+  await expect(page.locator("html")).toHaveClass(/browser-terminal-selection/);
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.querySelector(".xterm-rows")).userSelect,
+  )).toBe("text");
+
+  // A long press in a browser belongs to the browser: it shows its own handles
+  // and copy menu. The app must not add a second, conflicting pair of dots.
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const client = await context.newCDPSession(page);
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height - 50;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 41 }],
+  });
+  await page.waitForTimeout(900);
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator(".terminal-selection-handle")).toHaveCount(0);
+  await expect(page.locator(".terminal-selection-copy")).toHaveCount(0);
+});
+
+async function selectBrowserTerminalText(page) {
+  await page.evaluate(() => new Promise(resolve =>
+    window.__terminalTest.state.term.write("\x1bcBrowser native selection", resolve)));
+  await page.waitForFunction(() =>
+    document.querySelector(".xterm-rows")?.firstElementChild?.textContent.includes("Browser native selection"));
+  return page.evaluate(() => {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector(".xterm-rows").firstElementChild);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString();
+  });
+}
+
+for (const clipboard of ["available", "missing", "rejected"]) {
+  test(`browser-owned selection reaches Copy (${clipboard})`, async ({ page }) => {
+    await openTerminal(page);
+    const selected = await selectBrowserTerminalText(page);
+    expect(selected).toContain("Browser native selection");
+    expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection())).toBe("");
+    if (clipboard !== "available") {
+      await page.evaluate(clipboard => {
+        Object.defineProperty(navigator.clipboard, "writeText", {
+          configurable: true,
+          value: clipboard === "missing" ? undefined : async () => { throw new Error("denied"); },
+        });
+        document.addEventListener("copy", event => {
+          const data = event.clipboardData;
+          if (!data) return;
+          const setData = data.setData.bind(data);
+          data.setData = (format, text) => {
+            if (format === "text/plain") window.__terminalCopied = text;
+            setData(format, text);
+          };
+        }, { capture: true });
+      }, clipboard);
+    }
+    await page.locator("#copyBtn").click();
+    await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
+    expect(await page.evaluate(() => document.getSelection().toString())).toBe(selected);
+  });
+}
+
+test("browser selection handle gestures are not cleared or turned into scrolling", async ({ page }) => {
+  await openTerminal(page);
+  const selected = await selectBrowserTerminalText(page);
+  const result = await page.evaluate(() => {
+    const output = document.getElementById("terminalOutput");
+    const bounds = output.getBoundingClientRect();
+    const touch = new Touch({ identifier: 41, target: output, clientX: bounds.left + 20, clientY: bounds.top + 20 });
+    const events = [
+      new TouchEvent("touchstart", { bubbles: true, cancelable: true, touches: [touch] }),
+      new TouchEvent("touchmove", { bubbles: true, cancelable: true, touches: [touch] }),
+      new TouchEvent("touchend", { bubbles: true, cancelable: true, touches: [] }),
+    ];
+    const before = window.__terminalTest.state.term.buffer.active.viewportY;
+    for (const event of events) output.dispatchEvent(event);
+    return { selected: document.getSelection().toString(), prevented: events.map(event => event.defaultPrevented),
+      before, after: window.__terminalTest.state.term.buffer.active.viewportY };
+  });
+  expect(result.selected).toBe(selected);
+  expect(result.prevented).toEqual([false, false, false]);
+  expect(result.after).toBe(result.before);
+});
+
+test("Copy ignores a DOM selection outside the terminal", async ({ page }) => {
+  await openTerminal(page);
+  await page.evaluate(() => {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector("h1"));
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.locator("#copyBtn").click();
+  expect(await page.evaluate(() => window.__terminalCopied)).toBe(null);
 });
 
 for (const clipboard of ["missing", "rejected"]) {
