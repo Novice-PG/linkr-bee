@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-5" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-6" />
   </head>
   <body>
     <main class="flash-shell">
@@ -111,6 +111,25 @@
             </label>
           </div>
 
+          <section id="camPrep" class="notice cam-note" hidden>
+            <strong>ESP32-CAM 底板烧录提示</strong>
+            <p>多数 ESP32-CAM 底板没有把 DTR/RTS 自动复位电路接到 EN/IO0，页面无法自动让芯片进入下载模式。</p>
+            <ol>
+              <li>按住底板上的 <b>IO0</b>（或把 GPIO0 短接到 GND）。</li>
+              <li>点一下 <b>RST</b>，或断开再接通 USB 电源。</li>
+              <li>松开 IO0，然后勾选下面的“已手动进入下载模式”。</li>
+            </ol>
+            <p>ESP32-CAM-MB 这类带自动下载电路的底板可以直接烧录，不需要勾选。波特率建议先用 115200。</p>
+          </section>
+
+          <label class="check-field">
+            <input type="checkbox" id="manualBoot" />
+            <span>
+              <strong>已手动进入下载模式</strong>
+              <small>跳过自动复位；用于没有 DTR/RTS 自动下载电路的底板</small>
+            </span>
+          </label>
+
           <dl class="board-facts" id="boardFacts">
             <div><dt>芯片</dt><dd id="factChip">—</dd></div>
             <div><dt>烧录地址</dt><dd id="factAddress">—</dd></div>
@@ -159,11 +178,11 @@
               </li>
               <li>
                 <strong>ESP32-CAM 接线</strong>
-                <span>需要 3.3V USB-TTL，接 UART0：GPIO1 TX、GPIO3 RX，并共地。</span>
+                <span>用底板时直接接 USB；无底板时需要 3.3V USB-TTL，接 UART0：GPIO1 TX、GPIO3 RX，并共地。</span>
               </li>
               <li>
                 <strong>手动进入下载模式</strong>
-                <span>没有自动进入时，按住 BOOT 再点一下 RST，然后重新连接。</span>
+                <span>底板的 DTR/RTS 没有接到 EN/IO0 时，按住 IO0 点一下 RST，松开 IO0，并勾选“已手动进入下载模式”。</span>
               </li>
             </ul>
           </section>
@@ -179,7 +198,7 @@
               </li>
               <li>
                 <strong>选择串口</strong>
-                <span>点击“连接串口并烧录”，在浏览器弹窗里选择串口，工具会自动进入下载模式。</span>
+                <span>点击“连接串口并烧录”，在浏览器弹窗里选择串口。ESP32-CAM 底板若不能自动下载，先手动进入下载模式并勾选对应选项。</span>
               </li>
               <li>
                 <strong>等待完成</strong>
@@ -217,6 +236,6 @@
     </main>
 
     <script src="./vendor/jszip/jszip.min.js"></script>
-    <script type="module" src="./flash.js?v=20261026-2"></script>
+    <script type="module" src="./flash.js?v=20261026-3"></script>
   </body>
 </html>

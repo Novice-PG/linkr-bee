@@ -225,6 +225,72 @@ body {
   line-height: 1.5;
 }
 
+.cam-note {
+  margin: 14px 0 0;
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.cam-note strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.cam-note p {
+  margin: 0 0 6px;
+  color: var(--muted);
+}
+
+.cam-note ol {
+  margin: 0 0 6px;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.cam-note b {
+  color: var(--text);
+}
+
+.check-field {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.check-field input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.check-field span {
+  display: grid;
+  gap: 2px;
+}
+
+.check-field strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.check-field small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .flash-setup {
   padding: clamp(18px, 2.4vw, 24px);
 }

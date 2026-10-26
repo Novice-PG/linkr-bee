@@ -13,6 +13,8 @@ const BOARD_NAMES = {
 const $ = (id) => document.getElementById(id);
 const boardSelect = $("boardSelect");
 const baudSelect = $("baudSelect");
+const manualBoot = $("manualBoot");
+const camPrep = $("camPrep");
 const connectButton = $("connectButton");
 const downloadButton = $("downloadButton");
 const resetButton = $("resetButton");
@@ -160,9 +162,18 @@ function selectBoard(slug) {
   $("factHash").title = board?.sha256 || "";
   connectButton.disabled = !board;
   downloadButton.disabled = !board;
+  const isCam = board?.slug === "esp32-cam";
+  camPrep.hidden = !isCam;
+  // ESP32-CAM baseboards often use a CH340 without auto-download wiring. Start
+  // slow so a marginal USB cable or power rail still completes the handshake.
+  if (isCam) baudSelect.value = "115200";
   setProgress(0);
   if (board) {
-    setStatus(`已选择 ${board.name}。点击“连接串口并烧录”开始。`);
+    setStatus(
+      isCam
+        ? `已选择 ${board.name}。底板不能自动下载时，先按住 IO0 点一下 RST，再勾选“已手动进入下载模式”。`
+        : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
+    );
   }
 }
 
@@ -303,10 +314,23 @@ async function flash() {
     if (!state.port) {
       setStatus("请选择开发板串口…");
       state.port = await navigator.serial.requestPort();
-      state.transport = new Transport(state.port, false);
     }
 
-    setStatus("正在连接引导程序…");
+    // A failed attempt leaves the Web Serial port open, and reopening an open
+    // port throws. Always start from a fresh transport so the user can retry
+    // (or switch from auto reset to manual download mode) without reloading.
+    if (state.transport) {
+      try {
+        await state.transport.disconnect();
+      } catch {
+        // The port may already be closed; the new transport still works.
+      }
+    }
+    state.transport = new Transport(state.port, false);
+    state.loader = null;
+
+    const manual = manualBoot.checked;
+    setStatus(manual ? "正在连接（已跳过自动复位）…" : "正在连接引导程序…");
     const loader = new ESPLoader({
       transport: state.transport,
       baudrate: Number(baudSelect.value),
@@ -314,7 +338,7 @@ async function flash() {
       debugLogging: false,
     });
     state.loader = loader;
-    const chip = await loader.main();
+    const chip = await loader.main(manual ? "no_reset" : "default_reset");
     logLine(`检测到芯片：${chip}`);
 
     const expected = parseChip(state.board.chip);
@@ -347,13 +371,35 @@ async function flash() {
     await loader.after("hard_reset");
     setProgress(1);
     resetButton.disabled = false;
-    setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
-    logLine("烧录完成，设备已重启。");
+    if (manual) {
+      setStatus("烧录完成。请按一下底板 RST 键启动新固件。", "ok");
+      logLine("烧录完成。底板可能没有自动复位，请手动按 RST。");
+    } else {
+      setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
+      logLine("烧录完成，设备已重启。");
+    }
   } catch (error) {
     console.error(error);
-    setStatus(`烧录失败：${error?.message || error}`, "error");
-    logLine(`错误：${error?.message || error}`);
-    resetButton.disabled = !state.loader;
+    let message = String(error?.message || error);
+    if (
+      state.board?.slug === "esp32-cam" &&
+      !manualBoot.checked &&
+      /fail|connect|timeout|serial|open/i.test(message)
+    ) {
+      message +=
+        "。ESP32-CAM 底板可能没有自动下载电路：请按住 IO0 点一下 RST，松开 IO0，勾选“已手动进入下载模式”后再试。";
+    }
+    setStatus(`烧录失败：${message}`, "error");
+    logLine(`错误：${message}`);
+    // Close the failed session so the next click can open the port again.
+    try {
+      await state.transport?.disconnect();
+    } catch {
+      // Already closed.
+    }
+    state.transport = null;
+    state.loader = null;
+    resetButton.disabled = true;
   } finally {
     connectButton.disabled = !state.board;
   }
