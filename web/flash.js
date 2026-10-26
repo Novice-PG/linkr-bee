@@ -15,6 +15,10 @@ const boardSelect = $("boardSelect");
 const baudSelect = $("baudSelect");
 const manualBoot = $("manualBoot");
 const camPrep = $("camPrep");
+const portSelect = $("portSelect");
+const pickPortButton = $("pickPortButton");
+const refreshPortsButton = $("refreshPortsButton");
+const portHint = $("portHint");
 const connectButton = $("connectButton");
 const downloadButton = $("downloadButton");
 const resetButton = $("resetButton");
@@ -27,10 +31,137 @@ const state = {
   manifest: null,
   board: null,
   port: null,
+  ports: [],
   transport: null,
   loader: null,
   image: null,
 };
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const USB_SERIAL_NAMES = {
+  "0403": "FTDI",
+  "10c4": "CP210x",
+  "1a86": "CH340/CH341",
+  "303a": "Espressif USB Serial/JTAG",
+  "2341": "Arduino",
+};
+
+function portInfo(port) {
+  const info = port?.getInfo?.() || {};
+  const vid = info.usbVendorId?.toString(16).padStart(4, "0");
+  const pid = info.usbProductId?.toString(16).padStart(4, "0");
+  const name = vid ? USB_SERIAL_NAMES[vid] || "USB 串口" : "串口";
+  return {
+    vid: vid ? vid.toUpperCase() : "",
+    pid: pid ? pid.toUpperCase() : "",
+    name,
+  };
+}
+
+function portLabel(port, index) {
+  const { vid, pid, name } = portInfo(port);
+  const ids = vid ? ` · ${vid}:${pid || "????"}` : "";
+  return `串口 ${index + 1} · ${name}${ids}`;
+}
+
+function setPortHint(text, isError = false) {
+  portHint.textContent = text;
+  portHint.classList.toggle("error", isError);
+}
+
+function rebuildPortSelect(preferred) {
+  const selected = preferred || state.port;
+  portSelect.replaceChildren();
+  if (!state.ports.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "尚未选择串口";
+    portSelect.append(option);
+    portSelect.value = "";
+    return;
+  }
+  state.ports.forEach((port, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = portLabel(port, index);
+    portSelect.append(option);
+  });
+  let index = state.ports.indexOf(selected);
+  if (index < 0) index = 0;
+  portSelect.value = String(index);
+}
+
+// Granted ports survive a reload. Ask for one only when the list is empty or
+// the user explicitly picks another device.
+async function refreshPorts({ request = false } = {}) {
+  if (!navigator.serial) return;
+  try {
+    if (request) {
+      await releaseConnection();
+      const picked = await navigator.serial.requestPort();
+      state.port = picked;
+    }
+    state.ports = await navigator.serial.getPorts();
+    if (state.port && !state.ports.includes(state.port)) {
+      state.ports.push(state.port);
+    }
+    if (!state.port && state.ports.length) state.port = state.ports[0];
+    rebuildPortSelect(state.port);
+    if (state.port) {
+      const { vid, pid, name } = portInfo(state.port);
+      setPortHint(
+        `已选择 ${name}${vid ? `（VID ${vid} / PID ${pid}）` : ""}。` +
+          `如果打开失败，请关闭 Arduino IDE、minicom、ModemManager 或占用该串口的其他页面。`,
+      );
+    } else {
+      setPortHint("点击“选择串口”，在浏览器弹窗里选中开发板的 USB 串口。");
+    }
+  } catch (error) {
+    if (error?.name !== "NotFoundError") {
+      setPortHint(`读取串口失败：${error?.message || error}`, true);
+    }
+  }
+}
+
+function serialErrorHint(message) {
+  if (/failed to open|access denied|busy|resource busy|in use/i.test(message)) {
+    return (
+      "无法打开串口。请确认：1) 没有其他程序占用（Arduino IDE、minicom、ModemManager、另一个浏览器标签）；" +
+      "2) Linux 下当前用户在 dialout 组；3) 不使用 Snap/Flatpak 版浏览器；4) 换一根能传数据的 USB 线。"
+    );
+  }
+  return "";
+}
+
+// esptool-js' disconnect waits for the reader lock without a timeout. A failed
+// handshake can leave the read loop pending, which used to freeze the page
+// until reload. Bound every cleanup step and always release the OS port.
+async function releaseConnection() {
+  const transport = state.transport;
+  const port = state.port;
+  state.transport = null;
+  state.loader = null;
+  if (transport?.reader) {
+    try {
+      await Promise.race([transport.reader.cancel(), sleep(400)]);
+    } catch {
+      // Already cancelled.
+    }
+  }
+  if (transport) {
+    try {
+      await Promise.race([transport.disconnect(), sleep(1200)]);
+    } catch {
+      // Already closed.
+    }
+  }
+  try {
+    await Promise.race([port?.close?.(), sleep(600)]);
+  } catch {
+    // The port was not open or is already closed.
+  }
+}
 
 // The flasher is deployed from the fork's Pages site while the PR is open and
 // from origin after the merge. Prefer the repository the manifest was built
@@ -303,6 +434,9 @@ async function flash() {
   if (!state.board) return;
   connectButton.disabled = true;
   resetButton.disabled = true;
+  portSelect.disabled = true;
+  pickPortButton.disabled = true;
+  refreshPortsButton.disabled = true;
   setProgress(0);
   setStatus("正在准备固件…");
   try {
@@ -313,21 +447,17 @@ async function flash() {
     }
     if (!state.port) {
       setStatus("请选择开发板串口…");
-      state.port = await navigator.serial.requestPort();
+      await refreshPorts({ request: true });
+    }
+    if (!state.port) {
+      throw new Error("尚未选择串口");
     }
 
-    // A failed attempt leaves the Web Serial port open, and reopening an open
-    // port throws. Always start from a fresh transport so the user can retry
-    // (or switch from auto reset to manual download mode) without reloading.
-    if (state.transport) {
-      try {
-        await state.transport.disconnect();
-      } catch {
-        // The port may already be closed; the new transport still works.
-      }
-    }
+    // A previous attempt can leave the Web Serial port open (or its reader
+    // lock pending). Bounded cleanup lets the user retry, or switch from auto
+    // reset to manual download mode, without reloading the page.
+    await releaseConnection();
     state.transport = new Transport(state.port, false);
-    state.loader = null;
 
     const manual = manualBoot.checked;
     setStatus(manual ? "正在连接（已跳过自动复位）…" : "正在连接引导程序…");
@@ -380,28 +510,28 @@ async function flash() {
     }
   } catch (error) {
     console.error(error);
-    let message = String(error?.message || error);
-    if (
+    let message = String(error?.message || error).replace(/[。.\s]+$/, "");
+    const openHint = serialErrorHint(message);
+    if (openHint) {
+      message = `${message}。${openHint}`;
+    } else if (
       state.board?.slug === "esp32-cam" &&
       !manualBoot.checked &&
-      /fail|connect|timeout|serial|open/i.test(message)
+      /fail|connect|timeout|sync|boot|serial/i.test(message)
     ) {
       message +=
         "。ESP32-CAM 底板可能没有自动下载电路：请按住 IO0 点一下 RST，松开 IO0，勾选“已手动进入下载模式”后再试。";
     }
     setStatus(`烧录失败：${message}`, "error");
     logLine(`错误：${message}`);
-    // Close the failed session so the next click can open the port again.
-    try {
-      await state.transport?.disconnect();
-    } catch {
-      // Already closed.
-    }
-    state.transport = null;
-    state.loader = null;
+    // Release the failed session without waiting on a stuck reader lock.
+    await releaseConnection();
     resetButton.disabled = true;
   } finally {
     connectButton.disabled = !state.board;
+    portSelect.disabled = false;
+    pickPortButton.disabled = !navigator.serial;
+    refreshPortsButton.disabled = !navigator.serial;
   }
 }
 
@@ -452,8 +582,42 @@ async function init() {
   if (!navigator.serial) {
     $("unsupported").hidden = false;
     connectButton.disabled = true;
+    pickPortButton.disabled = true;
+    refreshPortsButton.disabled = true;
   }
   boardSelect.addEventListener("change", () => selectBoard(boardSelect.value));
+  portSelect.addEventListener("change", async () => {
+    const index = Number.parseInt(portSelect.value, 10);
+    state.port = Number.isInteger(index) ? state.ports[index] || null : null;
+    await releaseConnection();
+    if (state.port) {
+      const { vid, pid, name } = portInfo(state.port);
+      setPortHint(
+        `已选择 ${name}${vid ? `（VID ${vid} / PID ${pid}）` : ""}。` +
+          "如果打开失败，请关闭占用该串口的其他程序。",
+      );
+    } else {
+      setPortHint("点击“选择串口”，在浏览器弹窗里选中开发板的 USB 串口。");
+    }
+  });
+  pickPortButton.addEventListener("click", () => refreshPorts({ request: true }));
+  refreshPortsButton.addEventListener("click", () => refreshPorts());
+  navigator.serial?.addEventListener?.("connect", () => refreshPorts());
+  navigator.serial?.addEventListener?.("disconnect", () => refreshPorts());
+  // Best effort: release the OS port when the tab is closed or reloaded, so a
+  // refresh does not leave the previous page holding the serial handle.
+  window.addEventListener("pagehide", () => {
+    try {
+      state.transport?.disconnect?.();
+    } catch {
+      // Page is going away.
+    }
+    try {
+      state.port?.close?.();
+    } catch {
+      // Already closed.
+    }
+  });
   connectButton.addEventListener("click", flash);
   resetButton.addEventListener("click", resetDevice);
   downloadButton.addEventListener("click", () => {
@@ -469,6 +633,7 @@ async function init() {
   try {
     populateBoards(await loadManifest());
     logLine(`已加载 v${state.manifest.version}，${state.manifest.boards.length} 个板型。`);
+    await refreshPorts();
   } catch (error) {
     console.error(error);
     $("releasePill").classList.add("stale");

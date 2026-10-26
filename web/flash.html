@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-6" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-8" />
   </head>
   <body>
     <main class="flash-shell">
@@ -111,6 +111,18 @@
             </label>
           </div>
 
+          <div class="field port-field">
+            <span>串口 / COM Port</span>
+            <div class="port-row">
+              <select id="portSelect">
+                <option value="">尚未选择串口</option>
+              </select>
+              <button id="pickPortButton" class="btn" type="button">选择串口</button>
+              <button id="refreshPortsButton" class="btn" type="button">刷新</button>
+            </div>
+            <small id="portHint" class="port-hint">点击“选择串口”，在浏览器弹窗里选中开发板的 USB 串口。</small>
+          </div>
+
           <section id="camPrep" class="notice cam-note" hidden>
             <strong>ESP32-CAM 底板烧录提示</strong>
             <p>多数 ESP32-CAM 底板没有把 DTR/RTS 自动复位电路接到 EN/IO0，页面无法自动让芯片进入下载模式。</p>
@@ -120,6 +132,7 @@
               <li>松开 IO0，然后勾选下面的“已手动进入下载模式”。</li>
             </ol>
             <p>ESP32-CAM-MB 这类带自动下载电路的底板可以直接烧录，不需要勾选。波特率建议先用 115200。</p>
+            <p>烧录时建议拔掉摄像头和 SD 卡，并使用稳定的 5V USB 电源。若串口打不开，换 USB 线/口，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
           </section>
 
           <label class="check-field">
@@ -198,7 +211,11 @@
               </li>
               <li>
                 <strong>选择串口</strong>
-                <span>点击“连接串口并烧录”，在浏览器弹窗里选择串口。ESP32-CAM 底板若不能自动下载，先手动进入下载模式并勾选对应选项。</span>
+                <span>先点“选择串口”，确认选中的是开发板的 USB 串口；再点“连接串口并烧录”。</span>
+              </li>
+              <li>
+                <strong>手动进入下载模式</strong>
+                <span>ESP32-CAM 底板若不能自动下载，按住 IO0 点一下 RST，松开 IO0，勾选“已手动进入下载模式”再连接。</span>
               </li>
               <li>
                 <strong>等待完成</strong>
@@ -236,6 +253,6 @@
     </main>
 
     <script src="./vendor/jszip/jszip.min.js"></script>
-    <script type="module" src="./flash.js?v=20261026-3"></script>
+    <script type="module" src="./flash.js?v=20261026-6"></script>
   </body>
 </html>
