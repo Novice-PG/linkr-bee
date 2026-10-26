@@ -261,40 +261,17 @@ body {
   color: var(--text);
 }
 
-.check-field {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin: 14px 0 0;
-  padding: 12px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
+.cam-note code,
+.notice code {
+  padding: 1px 5px;
+  border-radius: 5px;
   background: var(--panel-2);
-  cursor: pointer;
-}
-
-.check-field input {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  margin: 2px 0 0;
-  accent-color: var(--accent);
-}
-
-.check-field span {
-  display: grid;
-  gap: 2px;
-}
-
-.check-field strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.check-field small {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
+.btn[hidden] {
+  display: none;
 }
 
 .flash-setup {
@@ -548,6 +525,12 @@ body {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.log-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
 }
 
 .link-button {

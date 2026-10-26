@@ -13,7 +13,7 @@ const BOARD_NAMES = {
 const $ = (id) => document.getElementById(id);
 const boardSelect = $("boardSelect");
 const baudSelect = $("baudSelect");
-const manualBoot = $("manualBoot");
+const retryButton = $("retryButton");
 const camPrep = $("camPrep");
 const portSelect = $("portSelect");
 const pickPortButton = $("pickPortButton");
@@ -302,7 +302,7 @@ function selectBoard(slug) {
   if (board) {
     setStatus(
       isCam
-        ? `已选择 ${board.name}。底板不能自动下载时，先按住 IO0 点一下 RST，再勾选“已手动进入下载模式”。`
+        ? `已选择 ${board.name}。底板不能自动下载时，按住 IO0 点一下 CAM 模块上的 RST，松开后再连接；失败时点“已按 IO0 + RST，重试连接”。`
         : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
     );
   }
@@ -430,9 +430,10 @@ function terminal() {
   };
 }
 
-async function flash() {
+async function flash({ noReset = false } = {}) {
   if (!state.board) return;
   connectButton.disabled = true;
+  retryButton.hidden = true;
   resetButton.disabled = true;
   portSelect.disabled = true;
   pickPortButton.disabled = true;
@@ -452,15 +453,21 @@ async function flash() {
     if (!state.port) {
       throw new Error("尚未选择串口");
     }
+    {
+      const { vid, pid, name } = portInfo(state.port);
+      logLine(
+        `串口：${name}${vid ? `（VID ${vid} / PID ${pid}）` : ""}` +
+          ` · 板型：${state.board.slug} · 固件：${state.manifest?.tag || state.manifest?.version || "?"}` +
+          ` · 来源：${state.manifest?.source || "?"}`,
+      );
+    }
 
     // A previous attempt can leave the Web Serial port open (or its reader
-    // lock pending). Bounded cleanup lets the user retry, or switch from auto
-    // reset to manual download mode, without reloading the page.
+    // lock pending). Bounded cleanup lets the user retry without reloading.
     await releaseConnection();
     state.transport = new Transport(state.port, false);
 
-    const manual = manualBoot.checked;
-    setStatus(manual ? "正在连接（已跳过自动复位）…" : "正在连接引导程序…");
+    setStatus(noReset ? "正在连接（跳过自动复位）…" : "正在连接引导程序…");
     const loader = new ESPLoader({
       transport: state.transport,
       baudrate: Number(baudSelect.value),
@@ -468,7 +475,7 @@ async function flash() {
       debugLogging: false,
     });
     state.loader = loader;
-    const chip = await loader.main(manual ? "no_reset" : "default_reset");
+    const chip = await loader.main(noReset ? "no_reset" : "default_reset");
     logLine(`检测到芯片：${chip}`);
 
     const expected = parseChip(state.board.chip);
@@ -501,26 +508,23 @@ async function flash() {
     await loader.after("hard_reset");
     setProgress(1);
     resetButton.disabled = false;
-    if (manual) {
-      setStatus("烧录完成。请按一下底板 RST 键启动新固件。", "ok");
-      logLine("烧录完成。底板可能没有自动复位，请手动按 RST。");
-    } else {
-      setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
-      logLine("烧录完成，设备已重启。");
-    }
+    setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
+    logLine("烧录完成，设备已重启。");
   } catch (error) {
     console.error(error);
     let message = String(error?.message || error).replace(/[。.\s]+$/, "");
     const openHint = serialErrorHint(message);
     if (openHint) {
       message = `${message}。${openHint}`;
-    } else if (
-      state.board?.slug === "esp32-cam" &&
-      !manualBoot.checked &&
-      /fail|connect|timeout|sync|boot|serial/i.test(message)
-    ) {
-      message +=
-        "。ESP32-CAM 底板可能没有自动下载电路：请按住 IO0 点一下 RST，松开 IO0，勾选“已手动进入下载模式”后再试。";
+    } else if (/fail|connect|timeout|sync|boot|serial/i.test(message)) {
+      retryButton.hidden = false;
+      if (state.board?.slug === "esp32-cam") {
+        message +=
+          "。请按住 IO0，按一下 ESP32-CAM 模块上的 RST，松开 IO0，再点“已按 IO0 + RST，重试连接”。";
+      } else {
+        message +=
+          "。如果开发板没有自动复位，请按住 BOOT/IO0，再点一下 RST，然后点“已按 IO0 + RST，重试连接”。";
+      }
     }
     setStatus(`烧录失败：${message}`, "error");
     logLine(`错误：${message}`);
@@ -579,7 +583,16 @@ function initTheme() {
 
 async function init() {
   initTheme();
-  if (!navigator.serial) {
+  const secure = window.isSecureContext && location.protocol !== "file:";
+  logLine(
+    `页面 ${location.origin} · secure=${secure} · serial=${navigator.serial ? "yes" : "no"}`,
+  );
+  if (!secure) {
+    $("insecure").hidden = false;
+    connectButton.disabled = true;
+    pickPortButton.disabled = true;
+    refreshPortsButton.disabled = true;
+  } else if (!navigator.serial) {
     $("unsupported").hidden = false;
     connectButton.disabled = true;
     pickPortButton.disabled = true;
@@ -618,7 +631,8 @@ async function init() {
       // Already closed.
     }
   });
-  connectButton.addEventListener("click", flash);
+  connectButton.addEventListener("click", () => flash());
+  retryButton.addEventListener("click", () => flash({ noReset: true }));
   resetButton.addEventListener("click", resetDevice);
   downloadButton.addEventListener("click", () => {
     if (!state.board) return;
@@ -627,6 +641,14 @@ async function init() {
   });
   $("clearLog").addEventListener("click", () => {
     logView.textContent = "";
+  });
+  $("copyLog").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(logView.textContent);
+      setStatus("烧录日志已复制。", "ok");
+    } catch {
+      setStatus("复制失败，请手动选中日志复制。", "error");
+    }
   });
 
   logLine("读取最新固件清单…");

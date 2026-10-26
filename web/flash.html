@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-9" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-12" />
   </head>
   <body>
     <main class="flash-shell">
@@ -62,6 +62,12 @@
 
       <section id="unsupported" class="notice notice-error" hidden>
         当前浏览器不支持 Web Serial。请使用桌面版 Chrome / Edge，并通过 USB 连接开发板。Android APK 不包含刷机功能。
+      </section>
+
+      <section id="insecure" class="notice notice-error" hidden>
+        当前页面不是安全上下文，Web Serial 无法使用。请打开
+        <code>https://novice-pg.github.io/linkr-bee/flash.html</code>，
+        或通过 <code>http://localhost</code> 访问；不要直接双击本地 HTML 文件。
       </section>
 
       <section class="flash-hero">
@@ -130,7 +136,7 @@
               <li>拔掉摄像头和 SD 卡。</li>
               <li>按住底板上的 <b>IO0</b>，按一下 <b>ESP32-CAM 模块上的 RST</b>（不是底板上的 RST），然后松开两个键。</li>
               <li>或者：拔掉 USB，按住 IO0，再插上 USB，等电脑出现串口后松开 IO0。</li>
-              <li>勾选下面的“已手动进入下载模式”，波特率选 115200，再点烧录。</li>
+              <li>波特率选 115200，再点烧录；连接失败时点页面上的“已按 IO0 + RST，重试连接”。</li>
             </ol>
             <p>底板只有 RESET 一个键时，需要把 GPIO0 短接到 GND 再复位。ESP32-CAM-MB 这类带自动下载电路的底板可以先直接烧录；失败时再按上面的手动步骤。</p>
             <p>单板 + CH340 USB-TTL 接线：</p>
@@ -143,14 +149,6 @@
             </ul>
             <p>烧录完成后先断开 GPIO0，再复位运行。使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，换短一点的数据线。若串口打不开，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
           </section>
-
-          <label class="check-field">
-            <input type="checkbox" id="manualBoot" />
-            <span>
-              <strong>已手动进入下载模式</strong>
-              <small>跳过自动复位；用于没有 DTR/RTS 自动下载电路的底板</small>
-            </span>
-          </label>
 
           <dl class="board-facts" id="boardFacts">
             <div><dt>芯片</dt><dd id="factChip">—</dd></div>
@@ -167,6 +165,9 @@
                 <path d="M5 21h14"></path>
               </svg>
               连接串口并烧录
+            </button>
+            <button id="retryButton" class="btn" type="button" hidden>
+              已按 IO0 + RST，重试连接
             </button>
             <button id="downloadButton" class="btn" type="button" disabled>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -204,35 +205,13 @@
               </li>
               <li>
                 <strong>手动进入下载模式</strong>
-                <span>ESP32-CAM：拔掉摄像头和 SD 卡，按住 IO0，按一下 CAM 模块上的 RST，松开；或按住 IO0 再插 USB。底板没有 IO0 键时把 GPIO0 短接 GND。成功后勾选“已手动进入下载模式”。</span>
+                <span>ESP32-CAM：拔掉摄像头和 SD 卡，按住 IO0，按一下 CAM 模块上的 RST，松开；或按住 IO0 再插 USB。底板没有 IO0 键时把 GPIO0 短接 GND。连接失败时点“已按 IO0 + RST，重试连接”。</span>
               </li>
             </ul>
           </section>
         </div>
 
         <aside class="flash-side">
-          <section class="card">
-            <div class="card-title"><span class="dot"></span><span>02 · 烧录步骤</span></div>
-            <ol class="steps">
-              <li>
-                <strong>连接开发板</strong>
-                <span>用 USB 线连接。ESP32-CAM 需要 3.3V USB-TTL，接 UART0（GPIO1 / GPIO3）。</span>
-              </li>
-              <li>
-                <strong>选择串口</strong>
-                <span>先点“选择串口”，确认选中的是开发板的 USB 串口；再点“连接串口并烧录”。</span>
-              </li>
-              <li>
-                <strong>手动进入下载模式</strong>
-                <span>ESP32-CAM 底板若不能自动下载，按住 IO0 点一下 RST，松开 IO0，勾选“已手动进入下载模式”再连接。</span>
-              </li>
-              <li>
-                <strong>等待完成</strong>
-                <span>看到“烧录完成”后按一下开发板复位键，或点“重启设备”。</span>
-              </li>
-            </ol>
-          </section>
-
           <section class="card release-card">
             <div class="card-title"><span class="dot"></span><span>最新发布</span></div>
             <dl class="release-facts">
@@ -250,7 +229,10 @@
       <section class="card log-panel">
         <div class="log-head">
           <span>烧录日志 / Log</span>
-          <button id="clearLog" class="link-button" type="button">清空</button>
+          <span class="log-actions">
+            <button id="copyLog" class="link-button" type="button">复制</button>
+            <button id="clearLog" class="link-button" type="button">清空</button>
+          </span>
         </div>
         <pre id="log" class="log" aria-live="polite"></pre>
       </section>
@@ -262,6 +244,6 @@
     </main>
 
     <script src="./vendor/jszip/jszip.min.js"></script>
-    <script type="module" src="./flash.js?v=20261026-6"></script>
+    <script type="module" src="./flash.js?v=20261026-9"></script>
   </body>
 </html>
