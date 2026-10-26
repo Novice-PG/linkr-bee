@@ -1,0 +1,60 @@
+name: Publish firmware assets
+
+# Repair or refresh only the firmware ZIPs of an existing release from a
+# completed firmware build. The full release workflow also builds the desktop
+# matrix; this job exists so a transient packaging failure cannot leave the
+# release pointing at stale firmware.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Build and test run id that produced the firmware artifacts
+        required: true
+      tag:
+        description: Existing release tag to update
+        required: true
+        default: v0.1.4
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Package and upload firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download the firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linkr-bee-esp32*
+          path: artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble the release ZIPs
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          mkdir -p release
+          for dir in artifacts/*; do
+            [ -d "${dir}" ] || continue
+            slug="${dir##*/linkr-bee-}"
+            root="linkr-bee-${tag}-firmware-${slug}"
+            stage="release/${root}"
+            mkdir -p "${stage}"
+            cp -a "${dir}/." "${stage}/"
+            (cd release && zip -qr "${root}.zip" "${root}")
+          done
+          ls -lh release
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" release/*.zip --clobber
+
+      - name: Refresh the flasher Pages deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --repo "${GITHUB_REPOSITORY}" --ref main
