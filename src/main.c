@@ -141,11 +141,13 @@ static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t advertise_refresh_req;
 static atomic_t nus_notify_enabled;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 /* Why the last BLE link ended. With the UART console disabled this is the
  * only way to tell a firmware-initiated teardown (0x13) from a controller or
  * peer timeout without attaching a separate debug port. */
 static atomic_t ble_disconnects;
 static atomic_t ble_last_disconnect_reason;
+#endif
 static uint8_t linkr_identity = BT_ID_DEFAULT;
 static atomic_t wifi_scan_request_id;
 #if LINKR_UART_AUTOBAUD
@@ -186,6 +188,7 @@ static atomic_t uart_reliable_drop_no_conn;
  * was a LOG_WRN that the board's ERR-only log level swallowed, so upstream
  * loss was completely unobservable on this board. */
 static atomic_t uart_queue_dropped;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 /* Bytes that left the BLE/WS queue for the bridge UART. This separates a
  * sender that never ran from a UART that never put the bytes on the wire. */
 static atomic_t uart_tx_bytes;
@@ -193,6 +196,7 @@ static atomic_t uart_tx_bytes;
  * the target is clearly printing means the line or the RX pin is the problem,
  * not the BLE delivery path. */
 static atomic_t uart_rx_bytes;
+#endif
 static struct uart_config active_uart_config = {
 	.baudrate = CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE,
 	.parity = DEFAULT_UART_PARITY,
@@ -862,7 +866,9 @@ static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 		}
 #endif
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 		atomic_add(&uart_rx_bytes, rx_len);
+#endif
 		uint32_t written = ring_buf_put(&uart_rx_ring, buf, rx_len);
 
 		if (written < (uint32_t)rx_len) {
@@ -1063,8 +1069,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	ble_diag.notify_enabled = 0;
 	schedule_ble_diag_marker_write();
 #endif
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 	atomic_inc(&ble_disconnects);
 	atomic_set(&ble_last_disconnect_reason, reason);
+#endif
 	LOG_INF("BLE disconnected: 0x%02x", reason);
 	/* Persistent advertising normally resumes automatically. Scheduling an
 	 * explicit start is harmless when it already resumed (-EALREADY), and also
@@ -1616,6 +1624,7 @@ static void diagnostics_response(struct bt_conn *conn)
 	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
 				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
 				    KERNEL_VERSION_STRING);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 	uint32_t reset_cause = 0;
 
 	(void)hwinfo_get_reset_cause(&reset_cause);
@@ -1624,7 +1633,6 @@ static void diagnostics_response(struct bt_conn *conn)
 				    (long long)k_uptime_get(), 0U,
 				    (unsigned int)security,
 				    (unsigned int)reset_cause);
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 	(void)send_control_response(conn,
 				    "@info uart dropped=%u dropped_total=%u dropped_no_conn=%u buffer=%u/%u rx=%u\r\n",
 				    dropped, dropped_total, dropped_no_conn, buffered,
@@ -1632,9 +1640,12 @@ static void diagnostics_response(struct bt_conn *conn)
 				    (unsigned int)atomic_get(&uart_rx_bytes));
 #else
 	(void)send_control_response(conn,
-				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u rx=%u\r\n",
-				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE,
-				    (unsigned int)atomic_get(&uart_rx_bytes));
+				    "@info sys uptime_ms=%lld owner=%u security=%u\r\n",
+				    (long long)k_uptime_get(), 0U,
+				    (unsigned int)security);
+	(void)send_control_response(conn,
+				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",
+				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE);
 #endif
 
 	(void)linkr_wifi_diagnostics(status, sizeof(status));
@@ -1646,11 +1657,16 @@ static void diagnostics_response(struct bt_conn *conn)
 	/* Third drop point: BLE/WS RX -> UART. Its own group so the six web
 	 * rows stay untouched (extra groups are already tolerated by the TUI
 	 * and the web parser, both key on the group name). */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 	(void)send_control_response(conn,
 				    "@info queue dropped=%u tx_bytes=%u depth=%u\r\n",
 				    (unsigned int)atomic_get(&uart_queue_dropped),
 				    (unsigned int)atomic_get(&uart_tx_bytes),
 				    (unsigned int)k_msgq_num_used_get(&ble_to_uart_queue));
+#else
+	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
+				    (unsigned int)atomic_get(&uart_queue_dropped));
+#endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
 	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	(void)send_control_response(conn,
@@ -2326,7 +2342,9 @@ static void ble_to_uart_thread(void)
 		}
 #endif
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
 		atomic_add(&uart_tx_bytes, packet.len);
+#endif
 		signal_uart_activity();
 	}
 }
@@ -2432,8 +2450,7 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 	(void)err;
 	return 0;
 #else
-	if (!linkr_uart_reliable_mode() ||
-	    atomic_get(&nus_notify_enabled)) {
+	if (!linkr_uart_reliable_mode()) {
 		/* NUS is the compatibility, best-effort path. Preserve its previous
 		 * behavior: UART capture must not stall when no NUS central exists. */
 		(void)nus_send_chunk(data, len);

@@ -29,9 +29,6 @@ static int wifi_connected = 1, wifi_ip_ready = 1, webdav_configured = 1;
 static int webdav_generation = 1, upload_pending_bytes;
 static int upload_failures, upload_successes;
 static int cfg_lock, log_lock, upload_lock, log_ring;
-/* main.c keeps the NUS subscription flag next to the bridge state; the
- * extracted production functions read it from here. */
-static int nus_notify_enabled;
 static bool log_boot_id_persisted = true;
 static uint64_t log_boot_id = 1;
 static uint32_t log_sequence;

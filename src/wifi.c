@@ -152,13 +152,12 @@ static size_t scan_cache_count;
 /* .ext_ram.bss is zeroed by esp_init_psram(), so it must not also carry the
  * .noinit section attribute: two section attributes conflict. */
 #define LINKR_EXT_RAM_BSS __attribute__((section(".ext_ram.bss"), aligned(4)))
-#define LINKR_EXT_RAM_NOINIT
+static uint8_t LINKR_EXT_RAM_BSS log_ring_data[LOG_RING_SIZE];
+struct ring_buf log_ring = RING_BUF_INIT(log_ring_data, LOG_RING_SIZE);
 #else
 #define LINKR_EXT_RAM_BSS
-#define LINKR_EXT_RAM_NOINIT __noinit
+RING_BUF_DECLARE(log_ring, LOG_RING_SIZE);
 #endif
-static uint8_t LINKR_EXT_RAM_NOINIT LINKR_EXT_RAM_BSS log_ring_data[LOG_RING_SIZE];
-struct ring_buf log_ring = RING_BUF_INIT(log_ring_data, LOG_RING_SIZE);
 static struct k_mutex log_lock;
 /* Serializes a configuration change with an in-flight HTTP PUT. */
 static struct k_mutex upload_lock;
