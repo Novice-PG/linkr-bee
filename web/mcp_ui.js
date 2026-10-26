@@ -18,9 +18,12 @@ const labels = {
   enableHint: ["Claude Desktop、Cursor、Codex 等 MCP 客户端可调用本机的串口与配件管理能力。需要保持 App 运行并连接 Linkr Bee；App 被系统杀掉后服务停止。", "MCP clients such as Claude Desktop, Cursor or Codex can use this device's serial console and accessory management. Keep the app running and Linkr Bee connected; the service stops if Android kills the app."],
   warning: ["拿到访问令牌的人都能向串口发送输入。请只在可信网络启用，并定期更换令牌；不要把这个地址暴露到公网。", "Anyone holding the access token can send serial input. Enable this only on a trusted network, rotate the token, and never expose the address to the internet."],
   access: ["访问权限", "Access"],
-  accessHint: ["只读模式拒绝所有修改设备的工具；WiFi 扫描不保存配置，但仍需本机确认。读写模式下每次写入同样需要确认。", "Read-only refuses every device-changing tool; a WiFi scan stores nothing and still needs on-device approval. In read-write mode every write also needs approval."],
+  accessHint: ["只读模式拒绝所有修改设备的工具；WiFi 扫描不保存配置，但仍需本机确认。读写模式下每次写入同样需要确认。「无需确认」会跳过手机确认，直接执行所有工具。", "Read-only refuses every device-changing tool; a WiFi scan stores nothing and still needs on-device approval. In read-write mode every write also needs approval. No-confirmation mode skips the phone prompt and runs every tool directly."],
   accessConfirm: ["读写：写入需在本机确认", "Read and write: writes need on-device approval"],
+  accessAuto: ["读写：无需本机确认（危险）", "Read and write: no on-device approval (unsafe)"],
   accessRead: ["只读：不改设备（扫描仍需确认）", "Read-only: no changes (scans still need approval)"],
+  accessAutoWarning: ["写入确认已关闭：任何拿到访问令牌的客户端都可以直接向串口发送输入、修改桥接设置，手机不会再弹出确认。请只在完全可信的网络与客户端上使用；更安全的选项是「读写：写入需在本机确认」。", "Write approval is off: any client holding the token can send serial input and change bridge settings with no prompt on the phone. Use only with fully trusted networks and clients; the approval mode is the safer choice."],
+  accessAutoConfirm: ["关闭写入确认后，拿到访问令牌的客户端可以在没有手机确认的情况下执行串口写入和配置修改。确定启用「无需确认」？", "With approval off, any client holding the token can send serial input and change settings without a confirmation on the phone. Enable the no-confirmation mode?"],
   port: ["端口", "Port"],
   portHint: ["1024–65535。修改端口会重启服务。", "1024–65535. Changing the port restarts the service."],
   bind: ["监听地址", "Listen on"],
@@ -109,10 +112,12 @@ export function createMcpUi({ mount, getLang, host }) {
         <label class="field"><span class="field-label" data-mcp="access"></span>
           <select id="mcpAccess">
             <option value="confirm" data-mcp-option="accessConfirm"></option>
+            <option value="auto" data-mcp-option="accessAuto"></option>
             <option value="read" data-mcp-option="accessRead"></option>
           </select>
           <span class="field-hint" data-mcp="accessHint"></span>
         </label>
+        <p id="mcpAutoWarning" class="field-hint mcp-warning" data-mcp="accessAutoWarning" hidden></p>
         <label class="field"><span class="field-label" data-mcp="port"></span>
           <input id="mcpPort" type="number" inputmode="numeric" min="1024" max="65535" step="1">
           <span class="field-hint" data-mcp="portHint"></span>
@@ -171,6 +176,7 @@ export function createMcpUi({ mount, getLang, host }) {
     copyUrl: $("mcpCopyUrl"), copyToken: $("mcpCopyToken"), regenerate: $("mcpRegenerate"),
     snippet: $("mcpSnippet"), copySnippet: $("mcpCopySnippet"), status: $("mcpStatus"),
     auditList: $("mcpAuditList"), clientConfig: $("mcpClientConfig"), audit: $("mcpAudit"),
+    autoWarning: $("mcpAutoWarning"),
   };
 
   const banner = document.createElement("div");
@@ -236,6 +242,8 @@ export function createMcpUi({ mount, getLang, host }) {
     elements.enabled.checked = Boolean(config.enabled);
     if (document.activeElement !== elements.port) elements.port.value = String(config.port);
     elements.access.value = config.access;
+    elements.access.classList.toggle("is-danger", config.access === "auto");
+    elements.autoWarning.hidden = config.access !== "auto";
     elements.bind.value = config.bind;
     elements.access.disabled = busy;
     elements.port.disabled = busy;
@@ -352,6 +360,13 @@ export function createMcpUi({ mount, getLang, host }) {
       /* Same ordering rule as the enable checkbox: read the edited controls
        * first, because render() rewrites them from the saved configuration. */
       const form = readForm();
+      /* Turning the approval click off is a security decision, not a routine
+       * preference: ask once, and leave the previous mode selected on cancel. */
+      if (input === elements.access && form.access === "auto" && config.access !== "auto"
+          && !window.confirm(text("accessAutoConfirm"))) {
+        render();
+        return;
+      }
       busy = true;
       render();
       try { await host.setConfig(form); config = host.getConfig(); setStatus(""); }

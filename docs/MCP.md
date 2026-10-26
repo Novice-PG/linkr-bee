@@ -81,6 +81,11 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
 3. Choose **Access**:
    - **Read and write: writes need on-device approval** — read-only tools run
      without approval; every device-changing tool asks on the phone first.
+   - **Read and write: no on-device approval (unsafe)** — every tool runs
+     directly, including serial writes and bridge changes, with no prompt on the
+     phone. The bearer token becomes the only control: use it only for a fully
+     trusted client that must act unattended, and keep the app on a trusted
+     network. The app asks once before switching to this mode.
    - **Read-only: no changes (scans still need approval)** — device-changing
      tools are refused; `wifi_scan` may still run after approval. See
      [Tools](#tools) for the exact split.
@@ -180,8 +185,9 @@ The status page returns only the server name, version, and MCP path.
 - **`wifi_scan`** consumes the radio but stores nothing, so read-only mode still
   lets the user approve it.
 - **Device-changing tools** are `send_serial_input`, `set_uart_config`,
-  `set_wifi`, and `set_webdav`. Each call needs one confirmation on the phone;
-  read-only mode refuses all four.
+  `set_wifi`, and `set_webdav`. In the default approval mode each call needs one
+  confirmation on the phone; the no-confirmation mode skips it. Read-only mode
+  refuses all four.
 - A denied or expired approval returns a tool error and nothing is executed. The
   approval card shows the tool and its arguments; password-like values are
   masked.
@@ -259,13 +265,17 @@ the client:
   certificate. Enable the server only on a network you trust, and never forward
   the port or expose it to the internet.
 - **Anyone holding the token can use the tools.** That includes reading the
-  serial log and requesting device-changing calls. A write still needs a human
-  click on the phone, but do not treat the token as read-only.
+  serial log and requesting device-changing calls. In the default approval mode a
+  write still needs a human click on the phone, but do not treat the token as
+  read-only. The optional **no-confirmation** mode removes that click entirely:
+  the token holder can then drive the accessory unattended, including while the
+  app is backgrounded, so only use it with a client and network you fully trust.
 - Requests that carry an `Origin` header are refused with `403`. This blocks
   browser-based use and DNS rebinding; it is why the server is for MCP clients,
   not web pages.
-- Every device-changing call that runs needs a confirmation on the phone. Read-only
-  mode refuses all four device-changing tools even if a client asks.
+- By default every device-changing call that runs needs a confirmation on the
+  phone. The no-confirmation mode skips that check (see above). Read-only mode
+  refuses all four device-changing tools even if a client asks.
 - The approval card shows the tool and its arguments with password-like fields
   masked. The WiFi password is never shown there or echoed in a tool result.
 - The card keeps the latest 50 external calls in memory for this app run, with
@@ -289,7 +299,9 @@ the client:
 - **Background operation is limited.** Approval prompts only work while the app
   is visible. If the app is in the background, an approval request is refused and
   a write is not executed; a backgrounded WebView can also delay or fail to answer
-  a request. Keep the app in the foreground when a write is expected.
+  a request. Keep the app in the foreground when a write is expected. The
+  no-confirmation mode is the exception: it has no prompt, so writes also run
+  while the app is backgrounded.
 - **One device-changing call at a time.** The second write is rejected, including
   while the first is still waiting for approval. Read tools can run concurrently.
 - **Tool results are bounded.** Serial reads are paged, searches are capped at 12
@@ -324,7 +336,7 @@ the client:
 | `504 Gateway Timeout` | The app did not answer within 180 seconds — for example while backgrounded or waiting on the phone. The call may not have reached the device; check the phone and the serial log before retrying, and never resend serial input blindly. |
 | Service error: address already in use | Another process holds the port. Change the port in the card or stop the other listener. |
 | Connection refused / no route | The client host cannot reach the phone. Check that both are on the same network without client isolation, that the listen address is **All interfaces**, and that the address is the phone's address on that network. `GET /` from the client host should answer without a token. |
-| Approval never appears | The app must be visible and in the foreground; a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. |
+| Approval never appears | The app must be visible and in the foreground; a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. In the no-confirmation mode there is intentionally no prompt. |
 | "The target is not connected" | Connect Linkr Bee and the target in the app first. Disconnecting makes serial tools return an explicit error even while retained log text is displayed. |
 | "Accessory settings need a Bluetooth LE connection" | The app is in LAN-only mode. Switch to the BLE connection for diagnostics and configuration tools. |
 | "read-only mode is enabled" | A device-changing tool was called while **Read-only** was selected. Switch to read-write access on the phone. |

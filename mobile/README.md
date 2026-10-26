@@ -323,7 +323,8 @@ loads the prebuilt bundle from `web/vendor/agent/` — rebuild it with
 
 The Android app can act as an MCP server on the local network, so external AI
 clients such as Claude Desktop, Cursor, and Codex can read the console and, after
-an approval on the phone, send input and change bridge settings. The card lives in
+an approval on the phone (or with the optional no-confirmation access mode), send
+input and change bridge settings. The card lives in
 **Settings → AI** as **MCP server**; it is created only when the native bridge
 (`window.LinkrMcp`) exists, so the Web, iOS, and HarmonyOS builds have no MCP
 endpoint.
@@ -338,8 +339,10 @@ endpoint.
   recent calls. A foreground-service notification keeps the process alive while
   the app is backgrounded and can stop the listener.
 - Caveats: Android only; the bearer token travels over plain HTTP on the LAN
-  (trusted networks only); writes need approval on the phone and are refused
-  while the app is backgrounded; read-only mode rejects device-changing tools;
+  (trusted networks only); by default writes need approval on the phone and are
+  refused while the app is backgrounded (the no-confirmation mode removes that
+  prompt, including in the background); read-only mode rejects device-changing
+  tools;
   there are no SSE or server-initiated messages; the server stops when the app
   process is destroyed; accessory tools need the BLE management channel; and
   serial output is untrusted device data where a successful send is delivery,

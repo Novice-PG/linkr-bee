@@ -46,8 +46,9 @@ target's own UART bytes and does not replace the target shell.
   about each target between sessions, counts the tokens it used, and can export
   the whole diagnosis as a Markdown report.
 - Android app as an MCP server on the local network, so Claude Desktop, Cursor,
-  and other AI clients can read the console and — after on-phone approval — send
-  input and change settings. See the [MCP server guide](docs/MCP.md).
+  and other AI clients can read the console and — after on-phone approval by
+  default, or in the explicit no-confirmation mode — send input and change
+  settings. See the [MCP server guide](docs/MCP.md).
 
 ## Choose a client
 

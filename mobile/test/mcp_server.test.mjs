@@ -497,6 +497,57 @@ test("a denied approval never executes the write", async () => {
   assert.equal(host.getAudit()[0].outcome, "denied");
 });
 
+test("no-confirmation mode runs approval-gated tools without asking the phone", async () => {
+  const approvals = [];
+  const { device, calls } = fakeDevice();
+  const host = createHost({
+    device,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: false };
+    },
+  });
+  const state = await host.setConfig({ access: "auto" });
+  assert.equal(state.access, "auto");
+
+  const write = await callTool(host, "send_serial_input", { text: "uname -a", appendEnter: true });
+  assert.equal(write.status, 200);
+  assert.equal(toolPayload(write.message).delivery, "sent");
+  assert.equal(approvals.length, 0);
+  assert.equal(calls.execute.length, 1);
+  assert.equal(host.getAudit()[0].outcome, "ok");
+
+  /* A scan is approval-gated but not a write: the no-confirmation mode skips
+   * that prompt too. */
+  const { accessory } = fakeAccessory({ scan: async () => ({ failed: false, networks: [{ ssid: "Bench" }] }) });
+  const scanHost = createHost({
+    accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: false };
+    },
+  });
+  await scanHost.setConfig({ access: "auto" });
+  const scan = await callTool(scanHost, "wifi_scan");
+  assert.equal(scan.status, 200);
+  assert.equal(toolPayload(scan.message).failed, false);
+  assert.equal(approvals.length, 0);
+});
+
+test("no-confirmation mode still runs preflight and honours the read-only switch", async () => {
+  const missingHost = createHost();
+  await missingHost.setConfig({ access: "auto" });
+  const missing = await callTool(missingHost, "send_serial_input", { text: "ls", appendEnter: true });
+  assert.match(toolErrorText(missing.message), /No target device session/);
+
+  const { device } = fakeDevice();
+  const readHost = createHost({ device });
+  await readHost.setConfig({ access: "auto" });
+  await readHost.setConfig({ access: "read" });
+  const denied = await callTool(readHost, "send_serial_input", { text: "ls", appendEnter: true });
+  assert.match(toolErrorText(denied.message), /read-only mode/);
+});
+
 test("a write on a missing target is refused before approval is requested", async () => {
   const approvals = [];
   const host = createHost({
@@ -683,6 +734,7 @@ test("validateMcpConfig rejects invalid records with stable messages", () => {
   assert.throws(() => validateMcpConfig({ port: 65536 }), /MCP port/);
   assert.throws(() => validateMcpConfig({ port: "8712" }), /MCP port/);
   assert.throws(() => validateMcpConfig({ bind: "wan" }), /MCP bind/);
+  assert.equal(validateMcpConfig({ access: "auto" }).access, "auto");
   assert.throws(() => validateMcpConfig({ access: "write" }), /MCP access/);
   assert.throws(() => validateMcpConfig({ enabled: "yes" }), /MCP enabled/);
   assert.throws(() => validateMcpConfig({ nonsense: true }), /Unknown MCP configuration field/);

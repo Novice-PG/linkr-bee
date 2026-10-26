@@ -590,3 +590,50 @@ test("read-only access refuses a write tool without raising the approval banner"
   // The refusal is audited even though no approval was requested.
   await expect(page.locator("#mcpAuditList")).toContainText(/denied/);
 });
+
+/* ------------------------------------------------------------------ *
+ * (f) No-confirmation access: the write runs without the approval banner
+ * ------------------------------------------------------------------ */
+test("no-confirmation access runs a write without the approval banner", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+
+  await expect(page.locator("#mcpAutoWarning")).toBeHidden();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.locator("#mcpAccess").selectOption("auto");
+  await expect(page.locator("#mcpAccess")).toHaveValue("auto");
+  await expect(page.locator("#mcpAutoWarning")).toBeVisible();
+  await expect(page.locator("#mcpAutoWarning")).toContainText("Write approval is off");
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-mcp-config-v1")).access),
+  ).toBe("auto");
+
+  await callRpc(page, {
+    bridgeId: "req-auto",
+    rpcId: "rpc-auto",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "uname -a", appendEnter: true } },
+  });
+  const response = await waitForResponse(page, "req-auto");
+  const payload = parsedResponse(response);
+  expect(payload.result.isError).toBeUndefined();
+  expect(resultText(payload)).toContain("serial-execution");
+  await expect(page.locator("#mcpApproval")).toBeHidden();
+  const executions = await page.evaluate(() => window.__mcpTestExecutions);
+  expect(executions).toHaveLength(1);
+  expect(executions[0].userApproved).toBe(true);
+
+  /* Cancelling the one-time security prompt leaves the previous mode selected. */
+  page.removeAllListeners("dialog");
+  page.on("dialog", (dialog) => dialog.dismiss());
+  await page.locator("#mcpAccess").selectOption("confirm");
+  await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  await page.locator("#mcpAccess").selectOption("auto");
+  await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  await expect(page.locator("#mcpAutoWarning")).toBeHidden();
+});

@@ -158,6 +158,10 @@
 }
 
 /* ---------- MCP server (Android app only) ---------- */
+/* .field-hint sets display:block, which defeats the hidden attribute. */
+.mcp-settings [hidden] { display: none; }
+/* The no-confirmation access mode is a security decision: make it visibly red. */
+.mcp-settings select.is-danger { color: var(--danger); border-color: var(--danger); }
 .mcp-settings .password-row { display: flex; align-items: center; gap: 6px; }
 .mcp-settings .password-row input { flex: 1 1 auto; min-width: 0; }
 .mcp-settings .password-row .btn { flex: 0 0 auto; }

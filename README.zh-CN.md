@@ -40,7 +40,8 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
   自身的 UART、WiFi 和日志上传设置前需确认。它会记住每台目标设备的事实、统计
   本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
 - Android App 可在局域网内充当 MCP 服务器，Claude Desktop、Cursor 等 AI 客户端能
-  读取控制台，并在手机确认后发送输入、修改设置。见 [MCP 服务器指南](docs/MCP.zh-CN.md)。
+  读取控制台，并默认在手机确认后发送输入、修改设置（也可手动开启「无需确认」模式）。
+  见 [MCP 服务器指南](docs/MCP.zh-CN.md)。
 
 ## 选择客户端
 
