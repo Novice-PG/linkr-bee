@@ -98,8 +98,8 @@ async function refreshPorts({ request = false } = {}) {
   if (!navigator.serial) return;
   try {
     if (request) {
-      await releaseConnection();
       const picked = await navigator.serial.requestPort();
+      await releaseConnection();
       state.port = picked;
     }
     state.ports = await navigator.serial.getPorts();
@@ -441,11 +441,12 @@ async function flash({ noReset = false } = {}) {
   setProgress(0);
   setStatus("正在准备固件…");
   try {
-    const image = await ensureImage(state.board);
-
     if (!navigator.serial) {
       throw new Error("当前浏览器不支持 Web Serial");
     }
+    // requestPort() needs the click's transient user activation. Ask for the
+    // port before downloading the image; a slow 5 MB fetch can consume the
+    // activation window and make the chooser fail with a SecurityError.
     if (!state.port) {
       setStatus("请选择开发板串口…");
       await refreshPorts({ request: true });
@@ -461,6 +462,8 @@ async function flash({ noReset = false } = {}) {
           ` · 来源：${state.manifest?.source || "?"}`,
       );
     }
+    setStatus("正在准备固件…");
+    const image = await ensureImage(state.board);
 
     // A previous attempt can leave the Web Serial port open (or its reader
     // lock pending). Bounded cleanup lets the user retry without reloading.
