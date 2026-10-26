@@ -251,6 +251,12 @@ body {
   color: var(--muted);
 }
 
+.cam-note ul {
+  margin: 0 0 6px;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
 .cam-note b {
   color: var(--text);
 }

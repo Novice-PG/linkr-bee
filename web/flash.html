@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-8" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-9" />
   </head>
   <body>
     <main class="flash-shell">
@@ -133,7 +133,15 @@
               <li>勾选下面的“已手动进入下载模式”，波特率选 115200，再点烧录。</li>
             </ol>
             <p>底板只有 RESET 一个键时，需要把 GPIO0 短接到 GND 再复位。ESP32-CAM-MB 这类带自动下载电路的底板可以先直接烧录；失败时再按上面的手动步骤。</p>
-            <p>使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，换短一点的数据线。若串口打不开，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
+            <p>单板 + CH340 USB-TTL 接线：</p>
+            <ul>
+              <li>CH340 <b>5V</b> → CAM <b>5V</b></li>
+              <li>CH340 <b>GND</b> → CAM <b>GND</b></li>
+              <li>CH340 <b>TX</b> → CAM <b>U0R（GPIO3）</b></li>
+              <li>CH340 <b>RX</b> → CAM <b>U0T（GPIO1）</b></li>
+              <li>CAM <b>GPIO0</b> → <b>GND</b>（只在下载时短接）</li>
+            </ul>
+            <p>烧录完成后先断开 GPIO0，再复位运行。使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，换短一点的数据线。若串口打不开，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
           </section>
 
           <label class="check-field">
