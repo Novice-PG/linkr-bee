@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-12" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-13" />
   </head>
   <body>
     <main class="flash-shell">
@@ -130,16 +130,13 @@
           </div>
 
           <section id="camPrep" class="notice cam-note" hidden>
-            <strong>ESP32-CAM 底板烧录提示</strong>
-            <p>ESP32-CAM 的 GPIO0 同时是摄像头 XCLK，而且多数底板没有把 DTR/RTS 自动复位电路接到 EN/IO0。按下面的顺序手动进入下载模式最可靠：</p>
+            <strong>ESP32-CAM 烧录方式（单板 + CH340 USB-TTL）</strong>
             <ol>
               <li>拔掉摄像头和 SD 卡。</li>
-              <li>按住底板上的 <b>IO0</b>，按一下 <b>ESP32-CAM 模块上的 RST</b>（不是底板上的 RST），然后松开两个键。</li>
-              <li>或者：拔掉 USB，按住 IO0，再插上 USB，等电脑出现串口后松开 IO0。</li>
-              <li>波特率选 115200，再点烧录；连接失败时点页面上的“已按 IO0 + RST，重试连接”。</li>
+              <li>按下面的接线表连接 CH340，烧录时把 <b>GPIO0 接到 GND</b>。</li>
+              <li>给 CH340 插上 USB，确认电脑出现串口。</li>
+              <li>波特率选 115200，点“连接串口并烧录”。烧录完成后先断开 GPIO0，再复位运行。</li>
             </ol>
-            <p>底板只有 RESET 一个键时，需要把 GPIO0 短接到 GND 再复位。ESP32-CAM-MB 这类带自动下载电路的底板可以先直接烧录；失败时再按上面的手动步骤。</p>
-            <p>单板 + CH340 USB-TTL 接线：</p>
             <ul>
               <li>CH340 <b>5V</b> → CAM <b>5V</b></li>
               <li>CH340 <b>GND</b> → CAM <b>GND</b></li>
@@ -147,7 +144,7 @@
               <li>CH340 <b>RX</b> → CAM <b>U0T（GPIO1）</b></li>
               <li>CAM <b>GPIO0</b> → <b>GND</b>（只在下载时短接）</li>
             </ul>
-            <p>烧录完成后先断开 GPIO0，再复位运行。使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，换短一点的数据线。若串口打不开，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
+            <p>使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，线尽量短。连接失败时确认 GPIO0 已接地并重新上电，再点“已进入下载模式，重试连接”。</p>
           </section>
 
           <dl class="board-facts" id="boardFacts">
@@ -167,7 +164,7 @@
               连接串口并烧录
             </button>
             <button id="retryButton" class="btn" type="button" hidden>
-              已按 IO0 + RST，重试连接
+              已进入下载模式，重试连接
             </button>
             <button id="downloadButton" class="btn" type="button" disabled>
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -201,17 +198,15 @@
               </li>
               <li>
                 <strong>ESP32-CAM 接线</strong>
-                <span>用底板时直接接 USB；无底板时需要 3.3V USB-TTL，接 UART0：GPIO1 TX、GPIO3 RX，并共地。</span>
+                <span>单板 + CH340：5V、GND、CH340 TX → U0R（GPIO3）、CH340 RX → U0T（GPIO1）。</span>
               </li>
               <li>
                 <strong>手动进入下载模式</strong>
-                <span>ESP32-CAM：拔掉摄像头和 SD 卡，按住 IO0，按一下 CAM 模块上的 RST，松开；或按住 IO0 再插 USB。底板没有 IO0 键时把 GPIO0 短接 GND。连接失败时点“已按 IO0 + RST，重试连接”。</span>
+                <span>ESP32-CAM：GPIO0 接 GND 后重新上电或复位；烧录完成后断开 GPIO0 再复位。连接失败时点“已进入下载模式，重试连接”。</span>
               </li>
             </ul>
           </section>
-        </div>
 
-        <aside class="flash-side">
           <section class="card release-card">
             <div class="card-title"><span class="dot"></span><span>最新发布</span></div>
             <dl class="release-facts">
@@ -223,7 +218,7 @@
               刷机不会擦除已保存的设置分区。需要恢复出厂设置时，请按板型说明用 esptool 擦除设置区。
             </p>
           </section>
-        </aside>
+        </div>
       </div>
 
       <section class="card log-panel">
@@ -244,6 +239,6 @@
     </main>
 
     <script src="./vendor/jszip/jszip.min.js"></script>
-    <script type="module" src="./flash.js?v=20261026-10"></script>
+    <script type="module" src="./flash.js?v=20261026-11"></script>
   </body>
 </html>

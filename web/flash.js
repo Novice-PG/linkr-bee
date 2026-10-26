@@ -302,7 +302,7 @@ function selectBoard(slug) {
   if (board) {
     setStatus(
       isCam
-        ? `已选择 ${board.name}。底板不能自动下载时，按住 IO0 点一下 CAM 模块上的 RST，松开后再连接；失败时点“已按 IO0 + RST，重试连接”。`
+        ? `已选择 ${board.name}。烧录前把 GPIO0 接 GND 并重新上电；失败时点“已进入下载模式，重试连接”。`
         : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
     );
   }
@@ -523,10 +523,10 @@ async function flash({ noReset = false } = {}) {
       retryButton.hidden = false;
       if (state.board?.slug === "esp32-cam") {
         message +=
-          "。请按住 IO0，按一下 ESP32-CAM 模块上的 RST，松开 IO0，再点“已按 IO0 + RST，重试连接”。";
+          "。请确认 GPIO0 已接 GND，断开再重新上电，然后点“已进入下载模式，重试连接”。";
       } else {
         message +=
-          "。如果开发板没有自动复位，请按住 BOOT/IO0，再点一下 RST，然后点“已按 IO0 + RST，重试连接”。";
+          "。如果开发板没有自动复位，请按住 BOOT/IO0，再点一下 RST，然后点“已进入下载模式，重试连接”。";
       }
     }
     setStatus(`烧录失败：${message}`, "error");

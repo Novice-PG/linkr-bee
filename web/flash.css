@@ -11,7 +11,7 @@ body {
 }
 
 .flash-shell {
-  width: min(1180px, calc(100% - 2 * var(--layout-gutter)));
+  width: min(1040px, calc(100% - 2 * var(--layout-gutter)));
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0 auto;
@@ -177,7 +177,7 @@ body {
 
 .flash-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--layout-gap);
   align-items: stretch;
 }
@@ -583,7 +583,7 @@ body {
 
 @media (max-width: 900px) {
   .flash-shell {
-    width: min(100% - 20px, 1180px);
+    width: min(100% - 20px, 1040px);
   }
 
   .flash-hero {
