@@ -19,8 +19,17 @@ async function backend(platform, bonded, fail = false) {
     read: async () => { calls.push("encrypted read"); return new DataView(new ArrayBuffer(10)); },
   };
   const window = {};
-  vm.runInNewContext(source, { window, exports: {}, require: name => name === "@capacitor/core"
-    ? { Capacitor: { getPlatform: () => platform, isNativePlatform: () => true } } : { BleClient } });
+  vm.runInNewContext(source, { window, exports: {}, require: name => {
+    if (name === "@capacitor/core") {
+      return { Capacitor: { getPlatform: () => platform, isNativePlatform: () => true } };
+    }
+    // The MCP transport is a separate native surface; only the BLE backend is
+    // under test here.
+    if (name === "./mcp-native") {
+      return { installLinkrMcpBridge: () => {} };
+    }
+    return { BleClient };
+  } });
   await window.LinkrNativeBleReady;
   return { ble: window.LinkrNativeBle, calls };
 }
@@ -62,10 +71,15 @@ test("a failed BLE initialization is retried instead of staying cached", async (
   vm.runInNewContext(source, {
     window,
     exports: {},
-    require: (name) =>
-      name === "@capacitor/core"
-        ? { Capacitor: { getPlatform: () => "ios", isNativePlatform: () => true } }
-        : { BleClient },
+    require: (name) => {
+      if (name === "@capacitor/core") {
+        return { Capacitor: { getPlatform: () => "ios", isNativePlatform: () => true } };
+      }
+      if (name === "./mcp-native") {
+        return { installLinkrMcpBridge: () => {} };
+      }
+      return { BleClient };
+    },
   });
   await window.LinkrNativeBleReady;
 

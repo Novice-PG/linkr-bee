@@ -1,0 +1,592 @@
+/* Browser verification of the Android-only MCP settings card and approval
+ * banner (web/mcp_ui.js) against a fake native bridge.
+ *
+ * On a real phone the bridge is installed by Capacitor (mobile/src/mcp-native.ts
+ * -> window.LinkrMcp). Here `page.addInitScript` installs the same contract
+ * (mobile/.tmp_mcp_contract.md) before any app script runs, so the whole path —
+ * app.js initMcp() -> web/mcp_server.js -> web/mcp_ui.js — is exercised in a
+ * real Chromium: settings card rendering, start/stop state, endpoint/token
+ * display, audit list and the on-phone approval banner.
+ *
+ * Only the test file is part of the repo; the fake bridge and the fake device
+ * executor live entirely inside the browser session. No app source is modified.
+ */
+import { test, expect } from "@playwright/test";
+
+const TOKEN_A = "0123456789abcdef".repeat(4); // 64 hex chars, as the native side sends
+const TOKEN_B = "fedcba9876543210".repeat(4);
+const CONFIG_KEY = "linkr-mcp-config-v1";
+const REMOTE = "192.168.1.20:49312";
+
+/* ------------------------------------------------------------------ *
+ * Fake native bridge (window.LinkrMcp)
+ * ------------------------------------------------------------------ */
+async function installFakeBridge(page) {
+  await page.addInitScript(
+    ({ tokenA, tokenB }) => {
+      const state = {
+        running: false,
+        port: 8712,
+        bind: "lan",
+        token: "",
+        url: "",
+        urls: [],
+        foreground: true,
+        activeRequests: 0,
+        lastError: null,
+      };
+      const clone = () => JSON.parse(JSON.stringify(state));
+      const listeners = { httpRequest: [], stateChanged: [] };
+
+      /* Answer log and call log the spec reads back with page.evaluate(). */
+      window.__mcpCalls = {
+        start: [],
+        stop: 0,
+        getState: 0,
+        regenerateToken: 0,
+        respond: 0,
+        addListener: [],
+      };
+      window.__mcpResponses = [];
+
+      const emitState = () => {
+        const snapshot = clone();
+        for (const cb of listeners.stateChanged) {
+          try {
+            cb(snapshot);
+          } catch {
+            /* a UI listener must not break the transport */
+          }
+        }
+      };
+
+      window.LinkrMcp = {
+        available: true,
+        platform: "android",
+        async start(config) {
+          window.__mcpCalls.start.push({ port: config?.port, bind: config?.bind });
+          state.running = true;
+          state.port = config?.port;
+          state.bind = config?.bind;
+          state.token = tokenA;
+          const loopback = `http://127.0.0.1:${state.port}/mcp`;
+          const lan = `http://192.168.1.50:${state.port}/mcp`;
+          state.url = state.bind === "loopback" ? loopback : lan;
+          state.urls = state.bind === "loopback" ? [loopback] : [loopback, lan];
+          state.lastError = null;
+          emitState();
+          return clone();
+        },
+        async stop() {
+          window.__mcpCalls.stop += 1;
+          state.running = false;
+          state.activeRequests = 0;
+          emitState();
+          return clone();
+        },
+        async getState() {
+          window.__mcpCalls.getState += 1;
+          return clone();
+        },
+        async regenerateToken() {
+          window.__mcpCalls.regenerateToken += 1;
+          state.token = state.token === tokenA ? tokenB : tokenA;
+          emitState();
+          return clone();
+        },
+        async respond(input) {
+          window.__mcpCalls.respond += 1;
+          window.__mcpResponses.push({ ...input });
+        },
+        async addListener(event, cb) {
+          window.__mcpCalls.addListener.push(event);
+          listeners[event]?.push(cb);
+          return {
+            remove: async () => {
+              const list = listeners[event] || [];
+              const index = list.indexOf(cb);
+              if (index >= 0) list.splice(index, 1);
+            },
+          };
+        },
+      };
+
+      /* Emit native -> JS events from page.evaluate(). */
+      window.__mcpEmit = {
+        http(payload) {
+          for (const cb of listeners.httpRequest) {
+            cb({ method: "POST", path: "/mcp", userAgent: "mcp-ui-spec/1.0", ...payload });
+          }
+        },
+        state(patch) {
+          Object.assign(state, patch || {});
+          emitState();
+        },
+      };
+
+      window.__mcpTestExecutions = [];
+    },
+    { tokenA: TOKEN_A, tokenB: TOKEN_B },
+  );
+}
+
+/* Preload a stored MCP configuration so the card starts with non-default values.
+ * app.js's initMcp() reads it through mcp_server.js loadConfig(). */
+async function preloadMcpConfig(page, config) {
+  await page.addInitScript(([key, value]) => {
+    try {
+      if (!localStorage.getItem(key)) localStorage.setItem(key, value);
+    } catch {
+      /* storage unavailable: the test will fail on the visible default value */
+    }
+  }, [CONFIG_KEY, JSON.stringify(config)]);
+}
+
+/* ------------------------------------------------------------------ *
+ * Test-only hook into app.js internals
+ *
+ * The real MCP write path executes through agentPanel.getDevice(), which only
+ * exists after a real BLE/LAN connection. These tests need a "target connected"
+ * precondition to reach the approval + execution path, so app.js is intercepted
+ * once to expose the panel object; the spec then swaps only getDevice() for a
+ * fake executor. Everything above it (host, approval UI, audit, serial gate) is
+ * the unchanged product code.
+ * ------------------------------------------------------------------ */
+async function exposeAppInternals(page) {
+  await page.route("**/app.js*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.text();
+    await route.fulfill({
+      response,
+      body:
+        body +
+        "\nwindow.__mcpTest = {\n" +
+        "  installDevice(device) { agentPanel.getDevice = () => device; },\n" +
+        "  clearDevice() { agentPanel.getDevice = () => null; },\n" +
+        "  get host() { return mcpHost; },\n" +
+        "  get panel() { return agentPanel; },\n" +
+        "};\n",
+    });
+  });
+}
+
+async function installFakeDevice(page) {
+  // app.js is intercepted above; wait for the appended hook (a cold Vite reload
+  // can race the first evaluate()).
+  await expect
+    .poll(() => page.evaluate(() => Boolean(window.__mcpTest)), { timeout: 10_000 })
+    .toBe(true);
+  await page.evaluate(() => {
+    window.__mcpTestExecutions = [];
+    window.__mcpTest.installDevice({
+      getStatus: () => ({
+        connected: true,
+        transport: "ble",
+        device: "Linkr Bee Test",
+        deviceId: "test-device-1",
+        uart: "115200 8n1",
+        receivedBytes: 42,
+        sentBytes: 7,
+        console: "unknown",
+        executionMode: "unknown",
+      }),
+      execute: async (args, signal, options) => {
+        window.__mcpTestExecutions.push({
+          args,
+          userApproved: Boolean(options?.userApproved),
+        });
+        return {
+          id: "exec-1",
+          delivery: "sent",
+          executionStatus: "sent",
+          observation: "quiet",
+          evidence: "",
+          evidenceStart: 0,
+          evidenceTruncated: false,
+          observedCursor: 0,
+          latestCursor: 0,
+          hasMore: false,
+        };
+      },
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Navigation + event helpers
+ * ------------------------------------------------------------------ */
+async function openApp(page) {
+  await page.goto("/");
+  await expect(page.locator("#agentButton")).toBeVisible();
+}
+
+async function openAiSettings(page) {
+  await page.locator("#panelToggle").tap();
+  await page.locator('[data-settings-target="ai"]').tap();
+  await expect(page.locator("#agentSettings")).toBeVisible();
+}
+
+/* Put the MCP card's top just below the drawer's sticky header + tab strip so
+ * taps are not intercepted and the card can be captured cleanly. */
+async function revealMcpCard(page) {
+  await page.evaluate(() => {
+    const drawer = document.querySelector("#controlsPanel");
+    const card = document.getElementById("mcpSettings");
+    if (!drawer || !card) return;
+    const chrome =
+      (document.querySelector(".drawer-head")?.offsetHeight || 0) +
+      (document.querySelector(".settings-tabs")?.offsetHeight || 0);
+    const delta =
+      card.getBoundingClientRect().top -
+      drawer.getBoundingClientRect().top -
+      chrome -
+      8;
+    drawer.scrollTop = Math.max(0, drawer.scrollTop + delta);
+  });
+}
+
+/* The drawer header/tabs are sticky; an element screenshot would otherwise be
+ * painted over by them at the top of the card. They are unrelated chrome, so
+ * they are taken out of the sticky layout for the duration of the capture.
+ * The drawer is position:fixed, so its layer only paints inside the viewport:
+ * a taller viewport lets the whole (tall) card be captured in one image. */
+async function screenshotMcpCard(page, path) {
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: viewport.width, height: 1600 });
+  await page.evaluate(() => {
+    const style = document.createElement("style");
+    style.id = "mcp-spec-shot-clean";
+    style.textContent =
+      "html.settings-drawer-layout .drawer-head, html.settings-drawer-layout .settings-tabs { position: static !important; }";
+    document.head.append(style);
+  });
+  await revealMcpCard(page);
+  await page.locator("#mcpSettings").screenshot({ path });
+  await page.evaluate(() => document.getElementById("mcp-spec-shot-clean")?.remove());
+  await page.setViewportSize(viewport);
+}
+
+async function emitHttpRequest(page, { id, body, remote = REMOTE }) {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  await page.evaluate(
+    ({ id, text, remote }) => {
+      window.__mcpEmit.http({ id, body: text, remote });
+    },
+    { id, text, remote },
+  );
+}
+
+async function callRpc(page, { bridgeId, rpcId, method, params }) {
+  await emitHttpRequest(page, {
+    id: bridgeId,
+    body: { jsonrpc: "2.0", id: rpcId, method, params },
+  });
+}
+
+async function waitForResponse(page, bridgeId) {
+  await expect
+    .poll(
+      () =>
+        page.evaluate((id) => window.__mcpResponses.find((r) => r.id === id) ?? null, bridgeId),
+      { timeout: 10_000 },
+    )
+    .not.toBeNull();
+  return page.evaluate((id) => window.__mcpResponses.find((r) => r.id === id), bridgeId);
+}
+
+function parsedResponse(response) {
+  return JSON.parse(response.body);
+}
+
+function resultText(payload) {
+  return payload?.result?.content?.[0]?.text ?? "";
+}
+
+async function enableMcp(page) {
+  await page.locator("#mcpEnabled").check();
+  await expect.poll(() => page.evaluate(() => window.__mcpCalls.start.length)).toBeGreaterThan(0);
+  await expect(page.locator("#mcpEndpointBlock")).toBeVisible();
+}
+
+/* ------------------------------------------------------------------ *
+ * (a) The card exists only when the Android bridge is installed
+ * ------------------------------------------------------------------ */
+test("MCP settings card is absent without the native Android bridge", async ({ page }) => {
+  await openApp(page);
+  expect(await page.evaluate(() => window.LinkrMcp)).toBeUndefined();
+
+  await openAiSettings(page);
+  // The regular AI settings section is untouched...
+  await expect(page.locator("#agentSettings")).toBeVisible();
+  // ...and no MCP card or approval banner was created at all.
+  await expect(page.locator("#mcpSettings")).toHaveCount(0);
+  await expect(page.locator("#mcpApproval")).toHaveCount(0);
+  await expect(page.locator("#controlsPanel")).not.toContainText(/MCP server|MCP 服务器/);
+});
+
+/* ------------------------------------------------------------------ *
+ * (a) + (b) Card appears on the AI tab; enabling starts the bridge,
+ *           reveals the endpoint and a masked token
+ * ------------------------------------------------------------------ */
+test("MCP card appears under the AI tab and enabling starts the bridge with the configured port/bind", async ({ page }) => {
+  await installFakeBridge(page);
+  await openApp(page);
+  await openAiSettings(page);
+
+  // The section is mounted next to the AI settings card and only shows on that tab.
+  await expect(page.locator("#mcpSettings")).toBeVisible();
+  expect(
+    await page.evaluate(() => document.getElementById("mcpSettings")?.previousElementSibling?.id),
+  ).toBe("agentSettings");
+  await page.locator('[data-settings-target="connection"]').tap();
+  await expect(page.locator("#mcpSettings")).toBeHidden();
+  await page.locator('[data-settings-target="ai"]').tap();
+  await expect(page.locator("#mcpSettings")).toBeVisible();
+  await revealMcpCard(page);
+
+  // Defaults come from web/mcp_server.js: port 8712, bind lan, access confirm.
+  await expect(page.locator("#mcpPort")).toHaveValue("8712");
+  await expect(page.locator("#mcpBind")).toHaveValue("lan");
+  await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  await expect(page.locator("#mcpEnabled")).not.toBeChecked();
+  await expect(page.locator("#mcpEndpointBlock")).toBeHidden();
+  await expect(page.locator("#mcpStatus")).toContainText(/Disabled|未启用/);
+
+  await enableMcp(page);
+
+  // initMcp() subscribes to both bridge events before the server is started.
+  await expect
+    .poll(() => page.evaluate(() => window.__mcpCalls.addListener))
+    .toEqual(["httpRequest", "stateChanged"]);
+
+  // The bridge received exactly the configured port/bind, and the card mirrors
+  // the native snapshot (endpoint + 64-hex token, masked with type=password).
+  expect(await page.evaluate(() => window.__mcpCalls.start)).toEqual([
+    { port: 8712, bind: "lan" },
+  ]);
+  await expect(page.locator("#mcpUrl")).toHaveValue("http://192.168.1.50:8712/mcp");
+  await expect(page.locator("#mcpToken")).toHaveAttribute("type", "password");
+  await expect(page.locator("#mcpToken")).toHaveValue(TOKEN_A);
+  await expect(page.locator("#mcpTokenToggle")).toHaveText(/Show token|显示令牌/);
+  await expect(page.locator("#mcpTokenToggle")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#mcpStatus")).toContainText(/Running|运行中/);
+  await expect(page.locator("#mcpStatus")).toContainText("http://192.168.1.50:8712/mcp");
+  await expect(page.locator("#mcpRegenerate")).toBeEnabled();
+  // The copyable client snippet carries the same URL and bearer token.
+  await expect(page.locator("#mcpSnippet")).toContainText("http://192.168.1.50:8712/mcp");
+  await expect(page.locator("#mcpSnippet")).toContainText(`Bearer ${TOKEN_A}`);
+
+  await screenshotMcpCard(page, "/tmp/mcp-ui-card.png");
+
+  // "Show token" unmasks it; the value was only hidden by input type.
+  await page.locator("#mcpTokenToggle").tap();
+  await expect(page.locator("#mcpToken")).toHaveAttribute("type", "text");
+  await expect(page.locator("#mcpTokenToggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#mcpTokenToggle")).toHaveText(/Hide token|隐藏令牌/);
+  await expect(page.locator("#mcpToken")).toHaveValue(TOKEN_A);
+
+  // Rotation goes through the native bridge and the card shows the new token.
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#mcpRegenerate").tap();
+  await expect(page.locator("#mcpToken")).toHaveValue(TOKEN_B);
+  expect(await page.evaluate(() => window.__mcpCalls.regenerateToken)).toBe(1);
+
+  // Disabling stops the native server and hides the endpoint/token block.
+  await revealMcpCard(page);
+  await page.locator("#mcpEnabled").uncheck();
+  await expect.poll(() => page.evaluate(() => window.__mcpCalls.stop)).toBe(1);
+  await expect(page.locator("#mcpEndpointBlock")).toBeHidden();
+  await expect(page.locator("#mcpStatus")).toContainText(/Disabled|未启用/);
+});
+
+/* ------------------------------------------------------------------ *
+ * (b) Non-default configured port/bind are what the bridge is started with
+ * ------------------------------------------------------------------ */
+test("enabling starts the bridge with a stored non-default port and loopback bind", async ({ page }) => {
+  await installFakeBridge(page);
+  await preloadMcpConfig(page, {
+    enabled: false,
+    port: 9400,
+    bind: "loopback",
+    access: "confirm",
+  });
+  await openApp(page);
+  await openAiSettings(page);
+  await revealMcpCard(page);
+
+  await expect(page.locator("#mcpPort")).toHaveValue("9400");
+  await expect(page.locator("#mcpBind")).toHaveValue("loopback");
+  await enableMcp(page);
+
+  expect(await page.evaluate(() => window.__mcpCalls.start)).toEqual([
+    { port: 9400, bind: "loopback" },
+  ]);
+  await expect(page.locator("#mcpUrl")).toHaveValue("http://127.0.0.1:9400/mcp");
+  await expect(page.locator("#mcpStatus")).toContainText("http://127.0.0.1:9400/mcp");
+});
+
+/* ------------------------------------------------------------------ *
+ * (c) An answered external tools/call shows up in the audit list
+ * ------------------------------------------------------------------ */
+test("an answered external tools/call is listed in the audit panel", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+
+  await page.locator("#mcpAudit > summary").tap();
+  await expect(page.locator("#mcpAudit")).toHaveAttribute("open", "");
+  await expect(page.locator("#mcpAuditList")).toContainText(
+    /No external calls yet|还没有外部调用/,
+  );
+
+  await callRpc(page, {
+    bridgeId: "req-status",
+    rpcId: "rpc-status",
+    method: "tools/call",
+    params: { name: "get_device_status", arguments: {} },
+  });
+
+  const response = await waitForResponse(page, "req-status");
+  expect(response.status).toBe(200);
+  const payload = parsedResponse(response);
+  expect(payload.jsonrpc).toBe("2.0");
+  expect(payload.id).toBe("rpc-status");
+  const toolData = JSON.parse(resultText(payload));
+  expect(toolData).toMatchObject({
+    connected: true,
+    transport: "ble",
+    device: "Linkr Bee Test",
+    deviceId: "test-device-1",
+  });
+  // The answer went back through the native bridge, not just into the DOM.
+  expect(await page.evaluate(() => window.__mcpCalls.respond)).toBe(1);
+
+  // The audit row names the tool, the outcome and the remote client.
+  const row = page.locator("#mcpAuditList .mcp-audit-row").first();
+  await expect(row).toContainText(/Read device status|读取设备状态/);
+  await expect(row).toContainText(/ok/);
+  await expect(row).toContainText(REMOTE);
+});
+
+/* ------------------------------------------------------------------ *
+ * (d) A write tool raises the on-phone approval banner:
+ *     deny -> isError result and nothing executed
+ *     allow -> the app's write path runs once
+ * ------------------------------------------------------------------ */
+test("a write tool needs on-phone approval: deny answers isError, allow executes", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+
+  // The banner is outside the settings panel: close the drawer first, exactly
+  // as a user reading the terminal would be when the external write arrives.
+  await page.locator("#drawerClose").tap();
+  await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "true");
+  // Wait for the 240 ms slide-out so the banner screenshot shows the terminal,
+  // not the settings sheet half-way off screen.
+  await expect
+    .poll(() =>
+      page
+        .locator("#controlsPanel")
+        .evaluate((el) => Math.round(el.getBoundingClientRect().right)),
+    )
+    .toBeLessThanOrEqual(0);
+
+  await callRpc(page, {
+    bridgeId: "req-deny",
+    rpcId: "rpc-deny",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "reboot", appendEnter: true } },
+  });
+
+  const banner = page.locator("#mcpApproval");
+  await expect(banner).toBeVisible();
+  await expect(banner).toHaveAttribute("role", "alertdialog");
+  await expect(banner.locator(".mcp-approval-title")).toHaveText(
+    /An AI client requests approval|AI 请求执行操作/,
+  );
+  await expect(banner.locator(".mcp-approval-tool")).toHaveText(
+    /Send serial input|发送串口输入/,
+  );
+  await expect(banner.locator(".mcp-approval-args")).toContainText('"text": "reboot"');
+  await expect(banner.locator(".mcp-approval-args")).toContainText('"appendEnter": true');
+  // Nothing was answered while the human is still deciding.
+  expect(
+    await page.evaluate(() => window.__mcpResponses.some((r) => r.id === "req-deny")),
+  ).toBe(false);
+  await page.screenshot({ path: "/tmp/mcp-ui-approval.png" });
+
+  await banner.locator('[data-mcp="approvalDeny"]').tap();
+  const denied = parsedResponse(await waitForResponse(page, "req-deny"));
+  expect(denied.result.isError).toBe(true);
+  expect(resultText(denied)).toBe("Not executed: the request was denied on the phone.");
+  await expect(banner).toBeHidden();
+  expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
+
+  // Second request: allow this time and check the write reaches the device
+  // executor once, with the MCP approval recorded as userApproved.
+  await callRpc(page, {
+    bridgeId: "req-allow",
+    rpcId: "rpc-allow",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "reboot", appendEnter: true } },
+  });
+  await expect(banner).toBeVisible();
+  await banner.locator('[data-mcp="approvalAllow"]').tap();
+
+  const allowed = parsedResponse(await waitForResponse(page, "req-allow"));
+  expect(allowed.result.isError).toBeUndefined();
+  const execution = JSON.parse(resultText(allowed));
+  expect(execution.source).toBe("serial-execution");
+  expect(execution.id).toBe("exec-1");
+  expect(execution.delivery).toBe("sent");
+  expect(execution.note).toContain("Delivery is not command completion");
+  await expect(banner).toBeHidden();
+  expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([
+    { args: { text: "reboot", appendEnter: true }, userApproved: true },
+  ]);
+});
+
+/* ------------------------------------------------------------------ *
+ * (d) Read-only access refuses a write tool with an isError result and
+ *     never asks the phone (no approval banner)
+ * ------------------------------------------------------------------ */
+test("read-only access refuses a write tool without raising the approval banner", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+
+  await page.locator("#mcpAccess").selectOption("read");
+  await expect(page.locator("#mcpAccess")).toHaveValue("read");
+  await expect(page.locator("#mcpAccess")).toBeEnabled();
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-mcp-config-v1")).access),
+  ).toBe("read");
+
+  await callRpc(page, {
+    bridgeId: "req-readonly",
+    rpcId: "rpc-readonly",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "reboot", appendEnter: true } },
+  });
+
+  const response = await waitForResponse(page, "req-readonly");
+  const payload = parsedResponse(response);
+  expect(payload.result.isError).toBe(true);
+  expect(resultText(payload)).toContain("read-only mode is enabled on the phone");
+  await expect(page.locator("#mcpApproval")).toBeHidden();
+  expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
+  // The refusal is audited even though no approval was requested.
+  await expect(page.locator("#mcpAuditList")).toContainText(/denied/);
+});

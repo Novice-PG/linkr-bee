@@ -1161,6 +1161,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     logsChanged,
     syncLayout,
     isOpen: () => opened,
+    /* The MCP server executes through the assistant's serial gate: one executor
+     * owns the device session, approvals and evidence, so an external client
+     * can never open a second write path to the UART. */
+    getDevice: () => device,
     isBusy: () => busy,
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),
     logsCleared() { stop("stopped", { preserveConversation: false }); clearConversation(); refreshConsole(); },

@@ -40,6 +40,8 @@ import { createTerminalKeyPreferences } from "./terminal_key_preferences.js";
 import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
+import { createMcpHost } from "./mcp_server.js";
+import { createMcpUi } from "./mcp_ui.js";
 import { createAboutPage } from "./about_page.js";
 import { inputLeavesPendingLine } from "./agent_execution_policy.js";
 import {
@@ -54,6 +56,8 @@ const terminalSessionTracker = createTerminalSessionTracker();
 const agentJournal = new SerialJournal();
 let agentPanel = null;
 let agentSettings = null;
+let mcpHost = null;
+let mcpUi = null;
 let terminalKeyPreferences = null;
 let aboutPage = null;
 let serialInputRevision = 0;
@@ -1140,6 +1144,7 @@ function applyLang() {
   updateModifierButtons();
   agentPanel?.refreshLang();
   agentSettings?.refreshLang();
+  mcpUi?.refreshLang();
   terminalKeyPreferences?.refreshLang();
   aboutPage?.refreshLang();
 }
@@ -5039,6 +5044,46 @@ async function executeAccessoryChange({ action, args = {}, command, signal }) {
     applied: Boolean(queried.value) && (wantOff ? queried.value.state === "off" : queried.value.state === "on") };
 }
 
+/* External MCP clients (Claude Desktop, Cursor, …) reach the same serial gate
+ * the assistant uses. Only the Android shell installs window.LinkrMcp; on the
+ * web, iOS and HarmonyOS builds this returns immediately and the settings card
+ * is never created. */
+function initMcp() {
+  const bridge = globalThis.LinkrMcp;
+  if (!bridge || !bridge.available) return;
+  let storage;
+  try { storage = localStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
+  mcpHost = createMcpHost({
+    getBridge: () => globalThis.LinkrMcp || null,
+    storage,
+    getDevice: () => agentPanel?.getDevice?.() || null,
+    readLog: (options) => agentJournal.read(options),
+    /* The accessory helpers are the app's own management-channel functions, so
+     * an MCP change goes through the same read-back and redaction every other
+     * host client uses. */
+    accessory: {
+      capability: accessoryCapability,
+      command: accessoryCommand,
+      execute: executeAccessoryChange,
+      diagnostics: collectAccessoryDiagnostics,
+      scan: scanWifi,
+    },
+    requestApproval: (request) => mcpUi
+      ? mcpUi.requestApproval(request)
+      : Promise.resolve({ approved: false, reason: "MCP approval UI is unavailable." }),
+    getLang: () => lang,
+    onChange: () => mcpUi?.refresh(),
+  });
+  mcpUi = createMcpUi({ mount: elements.controls, getLang: () => lang, host: mcpHost });
+  /* Subscribe before starting: a server that accepts a request before the
+   * httpRequest listener exists could only answer 503. The user explicitly
+   * enabled the server in a previous run, so bring it back up afterwards; a
+   * failed start stays visible in the settings card instead of blocking boot. */
+  Promise.resolve(mcpHost.attach())
+    .then(() => (mcpHost.getConfig().enabled ? mcpHost.enable() : null))
+    .catch(() => {});
+}
+
 function init() {
   loadPersisted();
   aboutPage = createAboutPage({ section: $("aboutPage"), getLang: () => lang });
@@ -5114,6 +5159,7 @@ function init() {
       return { inputRevision: queuedRevision };
     },
   });
+  initMcp();
   initSoftKeyboardLayout();
   syncSidebarForViewport();
   if (mobileMedia.addEventListener) {

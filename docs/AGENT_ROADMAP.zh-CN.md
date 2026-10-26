@@ -3,6 +3,39 @@
 本文记录 AI（Agent）功能当前的能力边界、已确认的缺口和排期。实机验收记录见
 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md)。
 
+## 2026-10-26：MCP 服务器（Android）
+
+Android App 现在可作为局域网内的 MCP 服务器（`POST /mcp`、JSON-RPC 2.0、Bearer
+令牌），让 Claude Desktop、Cursor、Codex 等支持 Streamable HTTP 的客户端使用配件的
+串口与配件管理能力。协议与工具逻辑在共享的 `web/mcp_server.js`，Java 只负责认证、
+HTTP 传输与前台服务生命周期。
+
+- 原生传输：`McpHttpServer`（纯 Java，可在主机 JVM 上测试）、`McpServerManager`
+  （配置、64 个十六进制字符的令牌、请求转发与 180 秒超时）、`LinkrMcpService`
+  （`connectedDevice` 前台服务）、`LinkrMcpPlugin`（Capacitor 桥）。监听 `0.0.0.0`
+  或回环；带 `Origin` 的请求以 `403` 拒绝；请求头上限 16 KiB、请求体上限 1 MiB。
+- 工具：9 个，复用现有的串口执行闸门与配件管理通道，没有第二条串口写路径。4 个只读
+  工具（`get_device_status`、`read_serial_log`、`search_serial_log`、
+  `get_accessory_diagnostics`）；`wifi_scan` 只观察、不保存配置，只读模式下仍可批准；
+  4 个写入工具（`send_serial_input`、`set_uart_config`、`set_wifi`、`set_webdav`）
+  每次都要在手机上确认，只读模式直接拒绝。设备变更调用一次只允许一个。
+- 界面：AI 设置页新增“MCP 服务器”卡片（启用、只读/读写、端口、监听地址、令牌复制与
+  轮换、客户端配置片段、最近 50 次调用审计）；写入确认横幅在设置面板之外显示，参数
+  打码。
+- 证据纪律不变：串口输出是不可信设备数据，发送成功只代表投递；等待确认时 App 必须在
+  前台，后台时不弹确认、写入不执行。
+- 生命周期边界：仅 Android；没有 SSE / 服务端主动消息（`GET /mcp` 返回 `405`）；App
+  进程结束服务即停止，前台服务只保证 App 在后台时进程仍存活。
+- 测试：`mobile/test/mcp_server.test.mjs`（协议、工具策略、审批与拒绝、脱敏、单写入
+  串行等）、`mobile/android/app/src/test/java/guru/linkr/ble/mcp/McpHttpServerTest.java`
+  （主机 JVM：路由、鉴权、`Origin` 优先级、大小限制、绑定失败与令牌轮换、停止语义）、
+  `mobile/browser-test/mcp_server.spec.mjs`（设置卡片与转发传输）、
+  `mobile/browser-test/mcp_ui.spec.mjs`（卡片可见性、端口/监听地址、审计列表、确认横幅
+  的允许与拒绝、只读模式）。
+- 验证边界：**主机 JVM 测试与构建已验证；真机验证待完成**（手机局域网可达性、Android
+  前后台行为、真机确认卡片、真实 BLE 管理通道均未验证）。
+- 使用与安全说明见 [MCP.zh-CN.md](MCP.zh-CN.md)（[English](MCP.md)）。
+
 ## 2026-10-23：上下文与工具加载优化
 
 Web、Capacitor 和 HarmonyOS ArkWeb 共用的 Pi runtime 默认改为 `focused`：
@@ -393,5 +426,6 @@ token）：保留四态语义与证据纪律，删掉模型可自行推断的重
   `match` / `mismatch` / `indeterminate` / `observed`，并守住两条区别：`observed`
   （没给预期，只是测量）不等于 `match`，`indeterminate`（答不了 / 回答不可用）不等于
   任一结果。不要另造一套说法，也不要把"退出码 0"或某一行的出现升级成"已验证"。
-- 当前应用未接入 MCP、子代理和向量记忆，不要按“现成可用”的应用能力排期。
+- 当前应用已内置 Android 端 MCP 服务器（见 [MCP.zh-CN.md](MCP.zh-CN.md)）；仍未接入
+  子代理和向量记忆，后两者不要按“现成可用”的应用能力排期。
 - 助手不应越过"下载后等用户指示"的界线，自动安装、刷写不在计划内。

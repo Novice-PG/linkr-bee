@@ -1,0 +1,923 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  MCP_CONFIG_KEY,
+  MCP_DEFAULT_PORT,
+  MCP_SERVER_NAME,
+  MCP_SERVER_VERSION,
+  MCP_TOOLS,
+  claudeConfigSnippet,
+  createMcpHost,
+  defaultMcpConfig,
+  redactToolArguments,
+  validateMcpConfig,
+} from "../../web/mcp_server.js";
+
+const TOOL_NAMES = [
+  "get_device_status",
+  "read_serial_log",
+  "search_serial_log",
+  "get_accessory_diagnostics",
+  "wifi_scan",
+  "send_serial_input",
+  "set_uart_config",
+  "set_wifi",
+  "set_webdav",
+];
+
+function memoryStorage(initial = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    getItem: (key) => (data.has(key) ? data.get(key) : null),
+    setItem: (key, value) => data.set(key, String(value)),
+  };
+}
+
+/* The journal contract is {text,start,cursor,latestCursor,truncated}; the host
+ * must not need any other field, so the fake can stay tiny. */
+function fakeJournal(log = {}) {
+  const reads = [];
+  return {
+    reads,
+    read(options = {}) {
+      reads.push({ ...options });
+      return { text: "", start: 0, cursor: 0, latestCursor: 0, truncated: false, ...log };
+    },
+  };
+}
+
+function fakeDevice({ status = {}, execute } = {}) {
+  const calls = { execute: [], status: 0 };
+  return {
+    calls,
+    device: {
+      getStatus() {
+        calls.status += 1;
+        return {
+          connected: true,
+          transport: "ble",
+          device: "Linkr Bee",
+          deviceId: "dev-1",
+          uart: "115200",
+          receivedBytes: 100,
+          sentBytes: 20,
+          console: { kind: "shell", evidence: "", cursor: 10, source: "classifier" },
+          executionMode: "auto",
+          // Fields the MCP status tool must not leak to an external client.
+          sessionId: "session-1",
+          inputRevision: 3,
+          profile: { board: "radxa" },
+          notes: [{ text: "kept locally" }],
+          commandPolicy: { alwaysAsk: [], allow: [] },
+          ...status,
+        };
+      },
+      async execute(args, signal, options) {
+        calls.execute.push({ args, signal, options });
+        if (execute) return execute(args, signal, options);
+        return {
+          id: "serial-1",
+          delivery: "sent",
+          executionStatus: "unknown",
+          observation: "no-output",
+          evidence: "",
+          evidenceStart: 10,
+          evidenceTruncated: false,
+          observedCursor: 10,
+          latestCursor: 10,
+          hasMore: false,
+        };
+      },
+    },
+  };
+}
+
+function fakeAccessory(overrides = {}) {
+  const calls = { capability: 0, command: [], diagnostics: 0, scan: 0, execute: [] };
+  const capability = { available: true, wifi: true, webdav: true, asyncEvents: true, ...(overrides.capability || {}) };
+  const accessory = {
+    capability() {
+      calls.capability += 1;
+      return { ...capability };
+    },
+    command(action, args) {
+      calls.command.push({ action, args });
+      return overrides.command ? overrides.command(action, args) : `@${action}`;
+    },
+    async diagnostics(options) {
+      calls.diagnostics += 1;
+      if (overrides.diagnostics) return overrides.diagnostics(options);
+      return {
+        settled: true,
+        groups: { fw: { version: "1" } },
+        lines: Array.from({ length: 30 }, (_, index) => `@info fw line${index}`),
+      };
+    },
+    async scan(options) {
+      calls.scan += 1;
+      if (overrides.scan) return overrides.scan(options);
+      return { failed: false, networks: [{ ssid: "Bench" }] };
+    },
+    async execute(request) {
+      calls.execute.push(request);
+      if (overrides.execute) return overrides.execute(request);
+      return {
+        command: request.command,
+        reply: "OK",
+        accepted: true,
+        applied: true,
+        settled: true,
+      };
+    },
+  };
+  return { accessory, calls };
+}
+
+function fakeBridge(overrides = {}) {
+  const listeners = [];
+  const calls = { start: [], stop: 0, getState: 0, regenerate: 0, respond: [], listeners: 0 };
+  const state = {
+    running: false,
+    port: MCP_DEFAULT_PORT,
+    bind: "lan",
+    token: "a".repeat(64),
+    url: `http://127.0.0.1:${MCP_DEFAULT_PORT}/mcp`,
+    urls: [`http://127.0.0.1:${MCP_DEFAULT_PORT}/mcp`],
+    foreground: true,
+    activeRequests: 0,
+    lastError: null,
+  };
+  const bridge = {
+    available: true,
+    platform: "android",
+    async start(config) {
+      calls.start.push({ ...config });
+      Object.assign(state, {
+        running: true,
+        port: config.port,
+        bind: config.bind,
+        url: `http://127.0.0.1:${config.port}/mcp`,
+        urls: [`http://127.0.0.1:${config.port}/mcp`],
+      });
+      return { ...state };
+    },
+    async stop() {
+      calls.stop += 1;
+      Object.assign(state, { running: false });
+      return { ...state };
+    },
+    async getState() {
+      calls.getState += 1;
+      return { ...state };
+    },
+    async regenerateToken() {
+      calls.regenerate += 1;
+      state.token = "b".repeat(64);
+      return { ...state };
+    },
+    async respond(input) {
+      calls.respond.push({ ...input });
+    },
+    async addListener(event, callback) {
+      calls.listeners += 1;
+      listeners.push({ event, callback });
+      return { remove: async () => {} };
+    },
+  };
+  Object.assign(bridge, overrides);
+  return { bridge, calls, state, listeners };
+}
+
+function createHost({
+  bridge = null,
+  device = null,
+  readLog = null,
+  accessory = null,
+  requestApproval = async () => ({ approved: true }),
+  storage = memoryStorage(),
+  onChange = () => {},
+  getLang = () => "en",
+} = {}) {
+  return createMcpHost({
+    getBridge: () => bridge,
+    storage,
+    getDevice: () => device,
+    readLog: readLog || (() => ({ text: "", start: 0, cursor: 0, latestCursor: 0, truncated: false })),
+    accessory,
+    requestApproval,
+    getLang,
+    onChange,
+  });
+}
+
+async function rpc(host, method, params, id = 1) {
+  const request = { jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) };
+  const response = await host.handleRpc(JSON.stringify(request));
+  return { status: response.status, message: response.body ? JSON.parse(response.body) : null };
+}
+
+async function callTool(host, name, args = {}, id = 1) {
+  return rpc(host, "tools/call", { name, arguments: args }, id);
+}
+
+function toolPayload(message) {
+  return JSON.parse(message.result.content[0].text);
+}
+
+function toolErrorText(message) {
+  assert.equal(message.result.isError, true);
+  return message.result.content[0].text;
+}
+
+test("initialize negotiates the protocol version and carries the evidence rules", async () => {
+  const host = createHost();
+  const cases = [
+    ["2024-11-05", "2024-11-05"],
+    ["2025-03-26", "2025-03-26"],
+    ["2099-01-01", "2025-06-18"],
+    [undefined, "2025-06-18"],
+  ];
+  for (const [requested, expected] of cases) {
+    const { status, message } = await rpc(host, "initialize",
+      requested === undefined ? {} : { protocolVersion: requested });
+    assert.equal(status, 200);
+    assert.equal(message.result.protocolVersion, expected);
+    assert.deepEqual(message.result.capabilities, { tools: { listChanged: false } });
+    assert.deepEqual(message.result.serverInfo, {
+      name: MCP_SERVER_NAME,
+      version: MCP_SERVER_VERSION,
+    });
+    const instructions = message.result.instructions;
+    assert.match(instructions, /untrusted device data/i);
+    assert.match(instructions, /delivery is not command completion/i);
+    assert.match(instructions, /approved by a human/i);
+    assert.match(instructions, /read-only mode/i);
+  }
+});
+
+test("notifications are acknowledged with 202 and ping has an empty result", async () => {
+  const host = createHost();
+  const initialized = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }));
+  assert.deepEqual(initialized, { status: 202, body: "" });
+  const cancelled = await host.handleRpc(JSON.stringify({
+    jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 },
+  }));
+  assert.deepEqual(cancelled, { status: 202, body: "" });
+  // An unknown notification is not answered either: it has no id to answer to.
+  const unknownNotification = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", method: "notifications/nope" }));
+  assert.equal(unknownNotification.status, 202);
+  const ping = await rpc(host, "ping");
+  assert.deepEqual(ping.message, { jsonrpc: "2.0", id: 1, result: {} });
+});
+
+test("malformed JSON and invalid requests become JSON-RPC errors", async () => {
+  const host = createHost();
+  const parse = await host.handleRpc("{not json");
+  assert.equal(parse.status, 400);
+  assert.equal(JSON.parse(parse.body).error.code, -32700);
+  assert.equal(JSON.parse(parse.body).id, null);
+
+  const version = await host.handleRpc(JSON.stringify({ jsonrpc: "1.0", id: 7, method: "ping" }));
+  assert.equal(version.status, 400);
+  assert.equal(JSON.parse(version.body).error.code, -32600);
+  assert.equal(JSON.parse(version.body).id, 7);
+
+  const missingMethod = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", id: 8 }));
+  assert.equal(missingMethod.status, 400);
+  assert.equal(JSON.parse(missingMethod.body).error.code, -32600);
+
+  const unknownMethod = await rpc(host, "tools/nope");
+  assert.equal(unknownMethod.status, 200);
+  assert.equal(unknownMethod.message.error.code, -32601);
+
+  const batch = await host.handleRpc(JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "ping" }]));
+  assert.equal(batch.status, 400);
+  assert.equal(JSON.parse(batch.body).error.code, -32600);
+});
+
+test("tools/list exposes the fixed catalog without internal policy fields", async () => {
+  const host = createHost();
+  const { status, message } = await rpc(host, "tools/list");
+  assert.equal(status, 200);
+  const tools = message.result.tools;
+  assert.deepEqual(tools.map((tool) => tool.name), TOOL_NAMES);
+  for (const tool of tools) {
+    assert.deepEqual(Object.keys(tool).sort(), ["description", "inputSchema", "name"]);
+    assert.equal(tool.inputSchema.type, "object");
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assert.ok(tool.description.length > 120, `${tool.name} needs an evidence-disciplined description`);
+    assert.doesNotMatch(JSON.stringify(tool), /"access"|"write"/);
+  }
+  const send = tools.find((tool) => tool.name === "send_serial_input");
+  assert.deepEqual(send.inputSchema.required, ["text", "appendEnter"]);
+  assert.equal(send.inputSchema.properties.text.maxLength, 2048);
+  assert.match(send.description, /delivery is not command completion/i);
+  const read = tools.find((tool) => tool.name === "read_serial_log");
+  assert.match(read.description, /untrusted device data/i);
+  assert.equal(read.inputSchema.properties.limit.maximum, 16000);
+  const uart = tools.find((tool) => tool.name === "set_uart_config");
+  assert.equal(uart.inputSchema.properties.baud.minimum, 300);
+  assert.equal(uart.inputSchema.properties.baud.maximum, 3000000);
+  assert.deepEqual(uart.inputSchema.properties.parity.enum, ["n", "e", "o"]);
+  const wifi = tools.find((tool) => tool.name === "set_wifi");
+  assert.deepEqual(wifi.inputSchema.properties.action.enum, ["connect", "off"]);
+  assert.equal(wifi.inputSchema.properties.password.maxLength, 64);
+  const webdav = tools.find((tool) => tool.name === "set_webdav");
+  assert.deepEqual(webdav.inputSchema.properties.action.enum, ["on", "off"]);
+  // The list is plain JSON: no handler functions may leak into the payload.
+  assert.doesNotThrow(() => JSON.stringify(tools));
+});
+
+test("empty resources/prompts lists and logging level are accepted", async () => {
+  const host = createHost();
+  assert.deepEqual((await rpc(host, "resources/list")).message.result, { resources: [] });
+  assert.deepEqual((await rpc(host, "resources/templates/list")).message.result, { resourceTemplates: [] });
+  assert.deepEqual((await rpc(host, "prompts/list")).message.result, { prompts: [] });
+  assert.deepEqual((await rpc(host, "logging/setLevel", { level: "debug" })).message.result, {});
+});
+
+test("read tools return only the documented device evidence", async () => {
+  const { device } = fakeDevice();
+  const journal = fakeJournal({ text: "U-Boot 2024.01\r\n", start: 10, cursor: 25, latestCursor: 25 });
+  const host = createHost({ device, readLog: journal.read });
+
+  const statusResponse = await callTool(host, "get_device_status");
+  assert.equal(statusResponse.status, 200);
+  const status = toolPayload(statusResponse.message);
+  assert.deepEqual(Object.keys(status).sort(), [
+    "connected", "console", "device", "deviceId", "executionMode",
+    "receivedBytes", "sentBytes", "transport", "uart",
+  ]);
+  assert.equal(status.connected, true);
+  assert.equal(status.transport, "ble");
+  assert.equal(status.uart, "115200");
+  assert.equal(status.executionMode, "auto");
+  // Local-only fields must not reach an external client.
+  assert.equal("sessionId" in status, false);
+  assert.equal("profile" in status, false);
+  assert.equal("notes" in status, false);
+  assert.equal("commandPolicy" in status, false);
+
+  const read = toolPayload((await callTool(host, "read_serial_log")).message);
+  assert.deepEqual(journal.reads.at(-1), { limit: 6000 });
+  assert.equal(read.text, "U-Boot 2024.01\r\n");
+  assert.equal(read.cursor, 25);
+  assert.equal(read.latestCursor, 25);
+  assert.equal(read.hasMore, false);
+  assert.equal(read.untrusted, true);
+
+  await callTool(host, "read_serial_log", { after: 5, limit: 100 });
+  assert.deepEqual(journal.reads.at(-1), { after: 5, limit: 100 });
+  await callTool(host, "read_serial_log", { recent: true });
+  assert.deepEqual(journal.reads.at(-1), { limit: 6000, recent: true });
+});
+
+test("read_serial_log refuses recent combined with after as invalid params", async () => {
+  const { device } = fakeDevice();
+  const host = createHost({ device, readLog: fakeJournal().read });
+  const response = await callTool(host, "read_serial_log", { after: 10, recent: true });
+  assert.equal(response.status, 200);
+  assert.equal(response.message.error.code, -32602);
+});
+
+test("search_serial_log returns bounded excerpts without advancing a cursor", async () => {
+  const text = `${"hit ".repeat(14)}tail hit`;
+  const journal = fakeJournal({ text, start: 0, cursor: text.length, latestCursor: text.length });
+  const { device } = fakeDevice();
+  const host = createHost({ device, readLog: journal.read });
+  const response = await callTool(host, "search_serial_log", { query: "HIT" });
+  assert.equal(response.status, 200);
+  const payload = toolPayload(response.message);
+  assert.equal(payload.matches.length, 12);
+  assert.equal(payload.moreMatches, true);
+  assert.equal(payload.untrusted, true);
+  assert.equal(payload.cursor, text.length);
+  assert.match(payload.note, /window/i);
+  assert.equal(payload.matches[0].excerpt.startsWith("hit"), true);
+  assert.deepEqual(journal.reads[0], { after: undefined, limit: 16000 });
+  const blank = await callTool(host, "search_serial_log", { query: "   " });
+  assert.equal(blank.message.error.code, -32602);
+});
+
+test("unknown tools and invalid arguments are invalid-params errors", async () => {
+  const host = createHost();
+  const unknown = await callTool(host, "no_such_tool", {});
+  assert.equal(unknown.status, 200);
+  assert.equal(unknown.message.error.code, -32602);
+  assert.match(unknown.message.error.message, /Unknown tool/);
+
+  const badLimit = await callTool(host, "read_serial_log", { limit: 0 });
+  assert.equal(badLimit.message.error.code, -32602);
+  assert.match(badLimit.message.error.message, /arguments\.limit/);
+
+  const missingText = await callTool(host, "send_serial_input", { appendEnter: true });
+  assert.equal(missingText.message.error.code, -32602);
+  assert.match(missingText.message.error.message, /arguments\.text is required/);
+
+  const extra = await callTool(host, "get_device_status", { unexpected: true });
+  assert.equal(extra.message.error.code, -32602);
+  assert.match(extra.message.error.message, /Unknown argument/);
+
+  const badEnum = await callTool(host, "set_wifi", { action: "reboot" });
+  assert.equal(badEnum.message.error.code, -32602);
+});
+
+test("a missing or disconnected target is an isError result with a clear reason", async () => {
+  const noSession = createHost({ device: null });
+  const missing = await callTool(noSession, "get_device_status");
+  assert.equal(missing.status, 200);
+  assert.match(toolErrorText(missing.message), /No target device session/);
+
+  const { device } = fakeDevice({ status: { connected: false } });
+  const disconnected = await callTool(createHost({ device }), "get_device_status");
+  assert.match(toolErrorText(disconnected.message), /not connected/i);
+});
+
+test("read-only access mode refuses device-changing tools and nothing is approved", async () => {
+  const approvals = [];
+  const { device, calls } = fakeDevice();
+  const host = createHost({
+    device,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  await host.setConfig({ access: "read" });
+  const denied = await callTool(host, "send_serial_input", { text: "reboot", appendEnter: true });
+  assert.equal(denied.status, 200);
+  assert.match(toolErrorText(denied.message), /read-only/i);
+  assert.equal(calls.execute.length, 0);
+  assert.equal(approvals.length, 0);
+  const audit = host.getAudit();
+  assert.equal(audit[0].outcome, "denied");
+  assert.equal(audit[0].tool, "send_serial_input");
+  // Reads stay available.
+  const status = await callTool(host, "get_device_status");
+  assert.equal(status.message.result.isError, undefined);
+});
+
+test("send_serial_input asks the phone for approval and sends once approved", async () => {
+  const approvals = [];
+  const { device, calls } = fakeDevice();
+  const host = createHost({
+    device,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "send_serial_input", { text: "uname -a", appendEnter: true });
+  assert.equal(response.status, 200);
+  assert.equal(response.message.result.isError, undefined);
+  const payload = toolPayload(response.message);
+  assert.equal(payload.id, "serial-1");
+  assert.equal(payload.delivery, "sent");
+  assert.match(payload.note, /Delivery is not command completion/);
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].tool, "send_serial_input");
+  assert.equal(approvals[0].args.text, "uname -a");
+  assert.match(approvals[0].summary, /uname -a/);
+  assert.equal(typeof approvals[0].timeoutMs, "number");
+  assert.equal(calls.execute.length, 1);
+  assert.deepEqual(calls.execute[0].args, { text: "uname -a", appendEnter: true });
+  assert.deepEqual(calls.execute[0].options, { userApproved: true });
+  assert.ok(calls.execute[0].signal instanceof AbortSignal);
+  assert.equal(host.getAudit()[0].outcome, "ok");
+});
+
+test("a denied approval never executes the write", async () => {
+  const { device, calls } = fakeDevice();
+  const host = createHost({ device, requestApproval: async () => ({ approved: false, reason: "not now" }) });
+  const response = await callTool(host, "send_serial_input", { text: "rm -rf /tmp/x", appendEnter: true });
+  assert.equal(response.status, 200);
+  assert.equal(toolErrorText(response.message), "Not executed: the request was denied on the phone.");
+  assert.equal(calls.execute.length, 0);
+  assert.equal(host.getAudit()[0].outcome, "denied");
+});
+
+test("a write on a missing target is refused before approval is requested", async () => {
+  const approvals = [];
+  const host = createHost({
+    device: null,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "send_serial_input", { text: "ls", appendEnter: true });
+  assert.match(toolErrorText(response.message), /No target device session/);
+  assert.equal(approvals.length, 0);
+});
+
+test("only one device-changing call runs at a time", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { device } = fakeDevice({
+    execute: async () => {
+      await gate;
+      return {
+        id: "serial-1", delivery: "sent", executionStatus: "unknown", observation: "no-output",
+        evidence: "", evidenceStart: 0, evidenceTruncated: false,
+        observedCursor: 0, latestCursor: 0, hasMore: false,
+      };
+    },
+  });
+  const host = createHost({ device });
+  const first = callTool(host, "send_serial_input", { text: "one", appendEnter: true });
+  const second = await callTool(host, "send_serial_input", { text: "two", appendEnter: true });
+  assert.equal(second.status, 200);
+  assert.match(toolErrorText(second.message), /another action is in progress/);
+  release();
+  const firstResponse = await first;
+  assert.equal(firstResponse.message.result.isError, undefined);
+  assert.equal(host.getAudit()[0].outcome, "ok");
+});
+
+test("tool failures are isError results, not JSON-RPC errors", async () => {
+  const { accessory } = fakeAccessory({
+    diagnostics: async () => {
+      throw new Error("management channel busy");
+    },
+  });
+  const host = createHost({ accessory });
+  const response = await callTool(host, "get_accessory_diagnostics");
+  assert.equal(response.status, 200);
+  assert.match(toolErrorText(response.message), /management channel busy/);
+  assert.equal(host.getAudit()[0].outcome, "error");
+});
+
+test("get_accessory_diagnostics bounds lines and requires the management channel", async () => {
+  const { accessory } = fakeAccessory();
+  const host = createHost({ accessory });
+  const payload = toolPayload((await callTool(host, "get_accessory_diagnostics")).message);
+  assert.equal(payload.source, "accessory-management-channel");
+  assert.equal(payload.command, "@i?");
+  assert.equal(payload.settled, true);
+  assert.equal(payload.groups.fw.version, "1");
+  assert.equal(payload.lines.length, 24);
+
+  const missing = await callTool(createHost({ accessory: null }), "get_accessory_diagnostics");
+  assert.match(toolErrorText(missing.message), /unavailable/i);
+});
+
+test("wifi_scan enforces capabilities, bounds networks and stays usable read-only", async () => {
+  const networks = Array.from({ length: 25 }, (_, index) => ({ ssid: `net-${index}`, rssi: -40 - index }));
+  const { accessory } = fakeAccessory({ scan: async () => ({ failed: false, networks }) });
+  const host = createHost({ accessory });
+  const response = await callTool(host, "wifi_scan");
+  const payload = toolPayload(response.message);
+  assert.equal(payload.failed, false);
+  assert.equal(payload.networks.length, 20);
+  assert.equal(payload.networks[19].ssid, "net-19");
+  assert.match(payload.note, /empty list/i);
+
+  const { accessory: limited } = fakeAccessory({ capability: { wifi: false } });
+  const denied = await callTool(createHost({ accessory: limited }), "wifi_scan");
+  assert.match(toolErrorText(denied.message), /WiFi control/);
+
+  // A scan changes no stored configuration, so read-only mode still allows it.
+  await host.setConfig({ access: "read" });
+  const readOnlyScan = await callTool(host, "wifi_scan");
+  assert.equal(readOnlyScan.message.result.isError, undefined);
+});
+
+test("accessory changes return the redacted command and the read-back evidence", async () => {
+  const approvals = [];
+  const { accessory, calls } = fakeAccessory({
+    command: (action, args) =>
+      `@u=${args.baud},${args.dataBits ?? 8},${args.parity ?? "n"},${args.stopBits ?? 1},${args.flow ?? "none"}`,
+    execute: async (request) => ({
+      command: request.command,
+      reply: "OK uart=115200,8,e,1,none",
+      accepted: true,
+      confirmed: { baud: 115200, dataBits: 8, parity: "e", stopBits: 1, flow: "none" },
+      settled: true,
+      applied: true,
+    }),
+  });
+  const host = createHost({
+    accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "set_uart_config", { baud: 115200, parity: "e" });
+  const payload = toolPayload(response.message);
+  assert.equal(payload.source, "accessory-management-channel");
+  assert.equal(payload.command, "@u=115200,8,e,1,none");
+  assert.equal(payload.reply, "OK uart=115200,8,e,1,none");
+  assert.equal(payload.applied, true);
+  assert.equal(payload.settled, true);
+  assert.match(payload.note, /applied=false/);
+  assert.match(approvals[0].summary, /UART/);
+  assert.deepEqual(calls.execute[0].action, "set-uart");
+  assert.equal(calls.execute[0].command, "@u=115200,8,e,1,none");
+});
+
+test("a WiFi password never reaches the tool result, summary or audit", async () => {
+  const PASSWORD = "BenchSecret-9f2";
+  const approvals = [];
+  const { accessory, calls } = fakeAccessory({
+    command: () => `@w=Bench,${PASSWORD}`,
+    // The step is deliberately leaky: the host itself must scrub the value.
+    execute: async (request) => ({
+      command: request.command,
+      reply: `OK wifi=connected,ssid=Bench,ip=10.0.0.2 echo @w=Bench,${PASSWORD}`,
+      accepted: true,
+      applied: true,
+      settled: true,
+    }),
+  });
+  const host = createHost({
+    accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "set_wifi", { action: "connect", ssid: "Bench", password: PASSWORD });
+  assert.equal(response.message.result.isError, undefined);
+  const text = response.message.result.content[0].text;
+  assert.doesNotMatch(text, /BenchSecret/);
+  assert.match(text, /"command":"@w=Bench,<redacted>"/);
+
+  assert.doesNotMatch(JSON.stringify(approvals), /BenchSecret/);
+  assert.equal(approvals[0].args.password, "<redacted>");
+  assert.equal(approvals[0].args.ssid, "Bench");
+  assert.doesNotMatch(JSON.stringify(host.getAudit()), /BenchSecret/);
+  assert.equal(host.getAudit()[0].args.password, "<redacted>");
+  // The app still receives the real command over the management channel.
+  assert.equal(calls.execute[0].command, `@w=Bench,${PASSWORD}`);
+});
+
+test("the audit list is bounded, newest first and redacted", async () => {
+  const { device } = fakeDevice();
+  const host = createHost({ device, readLog: fakeJournal().read });
+  for (let index = 0; index < 55; index++) {
+    await callTool(host, "get_device_status");
+  }
+  assert.equal(host.getAudit().length, 50);
+  assert.equal(host.getState().audit.length, 50);
+  await callTool(host, "read_serial_log", { limit: 10 });
+  const audit = host.getAudit();
+  assert.equal(audit.length, 50);
+  assert.equal(audit[0].tool, "read_serial_log");
+  assert.equal(audit[0].outcome, "ok");
+  assert.equal(audit[0].remote, null);
+  assert.match(audit[0].at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(typeof audit[0].durationMs, "number");
+  assert.deepEqual(audit[0].args, { limit: 10 });
+});
+
+test("validateMcpConfig rejects invalid records with stable messages", () => {
+  assert.deepEqual(validateMcpConfig({}), { enabled: false, port: 8712, bind: "lan", access: "confirm" });
+  assert.deepEqual(defaultMcpConfig({ port: 9000 }), { enabled: false, port: 9000, bind: "lan", access: "confirm" });
+  // "ask" is the tool-level access label; it normalizes to the stored mode.
+  assert.equal(validateMcpConfig({ access: "ask" }).access, "confirm");
+  assert.throws(() => validateMcpConfig({ port: 80 }), /MCP port/);
+  assert.throws(() => validateMcpConfig({ port: 65536 }), /MCP port/);
+  assert.throws(() => validateMcpConfig({ port: "8712" }), /MCP port/);
+  assert.throws(() => validateMcpConfig({ bind: "wan" }), /MCP bind/);
+  assert.throws(() => validateMcpConfig({ access: "write" }), /MCP access/);
+  assert.throws(() => validateMcpConfig({ enabled: "yes" }), /MCP enabled/);
+  assert.throws(() => validateMcpConfig({ nonsense: true }), /Unknown MCP configuration field/);
+  assert.throws(() => validateMcpConfig(null), /must be an object/);
+});
+
+test("setConfig validates before persisting and keeps the previous record on error", async () => {
+  const storage = memoryStorage();
+  const host = createHost({ storage });
+  assert.deepEqual(host.getConfig(), { enabled: false, port: 8712, bind: "lan", access: "confirm" });
+  const state = await host.setConfig({ port: 9000, bind: "loopback", access: "read" });
+  assert.equal(state.port, 9000);
+  assert.equal(state.bind, "loopback");
+  assert.equal(state.access, "read");
+  assert.deepEqual(JSON.parse(storage.data.get(MCP_CONFIG_KEY)), {
+    enabled: false, port: 9000, bind: "loopback", access: "read",
+  });
+  await assert.rejects(() => host.setConfig({ port: 80 }), /MCP port/);
+  await assert.rejects(() => host.setConfig({ bind: "wan" }), /MCP bind/);
+  await assert.rejects(() => host.setConfig({ access: "write" }), /MCP access/);
+  await assert.rejects(() => host.setConfig({ unknownKey: 1 }), /Unknown MCP configuration field/);
+  await assert.rejects(() => host.setConfig(null), /must be an object/);
+  assert.equal(JSON.parse(storage.data.get(MCP_CONFIG_KEY)).port, 9000);
+});
+
+test("a stored configuration is restored and a corrupt record falls back", () => {
+  const restored = createHost({
+    storage: memoryStorage({
+      [MCP_CONFIG_KEY]: JSON.stringify({ enabled: true, port: 9100, bind: "loopback", access: "read" }),
+    }),
+  });
+  assert.deepEqual(restored.getConfig(), { enabled: true, port: 9100, bind: "loopback", access: "read" });
+  assert.equal(restored.getState().enabled, true);
+  const corrupt = createHost({ storage: memoryStorage({ [MCP_CONFIG_KEY]: "{oops" }) });
+  assert.equal(corrupt.getConfig().port, 8712);
+});
+
+test("getState is a synchronous snapshot with the documented fields", () => {
+  const host = createHost();
+  const state = host.getState();
+  assert.equal(typeof state.then, "undefined");
+  assert.deepEqual(Object.keys(state).sort(), [
+    "access", "activeRequests", "audit", "bind", "enabled", "foreground",
+    "lastError", "port", "running", "token", "url", "urls",
+  ]);
+  assert.equal(state.enabled, false);
+  assert.equal(state.running, false);
+  assert.equal(state.url, "");
+  assert.deepEqual(state.urls, []);
+  assert.equal(state.token, "");
+  assert.equal(state.port, 8712);
+  assert.equal(state.bind, "lan");
+  assert.equal(state.access, "confirm");
+  assert.equal(state.foreground, false);
+  assert.equal(state.activeRequests, 0);
+  assert.equal(state.lastError, null);
+  assert.deepEqual(state.audit, []);
+  assert.equal(host.getBridge(), null);
+});
+
+test("enable/disable and setConfig drive the native bridge", async () => {
+  const { bridge, calls } = fakeBridge();
+  const host = createHost({ bridge });
+  assert.equal(host.getBridge(), bridge);
+
+  const attached = await host.attach();
+  assert.equal(attached.running, false);
+  assert.equal(calls.listeners, 2);
+  await host.attach();
+  assert.equal(calls.listeners, 2, "attach must be idempotent");
+
+  const [enabled] = await Promise.all([host.enable(), host.enable()]);
+  assert.equal(enabled.enabled, true);
+  assert.equal(enabled.running, true);
+  assert.equal(calls.start.length, 1, "concurrent enable calls share one native start");
+  assert.deepEqual(calls.start[0], { port: 8712, bind: "lan" });
+  assert.match(enabled.url, /8712/);
+
+  const rotated = await host.regenerateToken();
+  assert.equal(rotated.token, "b".repeat(64));
+  const refreshed = await host.refreshState();
+  assert.equal(refreshed.running, true);
+
+  const restarted = await host.setConfig({ port: 9000 });
+  assert.equal(calls.stop, 1);
+  assert.deepEqual(calls.start.at(-1), { port: 9000, bind: "lan" });
+  assert.equal(restarted.port, 9000);
+  assert.equal(restarted.running, true);
+
+  const disabled = await host.disable();
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.running, false);
+  assert.equal(calls.stop, 2);
+  await host.dispose();
+});
+
+test("an older native state reply cannot overwrite a newer snapshot", async () => {
+  let resolveState;
+  const pendingState = new Promise((resolve) => {
+    resolveState = resolve;
+  });
+  const { bridge, state } = fakeBridge();
+  bridge.getState = async () => pendingState;
+  const host = createHost({ bridge });
+  const attaching = host.attach(); // its refreshState waits on the slow getState
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await host.enable(); // start answers first and sets running:true
+  assert.equal(host.getState().running, true);
+  resolveState({ ...state, running: false, url: "" }); // stale pre-start reply
+  await attaching;
+  assert.equal(host.getState().running, true, "a stale getState reply must be ignored");
+});
+
+test("bridge failures surface through lastError without throwing", async () => {
+  const { bridge } = fakeBridge({
+    start: async () => {
+      throw new Error("port in use");
+    },
+  });
+  const host = createHost({ bridge });
+  const state = await host.enable();
+  assert.equal(state.enabled, true);
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /Could not start the MCP server: port in use/);
+  const updated = await host.setConfig({ port: 9001 });
+  assert.equal(updated.port, 9001);
+  assert.equal(host.getConfig().port, 9001);
+});
+
+test("the host reports Android-only availability when no bridge exists", async () => {
+  const host = createHost();
+  const state = await host.enable();
+  assert.equal(state.enabled, true);
+  assert.equal(state.running, false);
+  assert.match(state.lastError, /Android app/);
+  assert.deepEqual(await host.refreshState(), host.getState());
+  assert.deepEqual(await host.regenerateToken(), host.getState());
+  assert.equal(host.getBridge(), null);
+});
+
+test("handleHttp answers every forwarded request through the native bridge", async () => {
+  const { bridge, calls } = fakeBridge();
+  const { device } = fakeDevice();
+  const host = createHost({ bridge, device });
+  await host.attach();
+
+  const ok = await host.handleHttp({
+    id: "req-1",
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "get_device_status", arguments: {} } }),
+    remote: "192.168.1.7",
+    userAgent: "cursor/1.0",
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(calls.respond.length, 1);
+  assert.equal(calls.respond[0].id, "req-1");
+  assert.equal(calls.respond[0].status, 200);
+  assert.equal(JSON.parse(calls.respond[0].body).id, 9);
+  assert.equal(host.getAudit()[0].remote, "192.168.1.7");
+
+  const notification = await host.handleHttp({
+    id: "req-2",
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    remote: "192.168.1.7",
+  });
+  assert.equal(notification.status, 202);
+  assert.deepEqual(calls.respond[1], { id: "req-2", status: 202, body: "" });
+
+  const parseError = await host.handleHttp({ id: "req-3", body: "{not json" });
+  assert.equal(parseError.status, 400);
+  assert.equal(calls.respond[2].status, 400);
+  assert.equal(JSON.parse(calls.respond[2].body).error.code, -32700);
+});
+
+test("attach subscribes to forwarded HTTP requests and mirrors stateChanged", async () => {
+  const { bridge, calls, listeners } = fakeBridge();
+  const { device } = fakeDevice();
+  const host = createHost({ bridge, device });
+  await host.attach();
+  const requestListener = listeners.find((entry) => entry.event === "httpRequest").callback;
+  const stateListener = listeners.find((entry) => entry.event === "stateChanged").callback;
+  assert.equal(typeof requestListener, "function");
+  assert.equal(typeof stateListener, "function");
+
+  requestListener({
+    id: "native-1",
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    remote: "10.0.0.9",
+    userAgent: "cursor/1.0",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.respond.length, 1);
+  assert.equal(calls.respond[0].id, "native-1");
+  assert.deepEqual(JSON.parse(calls.respond[0].body).result, {});
+
+  stateListener({
+    running: true, port: 8712, bind: "lan", token: "t".repeat(64),
+    url: "http://10.0.0.2:8712/mcp", urls: ["http://10.0.0.2:8712/mcp"],
+    foreground: false, activeRequests: 2, lastError: null,
+  });
+  const state = host.getState();
+  assert.equal(state.running, true);
+  assert.equal(state.activeRequests, 2);
+  assert.equal(state.foreground, false);
+  assert.equal(state.url, "http://10.0.0.2:8712/mcp");
+});
+
+test("claudeConfigSnippet produces a usable Claude Desktop server entry", () => {
+  const token = "a".repeat(64);
+  const snippet = claudeConfigSnippet({ url: "http://192.168.1.20:8712/mcp", token });
+  const parsed = JSON.parse(snippet);
+  assert.deepEqual(Object.keys(parsed.mcpServers), [MCP_SERVER_NAME]);
+  const entry = parsed.mcpServers[MCP_SERVER_NAME];
+  assert.equal(entry.type, "http");
+  assert.equal(entry.url, "http://192.168.1.20:8712/mcp");
+  assert.equal(entry.headers.Authorization, `Bearer ${token}`);
+});
+
+test("redactToolArguments masks credentials and URL userinfo without mutating input", () => {
+  const args = { action: "connect", ssid: "Bench", password: "secret" };
+  const redacted = redactToolArguments("set_wifi", args);
+  assert.equal(redacted.password, "<redacted>");
+  assert.equal(redacted.ssid, "Bench");
+  assert.equal(args.password, "secret");
+  assert.equal(
+    redactToolArguments("set_webdav", { action: "on", url: "http://user:pass@host/dav/" }).url,
+    "http://<redacted>@host/dav/",
+  );
+  assert.equal(redactToolArguments("x", { token: "abc" }).token, "<redacted>");
+  assert.equal(redactToolArguments("x", { apiKey: "abc" }).apiKey, "<redacted>");
+  assert.deepEqual(redactToolArguments("x", null), {});
+  assert.deepEqual(readCatalogNames(), TOOL_NAMES);
+});
+
+/* Reading the exported catalog directly (instead of tools/list) keeps the
+ * fixed-name assertion honest: the transport projection cannot hide a rename. */
+function readCatalogNames() {
+  return MCP_TOOLS.map((tool) => tool.name);
+}

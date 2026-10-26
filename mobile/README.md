@@ -319,6 +319,35 @@ also include the assistant, and directly serving the unbuilt `web/` directory
 loads the prebuilt bundle from `web/vendor/agent/` — rebuild it with
 `tools/build_agent_bundle.sh` after changing the runtime or upgrading the SDK.
 
+## MCP server (Android)
+
+The Android app can act as an MCP server on the local network, so external AI
+clients such as Claude Desktop, Cursor, and Codex can read the console and, after
+an approval on the phone, send input and change bridge settings. The card lives in
+**Settings → AI** as **MCP server**; it is created only when the native bridge
+(`window.LinkrMcp`) exists, so the Web, iOS, and HarmonyOS builds have no MCP
+endpoint.
+
+- The native half is `mobile/android/app/src/main/java/guru/linkr/ble/mcp/`
+  (`McpHttpServer`, `McpServerManager`, `LinkrMcpService`, `LinkrMcpPlugin`);
+  `mobile/src/mcp-native.ts` exposes it as `window.LinkrMcp`. The protocol, tool
+  catalog, approval flow, and audit live in the shared `web/mcp_server.js` and
+  `web/mcp_ui.js`.
+- The card covers enable, read-only versus read-write access, port, listen
+  address, token copy and rotation, a client configuration snippet, and the most
+  recent calls. A foreground-service notification keeps the process alive while
+  the app is backgrounded and can stop the listener.
+- Caveats: Android only; the bearer token travels over plain HTTP on the LAN
+  (trusted networks only); writes need approval on the phone and are refused
+  while the app is backgrounded; read-only mode rejects device-changing tools;
+  there are no SSE or server-initiated messages; the server stops when the app
+  process is destroyed; accessory tools need the BLE management channel; and
+  serial output is untrusted device data where a successful send is delivery,
+  not command completion.
+- Verification: host-JVM tests + build verified; real-device validation pending.
+
+Full guide: [MCP server](../docs/MCP.md) · [中文](../docs/MCP.zh-CN.md).
+
 ## Regression tests
 
 ```sh

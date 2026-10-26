@@ -34,6 +34,15 @@
 
         </activity>
 
+        <!-- Keeps the process alive while the local MCP server is enabled so
+             external clients can still reach it after the activity is
+             backgrounded. The connectedDevice type is required from Android 14
+             because the transport exists for the BLE accessory session. -->
+        <service
+            android:name=".mcp.LinkrMcpService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -61,4 +70,7 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>

@@ -1,6 +1,8 @@
 import { BleClient } from "@capacitor-community/bluetooth-le";
 import { Capacitor } from "@capacitor/core";
 
+import { installLinkrMcpBridge } from "./mcp-native";
+
 type DeviceDescriptor = { id: string; name: string };
 type RequestDeviceOptions = {
   filters?: Array<{ services?: string[]; namePrefix?: string }>;
@@ -229,5 +231,7 @@ function createNativeBleBackend(): NativeBleBackend {
 // those reads fall back to the web backend and misreport the platform.
 if (Capacitor.isNativePlatform()) {
   window.LinkrNativeBle = createNativeBleBackend();
+  // The MCP transport is Android-only; the installer picks the platform.
+  installLinkrMcpBridge();
 }
 window.LinkrNativeBleReady = Promise.resolve();
