@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./flash.css?v=20261026-15" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-16" />
   </head>
   <body>
     <main class="flash-shell">
@@ -98,7 +98,7 @@
       <div class="flash-grid">
         <div class="flash-main">
           <section class="card flash-setup">
-          <div class="card-title"><span class="dot"></span><span>01 · 选择固件</span></div>
+          <div class="card-title"><span class="dot"></span><span>选择固件</span></div>
 
           <div class="field-grid">
             <label class="field">
@@ -187,15 +187,12 @@
             <div id="progressBar" class="progress-bar"></div>
           </div>
           <p id="status" class="status" role="status" aria-live="polite">等待选择板型。</p>
+          <p class="muted small setup-note">使用能传输数据的线，不要用只能充电的线。</p>
           </section>
 
           <section class="card prep-card">
             <div class="card-title"><span class="dot"></span><span>刷机前准备</span></div>
             <ul class="prep-list">
-              <li>
-                <strong>USB 数据线</strong>
-                <span>使用能传输数据的线，不要用只能充电的线。</span>
-              </li>
               <li>
                 <strong>ESP32-CAM 接线</strong>
                 <span>单板 + CH340：5V、GND、CH340 TX → U0R（GPIO3）、CH340 RX → U0T（GPIO1）。</span>

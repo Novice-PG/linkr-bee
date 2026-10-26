@@ -278,6 +278,10 @@ body {
   padding: clamp(18px, 2.4vw, 24px);
 }
 
+.setup-note {
+  margin: 10px 0 0;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
