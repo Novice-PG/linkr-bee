@@ -70,7 +70,10 @@
     max-height: calc(var(--terminal-viewport-height, 100vh) - 190px);
     min-height: 0;
   }
-  .agent-settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: 3px; }
+  /* When the inner form scroll reaches its end the swipe must continue to the
+   * drawer, otherwise the pinned Save/Clear row stays below the drawer viewport
+   * and cannot be reached (it is only reachable by scrolling the drawer). */
+  .agent-settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior-y: auto; padding-right: 3px; }
   .agent-settings-actions { flex: 0 0 auto; position: relative; padding-bottom: 6px; }
   html.soft-keyboard-open #agentSettings > .card-title { display: none; }
   html.soft-keyboard-open .app-shell.sidebar-open .controls .settings-tabs { display: none; }
@@ -107,6 +110,17 @@
   }
   .terminal-card .terminal-input-hint { display: none; }
   .agent-advanced-settings > summary { min-height: 48px; box-sizing: border-box; }
+}
+
+/* The phone drawer is full width and carries the status/navigation insets, so
+ * the form height budget from the 190 px constant is too generous there: the
+ * pinned Save/Clear row ended up below the drawer viewport and looked missing.
+ * Subtract the real insets on a phone; the keyboard-open rule above already
+ * sizes the form against the reduced viewport. */
+@media (max-width: 600px) {
+  html:not(.soft-keyboard-open) #agentSettingsForm {
+    max-height: calc(var(--terminal-viewport-height, 100dvh) - 190px - var(--safe-top) - var(--safe-bottom));
+  }
 }
 
 @media (min-width: 360px) {

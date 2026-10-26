@@ -144,3 +144,33 @@ test("a phone drawer fills the viewport instead of leaving a strip of the app vi
     return { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width), innerWidth };
   })).toEqual({ left: 0, right: metrics.innerWidth, width: metrics.innerWidth, innerWidth: metrics.innerWidth });
 });
+
+test("the AI settings Save and Clear buttons stay inside the drawer safe area", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#agentButton")).toBeVisible();
+  await page.addStyleTag({ content: INSETS });
+  await page.locator("#panelToggle").tap();
+  await page.locator('[data-settings-target="ai"]').tap();
+  await expect(page.locator("#agentSettingsSave")).toBeVisible();
+  const metrics = await page.evaluate(() => {
+    const drawer = document.querySelector("#controlsPanel");
+    drawer.scrollTop = 0;
+    const rect = (el) => {
+      const r = el.getBoundingClientRect();
+      return { top: Math.round(r.top), bottom: Math.round(r.bottom) };
+    };
+    return {
+      save: rect(document.querySelector("#agentSettingsSave")),
+      clear: rect(document.querySelector("#agentSettingsClear")),
+      drawerBottom: Math.round(drawer.getBoundingClientRect().bottom),
+      innerHeight,
+    };
+  });
+  /* The form budget must subtract the status- and navigation-bar insets, or the
+   * pinned action row sits past the bottom of the drawer (and the gesture bar)
+   * and reads as two missing buttons. */
+  for (const button of [metrics.save, metrics.clear]) {
+    expect(button.top).toBeGreaterThan(0);
+    expect(button.bottom).toBeLessThanOrEqual(metrics.drawerBottom - 36);
+  }
+});
