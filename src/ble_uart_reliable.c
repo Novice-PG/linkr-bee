@@ -233,24 +233,6 @@ static ssize_t state_read(struct bt_conn *conn,
 				 sizeof(state));
 }
 
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
-static bool rx_starts_frame(const uint8_t *bytes, uint16_t len)
-{
-	const struct reliable_header *header;
-
-	if (len < sizeof(*header)) {
-		return false;
-	}
-	header = (const struct reliable_header *)bytes;
-	return header->magic[0] == 'L' && header->magic[1] == 'R' &&
-	       header->version == LINKR_UART_RELIABLE_API_MAJOR &&
-	       sys_get_le16(header->payload_len_le) > 0 &&
-	       sys_get_le16(header->payload_len_le) <=
-		       LINKR_UART_RELIABLE_MAX_PAYLOAD &&
-	       len - sizeof(*header) <= sys_get_le16(header->payload_len_le);
-}
-#endif
-
 static ssize_t rx_write(struct bt_conn *conn,
 			const struct bt_gatt_attr *attr, const void *buf,
 			uint16_t len, uint16_t offset, uint8_t flags)
@@ -272,21 +254,6 @@ static ssize_t rx_write(struct bt_conn *conn,
 	    k_uptime_get() - rx_state.started_at > RX_TIMEOUT_MS) {
 		rx_reset_locked();
 	}
-
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
-	/* A client that gave up halfway through a frame (a failed write, a
-	 * reconnect, a canceled command) leaves this reassembler waiting for
-	 * continuation bytes. If the next ATT write starts a *new* frame, the
-	 * old code treated its 12-byte header as payload, then rejected it as
-	 * too long, and every later write failed until the two-second timeout
-	 * expired. The client had already latched on the first error, so the
-	 * session looked permanently dead. Recognise a frame start and abandon
-	 * the stale frame instead; a raw continuation fragment passing all the
-	 * header checks is vanishingly unlikely. */
-	if (rx_state.expected && rx_starts_frame(bytes, len)) {
-		rx_reset_locked();
-	}
-#endif
 
 	if (!rx_state.expected) {
 		if (len < sizeof(*header)) {
@@ -325,34 +292,21 @@ static ssize_t rx_write(struct bt_conn *conn,
 	if (rx_state.received == rx_state.expected) {
 		if (rx_state.sequence == rx_next_sequence) {
 			err = uart_write_fn(rx_state.payload, rx_state.expected);
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
-			if (!err || err == -ENOMEM) {
-				/* -ENOMEM means the frame is complete but the downstream
-				 * queue was full and counted the loss. The peer has
-				 * already advanced its sequence, so refusing the write
-				 * cannot recover the bytes; it only leaves clients that
-				 * treat a write failure as ambiguous latched until they
-				 * reconnect. Acknowledge and keep the session alive. */
-				rx_next_sequence = sequence_next(rx_next_sequence);
-				err = 0;
-			}
-#else
 			if (!err) {
 				rx_next_sequence = sequence_next(rx_next_sequence);
 			}
-#endif
+			/* -ENOMEM means nothing was enqueued. Do not acknowledge it:
+			 * the peer would advance its sequence and treat the retry as
+			 * a duplicate, permanently losing the frame. */
 		} else if (rx_state.sequence != previous_sequence) {
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
 			/* The peer's sequence does not match ours, usually because a
-			 * previous session ended with the two sides disagreeing. The
-			 * old behaviour returned an ATT error, which those same
-			 * clients latch on. Re-baseline on the sequence the peer
-			 * actually sent; a terminal should keep working across one
-			 * lost frame, and the peer advances from here. */
+			 * previous session ended with the two sides disagreeing.
+			 * Re-baseline on the sequence the peer actually sent, but
+			 * only after the UART accepted the whole frame. */
 			err = uart_write_fn(rx_state.payload, rx_state.expected);
-			if (!err || err == -ENOMEM) {
+			if (!err) {
 				rx_next_sequence = sequence_next(rx_state.sequence);
-				err = 0;
 			}
 #else
 			err = -EILSEQ;

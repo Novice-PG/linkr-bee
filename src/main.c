@@ -2570,12 +2570,12 @@ static void ble_tx_thread(void)
 		k_msgq_get(&ble_tx_queue, &chunk, K_FOREVER);
 
 		do {
-			if (!linkr_uart_reliable_mode() ||
-			    atomic_get(&nus_notify_enabled)) {
-				/* The current central subscribed NUS. Prefer it even if a
-				 * persisted reliable-UART CCC restored the reliable mode:
-				 * indications the client does not handle look like silence
-				 * and end in a timeout disconnect. */
+			if (!linkr_uart_reliable_mode()) {
+				/* No reliable selection for this session: use the NUS
+				 * compatibility channel. Anchoring on reliable_mode rather
+				 * than on a restored NUS subscription lets a client that
+				 * explicitly selects Reliable UART keep receiving output
+				 * even if its previous NUS CCC was restored by bonding. */
 				(void)nus_send_chunk(chunk.data, chunk.len);
 				err = 0;
 			} else {

@@ -8,6 +8,10 @@ boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devki
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
 for board in $boards; do
+  case "$board" in
+    esp32_cam/*) cam=yes ;;
+    *) cam=no ;;
+  esac
   build_name=$(printf '%s' "$board" | tr '/_' '--')
   build_dir="$repo_dir/build-verify-$build_name"
   west build -p always -d "$build_dir" -b "$board" "$repo_dir"
@@ -23,9 +27,16 @@ for board in $boards; do
   grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK=y' "$config"
   grep -qx 'CONFIG_TASK_WDT_CHANNELS=6' "$config"
   grep -qx 'CONFIG_TASK_WDT_MIN_TIMEOUT=5000' "$config"
-  grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "$config"
+  if [ "$cam" = yes ]; then
+    grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=10000' "$config"
+    grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "$config"
+    grep -qx '# CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS is not set' "$config"
+  else
+    grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "$config"
+  fi
   grep -qx '# CONFIG_TASK_WDT_DUMMY is not set' "$config"
-  if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "$config"; then
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "$config" && [ "$cam" = no ]; then
     grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "$config"
   else
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "$config"
