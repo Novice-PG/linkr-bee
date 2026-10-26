@@ -29,6 +29,10 @@ on:
   push:
     branches:
       - main
+      # The flasher is maintained on the fork only. Deploy it from its own
+      # branch so upstream main never gets a Pages workflow that stages
+      # release firmware or a flasher entry.
+      - fork/web-flasher
     paths:
       - "web/**"
       - ".github/workflows/pages.yml"
