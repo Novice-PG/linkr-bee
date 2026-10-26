@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Linkr Bee Firmware Flasher</title>
+    <meta name="theme-color" id="themeColorMeta" content="#05080D" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("linkr-theme");
+          const theme =
+            saved === "light" || saved === "dark"
+              ? saved
+              : window.matchMedia?.("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.theme = theme;
+        } catch {
+          // Storage can be unavailable in an embedded webview; keep the default.
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-5" />
+  </head>
+  <body>
+    <main class="flash-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="30 30 452 452" width="30" height="30" aria-hidden="true">
+              <path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="currentColor" stroke-width="30" stroke-linejoin="round" />
+              <path d="M180 210 L270 256 L180 302" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+              <rect x="306" y="214" width="36" height="84" rx="7" fill="currentColor" />
+            </svg>
+          </span>
+          <div>
+            <h1>Linkr Bee Flasher</h1>
+            <p class="support-text">固件刷机 · 自动跟随仓库最新 Release</p>
+          </div>
+        </div>
+
+        <div class="top-right">
+          <div class="top-actions">
+            <span class="status-pill release-pill" id="releasePill">正在读取最新固件…</span>
+            <button id="themeButton" class="icon-btn" type="button" title="切换主题 / Toggle theme" aria-label="Toggle theme">
+              <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+              </svg>
+              <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path>
+              </svg>
+              <span id="themeLabel" class="btn-label">浅色</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <section id="unsupported" class="notice notice-error" hidden>
+        当前浏览器不支持 Web Serial。请使用桌面版 Chrome / Edge，并通过 USB 连接开发板。Android APK 不包含刷机功能。
+      </section>
+
+      <section class="flash-hero">
+        <div class="flash-hero-copy">
+          <span class="eyebrow">USB · Web Serial</span>
+          <h2>给开发板刷入最新固件</h2>
+          <p>
+            页面自动读取仓库最新一次发布的固件。选择板型，连接 USB 串口，浏览器直接烧录，
+            不需要安装 esptool。
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="hero-meta-item">
+            <span>固件版本</span>
+            <strong id="heroVersion">—</strong>
+          </div>
+          <div class="hero-meta-item">
+            <span>可选板型</span>
+            <strong id="heroBoards">—</strong>
+          </div>
+          <div class="hero-meta-item">
+            <span>构建标记</span>
+            <strong>Novice-PG</strong>
+          </div>
+        </div>
+      </section>
+
+      <div class="flash-grid">
+        <div class="flash-main">
+          <section class="card flash-setup">
+          <div class="card-title"><span class="dot"></span><span>01 · 选择固件</span></div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>板型 / Board</span>
+              <select id="boardSelect" disabled>
+                <option>正在读取…</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>烧录波特率 / Baud</span>
+              <select id="baudSelect">
+                <option value="115200">115200（最稳）</option>
+                <option value="460800" selected>460800（推荐）</option>
+                <option value="921600">921600（最快）</option>
+              </select>
+            </label>
+          </div>
+
+          <dl class="board-facts" id="boardFacts">
+            <div><dt>芯片</dt><dd id="factChip">—</dd></div>
+            <div><dt>烧录地址</dt><dd id="factAddress">—</dd></div>
+            <div><dt>镜像大小</dt><dd id="factSize">—</dd></div>
+            <div><dt>SHA-256</dt><dd id="factHash" class="mono">—</dd></div>
+          </dl>
+
+          <div class="actions">
+            <button id="connectButton" class="btn btn-primary" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12"></path>
+                <path d="m7 10 5 5 5-5"></path>
+                <path d="M5 21h14"></path>
+              </svg>
+              连接串口并烧录
+            </button>
+            <button id="downloadButton" class="btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12"></path>
+                <path d="m7 10 5 5 5-5"></path>
+                <path d="M5 21h14"></path>
+              </svg>
+              下载固件 ZIP
+            </button>
+            <button id="resetButton" class="btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-3-6.7"></path>
+                <path d="M21 3v6h-6"></path>
+              </svg>
+              重启设备
+            </button>
+          </div>
+
+          <div class="progress" aria-hidden="true">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <p id="status" class="status" role="status" aria-live="polite">等待选择板型。</p>
+          </section>
+
+          <section class="card prep-card">
+            <div class="card-title"><span class="dot"></span><span>刷机前准备</span></div>
+            <ul class="prep-list">
+              <li>
+                <strong>USB 数据线</strong>
+                <span>使用能传输数据的线，不要用只能充电的线。</span>
+              </li>
+              <li>
+                <strong>ESP32-CAM 接线</strong>
+                <span>需要 3.3V USB-TTL，接 UART0：GPIO1 TX、GPIO3 RX，并共地。</span>
+              </li>
+              <li>
+                <strong>手动进入下载模式</strong>
+                <span>没有自动进入时，按住 BOOT 再点一下 RST，然后重新连接。</span>
+              </li>
+            </ul>
+          </section>
+        </div>
+
+        <aside class="flash-side">
+          <section class="card">
+            <div class="card-title"><span class="dot"></span><span>02 · 烧录步骤</span></div>
+            <ol class="steps">
+              <li>
+                <strong>连接开发板</strong>
+                <span>用 USB 线连接。ESP32-CAM 需要 3.3V USB-TTL，接 UART0（GPIO1 / GPIO3）。</span>
+              </li>
+              <li>
+                <strong>选择串口</strong>
+                <span>点击“连接串口并烧录”，在浏览器弹窗里选择串口，工具会自动进入下载模式。</span>
+              </li>
+              <li>
+                <strong>等待完成</strong>
+                <span>看到“烧录完成”后按一下开发板复位键，或点“重启设备”。</span>
+              </li>
+            </ol>
+          </section>
+
+          <section class="card release-card">
+            <div class="card-title"><span class="dot"></span><span>最新发布</span></div>
+            <dl class="release-facts">
+              <div><dt>版本</dt><dd id="releaseVersion">—</dd></div>
+              <div><dt>标签</dt><dd id="releaseTag" class="mono">—</dd></div>
+              <div><dt>固件来源</dt><dd id="releaseRepo" class="mono">—</dd></div>
+            </dl>
+            <p class="muted small">
+              刷机不会擦除已保存的设置分区。需要恢复出厂设置时，请按板型说明用 esptool 擦除设置区。
+            </p>
+          </section>
+        </aside>
+      </div>
+
+      <section class="card log-panel">
+        <div class="log-head">
+          <span>烧录日志 / Log</span>
+          <button id="clearLog" class="link-button" type="button">清空</button>
+        </div>
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+
+      <footer class="foot">
+        <span>固件来源：<a id="releaseLink" href="https://github.com/radxa/linkr-bee/releases/latest" target="_blank" rel="noreferrer">GitHub Releases</a></span>
+        <span>Linkr Bee · Web Serial Firmware Flasher</span>
+      </footer>
+    </main>
+
+    <script src="./vendor/jszip/jszip.min.js"></script>
+    <script type="module" src="./flash.js?v=20261026-2"></script>
+  </body>
+</html>

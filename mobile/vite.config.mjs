@@ -1,8 +1,9 @@
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vite";
+
+import { copyNativeVendor, stripWebFlasher } from "./native-bundle.mjs";
 
 const mobileDir = path.dirname(fileURLToPath(import.meta.url));
 const repoDir = path.resolve(mobileDir, "..");
@@ -67,12 +68,17 @@ export default defineConfig({
       },
     },
     {
+      name: "remove-web-only-flasher",
+      transformIndexHtml(html) {
+        return stripWebFlasher(html);
+      },
+    },
+    {
       name: "copy-linkr-terminal-vendor",
       closeBundle() {
-        fs.cpSync(
+        copyNativeVendor(
           path.join(webDir, "vendor"),
           path.join(mobileDir, "dist/vendor"),
-          { recursive: true },
         );
       },
     },

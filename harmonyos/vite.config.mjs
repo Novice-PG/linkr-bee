@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { copyNativeVendor, stripWebFlasher } from "../mobile/native-bundle.mjs";
+
 const harmonyDir = path.dirname(fileURLToPath(import.meta.url));
 const repoDir = path.resolve(harmonyDir, "..");
 const webDir = path.join(repoDir, "web");
@@ -61,12 +63,17 @@ export default {
       },
     },
     {
+      name: "remove-web-only-flasher",
+      transformIndexHtml(html) {
+        return stripWebFlasher(html);
+      },
+    },
+    {
       name: "copy-linkr-terminal-vendor",
       closeBundle() {
-        fs.cpSync(
+        copyNativeVendor(
           path.join(webDir, "vendor"),
           path.join(distDir, "vendor"),
-          { recursive: true },
         );
         inlineArkWebAssets();
         fs.rmSync(rawfileDir, { recursive: true, force: true });

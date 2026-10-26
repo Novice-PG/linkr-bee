@@ -50,3 +50,6 @@ harmonyos/**/*.p7b
 
 # Binaries built for a machine to try
 bin/
+
+# Firmware staged for the flasher at deploy time, not source
+web/firmware/

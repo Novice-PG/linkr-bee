@@ -6,6 +6,13 @@ name: Deploy the web terminal to GitHub Pages
 # artifact -- it is not rebuilt here, so what is published is exactly what the
 # regression suite ran against.
 #
+# The same deployment also stages the firmware from the newest GitHub release
+# under web/firmware/. The browser flasher fetches those files from this origin
+# rather than github.com: release assets redirect to a storage host that does
+# not answer a cross-origin fetch, and a flasher should not depend on a CORS
+# proxy. A release event redeploys the site, so the flasher follows the latest
+# release without a source commit.
+#
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
 # WebSocket bridge works from here too, but with a warning: an https page that
 # opens ws:// is mixed content, and Chromium allows it while marking it
@@ -25,6 +32,10 @@ on:
     paths:
       - "web/**"
       - ".github/workflows/pages.yml"
+      - "tools/build_firmware_manifest.py"
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
@@ -33,7 +44,8 @@ permissions:
   id-token: write
 
 # Pages deployments are not worth racing: a cancelled deploy can leave the site
-# half-updated, and the site changes at most a few times a day.
+# half-updated, and the site changes at most a few times a day. A release is the
+# important exception: it must be allowed to replace an older firmware bundle.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -42,13 +54,37 @@ jobs:
   deploy:
     name: Publish the plain web terminal
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      # Publish the newest released firmware beside the page. If the project
+      # has not published a release yet, the page still deploys and its
+      # runtime fallback can read the latest release from the API.
+      - name: Stage the latest released firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .firmware-release
+          if gh release download \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern '*firmware-*.zip' \
+              --dir .firmware-release; then
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)"
+            python3 tools/build_firmware_manifest.py \
+              --source .firmware-release \
+              --output web/firmware \
+              --tag "${tag}" \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            echo "No released firmware yet; publishing without a staged manifest."
+            rm -rf .firmware-release
+          fi
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.
