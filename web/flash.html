@@ -135,7 +135,8 @@
               <li>拔掉摄像头和 SD 卡。</li>
               <li>按下面的接线表连接 CH340，烧录时把 <b>GPIO0 接到 GND</b>。</li>
               <li>给 CH340 插上 USB，确认电脑出现串口。</li>
-              <li>波特率选 115200，点“连接串口并烧录”。烧录完成后先断开 GPIO0，再复位运行。</li>
+              <li>波特率选 115200，点“连接串口并烧录”。烧录完成后断开 GPIO0，再复位运行。</li>
+              <li><b>运行前必须拔掉 CH340 的 USB</b>，CAM 改用独立 5V 供电。CH340 继续插着时，它的 TX 会和目标 TX 抢 GPIO3，表现为 BLE 能连上但串口没有输出。</li>
             </ol>
             <ul>
               <li>CH340 <b>5V</b> → CAM <b>5V</b></li>
@@ -145,6 +146,7 @@
               <li>CAM <b>GPIO0</b> → <b>GND</b>（只在下载时短接）</li>
             </ul>
             <p>使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，线尽量短。连接失败时确认 GPIO0 已接地并重新上电，再点“已进入下载模式，重试连接”。</p>
+            <p>把 CAM 当 BLE 串口桥使用时：目标 <b>TX</b> → CAM <b>U0R（GPIO3）</b>，目标 <b>RX</b> → CAM <b>U0T（GPIO1）</b>，并共地。烧录用的 CH340 必须完全断开。</p>
           </section>
 
           <dl class="board-facts" id="boardFacts">
