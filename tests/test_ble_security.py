@@ -24,6 +24,25 @@ class BleSecurityTests(unittest.TestCase):
                         "-Werror", "-I", str(directory), str(ROOT / "tests/ble_security_harness.c"),
                         "-o", str(cls.binary)], check=True)
 
+    def test_c3_c5_production_configs_require_gpio_authorization(self):
+        for board in ["esp32c3_supermini", "esp32c3_devkitm", "esp32c3_devkitc",
+                      "esp32c5_devkitc_esp32c5_hpcore"]:
+            with self.subTest(board=board):
+                config = (ROOT / "boards" / f"{board}.conf").read_text()
+                self.assertIn("CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y", config.splitlines())
+                self.assertNotIn("CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n", config.splitlines())
+
+    def test_c5_open_pairing_fragment_is_explicit_and_changes_only_the_gpio_gate(self):
+        fragment = "dev_c5_open_pairing.conf"
+        config = (ROOT / fragment).read_text()
+        settings = [line.strip() for line in config.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(settings, ["CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n"])
+        for path in ["prj.conf", ".github/workflows/build.yml",
+                     ".github/workflows/release.yml", "tools/verify.sh"]:
+            with self.subTest(path=path):
+                self.assertNotIn(fragment, (ROOT / path).read_text())
+
     def test_open_pairing_keeps_encryption_and_bond_requirements(self):
         binary = Path(self.tmp.name) / "security-test-open"
         subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra",

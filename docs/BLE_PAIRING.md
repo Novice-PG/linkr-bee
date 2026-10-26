@@ -11,6 +11,10 @@
 | ESP32-C5 DevKitC | GPIO1 | `PAIRING_GPIO_AUTH=y` |
 | ESP32-WROOM-32 DevKitC | GPIO4（可选） | `PAIRING_GPIO_AUTH=n` |
 
+C5 DevKitC 正式固件仍需在 GPIO1 外接按钮或跳线。受控台架测试可显式加载
+`dev_c5_open_pairing.conf`，但该开发镜像允许附近任何主机配对，不适合正式使用；
+构建命令和风险说明见[开发文档](DEVELOPMENT.zh-CN.md#配对-gpio持久化与恢复出厂)。
+
 配对 GPIO 不被默认 UART、LED 或恢复出厂功能占用（WROOM 的 GPIO13 仅在启用
 autobaud 时作按键，GPIO2 为活动 LED）。用按钮或跳线将配对 GPIO 接到 Bee 的 GND。
 
