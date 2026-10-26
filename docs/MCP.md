@@ -13,7 +13,8 @@ runs through the same serial execution gate and accessory management channel tha
 the built-in assistant uses. The server is **Android-only**; the Web, iOS, and
 HarmonyOS clients have no MCP endpoint.
 
-This feature is not verified on real hardware yet. Read
+This feature is verified on a phone for the HTTP/MCP surface, but not yet with a
+real accessory (the write approval flow and accessory tools). Read
 [Verification status](#verification-status) before relying on it for hardware work.
 
 ## Contents
@@ -328,7 +329,8 @@ the client:
 
 ## Verification status
 
-**host-JVM tests + build verified; real-device validation pending.**
+**host-JVM tests + build verified; server reachability verified on a phone;
+accessory tools and the write approval flow still need a real accessory.**
 
 Concretely: the Java transport has host-JVM unit tests (routing, authentication,
 `Origin` precedence, body limits, status page, bind-failure and token-rotation
@@ -337,10 +339,26 @@ coverage (version negotiation, tool policy, approval paths, redaction,
 single-write guard), the settings card and approval banner have Playwright
 coverage against a fake native bridge, and the Android and web builds succeed.
 
-Not verified: behavior on a phone with a real accessory — LAN reachability from
-another device, Android foreground/background behavior and the foreground
-service, the approval banner on hardware, and accessory tools over a real BLE
-management channel. Nothing in this guide is hardware acceptance evidence.
+Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
+over adb):
+
+- the card starts the server on port 8712 with `lan` binding, generates a
+  64-hex token and shows `http://<wifi-ip>:8712/mcp`;
+- from another machine on the same Wi-Fi, `GET /` returns the status JSON,
+  `POST /mcp` returns 401 without a bearer token and 403 with an `Origin`
+  header, `initialize` negotiates `2025-06-18`, `tools/list` returns the nine
+  tools, and a `get_device_status` call returns the explicit "target is not
+  connected" `isError` result;
+- the `connectedDevice` foreground service is running with its ongoing
+  notification, and the endpoint stays reachable after the app is sent to the
+  background (`ping` answered).
+
+Not verified: a real accessory — a BLE target connection, a write that raises
+the on-phone approval banner, accessory diagnostics/scan/configuration over the
+management channel, and therefore any claim about actual serial writes or
+accessory changes. Process-death and foreground-service permission edge cases
+are covered by code review only. Nothing in this guide is hardware acceptance
+evidence for the accessory tools.
 
 ## Related documentation
 
