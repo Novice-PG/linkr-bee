@@ -71,3 +71,23 @@ test("injected status and navigation bar insets move the shell, top bar and draw
   expect(drawerMetrics.paddingBottom).toBe(36);
   expect(drawerMetrics.headTop).toBeGreaterThanOrEqual(44);
 });
+
+test("a phone drawer fills the viewport instead of leaving a strip of the app visible", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#agentButton")).toBeVisible();
+  await page.locator("#panelToggle").tap();
+  await expect(page.locator("#controlsPanel")).toBeVisible();
+  const metrics = await page.evaluate(() => {
+    const drawer = document.querySelector("#controlsPanel");
+    const rect = drawer.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, width: rect.width, innerWidth };
+  });
+  /* The Playwright project is a 390 px phone, so the full-width phone rule
+   * applies; a tablet keeps the narrower slide-over panel. The sheet slides in
+   * over 250 ms, so poll the settled geometry instead of the first frame. */
+  expect(metrics.innerWidth).toBeLessThanOrEqual(600);
+  await expect.poll(() => page.evaluate(() => {
+    const rect = document.querySelector("#controlsPanel").getBoundingClientRect();
+    return { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width), innerWidth };
+  })).toEqual({ left: 0, right: metrics.innerWidth, width: metrics.innerWidth, innerWidth: metrics.innerWidth });
+});

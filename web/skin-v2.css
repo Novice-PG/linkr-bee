@@ -1439,6 +1439,20 @@ button,
   }
 }
 
+/* Phones get the full-width sheet. At 86vw a strip of the dimmed app stayed
+ * visible beside the drawer, so the page behind it (the agent toolbar, the
+ * terminal keys) looked like it was spilling out past the sidebar. Tablets keep
+ * the 86vw panel because they have room for a backdrop. */
+@media (max-width: 600px) {
+  html.settings-drawer-layout .app-shell .controls {
+    width: 100vw;
+    max-width: 100vw;
+    right: auto;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
 /* ---------- Landscape phones ---------- */
 
 /* 844x390 is wider than the phone breakpoint but only 390 tall, so the width
