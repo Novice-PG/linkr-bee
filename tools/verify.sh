@@ -37,6 +37,9 @@ for board in $boards; do
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
   grep -qx 'CONFIG_BT_SMP=y' "$config"
+  if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|C5)=y$' "$config"; then
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y' "$config"
+  fi
   if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
     grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
   fi
