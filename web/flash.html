@@ -125,14 +125,15 @@
 
           <section id="camPrep" class="notice cam-note" hidden>
             <strong>ESP32-CAM 底板烧录提示</strong>
-            <p>多数 ESP32-CAM 底板没有把 DTR/RTS 自动复位电路接到 EN/IO0，页面无法自动让芯片进入下载模式。</p>
+            <p>ESP32-CAM 的 GPIO0 同时是摄像头 XCLK，而且多数底板没有把 DTR/RTS 自动复位电路接到 EN/IO0。按下面的顺序手动进入下载模式最可靠：</p>
             <ol>
-              <li>按住底板上的 <b>IO0</b>（或把 GPIO0 短接到 GND）。</li>
-              <li>点一下 <b>RST</b>，或断开再接通 USB 电源。</li>
-              <li>松开 IO0，然后勾选下面的“已手动进入下载模式”。</li>
+              <li>拔掉摄像头和 SD 卡。</li>
+              <li>按住底板上的 <b>IO0</b>，按一下 <b>ESP32-CAM 模块上的 RST</b>（不是底板上的 RST），然后松开两个键。</li>
+              <li>或者：拔掉 USB，按住 IO0，再插上 USB，等电脑出现串口后松开 IO0。</li>
+              <li>勾选下面的“已手动进入下载模式”，波特率选 115200，再点烧录。</li>
             </ol>
-            <p>ESP32-CAM-MB 这类带自动下载电路的底板可以直接烧录，不需要勾选。波特率建议先用 115200。</p>
-            <p>烧录时建议拔掉摄像头和 SD 卡，并使用稳定的 5V USB 电源。若串口打不开，换 USB 线/口，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
+            <p>底板只有 RESET 一个键时，需要把 GPIO0 短接到 GND 再复位。ESP32-CAM-MB 这类带自动下载电路的底板可以先直接烧录；失败时再按上面的手动步骤。</p>
+            <p>使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，换短一点的数据线。若串口打不开，关闭占用串口的程序；Linux 下确认 <b>/dev/ttyUSB*</b> 存在且当前用户在 dialout 组。</p>
           </section>
 
           <label class="check-field">
@@ -195,7 +196,7 @@
               </li>
               <li>
                 <strong>手动进入下载模式</strong>
-                <span>底板的 DTR/RTS 没有接到 EN/IO0 时，按住 IO0 点一下 RST，松开 IO0，并勾选“已手动进入下载模式”。</span>
+                <span>ESP32-CAM：拔掉摄像头和 SD 卡，按住 IO0，按一下 CAM 模块上的 RST，松开；或按住 IO0 再插 USB。底板没有 IO0 键时把 GPIO0 短接 GND。成功后勾选“已手动进入下载模式”。</span>
               </li>
             </ul>
           </section>
