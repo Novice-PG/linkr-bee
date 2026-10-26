@@ -68,6 +68,10 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # The release workflow creates the release with GITHUB_TOKEN, whose
+      # events do not trigger other workflows. Ask Pages explicitly so the
+      # flasher stages the firmware that was just published.
+      actions: write
     env:
       GH_REPO: ${{ github.repository }}
     steps:
@@ -175,3 +179,15 @@ jobs:
             echo "the release carries ${count} assets, this build made ${expected}" >&2
             exit 1
           }
+
+      - name: Refresh the flasher Pages deployment
+        if: github.event_name == 'push' || inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f tools/build_firmware_manifest.py ]; then
+            echo "no staged firmware on this tree; nothing to refresh"
+            exit 0
+          fi
+          gh workflow run pages.yml --repo "${GITHUB_REPOSITORY}" --ref main
