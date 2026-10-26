@@ -108,6 +108,13 @@
         "gattserverdisconnected",
         browserDisconnectHandler,
       );
+      /* A reconnect can reuse the same BluetoothDevice object. Any
+       * characteristic cached from the previous GATT server is stale even
+       * though this new server is connected; subscribing to it resolves but
+       * never delivers values. Drop the caches before every connect so the
+       * management and NUS characteristics both come from this server. */
+      browserCharacteristics.clear();
+      browserSubscriptions.clear();
       browserServer = await device.gatt.connect();
     },
 

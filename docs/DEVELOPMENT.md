@@ -323,6 +323,7 @@ WebSocket endpoint so LAN clients bypass BLE range and MTU limits entirely:
   access token are persisted in settings.
   `@i?` reports
   `@info ws state=up port=80 clients=N tx=… rx=… dropped=…` (no token)
+  (`dropped` is cleared when a client connects)
 - Protocol: after the upgrade the bridge sends a text frame announcing whether a
   token is required (`@ws auth=none` / `@ws auth=required`), and `@ws auth=ok`
   once access is granted. UART bytes always travel as binary frames. See
@@ -523,17 +524,23 @@ ERR format: @u=115200,8,n,1,n
 
 The diagnostic command is read-only. It reports the application and Zephyr
 versions, uptime, the open BLE access/security state, UART buffer usage and
-dropped-byte count, WiFi/IP state, and WebDAV
-queue, drop, HTTP, failure, and success counters:
+dropped-byte count, WiFi/IP state, WebSocket clients and drops, and WebDAV
+queue, drop, HTTP, failure, and success counters. The queue and Reliable UART
+groups expose UART TX drops and BLE indication timing:
 
 ```text
 @info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
-@info uart dropped=0 buffer=0/16384
+@info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0
+@info queue dropped=0
+@info rel ind=0 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=0
 @info done
 ```
+
+Buffer sizes and enabled services depend on the board configuration.
 
 The application version comes from
 `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION`.
@@ -1083,12 +1090,31 @@ Terminal layout and touch behavior intentionally differ by surface:
 | Surface | Remote tty size | Soft keyboard | History and copy |
 | --- | --- | --- | --- |
 | Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
+| Desktop Rust TUI | Synchronized with the same `stty rows <rows> cols <cols>` command at the next idle shell prompt; re-sent when the window, the rail or the assistant panel changes the pane's width | The pane follows the terminal window | Pane scrollback, drag selection, and the copy chord; see `tools/linkr-tui/README.md` |
 | Android / iOS / HarmonyOS native shell | Android never sends `stty`; other native shells also keep the tty unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
 
 The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
 resize is local display state, not a request to reflow the remote console. On
 Android this means no `stty rows/cols` is sent at all. The browser build keeps the
 existing `stty rows <rows> cols <cols>` behavior.
+
+The desktop TUI sends the same command as the web and Python clients, and only
+at an idle shell prompt: local typing, a pending line-mode buffer, or any target
+output that is not a prompt clears the gate until the shell returns one. The
+pane is sized to the painted centre, so opening or closing the rail or the
+assistant panel changes the emulator width and queues the same size for the
+target. A target tty that keeps an old width wraps readline's prompt onto the
+same row, which is what makes a long `user@host:~$` prompt look overwritten.
+
+If the pane shows `�` or a broken progress bar, inspect the actual diagnostic
+counters before attributing it to transport loss or rendering. `@i?` reports
+UART RX drops, disconnected BLE drops, UART TX queue drops, and Reliable UART
+indication retries, timeouts and maximum wait time. Sustained high-rate output
+can fill the UART RX ring when BLE delivery cannot keep up. UART forwarding,
+WebSocket and log capture still share the same worker; this firmware does not
+include a separate BLE sender or guarantee that a slow central cannot stall
+the other sinks. Reduce the target console's baud rate if drops increase;
+the TUI's legacy NUS path is best effort and has no retry.
 
 Build the shared assets and synchronize the generated Android/iOS projects:
 
@@ -1180,7 +1206,7 @@ hardware.
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, whole-transcript copy preserving wrapped lines and boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
+| Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, native-shell long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, native browser selection without custom dots, Copy writing nothing with no selection, selected wrapped lines preserving boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |
 
 ---
 

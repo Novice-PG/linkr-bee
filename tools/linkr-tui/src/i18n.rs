@@ -122,6 +122,9 @@ pub struct Strings {
     /// device's — because either one is the user's to check and neither is
     /// visible from the pane the user is looking at.
     pub decode_loss_notice: &'static str,
+    /// Appended to that notice on a BLE or LAN link, where the bridge itself
+    /// can drop bytes under load before the target's text ever reaches it.
+    pub decode_loss_bridge_hint: &'static str,
 
     // --- views -----------------------------------------------------------
     /// Title of the serial terminal view.
@@ -479,6 +482,7 @@ const ZH: Strings = Strings {
     latch_pending: "待发",
     decode_loss: "乱码",
     decode_loss_notice: "串口收到 {} 字节不是有效 UTF-8 文本：终端里显示为 �（旧控制台上是 ?）。请检查设备的串口参数（--query-uart 查看、--uart 设置），或确认设备没有用 GBK 等非 UTF-8 编码。",
+    decode_loss_bridge_hint: "如果只是零星字节缺失、设备本身输出正常，则可能是桥接链路在拥塞时丢弃了数据：打开“诊断”视图读取 @i? 的 uart / rel 计数即可确认；持续高速输出时可降低对端控制台波特率，或改用浏览器 Web 端的可靠 UART 通道。",
     view_terminal: "串口终端",
     view_diagnostics: "诊断",
     view_network: "网络",
@@ -668,6 +672,7 @@ const EN: Strings = Strings {
     latch_pending: "armed",
     decode_loss: "garbled",
     decode_loss_notice: "{} bytes from the serial link are not valid UTF-8: the pane shows � (? on the old console). Check the device's serial parameters (--query-uart reads them, --uart sets them), or whether it speaks GBK rather than UTF-8.",
+    decode_loss_bridge_hint: "If only occasional bytes are missing and the device's own output is otherwise sound, the bridge may have dropped them under load: open Diagnostics and read the uart / rel counters from @i? to tell. At sustained high output, lower the target console's baud rate, or use the browser client's Reliable UART channel.",
     view_terminal: "Serial Terminal",
     view_diagnostics: "Diagnostics",
     view_network: "Network",

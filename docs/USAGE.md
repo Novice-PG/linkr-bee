@@ -73,15 +73,16 @@ tap Ctrl, Alt, or Shift before the next key, and tap again to cancel the modifie
 
 Touch follows the phone's own selection model: drag vertically to scroll history
 without opening the keyboard, tap to open the keyboard, and long press to select.
-The word under the finger is selected at once and two draggable dots appear; drag
-a dot to adjust that edge precisely, character by character and across lines, then
-copy with the floating pill or the Copy button. If the WebView drops its own
-selection during the hold, Copy still returns the selected text; whole-transcript
-copy preserves wrapped lines, and the clipboard fallback keeps focus and does not
-close the keyboard. The same gestures work while the
+The word under the finger is selected at once and, in the native shells, two
+draggable dots appear; drag a dot to adjust that edge precisely, character by
+character and across lines, then copy with the floating pill or the Copy button.
+Browsers keep their own selection handles and copy menu instead. If the WebView
+drops its own selection during the hold, Copy still returns the selected text;
+copying a selection preserves wrapped lines, and the clipboard fallback keeps
+focus and does not close the keyboard. The same gestures work while the
 keyboard is open: a long press still selects and copies, and a vertical drag still
-scrolls history without closing the keyboard. The Copy button copies the selection,
-or the whole terminal buffer when nothing is selected. On Android the app never
+scrolls history without closing the keyboard. The Copy button copies only the
+selection and writes nothing when nothing is selected. On Android the app never
 sends `stty rows/cols`; the local terminal resizes around the keyboard while the
 remote tty keeps its size.
 

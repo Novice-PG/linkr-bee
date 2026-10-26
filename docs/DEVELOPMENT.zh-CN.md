@@ -257,7 +257,7 @@ WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,�
 - 端点:`ws://<设备 IP>/ws`(端口由 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` 决定,默认 80)
 - 协议:二进制 WebSocket 帧双向承载原始 UART 字节,没有任何额外封装——发什么就写进 UART,UART 收到什么就广播给所有已连接客户端
 - 客户端数:最多 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` 个(默认 2),每个客户端独立 TX 环形缓冲;慢客户端丢弃最旧数据,不会拖慢桥
-- 运行时控制:`@s on|off|?`、`@s token…`;开关状态与局域网访问令牌都持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`（不含令牌）
+- 运行时控制:`@s on|off|?`、`@s token…`;开关状态与局域网访问令牌都持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`（不含令牌;`dropped` 在客户端连接时清零）
 - 局域网访问令牌:首次启动生成 128 位随机令牌并保存,默认不再对全网开放。`@s?` 经加密 BLE 通道返回,`@s token` 重新生成,`@s token=<32 位十六进制>` 指定,`@s token off` 回到无鉴权。握手协议见 [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) 第 8 节
 - 兼容开关:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN`（32 位小写十六进制）用于产线固定令牌,优先级高于自动生成
 - 可选门槛:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 要求客户端在 3 秒内把 token 作为首条文本帧发送
@@ -409,17 +409,23 @@ ERR format: @u=115200,8,n,1,n
 ```
 
 诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
-访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态，以及
-WebDAV 队列、丢弃、HTTP、失败和成功计数：
+访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态、WebSocket 客户端
+与丢弃计数，以及 WebDAV 队列、丢弃、HTTP、失败和成功计数。queue 和 rel
+分组分别提供 UART 发送队列丢弃和 BLE indication 耗时：
 
 ```text
 @info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
-@info uart dropped=0 buffer=0/16384
+@info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0
+@info queue dropped=0
+@info rel ind=0 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=0
 @info done
 ```
+
+缓冲区大小和启用的服务以具体板级配置为准。
 
 应用版本由 `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` 设置。
 
@@ -871,11 +877,25 @@ http://127.0.0.1:8765/
 | 运行环境 | 远端 TTY 尺寸 | 软键盘 | 历史与复制 |
 | --- | --- | --- | --- |
 | 浏览器 Web / Pages | 登录后和布局变化时通过 `stty` 同步 | 跟随浏览器 viewport | 滚轮、触控板或触摸拖动；选中后复制 |
+| 桌面 Rust TUI | 在下一个空闲 shell 提示符发送同一条 `stty rows <rows> cols <cols>`；窗口、侧栏或助手面板改变窗格宽度后重发 | 窗格跟随终端窗口 | 窗格历史、拖动选择与复制快捷键；详见 `tools/linkr-tui/README.md` |
 | Android / iOS / HarmonyOS 原生壳 | 安卓端完全不发送 `stty`；其他原生壳在键盘开合时也保持远端 tty 尺寸不变 | 只缩小本地 WebView 并在本地重算行数，关闭后恢复；设置侧栏滑入前先收起输入法，并用 GPU 合成层做动画 | 上下拖动滚动 `term.scrollLines()`；轻点呼出键盘；长按选中手指下的单词并显示两个可拖动圆点，分别精确调整选区两端，可按字符、跨行扩展；浮动复制按钮复制选区，且长按达到阈值后绝不呼出键盘。即使 WebView 清空自己的 DOM 选区，复制仍返回刚才选中的文字；复制不会抢走焦点。键盘已打开时长按/拖动照样选中并复制，上下拖动照样查看历史。键盘按钮跟随屏幕上实际出现的输入法 |
 
 原生壳会有意跳过 `scheduleTerminalGeometrySync()`：软键盘引起的尺寸变化只是本地显示
 状态，不应让远端控制台重新排版。安卓端因此完全不发送 `stty rows/cols`。浏览器构建仍保留
 现有的 `stty rows <rows> cols <cols>` 同步。
+
+桌面 TUI 发送的命令与 Web、Python 客户端逐字节一致，并且只在空闲 shell 提示符出现时发送：
+本地有输入、行模式缓冲区里有未提交的内容，或目标输出看起来不是提示符，都会关闭发送闸门，
+直到 shell 重新给出提示符。窗格按实际绘制出来的中心区域定尺寸，所以开关侧栏或助手面板会
+改变模拟器宽度，并把同一尺寸排进队列。目标 tty 若仍保留旧宽度，readline 会把长
+`user@host:~$` 提示符折回同一行，看起来就像那一行被覆盖了。
+
+如果窗格出现 `�` 或进度条错乱，应先检查真实诊断计数，再区分传输丢失和渲染问题。
+`@i?` 提供 UART RX 丢弃、BLE 断开期间丢弃、UART 发送队列丢弃，以及 Reliable UART
+indication 的重试、超时和最大等待时间。BLE 发送跟不上时，持续高速输出可能写满 UART RX 环。
+UART 转发、WebSocket 和日志采集仍共用一个工作线程；当前固件没有独立 BLE 发送线程，
+不能保证慢速中心设备不会阻塞其他出口。丢弃计数增长时可降低目标控制台波特率；
+TUI 的 legacy NUS 通道只是尽力而为，没有重传。
 
 构建共享资源并同步 Android/iOS 原生工程：
 
@@ -954,7 +974,7 @@ C3 已验证启动和故障恢复时无此告警；其他支持板型目前仅�
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |
 | 助手（Agent 模式） | Node 与浏览器套件覆盖执行策略、证据处理与任务恢复 | 真实目标机上的命令执行与设备档案恢复，详见 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
-| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、整段复制保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |
+| 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、原生壳长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、浏览器保留原生选择且不绘制自定义圆点、无选区时不复制、复制选区保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |
 
 ---
 

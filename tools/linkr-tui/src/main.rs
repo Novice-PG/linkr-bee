@@ -2007,24 +2007,21 @@ fn read_first_line(path: &std::path::Path) -> Result<String, String> {
     Ok(text.lines().next().unwrap_or("").trim().to_string())
 }
 
-/// The centre region — the terminal pane's area — for a frame of this size.
-/// The pane the emulator is sized to: [`ui::pane_area`], the paint's own
-/// arithmetic, so the grid ends exactly where the painted cells do.
+/// The centre region of the design's full layout: rail and assistant shown.
+///
+/// The reference [`fit_pane_to`] is checked against with the default layout.
+/// A live window sizes to whatever [`painted_centre`] says the paint is using.
+#[cfg(test)]
 fn pane_area(cols: u16, rows: u16) -> Rect {
     ui::pane_area(cols, rows)
 }
 
 /// The centre region as the *paint* lays it out, rail and panel and all.
 ///
-/// Not [`pane_area`]: that is the emulator's width, which deliberately stays
-/// put when a column appears or goes so a toggle does not rewrap the device's
-/// whole history. A mouse point, though, is measured against what the user
-/// sees — the rail and the assistant's panel both take their columns off it —
-/// so the drag asks this one and clamps to the emulated screen afterwards.
-// The interactive session's helpers. A CLI-only binary has no loop that calls
-// them, so they leave the build rather than warn as dead code; the tests that
-// drive them keep them under `test`.
-#[cfg(any(feature = "tui", test))]
+/// This is the pane the emulator is sized to: a mouse point and the device's
+/// wrap are both measured against what the user sees, so the rail and the
+/// assistant's panel both take their columns off it. Toggling either is a pane
+/// resize, and the size sync tells the target about it at the next prompt.
 fn painted_centre(app: &App, cols: u16, rows: u16) -> Rect {
     ui::regions_for(
         Rect::new(0, 0, cols, rows),
@@ -2067,8 +2064,13 @@ fn pane_cell_at(app: &App, cols: u16, rows: u16, column: u16, row: u16) -> Optio
 /// window would wrap the device's lines under it.
 fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
     let painted = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console).width;
-    let pane = pane_area(painted, rows);
+    // The *painted* centre: the rail and the assistant's panel take their
+    // columns out of it, so toggling either resizes the pane. The remote tty
+    // is told the same size the emulator is sized to, which is what keeps a
+    // readline wrap and the pane's own wrap on the same column.
+    let pane = painted_centre(app, painted, rows);
     app.terminal.set_size(pane.width, pane.height);
+    app.geometry.set_size(pane.width, pane.height);
     // A run the pointer drew names cells of the frame it was drawn on; a
     // window that moved those cells under it is a frame the run no longer
     // names, so the run goes with the size.
@@ -4672,20 +4674,37 @@ mod tests {
         assert_eq!(rows[1], "", "and it is one line, not two: {rows:?}");
     }
 
-    /// The device is told the pane's size, and the panel is not the pane's
-    /// business: opening or closing it must not change what the emulator
-    /// thinks its grid is, or the device would reflow its history for a column
-    /// of chat. The rail is the one that moves the pane, and always did.
+    /// The pane follows the paint: opening or closing the assistant gives the
+    /// emulator the column back or takes it away, and the size sync is told the
+    /// same size so the remote tty wraps where the pane does.
     #[test]
-    fn the_pane_keeps_its_size_when_the_panel_moves() {
+    fn the_pane_follows_the_panel_and_the_rail() {
         let mut shown = App::default();
-        let pane = fit_pane_to(140, 30, &mut shown);
-        let mut hidden = App {
+        let both = fit_pane_to(180, 30, &mut shown);
+
+        let mut no_panel = App {
             assistant_panel: false,
             ..App::default()
         };
-        assert_eq!(fit_pane_to(140, 30, &mut hidden), pane);
-        assert_eq!(hidden.terminal.size(), shown.terminal.size());
+        let wide = fit_pane_to(180, 30, &mut no_panel);
+        assert!(
+            wide.width > both.width,
+            "{wide:?} is not wider than {both:?}"
+        );
+        assert_eq!(no_panel.terminal.size(), (wide.width, wide.height));
+        assert_eq!(no_panel.geometry.geometry().cols, wide.width);
+
+        let mut no_rail = App {
+            sidebar_visible: false,
+            ..App::default()
+        };
+        let widest = fit_pane_to(180, 30, &mut no_rail);
+        assert!(
+            widest.width > both.width,
+            "{widest:?} is not wider than {both:?}"
+        );
+        assert_eq!(no_rail.terminal.size(), (widest.width, widest.height));
+        assert_eq!(no_rail.geometry.geometry().cols, widest.width);
     }
 
     /// `--print-frame --overlay` draws the modal, in the language asked for —
@@ -4953,6 +4972,11 @@ mod tests {
         assert_eq!(app.sidebar_cursor, 3);
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.view, View::ALL[0], "the row opened its view");
+
+        // Choosing a view handed the keyboard to it, so come back to the rail
+        // before walking its rows. Leaving the focus in the content is the
+        // behaviour this test's sibling asserts.
+        app.focus = Focus::Sidebar;
 
         // Walk to the `reboot` row — the last one — and ask for it. It must not
         // fire: it must raise a confirmation.
