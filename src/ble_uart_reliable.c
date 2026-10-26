@@ -233,6 +233,7 @@ static ssize_t state_read(struct bt_conn *conn,
 				 sizeof(state));
 }
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
 static bool rx_starts_frame(const uint8_t *bytes, uint16_t len)
 {
 	const struct reliable_header *header;
@@ -248,6 +249,7 @@ static bool rx_starts_frame(const uint8_t *bytes, uint16_t len)
 		       LINKR_UART_RELIABLE_MAX_PAYLOAD &&
 	       len - sizeof(*header) <= sys_get_le16(header->payload_len_le);
 }
+#endif
 
 static ssize_t rx_write(struct bt_conn *conn,
 			const struct bt_gatt_attr *attr, const void *buf,
@@ -271,6 +273,7 @@ static ssize_t rx_write(struct bt_conn *conn,
 		rx_reset_locked();
 	}
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
 	/* A client that gave up halfway through a frame (a failed write, a
 	 * reconnect, a canceled command) leaves this reassembler waiting for
 	 * continuation bytes. If the next ATT write starts a *new* frame, the
@@ -283,6 +286,7 @@ static ssize_t rx_write(struct bt_conn *conn,
 	if (rx_state.expected && rx_starts_frame(bytes, len)) {
 		rx_reset_locked();
 	}
+#endif
 
 	if (!rx_state.expected) {
 		if (len < sizeof(*header)) {
@@ -321,6 +325,7 @@ static ssize_t rx_write(struct bt_conn *conn,
 	if (rx_state.received == rx_state.expected) {
 		if (rx_state.sequence == rx_next_sequence) {
 			err = uart_write_fn(rx_state.payload, rx_state.expected);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
 			if (!err || err == -ENOMEM) {
 				/* -ENOMEM means the frame is complete but the downstream
 				 * queue was full and counted the loss. The peer has
@@ -331,7 +336,13 @@ static ssize_t rx_write(struct bt_conn *conn,
 				rx_next_sequence = sequence_next(rx_next_sequence);
 				err = 0;
 			}
+#else
+			if (!err) {
+				rx_next_sequence = sequence_next(rx_next_sequence);
+			}
+#endif
 		} else if (rx_state.sequence != previous_sequence) {
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
 			/* The peer's sequence does not match ours, usually because a
 			 * previous session ended with the two sides disagreeing. The
 			 * old behaviour returned an ATT error, which those same
@@ -343,6 +354,9 @@ static ssize_t rx_write(struct bt_conn *conn,
 				rx_next_sequence = sequence_next(rx_state.sequence);
 				err = 0;
 			}
+#else
+			err = -EILSEQ;
+#endif
 		}
 		rx_reset_locked();
 		if (err) {
@@ -479,10 +493,6 @@ void linkr_uart_reliable_disconnected(struct bt_conn *conn)
 	}
 	k_mutex_unlock(&rx_lock);
 	atomic_clear(&indication_enabled);
-	/* The next central may select NUS instead of the reliable channel.
-	 * Keeping this set would route its output into indications nobody
-	 * subscribed to. The channel is selected again by the CCC callback. */
-	atomic_clear(&reliable_mode);
 }
 
 bool linkr_uart_reliable_mode(void)
@@ -492,13 +502,9 @@ bool linkr_uart_reliable_mode(void)
 
 void linkr_uart_reliable_nus_selected(void)
 {
-	/* The central selected the raw NUS channel. Zephyr may restore a saved
-	 * reliable-UART CCC from an earlier session for the same bond, which makes
-	 * indication_enabled true even though this client is not handling
-	 * indications. Sending there would leave the client with no output and
-	 * eventually trip the indication timeout (a silent disconnect), so a NUS
-	 * subscription always selects NUS. */
-	atomic_clear(&reliable_mode);
+	if (!atomic_get(&indication_enabled)) {
+		atomic_clear(&reliable_mode);
+	}
 }
 
 int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,

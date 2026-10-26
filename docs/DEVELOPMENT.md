@@ -362,7 +362,7 @@ The shipped configuration enables
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
 
-The classic-ESP32 builds (ESP32-WROOM-32 and ESP32-CAM) enable
+The ESP32-CAM build enables
 `CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE=y`. Its single UART-to-BLE thread used
 to block in the Reliable UART indication, and because the same thread feeds the
 LAN bridge and log ring, a slow central also starved a LAN-only TUI or browser.
@@ -370,9 +370,9 @@ With decoupling the thread stages each chunk for those sinks and hands the BLE
 copy to a small queue and a dedicated sender thread, so the UART ring keeps
 draining while one indication is in flight. A full queue disconnects the
 central after the in-flight chunk instead of skipping a sequence number, which
-lets it resynchronise; LAN output is unaffected. Their UART RX ring is
-14336 bytes so the queue fits beside it in DRAM0. C3 and C5 keep the upstream
-synchronous path unchanged.
+lets it resynchronise; LAN output is unaffected. Its UART RX ring is 20480
+bytes so the queue fits beside it. ESP32-WROOM-32 keeps the upstream
+synchronous path and its 16384-byte ring; C3 and C5 are unchanged too.
 
 ### Pairing GPIO, persistence, and factory reset
 
