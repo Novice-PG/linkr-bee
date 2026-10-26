@@ -122,8 +122,10 @@ html.settings-drawer-layout .settings-tabs { top: var(--window-header-height); b
     border: 0;
     border-radius: 0;
   }
-  html.settings-drawer-layout .drawer-head.window-header { top: var(--safe-top); }
-  html.settings-drawer-layout .settings-tabs { top: calc(var(--window-header-height) + var(--safe-top)); }
+  /* The drawer itself is padded by the safe-area inset, so the sticky header and
+   * tabs must not add it again: sticky offsets are measured from the padded
+   * content box, and the base rules at the top of this file already keep them
+   * below the status bar while scrolling. */
   .controls .card { border-radius: var(--window-radius); }
 }
 
