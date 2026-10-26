@@ -341,7 +341,7 @@ function populateBoards(manifest) {
 
 async function fetchBytes(url, label, expectedSize = 0) {
   logLine(`下载 ${label} …`);
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
   const total = Number(response.headers.get("content-length")) || expectedSize || 0;
   if (!response.body) {
