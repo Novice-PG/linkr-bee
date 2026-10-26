@@ -5,6 +5,7 @@
   --control-radius: var(--radius-sm);
   --window-header-height: 56px;
   --window-header-padding: 6px 10px;
+  --window-header-padding-top: 6px;
   --window-shadow: 0 2px 8px rgba(2, 6, 16, .2);
   --overlay-shadow: 0 12px 32px rgba(2, 6, 16, .35), 0 2px 8px rgba(2, 6, 16, .2);
   --primary-fill: var(--accent);
@@ -105,27 +106,41 @@ html.agent-mode .terminal-card { box-shadow: var(--window-shadow); }
 .controls.window-surface > :last-child { margin-bottom: 12px; }
 .controls .drawer-head.window-header { position: sticky; top: 0; z-index: 5; }
 .controls .settings-tabs { position: sticky; top: var(--window-header-height); z-index: 3; }
+/* Sticky chrome sits over scrolled cards in the docked settings panel too, so it
+ * needs the opaque variant there as well (the glass token is translucent). */
+.controls .drawer-head.window-header,
+.controls .settings-tabs,
+.controls.has-agent-settings .settings-tabs { background: var(--sticky-surface, var(--panel-2)); }
 html.settings-drawer-layout .controls.window-surface {
   padding: 0;
   border-radius: var(--window-radius);
   box-shadow: var(--overlay-shadow);
   scroll-padding-top: calc(var(--window-header-height) + 64px);
 }
-html.settings-drawer-layout .drawer-head.window-header { top: 0; background: var(--panel-2); padding: var(--window-header-padding); }
-html.settings-drawer-layout .settings-tabs { top: var(--window-header-height); border-radius: var(--control-radius); }
+html.settings-drawer-layout .drawer-head.window-header { top: 0; background: var(--sticky-surface, var(--panel-2)); padding: var(--window-header-padding); }
+/* Sticky chrome sits over scrolled cards: a translucent glass background lets
+ * their text show through, which reads as overlapping UI. */
+html.settings-drawer-layout .controls .settings-tabs { top: var(--window-header-height); border-radius: var(--control-radius); background: var(--sticky-surface, var(--panel-2)); }
 .controls.has-agent-settings .settings-tabs { border-radius: var(--control-radius); }
 
 @media (max-width: 600px) {
+  /* The drawer is full width on phones, so the status-bar band is part of its
+   * scrollport. Move the safe-area inset from the scroll container's padding
+   * into the sticky header: the padding would scroll away and let card text
+   * slide under the status bar, while the header can cover that band. */
   html.settings-drawer-layout .controls.window-surface {
-    padding-top: var(--safe-top);
+    padding-top: 0;
     padding-bottom: var(--safe-bottom);
     border: 0;
     border-radius: 0;
   }
-  /* The drawer itself is padded by the safe-area inset, so the sticky header and
-   * tabs must not add it again: sticky offsets are measured from the padded
-   * content box, and the base rules at the top of this file already keep them
-   * below the status bar while scrolling. */
+  html.settings-drawer-layout .controls.window-surface .drawer-head.window-header {
+    min-height: calc(var(--window-header-height) + var(--safe-top));
+    padding-top: calc(var(--window-header-padding-top) + var(--safe-top));
+  }
+  html.settings-drawer-layout .controls.window-surface .settings-tabs {
+    top: calc(var(--window-header-height) + var(--safe-top));
+  }
   .controls .card { border-radius: var(--window-radius); }
 }
 
