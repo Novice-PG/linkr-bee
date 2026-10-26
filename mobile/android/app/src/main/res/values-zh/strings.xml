@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="mcp_approval_allow">允许</string>
+    <string name="mcp_approval_deny">拒绝</string>
+</resources>

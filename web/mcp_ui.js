@@ -111,7 +111,7 @@ const REFRESH_INTERVAL_MS = 3000;
  * asks once before saving it. */
 const ACCESS_RANK = { read: 0, confirm: 1, guarded: 2, auto: 3 };
 
-export function createMcpUi({ mount, getLang, host }) {
+export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
   if (!mount || !host) return null;
   const langIndex = () => (String(getLang?.() || "en").toLowerCase().startsWith("zh") ? 0 : 1);
   const text = (key) => labels[key]?.[langIndex()] || key;
@@ -233,6 +233,8 @@ export function createMcpUi({ mount, getLang, host }) {
   let state = host.getState();
   let busy = false;
   let pendingApproval = null;
+  let approvalActionSubscription = null;
+  let approvalCounter = 0;
   let refreshInFlight = false;
   let refreshTimer = null;
 
@@ -369,8 +371,17 @@ export function createMcpUi({ mount, getLang, host }) {
     try {
       await host.setConfig(form);
       config = host.getConfig();
-      if (wanted) await host.enable();
-      else await host.disable();
+      if (wanted) {
+        await host.enable();
+        /* Android 13+ needs POST_NOTIFICATIONS for background approvals. Ask
+         * now, while the user is in the app; a refusal only degrades to the
+         * in-app card. */
+        try {
+          Promise.resolve(getBridge?.()?.requestApprovalPermission?.()).catch(() => {});
+        } catch {
+          /* older shells without the method keep the in-app card */
+        }
+      } else await host.disable();
     } catch (error) {
       setStatus(`${text("errorPrefix")}${error?.message || ""}`, true);
     } finally {
@@ -445,28 +456,127 @@ export function createMcpUi({ mount, getLang, host }) {
     bannerParts.allow.focus({ preventScroll: true });
   }
 
-  function requestApproval(request) {
-    if (pendingApproval) {
-      return Promise.resolve({ approved: false, reason: text("approvalBusy") });
-    }
-    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
-      return Promise.resolve({ approved: false, reason: text("approvalBackground") });
-    }
+  /* The notification body never carries raw tool arguments: it names the tool
+   * and the (already redacted) summary, and the notification is PRIVATE on the
+   * lock screen. */
+  function notificationBody(request) {
+    const tool = toolText(request?.tool);
+    const summary = typeof request?.summary === "string" ? request.summary : "";
+    return (summary ? `${tool} — ${summary}` : tool).slice(0, 180);
+  }
+
+  function beginApproval(request, { notificationId = null, showBannerNow = true } = {}) {
+    const timeoutMs = Math.min(120000, Math.max(5000, Number(request?.timeoutMs) || APPROVAL_TIMEOUT_MS));
     return new Promise((resolve) => {
-      const timeoutMs = Math.min(120000, Math.max(5000, Number(request?.timeoutMs) || APPROVAL_TIMEOUT_MS));
       const timer = setTimeout(() => settle(false, text("approvalTimeout")), timeoutMs);
-      const pending = { request, resolve, timer, settle: null };
+      const pending = { request, resolve, timer, settle: null, notificationId };
       pendingApproval = pending;
       pending.settle = (approved, reason) => {
         if (pendingApproval !== pending) return;
         pendingApproval = null;
         clearTimeout(timer);
         hideBanner();
+        if (pending.notificationId) {
+          const bridge = getBridge?.();
+          try { Promise.resolve(bridge?.cancelApproval?.(pending.notificationId)).catch(() => {}); } catch { /* ignore */ }
+        }
         resolve({ approved, reason });
       };
       const settle = pending.settle;
-      showBanner(request || {});
+      if (showBannerNow) showBanner(request || {});
     });
+  }
+
+  /* The WebView keeps reporting visibilityState "visible" when the Android
+   * activity is paused (the foreground service keeps the process alive), so the
+   * native foreground flag is the reliable signal for "can the user see the
+   * app right now". Fall back to document.visibilityState on other platforms. */
+  async function isAppHidden() {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return true;
+    try {
+      const bridge = getBridge?.();
+      if (bridge && typeof bridge.getState === "function") {
+        const native = await bridge.getState();
+        if (native && native.foreground === false) return true;
+      }
+    } catch {
+      /* keep the document signal */
+    }
+    return false;
+  }
+
+  async function requestApproval(request) {
+    if (pendingApproval) {
+      return { approved: false, reason: text("approvalBusy") };
+    }
+    /* Foreground: the in-app banner is faster and shows the arguments. While
+     * the app is hidden (screen off, another app) the native notification is
+     * the only place the user can answer, so ask the Android shell for it. */
+    const hidden = await isAppHidden();
+    if (hidden) {
+      const bridge = getBridge?.();
+      if (!bridge || typeof bridge.showApproval !== "function") {
+        return { approved: false, reason: text("approvalBackground") };
+      }
+      const id = `mcp-${Date.now()}-${++approvalCounter}`;
+      let shown = false;
+      try {
+        shown = (await bridge.showApproval({
+          id,
+          title: text("approvalTitle"),
+          body: notificationBody(request),
+        })) === true;
+      } catch {
+        shown = false;
+      }
+      if (!shown) return { approved: false, reason: text("approvalBackground") };
+      return beginApproval(request, { notificationId: id, showBannerNow: false });
+    }
+    return beginApproval(request, { showBannerNow: true });
+  }
+
+  function handleApprovalAction(payload) {
+    const pending = pendingApproval;
+    if (!pending || !pending.notificationId) return;
+    if (String(payload?.id ?? "") !== pending.notificationId) return;
+    pending.settle(Boolean(payload?.approved), payload?.approved ? "" : text("approvalDenied"));
+  }
+
+  async function subscribeApprovalActions() {
+    const bridge = getBridge?.();
+    if (!bridge || typeof bridge.addListener !== "function") return;
+    try {
+      approvalActionSubscription = await bridge.addListener("approvalAction", handleApprovalAction);
+    } catch {
+      approvalActionSubscription = null;
+    }
+  }
+
+  /* If the user backgrounds the app while the in-app banner is waiting, move
+   * the same request to a notification instead of letting it expire unseen. */
+  async function notificationOnHide() {
+    const pending = pendingApproval;
+    if (!pending || pending.notificationId || document.visibilityState === "visible") return;
+    const bridge = getBridge?.();
+    if (!bridge || typeof bridge.showApproval !== "function") return;
+    const id = `mcp-${Date.now()}-${++approvalCounter}`;
+    let shown = false;
+    try {
+      shown = (await bridge.showApproval({
+        id,
+        title: text("approvalTitle"),
+        body: notificationBody(pending.request),
+      })) === true;
+    } catch {
+      shown = false;
+    }
+    if (!shown) return;
+    if (pendingApproval !== pending) {
+      try { Promise.resolve(bridge.cancelApproval?.(id)).catch(() => {}); } catch { /* ignore */ }
+      return;
+    }
+    pending.notificationId = id;
+    hideBanner();
   }
 
   function settlePending(approved, reason) {
@@ -481,6 +591,9 @@ export function createMcpUi({ mount, getLang, host }) {
       settlePending(false, text("approvalDenied"));
     }
   });
+
+  document.addEventListener("visibilitychange", notificationOnHide);
+  void subscribeApprovalActions();
 
   applyLabels();
   render();
@@ -498,6 +611,11 @@ export function createMcpUi({ mount, getLang, host }) {
     dispose() {
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = null;
+      document.removeEventListener("visibilitychange", notificationOnHide);
+      if (approvalActionSubscription?.remove) {
+        Promise.resolve(approvalActionSubscription.remove()).catch(() => {});
+      }
+      approvalActionSubscription = null;
       settlePending(false, text("approvalDenied"));
     },
   };

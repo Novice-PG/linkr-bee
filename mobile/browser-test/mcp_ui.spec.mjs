@@ -36,7 +36,7 @@ async function installFakeBridge(page) {
         lastError: null,
       };
       const clone = () => JSON.parse(JSON.stringify(state));
-      const listeners = { httpRequest: [], stateChanged: [] };
+      const listeners = { httpRequest: [], stateChanged: [], approvalAction: [] };
 
       /* Answer log and call log the spec reads back with page.evaluate(). */
       window.__mcpCalls = {
@@ -46,8 +46,12 @@ async function installFakeBridge(page) {
         regenerateToken: 0,
         respond: 0,
         addListener: [],
+        showApproval: [],
+        cancelApproval: [],
       };
       window.__mcpResponses = [];
+      /* Tests can make the platform refuse to post a notification. */
+      window.__mcpApprovalAvailable = true;
 
       const emitState = () => {
         const snapshot = clone();
@@ -98,6 +102,13 @@ async function installFakeBridge(page) {
           window.__mcpCalls.respond += 1;
           window.__mcpResponses.push({ ...input });
         },
+        async showApproval(input) {
+          window.__mcpCalls.showApproval.push({ ...input });
+          return window.__mcpApprovalAvailable !== false;
+        },
+        async cancelApproval(id) {
+          window.__mcpCalls.cancelApproval.push(id);
+        },
         async addListener(event, cb) {
           window.__mcpCalls.addListener.push(event);
           listeners[event]?.push(cb);
@@ -121,6 +132,9 @@ async function installFakeBridge(page) {
         state(patch) {
           Object.assign(state, patch || {});
           emitState();
+        },
+        approvalAction(payload) {
+          for (const cb of listeners.approvalAction) cb({ ...payload });
         },
       };
 
@@ -348,6 +362,14 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
   await expect(page.locator("#mcpPort")).toHaveValue("8712");
   await expect(page.locator("#mcpBind")).toHaveValue("lan");
   await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  // The four access modes are always listed in restrictive -> permissive order.
+  await expect(page.locator("#mcpAccess option")).toHaveCount(4);
+  await expect(page.locator("#mcpAccess option")).toHaveText([
+    /Read-only: no approval needed|只读（不需要授权）/,
+    /Read and write: every command needs approval|写入（每条命令需要授权）/,
+    /Read and write: only high-risk commands need approval|写入（仅高危命令需要授权）/,
+    /Read and write: fully authorized|写入（完全授权）/,
+  ]);
   await expect(page.locator("#mcpEnabled")).not.toBeChecked();
   await expect(page.locator("#mcpEndpointBlock")).toBeHidden();
   await expect(page.locator("#mcpStatus")).toContainText(/Disabled|未启用/);
@@ -356,8 +378,8 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
 
   // initMcp() subscribes to both bridge events before the server is started.
   await expect
-    .poll(() => page.evaluate(() => window.__mcpCalls.addListener))
-    .toEqual(["httpRequest", "stateChanged"]);
+    .poll(() => page.evaluate(() => [...new Set(window.__mcpCalls.addListener)].sort()))
+    .toEqual(["approvalAction", "httpRequest", "stateChanged"]);
 
   // The bridge received exactly the configured port/bind, and the card mirrors
   // the native snapshot (endpoint + 64-hex token, masked with type=password).
@@ -703,4 +725,104 @@ test("high-risk-only access runs safe writes but still approves destructive inpu
   await page.locator("#mcpAccess").selectOption("guarded");
   await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
   await expect(page.locator("#mcpGuardedWarning")).toBeHidden();
+});
+
+/* ------------------------------------------------------------------ *
+ * (g) Hidden page: approvals happen in the platform notification
+ * ------------------------------------------------------------------ */
+async function hidePage(page) {
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+  });
+  await expect.poll(
+    () => page.evaluate(() => window.__mcpCalls.addListener.includes("approvalAction")),
+  ).toBe(true);
+}
+
+async function waitForApprovalNotification(page) {
+  await expect.poll(() => page.evaluate(() => window.__mcpCalls.showApproval.length)).toBeGreaterThan(0);
+  return page.evaluate(() => window.__mcpCalls.showApproval.at(-1));
+}
+
+test("a hidden page asks through a notification and executes when Allow is tapped", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+  await hidePage(page);
+
+  await callRpc(page, {
+    bridgeId: "req-notif-allow",
+    rpcId: "rpc-notif-allow",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "uname -a", appendEnter: true } },
+  });
+  const notification = await waitForApprovalNotification(page);
+  expect(notification.id).toBeTruthy();
+  expect(notification.body).toContain("Send serial input");
+  await expect(page.locator("#mcpApproval")).toBeHidden();
+
+  await page.evaluate((id) => window.__mcpEmit.approvalAction({ id, approved: true }), notification.id);
+  const response = await waitForResponse(page, "req-notif-allow");
+  const payload = parsedResponse(response);
+  expect(payload.result.isError).toBeUndefined();
+  expect(resultText(payload)).toContain("serial-execution");
+  const executions = await page.evaluate(() => window.__mcpTestExecutions);
+  expect(executions).toHaveLength(1);
+  await expect.poll(() => page.evaluate(() => window.__mcpCalls.cancelApproval)).toContain(notification.id);
+});
+
+test("a notification Deny answers isError and executes nothing", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+  await hidePage(page);
+
+  await callRpc(page, {
+    bridgeId: "req-notif-deny",
+    rpcId: "rpc-notif-deny",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "reboot", appendEnter: true } },
+  });
+  const notification = await waitForApprovalNotification(page);
+  await page.evaluate((id) => window.__mcpEmit.approvalAction({ id, approved: false }), notification.id);
+  const response = await waitForResponse(page, "req-notif-deny");
+  const payload = parsedResponse(response);
+  expect(payload.result.isError).toBe(true);
+  expect(resultText(payload)).toContain("denied on the phone");
+  expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
+});
+
+test("a hidden page without notification permission refuses instead of hanging", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+  await page.evaluate(() => { window.__mcpApprovalAvailable = false; });
+  await hidePage(page);
+
+  await callRpc(page, {
+    bridgeId: "req-notif-unavailable",
+    rpcId: "rpc-notif-unavailable",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "ls", appendEnter: true } },
+  });
+  const response = await waitForResponse(page, "req-notif-unavailable");
+  const payload = parsedResponse(response);
+  expect(payload.result.isError).toBe(true);
+  expect(resultText(payload)).toContain("denied on the phone");
+  expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 });

@@ -5292,7 +5292,11 @@ function initMcp() {
     getLang: () => lang,
     onChange: () => mcpUi?.refresh(),
   });
-  mcpUi = createMcpUi({ mount: elements.controls, getLang: () => lang, host: mcpHost });
+  mcpUi = createMcpUi({
+    mount: elements.controls, getLang: () => lang, host: mcpHost,
+    /* The hidden-page approval path posts a notification through the Android bridge. */
+    getBridge: () => globalThis.LinkrMcp || null,
+  });
   /* Subscribe before starting: a server that accepts a request before the
    * httpRequest listener exists could only answer 503. The user explicitly
    * enabled the server in a previous run, so bring it back up afterwards; a

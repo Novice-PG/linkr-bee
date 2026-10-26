@@ -77,7 +77,9 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
 1. Open **Settings → AI** in the app and find the **MCP server** card.
 2. Enable **Allow AI clients on this network**. The server starts immediately and
    the setting is remembered; it starts again on the next app launch while the
-   toggle stays on.
+   toggle stays on. On Android 13+ this asks for the notification permission so
+   approvals can appear in the notification shade while the app is in the
+   background; refusing it only disables that background path.
 3. Choose **Access**, from the most restrictive to the most permissive mode:
    - **Read-only: no approval needed** — nothing is ever asked on the phone:
      reads and scans run directly, and every write tool is refused.
@@ -113,7 +115,8 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
      restarts are deliberately not guarded. The classification is a best-effort
      pattern guard for recognized shell forms, **not a sandbox**: indirect
      execution through scripts, variables or interpreters cannot be classified,
-     so a token holder may still reach a high-risk action without a prompt.
+     so a token holder may still reach a high-risk action without a prompt. The
+     app asks once before switching to this mode from a stricter one.
    - **Read and write: fully authorized** — every tool runs directly, including
      serial writes and bridge changes, with no prompt on the phone. The bearer
      token becomes the only control: use it only for a fully trusted client that
@@ -374,6 +377,12 @@ the client:
   still running reads and scans without a prompt.
 - The approval card shows the tool and its arguments with password-like fields
   masked. The WiFi password is never shown there or echoed in a tool result.
+- When the app is not visible (screen off, another app in front) the approval is
+  posted as a high-priority notification with **Allow** / **Deny** actions. The
+  notification body names the tool and a short summary, is PRIVATE on the lock
+  screen, and tapping an action answers the waiting call without opening the
+  app. Approving there is a real approval: treat the unlocked phone and its
+  notification shade as the approval boundary.
 - The card keeps the latest 50 external calls in memory for this app run, with
   password-like arguments and URL userinfo masked. The audit list is not
   persisted.
@@ -392,13 +401,15 @@ the client:
   alive while the app is backgrounded, but the server is not a daemon: closing the
   activity destroys it, and if Android kills the app process the listener goes
   away. Relaunching the app restarts the server when the setting is still on.
-- **Background operation is limited.** An approval prompt only works while the
-  app is visible. In the background the prompt is refused and the call is not
-  executed; a backgrounded WebView can also delay or fail to answer a request.
-  This affects every write and scan in `confirm` mode and the high-risk calls in
-  `guarded` mode, so keep the app in the foreground when one is expected. Calls
-  that never prompt — every read, both scans, `auto` mode, and non-high-risk
-  writes in `guarded` — can run while the app is backgrounded.
+- **Background approvals use a notification.** While the app is visible the
+  approval card is shown in the app; while it is not visible the request is
+  posted as a high-priority notification with **Allow** / **Deny** actions, so a
+  write can be approved from the notification shade without reopening the app.
+  This needs the POST_NOTIFICATIONS permission on Android 13+ and the app
+  process alive; if notifications are disabled, a background approval is refused
+  and the call is not executed. A backgrounded WebView can still delay or fail
+  to answer a request. Calls that never prompt — every read, both scans, `auto`
+  mode, and non-high-risk writes in `guarded` — run while backgrounded.
 - **One device-changing call at a time.** The second write is rejected, including
   while the first is still waiting for approval. Read tools can run concurrently.
 - **Tool results are bounded.** Serial reads are paged, searches are capped at 12
@@ -433,7 +444,7 @@ the client:
 | `504 Gateway Timeout` | The app did not answer within 180 seconds — for example while backgrounded or waiting on the phone. The call may not have reached the device; check the phone and the serial log before retrying, and never resend serial input blindly. |
 | Service error: address already in use | Another process holds the port. Change the port in the card or stop the other listener. |
 | Connection refused / no route | The client host cannot reach the phone. Check that both are on the same network without client isolation, that the listen address is **All interfaces**, and that the address is the phone's address on that network. `GET /` from the client host should answer without a token. |
-| Approval never appears | The app must be visible and in the foreground; a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. A prompt is expected only for writes and scans in `confirm` mode and for the high-risk calls in `guarded` mode; `auto` and `read` never prompt, and `guarded` runs non-high-risk calls directly. |
+| Approval never appears | The app must be visible (in-app card) or notifications must be enabled (background notification with Allow/Deny); a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. A prompt is expected only for writes and scans in `confirm` mode and for the high-risk calls in `guarded` mode; `auto` and `read` never prompt, and `guarded` runs non-high-risk calls directly. |
 | A write ran without a phone approval | The selected mode does not prompt for that call: `guarded` runs non-high-risk writes directly and `auto` never asks. Select `confirm` to require a click for every write; `read` refuses writes instead. |
 | "The target is not connected" | Connect Linkr Bee and the target in the app first. Disconnecting makes serial tools return an explicit error even while retained log text is displayed. |
 | "Accessory settings need a Bluetooth LE connection" | The app is in LAN-only mode. Switch to the BLE connection for diagnostics and configuration tools. |
@@ -473,6 +484,10 @@ over adb, connected to a Linkr Bee accessory over BLE):
   it returned `isError: "Not executed: the request was denied on the phone."`,
   and approving it delivered the text to the target shell (the target echoed it
   back, visible in the serial log);
+- with the app backgrounded, a write approval was posted as a notification
+  (channel "Linkr Bee MCP approvals", `VISIBILITY_PRIVATE`) with **Allow** /
+  **Deny** actions; tapping Allow executed the waiting call and dismissed the
+  notification;
 - a tracked command (`send_serial_input` with `trackExit` and
   `waitForCompletion`) ran `uname -s` on the real target and returned
   `completed:true`, `exitCode:0`, `tracked:true` and the shell output in the

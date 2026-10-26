@@ -1,5 +1,9 @@
 package guru.linkr.ble.mcp;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import androidx.core.app.ActivityCompat;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -107,6 +111,70 @@ public class LinkrMcpPlugin extends Plugin {
         call.resolve();
     }
 
+    /**
+     * Posts an Allow/Deny notification for a write approval. Resolves with a
+     * boolean (see below): {@code true} when a notification was posted,
+     * {@code false} when the user disabled notifications or denied the
+     * POST_NOTIFICATIONS permission. A disabled notification permission is not
+     * an error, so this never rejects for it.
+     */
+    @PluginMethod
+    public void showApproval(PluginCall call) {
+        if (manager == null) {
+            call.reject("MCP bridge is not ready");
+            return;
+        }
+        String id = call.getString("id");
+        if (id == null || id.trim().isEmpty()) {
+            call.reject("Approval id is required");
+            return;
+        }
+        boolean posted = manager.showApproval(id, call.getString("title"), call.getString("body"));
+        /* Capacitor's PluginCall can only resolve a JSON object, so the boolean
+         * travels as {posted}; the TypeScript bridge unwraps it to a boolean. */
+        JSObject result = new JSObject();
+        result.put("posted", posted);
+        call.resolve(result);
+    }
+
+    /**
+     * Asks for POST_NOTIFICATIONS on Android 13+ so background approvals can be
+     * posted later. The web layer calls this when the user enables the server (a
+     * foreground moment); the OS dialog is asynchronous, so this resolves
+     * immediately. Without the permission the feature degrades to the in-app
+     * approval card and background requests are refused.
+     */
+    @PluginMethod
+    public void requestApprovalPermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && getActivity() != null) {
+            boolean granted = getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    == PackageManager.PERMISSION_GRANTED;
+            if (!granted) {
+                ActivityCompat.requestPermissions(
+                        getActivity(),
+                        new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                        8712);
+            }
+        }
+        call.resolve();
+    }
+
+    /** Dismisses a pending approval notification. Unknown ids are a no-op. */
+    @PluginMethod
+    public void cancelApproval(PluginCall call) {
+        if (manager == null) {
+            call.reject("MCP bridge is not ready");
+            return;
+        }
+        String id = call.getString("id");
+        if (id == null || id.trim().isEmpty()) {
+            call.reject("Approval id is required");
+            return;
+        }
+        manager.cancelApproval(id);
+        call.resolve();
+    }
+
     /** True while the WebView has subscribed to forwarded HTTP requests. */
     public boolean hasHttpRequestListener() {
         return hasListeners("httpRequest");
@@ -118,5 +186,9 @@ public class LinkrMcpPlugin extends Plugin {
 
     public void emitStateChanged(JSObject state) {
         notifyListeners("stateChanged", state);
+    }
+
+    public void emitApprovalAction(JSObject payload) {
+        notifyListeners("approvalAction", payload);
     }
 }

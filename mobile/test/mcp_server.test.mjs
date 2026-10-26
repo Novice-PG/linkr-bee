@@ -530,7 +530,7 @@ test("a denied approval never executes the write", async () => {
   assert.equal(host.getAudit()[0].outcome, "denied");
 });
 
-test("no-confirmation mode runs approval-gated tools without asking the phone", async () => {
+test("fully-authorized mode runs approval-gated tools without asking the phone", async () => {
   const approvals = [];
   const { device, calls } = fakeDevice();
   const host = createHost({
@@ -550,7 +550,7 @@ test("no-confirmation mode runs approval-gated tools without asking the phone", 
   assert.equal(calls.execute.length, 1);
   assert.equal(host.getAudit()[0].outcome, "ok");
 
-  /* A scan is approval-gated but not a write: the no-confirmation mode skips
+  /* A scan is approval-gated but not a write: the fully-authorized mode skips
    * that prompt too. */
   const { accessory } = fakeAccessory({ scan: async () => ({ failed: false, networks: [{ ssid: "Bench" }] }) });
   const scanHost = createHost({
@@ -567,7 +567,7 @@ test("no-confirmation mode runs approval-gated tools without asking the phone", 
   assert.equal(approvals.length, 0);
 });
 
-test("no-confirmation mode still runs preflight and honours the read-only switch", async () => {
+test("fully-authorized mode still runs preflight and honours the read-only switch", async () => {
   const missingHost = createHost();
   await missingHost.setConfig({ access: "auto" });
   const missing = await callTool(missingHost, "send_serial_input", { text: "ls", appendEnter: true });

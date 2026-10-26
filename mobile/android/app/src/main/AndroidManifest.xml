@@ -43,6 +43,12 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Allow/Deny taps on the MCP write-approval notification. Not
+             exported: only the app's own broadcast PendingIntent targets it. -->
+        <receiver
+            android:name=".mcp.LinkrMcpApprovalReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
