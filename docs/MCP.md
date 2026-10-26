@@ -4,8 +4,8 @@
 
 The **Android app** can act as a Model Context Protocol (MCP) server on the local
 network. MCP clients such as Claude Desktop, Cursor, and Codex can then read the
-serial console, inspect the accessory, and — after an approval on the phone —
-send serial input and change the bridge's settings.
+serial console, inspect the accessory, and — under the access mode selected on
+the phone — send serial input and change the bridge's settings.
 
 The phone is the server. The client never connects to the accessory directly:
 Linkr Bee keeps its usual Bluetooth LE or LAN connection, and every MCP tool call
@@ -78,17 +78,47 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
 2. Enable **Allow AI clients on this network**. The server starts immediately and
    the setting is remembered; it starts again on the next app launch while the
    toggle stays on.
-3. Choose **Access**:
-   - **Read and write: writes need on-device approval** — read-only tools run
-     without approval; every device-changing tool asks on the phone first.
-   - **Read and write: no on-device approval (unsafe)** — every tool runs
-     directly, including serial writes and bridge changes, with no prompt on the
-     phone. The bearer token becomes the only control: use it only for a fully
-     trusted client that must act unattended, and keep the app on a trusted
-     network. The app asks once before switching to this mode.
-   - **Read-only: no changes (scans still need approval)** — device-changing
-     tools are refused; `wifi_scan` may still run after approval. See
-     [Tools](#tools) for the exact split.
+3. Choose **Access**, from the most restrictive to the most permissive mode:
+   - **Read-only: no approval needed** — nothing is ever asked on the phone:
+     reads and scans run directly, and every write tool is refused.
+   - **Read and write: every command needs approval** — each write and each scan
+     asks once on the phone; reads run directly. This is the default.
+   - **Read and write: only high-risk commands need approval** — only the
+     high-risk calls below ask on the phone; every other read, scan and write
+     runs directly:
+     - `send_serial_input` only when its text matches the destructive-command
+       guard the built-in assistant uses: recursive or forced deletion (`rm -rf`
+       and similar), `find -delete`/`-exec rm`, `shred`; partition and filesystem
+       tools (`mkfs`/`mke2fs`/`fdisk`/`sfdisk`/`gdisk`/`parted`/`sgdisk`/
+       `wipefs`/`blkdiscard`); `dd`; flash, MTD and bootloader tools
+       (`flash_erase`/`nandwrite`/`ubiformat`/`mtd_debug`/`flashrom`/
+       `fw_setenv`, `esptool`/`openocd`/`fastboot`/`rkdeveloptool`/`dfu-util`/
+       `stm32flash`/`avrdude`); privilege escalation (`sudo`/`doas`/`su`);
+       recursive `chmod`/`chown`/`chgrp`; `chattr`/`setfacl`; redirects to raw
+       devices (`/dev/sd*`, `mmcblk*`, `nvme*`, `mtdblock*`, `loop*`, `disk*`);
+       piping a download into a shell (`curl`/`wget`/`fetch | sh`) and
+       `base64 -d | sh`. Patterns match at a command position, so text that
+       merely mentions one of these names is not treated as high risk;
+     - `set_wifi` for every action;
+     - `set_webdav` only for `action:"on"`; `action:"off"` runs directly;
+     - `set_lan_bridge` only for `action:"on"` or `"rotate-token"`;
+       `action:"off"` runs directly;
+     - `disconnect_bee` only for `forget:true`; a plain disconnect runs
+       directly.
+
+     Everything else runs directly in this mode: `set_uart_config`,
+     `set_bee_name`, `connect_bee`, a plain `disconnect_bee`, `set_webdav` off,
+     `set_lan_bridge` off, `wifi_scan`, `scan_bee_devices`, and every read tool.
+     Recoverable actions such as reboot, poweroff, mount/umount and service
+     restarts are deliberately not guarded. The classification is a best-effort
+     pattern guard for recognized shell forms, **not a sandbox**: indirect
+     execution through scripts, variables or interpreters cannot be classified,
+     so a token holder may still reach a high-risk action without a prompt.
+   - **Read and write: fully authorized** — every tool runs directly, including
+     serial writes and bridge changes, with no prompt on the phone. The bearer
+     token becomes the only control: use it only for a fully trusted client that
+     must act unattended, and keep the app on a trusted network. The app asks
+     once before switching to this mode.
 4. Set the **Port** (1024–65535, default `8712`). Changing the port or listen
    address restarts the server briefly.
 5. Choose **Listen on**:
@@ -168,47 +198,64 @@ The status page returns only the server name, version, and MCP path.
 
 ## Tools
 
-| Tool | Approval | Needs |
-| --- | --- | --- |
-| `get_device_status` | none | target connection |
-| `read_serial_log` | none | target connection |
-| `search_serial_log` | none | target connection |
-| `get_accessory_diagnostics` | none | BLE management channel |
-| `wifi_scan` | one per call | BLE management channel with WiFi and async events |
-| `send_serial_input` | one per call | target connection |
-| `set_uart_config` | one per call | BLE management channel |
-| `set_wifi` | one per call | BLE management channel with WiFi control |
-| `set_webdav` | one per call | BLE management channel with WebDAV support |
-| `get_bee_status` | none | none (reads the app's own connection) |
-| `scan_bee_devices` | one per call | Android BLE scan; app disconnected |
-| `connect_bee` | one per call | Android BLE; app disconnected |
-| `disconnect_bee` | one per call | — |
-| `set_bee_name` | one per call | BLE management channel |
-| `set_lan_bridge` | one per call | BLE management channel |
+The columns are the four access modes from [Enable the server](#enable-the-server):
+`read` is the read-only mode, `confirm` the every-command mode, `guarded` the
+high-risk-only mode, and `auto` the fully-authorized mode. **run** executes
+directly with no prompt on the phone, **ask** needs one approval per call, and
+**refused** returns a tool error and runs nothing. Cells that name an argument or
+a risk class ask only for those calls; every other call to that tool runs
+directly.
 
-- **Read-only tools** need no approval. They never send UART input and never
+| Tool | `read` | `confirm` | `guarded` | `auto` | Needs |
+| --- | --- | --- | --- | --- | --- |
+| `get_device_status` | run | run | run | run | target connection |
+| `read_serial_log` | run | run | run | run | target connection |
+| `search_serial_log` | run | run | run | run | target connection |
+| `get_accessory_diagnostics` | run | run | run | run | BLE management channel |
+| `get_bee_status` | run | run | run | run | none (reads the app's own connection) |
+| `get_execution_status` | run | run | run | run | target connection |
+| `wifi_scan` | run | ask | run | run | BLE management channel with WiFi and async events |
+| `scan_bee_devices` | run | ask | run | run | Android BLE scan; app disconnected |
+| `send_serial_input` | refused | ask | ask if high-risk | run | target connection |
+| `set_uart_config` | refused | ask | run | run | BLE management channel |
+| `set_wifi` | refused | ask | ask | run | BLE management channel with WiFi control |
+| `set_webdav` | refused | ask | ask for `on` | run | BLE management channel with WebDAV support |
+| `connect_bee` | refused | ask | run | run | Android BLE; app disconnected |
+| `disconnect_bee` | refused | ask | ask for `forget:true` | run | — |
+| `set_bee_name` | refused | ask | run | run | BLE management channel |
+| `set_lan_bridge` | refused | ask | ask for `on`/`rotate-token` | run | BLE management channel |
+
+- **Read-only tools** need no approval in any mode and never send UART input or
   change the accessory. `get_bee_status` also works while disconnected: it
   reports the app's own link to the board.
+- **Scan tools** (`wifi_scan`, `scan_bee_devices`) only observe: they consume the
+  radio but send no UART input and change no stored configuration, which is why
+  `read` mode still runs them directly. `confirm` asks once per scan; `guarded`
+  and `auto` run them directly.
 - **Connection tools** (`scan_bee_devices`, `connect_bee`, `disconnect_bee`)
   drive the app's Bluetooth session, not the target console. Connecting resets
   the terminal journal and changes which board every serial/accessory tool
   talks to; disconnecting makes those tools fail until `connect_bee` succeeds.
-  `scan_bee_devices` is an observation and read-only mode still allows it after
-  approval; `connect_bee` and `disconnect_bee` are write tools and are refused in
-  read-only mode.
+  `scan_bee_devices` is an observation and runs in `read` mode; `connect_bee` and
+  `disconnect_bee` are write tools, so `read` refuses them. In `guarded` mode a
+  plain disconnect runs directly and only `forget:true` asks.
 - **Board configuration tools** (`set_bee_name`, `set_lan_bridge`) change the
   bridge's advertised BLE name or its LAN WebSocket listener through the
-  encrypted management channel. They are write tools: approval rules and
-  read-only mode apply. `set_lan_bridge` never returns the LAN token.
-- **`wifi_scan`** consumes the radio but stores nothing, so read-only mode still
-  lets the user approve it.
+  encrypted management channel. They are write tools: `read` refuses them,
+  `confirm` asks once per call, and `auto` runs them directly. In `guarded` mode
+  `set_bee_name` runs directly, while `set_lan_bridge` asks for `action:"on"` and
+  `"rotate-token"` and runs `action:"off"` directly. `set_lan_bridge` never
+  returns the LAN token.
 - **Device-changing tools** are `send_serial_input`, `set_uart_config`,
-  `set_wifi`, and `set_webdav`. In the default approval mode each call needs one
-  confirmation on the phone; the no-confirmation mode skips it. Read-only mode
-  refuses all four.
+  `set_wifi`, and `set_webdav`. `read` refuses all four; `confirm` asks once per
+  call; `auto` runs them directly. In `guarded` mode `set_wifi` asks for every
+  action and `send_serial_input` asks only when its text matches the
+  destructive-command guard; `set_uart_config`, `set_webdav` `action:"off"` and
+  low-risk serial input run directly, while `set_webdav` `action:"on"` asks. The
+  guard and its limits are described under [Enable the server](#enable-the-server).
 - A denied or expired approval returns a tool error and nothing is executed. The
   approval card shows the tool and its arguments; password-like values are
-  masked.
+  masked. Calls that run directly show no card.
 - Arguments are validated against the tool's JSON Schema; unknown arguments and
   out-of-range values are rejected as invalid params (`-32602`). Tool results are
   JSON in a single text content block; device and accessory failures are
@@ -235,8 +282,23 @@ The status page returns only the server name, version, and MCP path.
 
 - `send_serial_input` sends up to 2,048 characters to the target UART, with an
   optional Enter sequence. A successful send only means the payload was
-  delivered; the result carries the delivery record and an evidence window, not a
-  command exit status.
+  delivered; the result carries the delivery record and an evidence window.
+  Without `trackExit` there is no exit status. With `trackExit: true` the app
+  appends a shell completion token (POSIX shell with an observed idle prompt
+  required), and the result reports `state`, `executionStatus`, `completed` and
+  — once the token appears — `exitCode`. `waitForCompletion: true` (which
+  requires `trackExit`) waits up to `timeoutMs` for that terminal state instead
+  of returning immediately. An exit code of 0 describes shell completion, not
+  verification of the goal. Tracking requires the app to recognize an idle POSIX
+  shell prompt; when the prompt is unusual the tool refuses instead of guessing
+  (an untracked send still works). In `guarded` mode only text that matches the
+  destructive-command guard asks on the phone; other sends run directly.
+- `get_execution_status` returns the app's record for one `send_serial_input` id:
+  `state`, `delivery`, `executionStatus`, `observation`, `waitingFor`,
+  `completed`, `exitCode` and the evidence window. Pass `waitMs` to wait for a
+  terminal state. An unknown id (for example after a reconnect or app restart)
+  is an explicit error. It sends no input itself: only the originating
+  `send_serial_input` call submitted text.
 - `set_uart_config` changes the bridge's UART format: baud 300–3,000,000, data
   bits 5–8, parity `n`/`e`/`o`, stop bits 1/2, flow `none`/`rtscts`. The result
   contains the accessory's reply and a read-back; `applied: false` means the
@@ -245,11 +307,13 @@ The status page returns only the server name, version, and MCP path.
   accessory's 2.4 GHz network. The password is masked on the approval card,
   travels only over the encrypted BLE management channel, and is scrubbed from
   the result and the audit list. `applied: false` with `settled: true` means it
-  did not connect.
+  did not connect. In `guarded` mode every action asks on the phone, because the
+  call carries the WiFi credential or changes network connectivity.
 - `set_webdav` enables or disables uploading captured UART logs to a WebDAV
   endpoint (`action: "on"`/`"off"`, endpoint URL up to 256 characters). Only
   enable endpoints the user trusts; the accessory sends logs there over its own
-  network.
+  network. In `guarded` mode only enabling upload (`action: "on"`) asks; disabling
+  runs directly.
 - Accessory tools change the bridge, not the target console. A result from
   `get_accessory_diagnostics` or a configuration read-back describes the
   accessory; it is not target output.
@@ -264,8 +328,16 @@ the client:
   a resend;
 - a successful send is **delivery, not command completion**. The client must read
   the serial log to observe output, and a quiet console is not proof either;
+  only a command sent with `trackExit` reports completion/`exitCode`, and an exit
+  code of 0 describes the shell, not the goal;
 - uncertain or partial input is **never retried automatically**. Inspect the
   phone and the log before resending;
+- approval depends on the selected access mode. `confirm` asks for every write
+  and every scan; `guarded` asks only for the high-risk calls listed under
+  [Enable the server](#enable-the-server) and runs ordinary writes and both scans
+  directly; `auto` asks nothing; `read` refuses every write tool and asks
+  nothing. An approval, and equally a skipped prompt, is not evidence that a
+  command did what the client intended;
 - only one device-changing call runs at a time. A second one is refused
   immediately with an error while the first is pending or executing; read tools
   are not serialized behind that guard;
@@ -283,17 +355,23 @@ the client:
   certificate. Enable the server only on a network you trust, and never forward
   the port or expose it to the internet.
 - **Anyone holding the token can use the tools.** That includes reading the
-  serial log and requesting device-changing calls. In the default approval mode a
-  write still needs a human click on the phone, but do not treat the token as
-  read-only. The optional **no-confirmation** mode removes that click entirely:
-  the token holder can then drive the accessory unattended, including while the
-  app is backgrounded, so only use it with a client and network you fully trust.
+  serial log and requesting device-changing calls. What happens next depends on
+  the selected access mode: `confirm` still needs a human click on the phone for
+  every write and scan, but do not treat the token as read-only. The more
+  permissive modes reduce or remove that click: `guarded` runs ordinary writes
+  and both scans directly and asks only for the high-risk calls listed under
+  [Enable the server](#enable-the-server), while `auto` asks nothing. In both,
+  the token holder can drive the accessory unattended, including while the app
+  is backgrounded, so only use them with a client and network you fully trust.
 - Requests that carry an `Origin` header are refused with `403`. This blocks
   browser-based use and DNS rebinding; it is why the server is for MCP clients,
   not web pages.
-- By default every device-changing call that runs needs a confirmation on the
-  phone. The no-confirmation mode skips that check (see above). Read-only mode
-  refuses all four device-changing tools even if a client asks.
+- Approval is mode-dependent. The default `confirm` mode asks for every write
+  and every scan. `guarded` deliberately skips the prompt for non-high-risk
+  writes; its high-risk classification is a best-effort pattern guard, not a
+  sandbox, so a token holder may still cause changes without a click. `auto`
+  asks nothing. `read` refuses all eight write tools even if a client asks, while
+  still running reads and scans without a prompt.
 - The approval card shows the tool and its arguments with password-like fields
   masked. The WiFi password is never shown there or echoed in a tool result.
 - The card keeps the latest 50 external calls in memory for this app run, with
@@ -314,12 +392,13 @@ the client:
   alive while the app is backgrounded, but the server is not a daemon: closing the
   activity destroys it, and if Android kills the app process the listener goes
   away. Relaunching the app restarts the server when the setting is still on.
-- **Background operation is limited.** Approval prompts only work while the app
-  is visible. If the app is in the background, an approval request is refused and
-  a write is not executed; a backgrounded WebView can also delay or fail to answer
-  a request. Keep the app in the foreground when a write is expected. The
-  no-confirmation mode is the exception: it has no prompt, so writes also run
-  while the app is backgrounded.
+- **Background operation is limited.** An approval prompt only works while the
+  app is visible. In the background the prompt is refused and the call is not
+  executed; a backgrounded WebView can also delay or fail to answer a request.
+  This affects every write and scan in `confirm` mode and the high-risk calls in
+  `guarded` mode, so keep the app in the foreground when one is expected. Calls
+  that never prompt — every read, both scans, `auto` mode, and non-high-risk
+  writes in `guarded` — can run while the app is backgrounded.
 - **One device-changing call at a time.** The second write is rejected, including
   while the first is still waiting for approval. Read tools can run concurrently.
 - **Tool results are bounded.** Serial reads are paged, searches are capped at 12
@@ -354,10 +433,11 @@ the client:
 | `504 Gateway Timeout` | The app did not answer within 180 seconds — for example while backgrounded or waiting on the phone. The call may not have reached the device; check the phone and the serial log before retrying, and never resend serial input blindly. |
 | Service error: address already in use | Another process holds the port. Change the port in the card or stop the other listener. |
 | Connection refused / no route | The client host cannot reach the phone. Check that both are on the same network without client isolation, that the listen address is **All interfaces**, and that the address is the phone's address on that network. `GET /` from the client host should answer without a token. |
-| Approval never appears | The app must be visible and in the foreground; a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. In the no-confirmation mode there is intentionally no prompt. |
+| Approval never appears | The app must be visible and in the foreground; a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. A prompt is expected only for writes and scans in `confirm` mode and for the high-risk calls in `guarded` mode; `auto` and `read` never prompt, and `guarded` runs non-high-risk calls directly. |
+| A write ran without a phone approval | The selected mode does not prompt for that call: `guarded` runs non-high-risk writes directly and `auto` never asks. Select `confirm` to require a click for every write; `read` refuses writes instead. |
 | "The target is not connected" | Connect Linkr Bee and the target in the app first. Disconnecting makes serial tools return an explicit error even while retained log text is displayed. |
 | "Accessory settings need a Bluetooth LE connection" | The app is in LAN-only mode. Switch to the BLE connection for diagnostics and configuration tools. |
-| "read-only mode is enabled" | A device-changing tool was called while **Read-only** was selected. Switch to read-write access on the phone. |
+| "read-only mode is enabled" | A write tool was called while **Read-only** was selected. Reads and scans still run without a prompt; switch to a read-write access mode on the phone to change the device. |
 | "another action is in progress" | A device-changing call is still pending or running. Wait for it to finish, then retry. |
 
 ## Verification status
@@ -369,9 +449,10 @@ some configuration-change tools and process-death handling are still untested.**
 Concretely: the Java transport has host-JVM unit tests (routing, authentication,
 `Origin` precedence, body limits, status page, bind-failure and token-rotation
 handling, stop semantics), the MCP protocol and tool layer has `node --test`
-coverage (version negotiation, tool policy, approval paths, redaction,
-single-write guard), the settings card and approval banner have Playwright
-coverage against a fake native bridge, and the Android and web builds succeed.
+coverage (version negotiation, the four access modes and the guarded high-risk
+classifier, approval paths, redaction, single-write guard), the settings card and
+approval banner have Playwright coverage against a fake native bridge, and the
+Android and web builds succeed.
 
 Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
 over adb, connected to a Linkr Bee accessory over BLE):
@@ -381,7 +462,7 @@ over adb, connected to a Linkr Bee accessory over BLE):
 - from another machine on the same Wi-Fi, `GET /` returns the status JSON,
   `POST /mcp` returns 401 without a bearer token and 403 with an `Origin`
   header, `initialize` negotiates `2025-06-18` and `tools/list` returns the
-  fifteen tools;
+  sixteen tools;
 - `get_device_status` reports the live accessory (`connected:true`,
   `transport:"ble"`, device name/id, `115200,8,n,1,n`, byte counters);
   `get_accessory_diagnostics` returns the bridge's own `@i?` groups (firmware
@@ -392,6 +473,12 @@ over adb, connected to a Linkr Bee accessory over BLE):
   it returned `isError: "Not executed: the request was denied on the phone."`,
   and approving it delivered the text to the target shell (the target echoed it
   back, visible in the serial log);
+- a tracked command (`send_serial_input` with `trackExit` and
+  `waitForCompletion`) ran `uname -s` on the real target and returned
+  `completed:true`, `exitCode:0`, `tracked:true` and the shell output in the
+  evidence window (`waitedMs` under a second); `get_execution_status` by that id
+  returned the same completed record, and an unknown id returned an `isError`
+  instead of an empty success;
 - `wifi_scan` ran after on-phone approval and returned real access points with
   RSSI/channel/security;
 - the Bee connection tools ran over MCP against the real board:
@@ -409,7 +496,10 @@ over adb, connected to a Linkr Bee accessory over BLE):
 Not verified: the accessory configuration tools (`set_uart_config`, `set_wifi`,
 `set_webdav`) and `set_lan_bridge` were not exercised on hardware;
 `set_bee_name` was exercised only with `reset=true`, not with a custom name;
-`disconnect_bee` with `forget=true` was not exercised. Process-death and
+`disconnect_bee` with `forget=true` was not exercised. The hardware run above
+used the default every-command approval mode: the `guarded` high-risk
+classification and the prompt-free `read` mode are covered by the tool-layer
+tests, not by a hardware session. Process-death and
 foreground-service permission edge cases are covered by code review only, and
 multiple concurrent clients were not tested. Nothing in this guide claims those
 paths are hardware-verified.

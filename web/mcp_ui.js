@@ -18,12 +18,15 @@ const labels = {
   enableHint: ["Claude Desktop、Cursor、Codex 等 MCP 客户端可调用本机的串口与配件管理能力。需要保持 App 运行并连接 Linkr Bee；App 被系统杀掉后服务停止。", "MCP clients such as Claude Desktop, Cursor or Codex can use this device's serial console and accessory management. Keep the app running and Linkr Bee connected; the service stops if Android kills the app."],
   warning: ["拿到访问令牌的人都能向串口发送输入。请只在可信网络启用，并定期更换令牌；不要把这个地址暴露到公网。", "Anyone holding the access token can send serial input. Enable this only on a trusted network, rotate the token, and never expose the address to the internet."],
   access: ["访问权限", "Access"],
-  accessHint: ["只读模式拒绝所有修改设备的工具；WiFi 扫描不保存配置，但仍需本机确认。读写模式下每次写入同样需要确认。「无需确认」会跳过手机确认，直接执行所有工具。", "Read-only refuses every device-changing tool; a WiFi scan stores nothing and still needs on-device approval. In read-write mode every write also needs approval. No-confirmation mode skips the phone prompt and runs every tool directly."],
-  accessConfirm: ["读写：写入需在本机确认", "Read and write: writes need on-device approval"],
-  accessAuto: ["读写：无需本机确认（危险）", "Read and write: no on-device approval (unsafe)"],
-  accessRead: ["只读：不改设备（扫描仍需确认）", "Read-only: no changes (scans still need approval)"],
-  accessAutoWarning: ["写入确认已关闭：任何拿到访问令牌的客户端都可以直接向串口发送输入、修改桥接设置，手机不会再弹出确认。请只在完全可信的网络与客户端上使用；更安全的选项是「读写：写入需在本机确认」。", "Write approval is off: any client holding the token can send serial input and change bridge settings with no prompt on the phone. Use only with fully trusted networks and clients; the approval mode is the safer choice."],
-  accessAutoConfirm: ["关闭写入确认后，拿到访问令牌的客户端可以在没有手机确认的情况下执行串口写入和配置修改。确定启用「无需确认」？", "With approval off, any client holding the token can send serial input and change settings without a confirmation on the phone. Enable the no-confirmation mode?"],
+  accessHint: ["只读模式不弹任何确认，只拒绝修改设备的工具；每条确认模式对每次写入和扫描都要在手机上确认；仅高危模式只对破坏性命令、凭据/网络变更和桥接暴露确认，其余写入直接执行；完全授权不弹任何确认。", "Read-only asks nothing and refuses every device-changing tool. Every-command mode asks on the phone for each write and scan. High-risk-only mode asks only for destructive shell commands, credential or network changes and bridge exposure, and runs other writes directly. Fully authorized asks nothing."],
+  accessConfirm: ["写入（每条命令需要授权）", "Read and write: every command needs approval"],
+  accessGuarded: ["写入（仅高危命令需要授权）", "Read and write: only high-risk commands need approval"],
+  accessAuto: ["写入（完全授权）", "Read and write: fully authorized"],
+  accessRead: ["只读（不需要授权）", "Read-only: no approval needed"],
+  accessAutoWarning: ["写入确认已关闭：任何拿到访问令牌的客户端都可以直接向串口发送输入、修改桥接设置，手机不会再弹出确认。请只在完全可信的网络与客户端上使用；更安全的选项是「写入：每条命令需要授权」。", "Write approval is off: any client holding the token can send serial input and change bridge settings with no prompt on the phone. Use only with fully trusted networks and clients; the every-command approval mode is the safer choice."],
+  accessAutoConfirm: ["启用「完全授权」后，拿到访问令牌的客户端可以在没有手机确认的情况下执行串口写入和配置修改。确定启用？", "With fully-authorized mode, any client holding the token can send serial input and change settings without a confirmation on the phone. Enable it?"],
+  accessGuardedWarning: ["仅高危模式依赖尽力而为的命令规则：未命中的写入会直接执行，脚本、变量或解释器间接执行无法识别。凭据、网络与桥接变更仍会确认。", "High-risk-only mode relies on best-effort command patterns: writes that do not match run directly, and indirect execution through scripts, variables or interpreters cannot be recognized. Credential, network and bridge changes still ask."],
+  accessGuardedConfirm: ["启用「仅高危」后，未命中高危规则的写入会在没有手机确认的情况下执行；高危判定是尽力而为的规则，不是沙箱。确定启用？", "With high-risk-only mode, writes that do not match the high-risk rules run without a phone confirmation. The rules are best effort, not a sandbox. Enable it?"],
   port: ["端口", "Port"],
   portHint: ["1024–65535。修改端口会重启服务。", "1024–65535. Changing the port restarts the service."],
   bind: ["监听地址", "Listen on"],
@@ -50,7 +53,7 @@ const labels = {
   stopped: ["未启用", "Disabled"],
   stopping: ["正在停止…", "Stopping…"],
   foreground: ["App 在前台", "App in the foreground"],
-  background: ["App 在后台：写入类操作需要在手机上确认，可能失败。", "App in the background: writes need on-device approval and may fail."],
+  background: ["App 在后台：需要手机确认的写入可能失败。", "App in the background: writes that need approval may fail."],
   notConnected: ["当前未连接 Linkr Bee；串口与配件工具会返回明确错误。", "Linkr Bee is not connected; serial and accessory tools will return an explicit error."],
   errorPrefix: ["服务错误：", "Service error: "],
   portError: ["端口必须是 1024 到 65535 之间的整数。", "Port must be an integer between 1024 and 65535."],
@@ -79,6 +82,7 @@ const labels = {
   tool_disconnect_bee: ["断开主机", "Disconnect Bee"],
   tool_set_bee_name: ["修改主机蓝牙名", "Change Bee BLE name"],
   tool_set_lan_bridge: ["配置主机局域网桥接", "Configure Bee LAN bridge"],
+  tool_get_execution_status: ["读取执行状态", "Read execution status"],
 };
 
 const TOOL_LABEL_KEYS = {
@@ -97,10 +101,15 @@ const TOOL_LABEL_KEYS = {
   disconnect_bee: "tool_disconnect_bee",
   set_bee_name: "tool_set_bee_name",
   set_lan_bridge: "tool_set_lan_bridge",
+  get_execution_status: "tool_get_execution_status",
 };
 
 const APPROVAL_TIMEOUT_MS = 90000;
 const REFRESH_INTERVAL_MS = 3000;
+/* Ordered most to least restrictive. Moving to a less restrictive mode that
+ * removes routine approval (guarded/auto) is a security decision, so the card
+ * asks once before saving it. */
+const ACCESS_RANK = { read: 0, confirm: 1, guarded: 2, auto: 3 };
 
 export function createMcpUi({ mount, getLang, host }) {
   if (!mount || !host) return null;
@@ -123,13 +132,15 @@ export function createMcpUi({ mount, getLang, host }) {
         <p class="field-hint mcp-warning" data-mcp="warning"></p>
         <label class="field"><span class="field-label" data-mcp="access"></span>
           <select id="mcpAccess">
-            <option value="confirm" data-mcp-option="accessConfirm"></option>
-            <option value="auto" data-mcp-option="accessAuto"></option>
             <option value="read" data-mcp-option="accessRead"></option>
+            <option value="confirm" data-mcp-option="accessConfirm"></option>
+            <option value="guarded" data-mcp-option="accessGuarded"></option>
+            <option value="auto" data-mcp-option="accessAuto"></option>
           </select>
           <span class="field-hint" data-mcp="accessHint"></span>
         </label>
         <p id="mcpAutoWarning" class="field-hint mcp-warning" data-mcp="accessAutoWarning" hidden></p>
+        <p id="mcpGuardedWarning" class="field-hint mcp-warning" data-mcp="accessGuardedWarning" hidden></p>
         <label class="field"><span class="field-label" data-mcp="port"></span>
           <input id="mcpPort" type="number" inputmode="numeric" min="1024" max="65535" step="1">
           <span class="field-hint" data-mcp="portHint"></span>
@@ -189,6 +200,7 @@ export function createMcpUi({ mount, getLang, host }) {
     snippet: $("mcpSnippet"), copySnippet: $("mcpCopySnippet"), status: $("mcpStatus"),
     auditList: $("mcpAuditList"), clientConfig: $("mcpClientConfig"), audit: $("mcpAudit"),
     autoWarning: $("mcpAutoWarning"),
+    guardedWarning: $("mcpGuardedWarning"),
   };
 
   const banner = document.createElement("div");
@@ -256,6 +268,7 @@ export function createMcpUi({ mount, getLang, host }) {
     elements.access.value = config.access;
     elements.access.classList.toggle("is-danger", config.access === "auto");
     elements.autoWarning.hidden = config.access !== "auto";
+    elements.guardedWarning.hidden = config.access !== "guarded";
     elements.bind.value = config.bind;
     elements.access.disabled = busy;
     elements.port.disabled = busy;
@@ -372,10 +385,13 @@ export function createMcpUi({ mount, getLang, host }) {
       /* Same ordering rule as the enable checkbox: read the edited controls
        * first, because render() rewrites them from the saved configuration. */
       const form = readForm();
-      /* Turning the approval click off is a security decision, not a routine
-       * preference: ask once, and leave the previous mode selected on cancel. */
-      if (input === elements.access && form.access === "auto" && config.access !== "auto"
-          && !window.confirm(text("accessAutoConfirm"))) {
+      /* Loosening the access mode is a security decision, not a routine
+       * preference: ask once when moving to a mode that skips routine approval,
+       * and leave the previous mode selected on cancel. */
+      const loosening = input === elements.access
+        && ACCESS_RANK[form.access] > ACCESS_RANK[config.access];
+      if (loosening && (form.access === "guarded" || form.access === "auto")
+          && !window.confirm(text(form.access === "auto" ? "accessAutoConfirm" : "accessGuardedConfirm"))) {
         render();
         return;
       }

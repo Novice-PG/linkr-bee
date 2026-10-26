@@ -26,6 +26,9 @@ function fixture({ initial = "root@board:~# ", send } = {}) {
 test("console hints use the current tail and do not trust old shell prompts", () => {
   for (const [text, kind] of [
     ["Linux boot\r\nroot@board:~# ", "shell"], ["[root@board /]# ", "shell"],
+    ["12:23:57 radxa@radxa-cubie-a7z ~ → ", "shell"],
+    ["radxa@board:~❯ ", "shell"], ["radxa@board:~/repo % ", "shell"],
+    ["logs say use radxa@board ~ → ", "unknown"], ["note → ", "unknown"],
     ["board login: ", "login"], ["Password: ", "password"], ["=> ", "bootloader"],
     ["Kernel panic - not syncing: VFS failed\r\n", "panic"],
     ["root@board:~# reboot\r\nBooting...\r\n", "unknown"],

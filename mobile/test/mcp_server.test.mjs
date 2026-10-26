@@ -9,6 +9,7 @@ import {
   claudeConfigSnippet,
   createMcpHost,
   defaultMcpConfig,
+  isHighRiskToolCall,
   redactToolArguments,
   validateMcpConfig,
 } from "../../web/mcp_server.js";
@@ -29,6 +30,7 @@ const TOOL_NAMES = [
   "disconnect_bee",
   "set_bee_name",
   "set_lan_bridge",
+  "get_execution_status",
 ];
 
 function memoryStorage(initial = {}) {
@@ -53,8 +55,8 @@ function fakeJournal(log = {}) {
   };
 }
 
-function fakeDevice({ status = {}, execute } = {}) {
-  const calls = { execute: [], status: 0 };
+function fakeDevice({ status = {}, execute, inspectExecution = null } = {}) {
+  const calls = { execute: [], status: 0, inspect: [] };
   return {
     calls,
     device: {
@@ -79,6 +81,11 @@ function fakeDevice({ status = {}, execute } = {}) {
           ...status,
         };
       },
+      inspectExecution(id) {
+        calls.inspect.push(id);
+        return inspectExecution ? inspectExecution(id) : null;
+      },
+      observe() {},
       async execute(args, signal, options) {
         calls.execute.push({ args, signal, options });
         if (execute) return execute(args, signal, options);
@@ -277,6 +284,8 @@ test("initialize negotiates the protocol version and carries the evidence rules"
     assert.match(instructions, /delivery is not command completion/i);
     assert.match(instructions, /approved by a human/i);
     assert.match(instructions, /read-only mode/i);
+    assert.match(instructions, /high-risk-only mode/i);
+    assert.match(instructions, /fully-authorized mode/i);
   }
 });
 
@@ -572,6 +581,156 @@ test("no-confirmation mode still runs preflight and honours the read-only switch
   assert.match(toolErrorText(denied.message), /read-only mode/);
 });
 
+test("read-only access mode asks nothing, including scans", async () => {
+  const approvals = [];
+  const scans = [];
+  const { accessory } = fakeAccessory();
+  const host = createHost({
+    accessory,
+    bee: {
+      scan: async (options) => {
+        scans.push(options);
+        return [{ deviceId: "AA", name: "Linkr Bee 1", rssi: -40 }];
+      },
+    },
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: false };
+    },
+  });
+  await host.setConfig({ access: "read" });
+  const wifi = await callTool(host, "wifi_scan");
+  assert.equal(wifi.message.result.isError, undefined);
+  const boards = await callTool(host, "scan_bee_devices");
+  assert.equal(boards.message.result.isError, undefined);
+  assert.equal(toolPayload(boards.message).devices.length, 1);
+  assert.equal(scans.length, 1);
+  // Read-only mode refuses writes instead of asking for them.
+  const denied = await callTool(host, "set_bee_name", { name: "Bench" });
+  assert.match(toolErrorText(denied.message), /read-only mode/);
+  assert.equal(approvals.length, 0);
+});
+
+test("high-risk-only mode runs ordinary writes without asking the phone", async () => {
+  const approvals = [];
+  const { device, calls } = fakeDevice();
+  const { accessory } = fakeAccessory();
+  const host = createHost({
+    device,
+    accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: false };
+    },
+  });
+  const state = await host.setConfig({ access: "guarded" });
+  assert.equal(state.access, "guarded");
+
+  const send = await callTool(host, "send_serial_input", { text: "uname -a", appendEnter: true });
+  assert.equal(send.message.result.isError, undefined);
+  assert.equal(toolPayload(send.message).delivery, "sent");
+
+  const uart = await callTool(host, "set_uart_config", { baud: 115200 });
+  assert.equal(uart.message.result.isError, undefined);
+
+  const rename = await callTool(host, "set_bee_name", { name: "Bench Bee" });
+  assert.equal(rename.message.result.isError, undefined);
+
+  const scan = await callTool(host, "wifi_scan");
+  assert.equal(scan.message.result.isError, undefined);
+
+  assert.equal(approvals.length, 0);
+  assert.equal(calls.execute.length, 1);
+  assert.equal(host.getAudit()[0].outcome, "ok");
+});
+
+test("high-risk-only mode still asks for destructive serial input", async () => {
+  const approvals = [];
+  const { device, calls } = fakeDevice();
+  const host = createHost({
+    device,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: false };
+    },
+  });
+  await host.setConfig({ access: "guarded" });
+
+  const rm = await callTool(host, "send_serial_input", { text: "rm -rf /tmp/bench", appendEnter: true });
+  assert.equal(toolErrorText(rm.message), "Not executed: the request was denied on the phone.");
+  assert.equal(approvals.length, 1);
+  assert.equal(approvals[0].tool, "send_serial_input");
+
+  const sudo = await callTool(host, "send_serial_input", { text: "sudo cat /etc/shadow", appendEnter: true });
+  assert.equal(toolErrorText(sudo.message), "Not executed: the request was denied on the phone.");
+  assert.equal(approvals.length, 2);
+
+  /* Reboot is recoverable and deliberately absent from the destructive guard,
+   * so the guarded mode sends it directly. */
+  const reboot = await callTool(host, "send_serial_input", { text: "reboot", appendEnter: true });
+  assert.equal(reboot.message.result.isError, undefined);
+  assert.equal(approvals.length, 2);
+  assert.equal(calls.execute.length, 1);
+});
+
+test("high-risk-only mode gates credential, bridge and forget changes", async () => {
+  const approvals = [];
+  const { accessory } = fakeAccessory();
+  const disconnects = [];
+  const host = createHost({
+    accessory,
+    bee: {
+      disconnect: async (options) => {
+        disconnects.push(options);
+        return { connected: false, savedDeviceId: options.forget ? null : "AA" };
+      },
+    },
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  await host.setConfig({ access: "guarded" });
+
+  // Safe variants run directly.
+  await callTool(host, "set_webdav", { action: "off" });
+  await callTool(host, "set_lan_bridge", { action: "off" });
+  await callTool(host, "disconnect_bee", {});
+  assert.equal(approvals.length, 0);
+
+  // Credentials, bridge exposure and forgetting the board still ask.
+  await callTool(host, "set_wifi", { action: "connect", ssid: "Bench", password: "secret" });
+  await callTool(host, "set_webdav", { action: "on", url: "https://example.test/logs" });
+  await callTool(host, "set_lan_bridge", { action: "rotate-token" });
+  await callTool(host, "disconnect_bee", { forget: true });
+  assert.deepEqual(approvals.map((request) => request.tool), [
+    "set_wifi", "set_webdav", "set_lan_bridge", "disconnect_bee",
+  ]);
+  assert.equal(approvals[0].args.password, "<redacted>");
+  assert.equal(disconnects.length, 2);
+});
+
+test("isHighRiskToolCall keeps the guarded gate narrowly high risk", () => {
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "uname -a" }), false);
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "rm -rf /tmp/x" }), true);
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "dd if=/dev/zero of=/dev/mmcblk0" }), true);
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "sudo systemctl restart ssh" }), true);
+  assert.equal(isHighRiskToolCall("set_wifi", { action: "off" }), true);
+  assert.equal(isHighRiskToolCall("set_webdav", { action: "on" }), true);
+  assert.equal(isHighRiskToolCall("set_webdav", { action: "off" }), false);
+  assert.equal(isHighRiskToolCall("set_lan_bridge", { action: "on" }), true);
+  assert.equal(isHighRiskToolCall("set_lan_bridge", { action: "rotate-token" }), true);
+  assert.equal(isHighRiskToolCall("set_lan_bridge", { action: "off" }), false);
+  assert.equal(isHighRiskToolCall("disconnect_bee", { forget: true }), true);
+  assert.equal(isHighRiskToolCall("disconnect_bee", {}), false);
+  assert.equal(isHighRiskToolCall("set_uart_config", { baud: 9600 }), false);
+  assert.equal(isHighRiskToolCall("set_bee_name", { name: "Bench" }), false);
+  assert.equal(isHighRiskToolCall("connect_bee", {}), false);
+  assert.equal(isHighRiskToolCall("wifi_scan", {}), false);
+  assert.equal(isHighRiskToolCall("scan_bee_devices", {}), false);
+  assert.equal(isHighRiskToolCall("get_device_status", {}), false);
+});
+
 test("a write on a missing target is refused before approval is requested", async () => {
   const approvals = [];
   const host = createHost({
@@ -759,6 +918,7 @@ test("validateMcpConfig rejects invalid records with stable messages", () => {
   assert.throws(() => validateMcpConfig({ port: "8712" }), /MCP port/);
   assert.throws(() => validateMcpConfig({ bind: "wan" }), /MCP bind/);
   assert.equal(validateMcpConfig({ access: "auto" }).access, "auto");
+  assert.equal(validateMcpConfig({ access: "guarded" }).access, "guarded");
   assert.throws(() => validateMcpConfig({ access: "write" }), /MCP access/);
   assert.throws(() => validateMcpConfig({ enabled: "yes" }), /MCP enabled/);
   assert.throws(() => validateMcpConfig({ nonsense: true }), /Unknown MCP configuration field/);
@@ -1141,4 +1301,86 @@ test("set_bee_name requires the management channel instead of approving an impos
   const response = await callTool(host, "set_bee_name", { name: "x" });
   assert.match(toolErrorText(response.message), /LAN only/);
   assert.equal(approvals.length, 0);
+});
+
+/* ------------------------------------------------------------------ *
+ * Execution status: tracked completion + polling by id
+ * ------------------------------------------------------------------ */
+test("send_serial_input with trackExit and waitForCompletion reports the exit code", async () => {
+  const { device, calls } = fakeDevice({
+    execute: async () => ({
+      id: "serial-2",
+      state: "sent",
+      delivery: "sent",
+      executionStatus: "unknown",
+      observation: "output-observed",
+      evidence: "",
+      tracked: true,
+    }),
+    inspectExecution: () => {
+      // First poll: still running; second: the shell printed the token.
+      if (!calls.inspect.length || calls.inspect.length === 1) {
+        return { id: "serial-2", state: "sent", delivery: "sent", executionStatus: "unknown", observation: "output-observed", evidence: "", observationClosed: false };
+      }
+      return { id: "serial-2", state: "sent", delivery: "sent", executionStatus: "completed", observation: "prompt-returned", evidence: "uname -a\nLinux\n", observationClosed: true, exitCode: 0, completionToken: "LINKR_EXIT_x" };
+    },
+  });
+  const host = createHost({ device });
+  const response = await callTool(host, "send_serial_input", {
+    text: "uname -a",
+    appendEnter: true,
+    trackExit: true,
+    waitForCompletion: true,
+    timeoutMs: 5000,
+  });
+  const payload = toolPayload(response.message);
+  assert.equal(payload.completed, true);
+  assert.equal(payload.exitCode, 0);
+  assert.equal(payload.tracked, true);
+  assert.equal(payload.executionStatus, "completed");
+  assert.equal(payload.timedOut, false);
+  assert.match(payload.note, /Tracked command/);
+  assert.equal(calls.execute[0].args.trackExit, true);
+  assert.equal(calls.inspect.length >= 1, true);
+});
+
+test("get_execution_status returns the current snapshot and waits on request", async () => {
+  let polls = 0;
+  const { device } = fakeDevice({
+    inspectExecution: () => {
+      polls += 1;
+      return polls < 2
+        ? { id: "serial-1", state: "sent", delivery: "sent", executionStatus: "unknown", observation: "no-output", evidence: "", observationClosed: false }
+        : { id: "serial-1", state: "sent", delivery: "sent", executionStatus: "unknown", observation: "output-observed", evidence: "hello\n", observationClosed: false };
+    },
+  });
+  const host = createHost({ device });
+  const snapshot = await callTool(host, "get_execution_status", { id: "serial-1" });
+  const immediate = toolPayload(snapshot.message);
+  assert.equal(immediate.id, "serial-1");
+  assert.equal(immediate.completed, false);
+  assert.equal(immediate.timedOut, true);
+
+  const waited = await callTool(host, "get_execution_status", { id: "serial-1", waitMs: 1000 });
+  const payload = toolPayload(waited.message);
+  assert.equal(payload.id, "serial-1");
+  assert.equal(payload.timedOut, true);
+  assert.equal(payload.completed, false);
+});
+
+test("execution tracking validates its arguments and reports unknown ids", async () => {
+  const { device } = fakeDevice();
+  const host = createHost({ device });
+
+  const semantic = await callTool(host, "send_serial_input", {
+    text: "ls",
+    appendEnter: true,
+    waitForCompletion: true,
+  });
+  assert.equal(semantic.message.error.code, -32602);
+  assert.match(semantic.message.error.message, /trackExit/);
+
+  const missing = await callTool(host, "get_execution_status", { id: "serial-unknown" });
+  assert.equal(missing.message.result.isError, true);
+  assert.match(missing.message.result.content[0].text, /No execution/);
 });

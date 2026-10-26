@@ -637,3 +637,70 @@ test("no-confirmation access runs a write without the approval banner", async ({
   await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
   await expect(page.locator("#mcpAutoWarning")).toBeHidden();
 });
+
+/* ------------------------------------------------------------------ *
+ * (g) High-risk-only access: safe writes run directly, destructive shell
+ *     input still raises the approval banner
+ * ------------------------------------------------------------------ */
+test("high-risk-only access runs safe writes but still approves destructive input", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+
+  // Moving from the default every-command mode asks once before loosening.
+  await expect(page.locator("#mcpGuardedWarning")).toBeHidden();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.locator("#mcpAccess").selectOption("guarded");
+  await expect(page.locator("#mcpAccess")).toHaveValue("guarded");
+  await expect(page.locator("#mcpGuardedWarning")).toBeVisible();
+  await expect(page.locator("#mcpGuardedWarning")).toContainText("best-effort");
+  await expect(page.locator("#mcpAutoWarning")).toBeHidden();
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-mcp-config-v1")).access),
+  ).toBe("guarded");
+
+  // A benign command does not ask and reaches the executor once.
+  await callRpc(page, {
+    bridgeId: "req-guarded-safe",
+    rpcId: "rpc-guarded-safe",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "uname -a", appendEnter: true } },
+  });
+  const safe = parsedResponse(await waitForResponse(page, "req-guarded-safe"));
+  expect(safe.result.isError).toBeUndefined();
+  expect(resultText(safe)).toContain("serial-execution");
+  await expect(page.locator("#mcpApproval")).toBeHidden();
+
+  // Destructive shell input is still gated by the approval banner.
+  await callRpc(page, {
+    bridgeId: "req-guarded-risky",
+    rpcId: "rpc-guarded-risky",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "rm -rf /tmp/x", appendEnter: true } },
+  });
+  const banner = page.locator("#mcpApproval");
+  await expect(banner).toBeVisible();
+  await expect(banner.locator(".mcp-approval-args")).toContainText("rm -rf /tmp/x");
+  await banner.locator('[data-mcp="approvalDeny"]').tap();
+  const risky = parsedResponse(await waitForResponse(page, "req-guarded-risky"));
+  expect(risky.result.isError).toBe(true);
+  expect(resultText(risky)).toBe("Not executed: the request was denied on the phone.");
+  await expect(banner).toBeHidden();
+  const executions = await page.evaluate(() => window.__mcpTestExecutions);
+  expect(executions).toEqual([
+    { args: { text: "uname -a", appendEnter: true }, userApproved: true },
+  ]);
+
+  /* Cancelling the one-time prompt keeps the previous selection. */
+  page.removeAllListeners("dialog");
+  page.on("dialog", (dialog) => dialog.dismiss());
+  await page.locator("#mcpAccess").selectOption("confirm");
+  await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  await page.locator("#mcpAccess").selectOption("guarded");
+  await expect(page.locator("#mcpAccess")).toHaveValue("confirm");
+  await expect(page.locator("#mcpGuardedWarning")).toBeHidden();
+});
