@@ -180,6 +180,81 @@ export const MCP_TOOLS = Object.freeze([
     access: "ask",
     write: true,
   }),
+  Object.freeze({
+    name: "get_bee_status",
+    description: "Read the app's own connection to the Linkr Bee bridge: connected or not, the transport (Bluetooth LE or the LAN WebSocket), the board name and device id, the encrypted management-channel capabilities, the advertised BLE name and the LAN WebSocket bridge state. This describes the bridge, not the target console: use get_device_status and the serial tools for the target. Read-only: sends no target UART input and changes nothing.",
+    inputSchema: NO_ARGUMENTS,
+    access: "read",
+    write: false,
+  }),
+  Object.freeze({
+    name: "scan_bee_devices",
+    description: "Scan for nearby Linkr Bee boards over Bluetooth LE and list deviceId, name and RSSI. Android app only; the scan filters on the Linkr Management Service, so a customised BLE name does not hide a board. Scanning does not connect or change anything: pass a deviceId to connect_bee. Requires one on-phone approval unless approval is turned off, and does not run while the app is already connected; disconnect first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        durationMs: { type: "integer", minimum: 1000, maximum: 15000 },
+      },
+      additionalProperties: false,
+    },
+    access: "ask",
+    write: false,
+  }),
+  Object.freeze({
+    name: "connect_bee",
+    description: "Connect the app to a Linkr Bee board over Bluetooth LE, by a deviceId from scan_bee_devices or by a unique advertised name; with neither, reconnect the board already saved in the app. This changes the app's active session: the terminal journal resets and every serial/accessory tool targets the newly connected board. It connects the bridge, not the target console. Requires one on-phone approval unless approval is turned off; if the app is already connected, disconnect first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deviceId: { type: "string", minLength: 1, maxLength: 128 },
+        name: { type: "string", minLength: 1, maxLength: 64 },
+      },
+      additionalProperties: false,
+    },
+    access: "ask",
+    write: true,
+  }),
+  Object.freeze({
+    name: "disconnect_bee",
+    description: "Disconnect the app from the current Linkr Bee board over Bluetooth LE, or close the LAN WebSocket session. With forget=true it also clears the board saved in the app, so the app will not auto-reconnect on its next launch. Requires one on-phone approval unless approval is turned off. Serial and accessory tools fail afterwards until connect_bee runs again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        forget: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    access: "ask",
+    write: true,
+  }),
+  Object.freeze({
+    name: "set_bee_name",
+    description: "Change the name Linkr Bee advertises over Bluetooth LE (1-29 UTF-8 bytes; Chinese and emoji are allowed and count by bytes; no control characters), or reset=true to restore the default 'Linkr Bee XXXX' name. Requires one on-phone approval unless approval is turned off. The tool reads the name back through the management channel: applied=false means the board did not report the requested name, so never claim success. The Device ID used for target verification does not change.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 29 },
+        reset: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    access: "ask",
+    write: true,
+  }),
+  Object.freeze({
+    name: "set_lan_bridge",
+    description: "Enable, disable or rotate the access token of the LAN WebSocket bridge on Linkr Bee itself (the @s commands, over the encrypted BLE management channel). Requires one on-phone approval unless approval is turned off. rotate-token invalidates the current LAN token and stores the new one on the phone; the token itself is never returned by this tool. The bridge state is read back: applied=false means the board did not report the requested state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["on", "off", "rotate-token"] },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    access: "ask",
+    write: true,
+  }),
 ]);
 
 const TOOL_BY_NAME = new Map(MCP_TOOLS.map((tool) => [tool.name, tool]));
@@ -193,7 +268,7 @@ const MCP_INSTRUCTIONS = [
   "A successful send is delivery only: delivery is not command completion.",
   "Read the serial log to observe output, and never resend uncertain input automatically.",
   "Writes are approved by a human on the phone unless the phone owner has turned on the no-confirmation mode; when read-only mode is enabled every device-changing tool is refused.",
-  "Accessory tools configure the bridge, not the target console.",
+  "Accessory and connection tools configure the bridge, not the target console: scan_bee_devices, connect_bee and disconnect_bee change the app's own Bluetooth session, while get_bee_status reports that session.",
 ].join(" ");
 
 const DEFAULTS = Object.freeze({
@@ -406,6 +481,16 @@ function validateToolSemantics(tool, args) {
   }
   if (tool.name === "search_serial_log" && typeof args.query === "string" && !args.query.trim()) {
     return "arguments.query must contain non-whitespace text";
+  }
+  if (tool.name === "connect_bee" && args.deviceId !== undefined && args.name !== undefined) {
+    return "arguments.deviceId and arguments.name cannot be combined";
+  }
+  if (tool.name === "set_bee_name") {
+    const hasName = args.name !== undefined;
+    const reset = args.reset === true;
+    if (hasName === reset) {
+      return "Provide either arguments.name or arguments.reset=true";
+    }
   }
   return null;
 }
@@ -781,6 +866,14 @@ export function createMcpHost(deps = {}) {
     return accessory;
   }
 
+  function requireBee(method) {
+    const bee = deps.bee;
+    if (!bee || typeof bee[method] !== "function") {
+      throw new Error("Linkr Bee connection control is unavailable in this app build.");
+    }
+    return bee;
+  }
+
   /* Reject impossible work before asking the user to approve it: approving a
    * command that cannot be sent is worse than a clear tool error. The checks
    * repeat in the execute path so a missing dependency still reports the same
@@ -813,6 +906,19 @@ export function createMcpHost(deps = {}) {
         case "set_webdav":
           requireAccessory("webdav", "WebDAV upload");
           break;
+        case "scan_bee_devices":
+          requireBee("scan");
+          break;
+        case "connect_bee":
+          requireBee("connect");
+          break;
+        case "disconnect_bee":
+          requireBee("disconnect");
+          break;
+        case "set_bee_name":
+        case "set_lan_bridge":
+          requireAccessory();
+          break;
         default:
           break;
       }
@@ -843,6 +949,32 @@ export function createMcpHost(deps = {}) {
       case "set_webdav": {
         if (args.action === "off") return zh ? "关闭配件 WebDAV 日志上传？" : "Disable WebDAV log upload on the accessory?";
         return zh ? `启用配件日志上传到 ${maskUrlCredentials(args.url ?? "")}？` : `Enable accessory log upload to ${maskUrlCredentials(args.url ?? "")}?`;
+      }
+      case "scan_bee_devices":
+        return zh ? "通过蓝牙扫描附近的 Linkr Bee 主机？" : "Scan for nearby Linkr Bee boards over Bluetooth LE?";
+      case "connect_bee": {
+        const target = args.deviceId || args.name || (zh ? "已保存的主机" : "the saved board");
+        return zh
+          ? `连接 Linkr Bee「${target}」？当前终端会话会重新开始。`
+          : `Connect the app to Linkr Bee "${target}"? The current terminal session will restart.`;
+      }
+      case "disconnect_bee":
+        return args.forget === true
+          ? (zh ? "断开 Linkr Bee，并清除已保存的主机（今后不再自动重连）？" : "Disconnect from Linkr Bee and forget the saved board (no auto-reconnect later)?")
+          : (zh ? "断开当前 Linkr Bee 连接？" : "Disconnect from the current Linkr Bee board?");
+      case "set_bee_name":
+        return args.reset === true
+          ? (zh ? "把蓝牙广播名恢复为默认的「Linkr Bee XXXX」？" : "Restore the default 'Linkr Bee XXXX' BLE name?")
+          : (zh ? `把蓝牙广播名改为「${args.name ?? ""}」？` : `Change the advertised BLE name to "${args.name ?? ""}"?`);
+      case "set_lan_bridge": {
+        if (args.action === "rotate-token") {
+          return zh
+            ? "重新生成局域网 WebSocket 令牌？现有局域网客户端会立即失效。"
+            : "Rotate the LAN WebSocket token? Existing LAN clients stop working immediately.";
+        }
+        return args.action === "off"
+          ? (zh ? "关闭主机上的局域网 WebSocket 桥接？" : "Disable the LAN WebSocket bridge on Linkr Bee?")
+          : (zh ? "启用主机上的局域网 WebSocket 桥接？" : "Enable the LAN WebSocket bridge on Linkr Bee?");
       }
       default:
         return tool.name;
@@ -1016,6 +1148,61 @@ export function createMcpHost(deps = {}) {
         return runAccessoryChange("set-wifi", args, "wifi", "WiFi control", signal);
       case "set_webdav":
         return runAccessoryChange("set-webdav", args, "webdav", "WebDAV upload", signal);
+      case "get_bee_status": {
+        if (!deps.bee || typeof deps.bee.status !== "function") {
+          throw new Error("Linkr Bee connection control is unavailable in this app build.");
+        }
+        const status = await deps.bee.status({ signal });
+        return {
+          source: "linkr-bee-connection",
+          ...(isPlainObject(status) ? status : {}),
+          note: "This describes the app's connection to the bridge. It does not prove the target console is connected; use get_device_status and the serial log for that.",
+        };
+      }
+      case "scan_bee_devices": {
+        const bee = requireBee("scan");
+        const devices = await bee.scan({ signal, durationMs: args.durationMs });
+        return {
+          source: "ble-scan",
+          devices: (Array.isArray(devices) ? devices : []).slice(0, 40),
+          note: "Names and RSSI are radio observations, not identity proof: the board's advertised name can be chosen by its owner. Connect only to a board you recognize, or match the deviceId from a previous session.",
+        };
+      }
+      case "connect_bee": {
+        const bee = requireBee("connect");
+        const status = await bee.connect({ deviceId: args.deviceId, name: args.name, signal });
+        return {
+          ...(isPlainObject(status) ? status : {}),
+          note: "Connected. Serial and accessory tools now act on this board's session; the target console still needs its own connection.",
+        };
+      }
+      case "disconnect_bee": {
+        const bee = requireBee("disconnect");
+        const status = await bee.disconnect({ forget: args.forget === true, signal });
+        return {
+          ...(isPlainObject(status) ? status : {}),
+          forgotten: args.forget === true,
+          note: "Disconnected. Serial and accessory tools return errors until connect_bee succeeds again.",
+        };
+      }
+      case "set_bee_name": {
+        const accessory = requireAccessory();
+        const evidence = await accessory.changeBleName({ name: args.name, reset: args.reset === true, signal });
+        return {
+          source: "accessory-management-channel",
+          ...(isPlainObject(evidence) ? evidence : {}),
+          note: "The advertised name is display metadata, not identity: the Device ID used for verification does not change. applied=false means the board did not report the requested name.",
+        };
+      }
+      case "set_lan_bridge": {
+        const accessory = requireAccessory();
+        const evidence = await accessory.changeLanBridge({ action: args.action, signal });
+        return {
+          source: "accessory-management-channel",
+          ...(isPlainObject(evidence) ? evidence : {}),
+          note: "This configures the bridge's own LAN WebSocket listener, not the target console. The access token is never returned; rotate-token invalidates existing LAN clients.",
+        };
+      }
       default:
         throw new Error(`No implementation for tool ${name}.`);
     }

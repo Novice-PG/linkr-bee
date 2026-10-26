@@ -14,12 +14,15 @@ HTTP 传输与前台服务生命周期。
   （配置、64 个十六进制字符的令牌、请求转发与 180 秒超时）、`LinkrMcpService`
   （`connectedDevice` 前台服务）、`LinkrMcpPlugin`（Capacitor 桥）。监听 `0.0.0.0`
   或回环；带 `Origin` 的请求以 `403` 拒绝；请求头上限 16 KiB、请求体上限 1 MiB。
-- 工具：9 个，复用现有的串口执行闸门与配件管理通道，没有第二条串口写路径。4 个只读
+- 工具：15 个，复用现有的串口执行闸门与配件管理通道，没有第二条串口写路径。5 个只读
   工具（`get_device_status`、`read_serial_log`、`search_serial_log`、
-  `get_accessory_diagnostics`）；`wifi_scan` 只观察、不保存配置，只读模式下仍可批准；
-  4 个写入工具（`send_serial_input`、`set_uart_config`、`set_wifi`、`set_webdav`）
-  默认每次都要在手机上确认，只读模式直接拒绝；另有需要手动开启的「无需本机确认」模式，
-  开启后所有工具直接执行（危险，仅限完全可信的客户端与网络）。设备变更调用一次只允许一个。
+  `get_accessory_diagnostics`、`get_bee_status`）；`wifi_scan` 与 `scan_bee_devices`
+  只观察、不保存配置，只读模式下仍可批准；8 个写入工具（`send_serial_input`、
+  `set_uart_config`、`set_wifi`、`set_webdav`、`connect_bee`、`disconnect_bee`、
+  `set_bee_name`、`set_lan_bridge`）默认每次都要在手机上确认，只读模式直接拒绝；
+  另有需要手动开启的「无需本机确认」模式，开启后所有工具直接执行（危险，仅限完全可信的
+  客户端与网络）。设备变更调用一次只允许一个。连接工具（扫描/连接/断开）控制 App 自己
+  的蓝牙会话，不是目标控制台；主机配置工具修改广播名与局域网 WebSocket 监听。
 - 界面：AI 设置页新增“MCP 服务器”卡片（启用、只读/读写、端口、监听地址、令牌复制与
   轮换、客户端配置片段、最近 50 次调用审计）；写入确认横幅在设置面板之外显示，参数
   打码。

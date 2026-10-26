@@ -155,8 +155,23 @@ curl -s http://192.168.1.42:8712/mcp \
 | `set_uart_config` | 每次调用一次 | BLE 管理通道 |
 | `set_wifi` | 每次调用一次 | BLE 管理通道，支持 WiFi 控制 |
 | `set_webdav` | 每次调用一次 | BLE 管理通道，支持 WebDAV |
+| `get_bee_status` | 无 | 无（读取 App 自己的连接） |
+| `scan_bee_devices` | 每次调用一次 | Android 蓝牙扫描；App 未连接时 |
+| `connect_bee` | 每次调用一次 | Android 蓝牙；App 未连接时 |
+| `disconnect_bee` | 每次调用一次 | — |
+| `set_bee_name` | 每次调用一次 | BLE 管理通道 |
+| `set_lan_bridge` | 每次调用一次 | BLE 管理通道 |
 
-- **只读工具**无需确认，不发送 UART 输入，也不修改配件。
+- **只读工具**无需确认，不发送 UART 输入，也不修改配件。`get_bee_status` 在未连接时
+  也可用：它报告 App 自己到主机的连接。
+- **连接工具**（`scan_bee_devices`、`connect_bee`、`disconnect_bee`）控制 App 的蓝牙
+  会话，而不是目标控制台。连接会重置终端日志，并改变所有串口/配件工具操作的板子；
+  断开后这些工具会报错，直到 `connect_bee` 成功。`scan_bee_devices` 属于观察操作，
+  只读模式下仍可在确认后执行；`connect_bee` 与 `disconnect_bee` 是写工具，只读模式
+  会拒绝。
+- **主机配置工具**（`set_bee_name`、`set_lan_bridge`）通过加密管理通道修改主机广播的
+  蓝牙名或局域网 WebSocket 监听。它们是写工具，受确认规则与只读模式约束；
+  `set_lan_bridge` 从不返回局域网令牌。
 - **`wifi_scan`** 会让配件扫描无线网络，但不会保存任何配置，因此只读模式下仍允许用户
   批准执行。
 - **修改设备的工具**是 `send_serial_input`、`set_uart_config`、`set_wifi` 和
@@ -280,8 +295,8 @@ MCP 工具描述和 `initialize` 返回的说明会向客户端重复这些规�
 
 ## 验证状态
 
-**主机 JVM 测试与构建已验证；服务器、读取工具、确认流程与一次实际写入已在真机 + 真实
-配件上验证；配置修改工具与进程被杀处理仍未验证。**
+**主机 JVM 测试与构建已验证；服务器、读取工具、确认流程、一次实际写入，以及主机连接/
+改名工具已在真机 + 真实配件上验证；部分配置修改工具与进程被杀处理仍未验证。**
 
 具体而言：Java 传输层有主机 JVM 单元测试（路由、鉴权、`Origin` 优先级、请求体限制、
 状态页、绑定失败与令牌轮换、停止语义），MCP 协议与工具层有 `node --test` 覆盖（版本
@@ -294,7 +309,7 @@ Linkr Bee 配件）：
 - 卡片可以启动服务：端口 8712、监听 `lan`、生成 64 位十六进制令牌，地址显示为
   `http://<WiFi IP>:8712/mcp`；
 - 同一 Wi-Fi 的另一台机器上：`GET /` 返回状态 JSON；`POST /mcp` 无令牌返回 401、带
-  `Origin` 头返回 403；`initialize` 协商到 `2025-06-18`；`tools/list` 返回 9 个工具；
+  `Origin` 头返回 403；`initialize` 协商到 `2025-06-18`；`tools/list` 返回 15 个工具；
 - `get_device_status` 返回真实配件（`connected:true`、`transport:"ble"`、设备名/ID、
   `115200,8,n,1,n`、收发字节数）；`get_accessory_diagnostics` 返回配件自身 `@i?` 分组
   （固件 0.1.2、Zephyr 4.4.1、UART/WiFi/WebDAV/ws 计数）；`read_serial_log` 返回日志
@@ -303,12 +318,18 @@ Linkr Bee 配件）：
   `isError: "Not executed: the request was denied on the phone."`；点「允许」后文本
   实际送达目标串口（目标 shell 回显，串口日志可见）；
 - `wifi_scan` 在手机确认后执行，返回真实热点及 RSSI/信道/加密方式；
+- 主机连接工具通过 MCP 在真实板子上执行：`scan_bee_devices` 发现目标（deviceId、
+  名称、RSSI）、`connect_bee` 成功连接（管理通道可用，并返回蓝牙名与局域网桥接状态）、
+  `disconnect_bee` 断开、无参数 `connect_bee` 重新连接已保存的主机；`get_bee_status`
+  返回连接、能力与 `lanBridge`（不含令牌）；
+- `set_bee_name` 以 `reset=true` 调用返回 `applied:true` 及读回的名称与 `custom:false`；
 - `connectedDevice` 前台服务在运行并显示常驻通知；App 退到后台后端点仍可达
   （`ping` 有应答）。
 
-未验证：配件配置工具（`set_uart_config`、`set_wifi`、`set_webdav`）未在真机上执行；
-进程被杀与前台服务权限边界仅有代码审查覆盖；多客户端并发未测试。本文不声称这些路径
-已在真机验证。
+未验证：配件配置工具（`set_uart_config`、`set_wifi`、`set_webdav`）与
+`set_lan_bridge` 未在真机上执行；`set_bee_name` 只用 `reset=true` 验证过，未验证自定义
+名称；`disconnect_bee` 的 `forget=true` 未验证。进程被杀与前台服务权限边界仅有代码审查
+覆盖；多客户端并发未测试。本文不声称这些路径已在真机验证。
 
 ## 相关文档
 

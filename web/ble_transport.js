@@ -86,6 +86,13 @@
         .filter((device) => wanted.size === 0 || wanted.has(device.id));
     },
 
+    /* Web Bluetooth has no headless scan: requestLEScan only reports
+     * advertisements for devices the user already picked, and a page cannot
+     * list nearby devices without the browser's device chooser. */
+    async scanDevices() {
+      throw new Error("BLE scanning is not available on this platform");
+    },
+
     async connect(deviceId, onDisconnect) {
       const device = browserDevices.get(deviceId);
       if (!device) {
@@ -233,6 +240,10 @@
 
     async getDevices(deviceIds = []) {
       return (await backend()).getDevices(deviceIds);
+    },
+
+    async scanDevices(options) {
+      return (await backend()).scanDevices(options);
     },
 
     async connect(deviceId, onDisconnect) {

@@ -179,9 +179,27 @@ The status page returns only the server name, version, and MCP path.
 | `set_uart_config` | one per call | BLE management channel |
 | `set_wifi` | one per call | BLE management channel with WiFi control |
 | `set_webdav` | one per call | BLE management channel with WebDAV support |
+| `get_bee_status` | none | none (reads the app's own connection) |
+| `scan_bee_devices` | one per call | Android BLE scan; app disconnected |
+| `connect_bee` | one per call | Android BLE; app disconnected |
+| `disconnect_bee` | one per call | — |
+| `set_bee_name` | one per call | BLE management channel |
+| `set_lan_bridge` | one per call | BLE management channel |
 
 - **Read-only tools** need no approval. They never send UART input and never
-  change the accessory.
+  change the accessory. `get_bee_status` also works while disconnected: it
+  reports the app's own link to the board.
+- **Connection tools** (`scan_bee_devices`, `connect_bee`, `disconnect_bee`)
+  drive the app's Bluetooth session, not the target console. Connecting resets
+  the terminal journal and changes which board every serial/accessory tool
+  talks to; disconnecting makes those tools fail until `connect_bee` succeeds.
+  `scan_bee_devices` is an observation and read-only mode still allows it after
+  approval; `connect_bee` and `disconnect_bee` are write tools and are refused in
+  read-only mode.
+- **Board configuration tools** (`set_bee_name`, `set_lan_bridge`) change the
+  bridge's advertised BLE name or its LAN WebSocket listener through the
+  encrypted management channel. They are write tools: approval rules and
+  read-only mode apply. `set_lan_bridge` never returns the LAN token.
 - **`wifi_scan`** consumes the radio but stores nothing, so read-only mode still
   lets the user approve it.
 - **Device-changing tools** are `send_serial_input`, `set_uart_config`,
@@ -344,9 +362,9 @@ the client:
 
 ## Verification status
 
-**host-JVM tests + build verified; server, read tools, approval and one live
-write verified on a phone with a real accessory; configuration-change tools and
-process-death handling are still untested.**
+**host-JVM tests + build verified; server, read tools, approval, one live write,
+and the Bee connection/rename tools verified on a phone with a real accessory;
+some configuration-change tools and process-death handling are still untested.**
 
 Concretely: the Java transport has host-JVM unit tests (routing, authentication,
 `Origin` precedence, body limits, status page, bind-failure and token-rotation
@@ -362,8 +380,8 @@ over adb, connected to a Linkr Bee accessory over BLE):
   64-hex token and shows `http://<wifi-ip>:8712/mcp`;
 - from another machine on the same Wi-Fi, `GET /` returns the status JSON,
   `POST /mcp` returns 401 without a bearer token and 403 with an `Origin`
-  header, `initialize` negotiates `2025-06-18` and `tools/list` returns the nine
-  tools;
+  header, `initialize` negotiates `2025-06-18` and `tools/list` returns the
+  fifteen tools;
 - `get_device_status` reports the live accessory (`connected:true`,
   `transport:"ble"`, device name/id, `115200,8,n,1,n`, byte counters);
   `get_accessory_diagnostics` returns the bridge's own `@i?` groups (firmware
@@ -376,12 +394,22 @@ over adb, connected to a Linkr Bee accessory over BLE):
   back, visible in the serial log);
 - `wifi_scan` ran after on-phone approval and returned real access points with
   RSSI/channel/security;
+- the Bee connection tools ran over MCP against the real board:
+  `scan_bee_devices` found it (`deviceId`, name, RSSI), `connect_bee` connected
+  it (management channel available, BLE name and LAN bridge state reported),
+  `disconnect_bee` disconnected it, and `connect_bee` with no arguments
+  reconnected the saved board; `get_bee_status` reported the connection,
+  capabilities and `lanBridge` without the token;
+- `set_bee_name` with `reset=true` returned `applied:true` with the read-back
+  name and `custom:false`;
 - the `connectedDevice` foreground service is running with its ongoing
   notification, and the endpoint stays reachable after the app is sent to the
   background (`ping` answered).
 
 Not verified: the accessory configuration tools (`set_uart_config`, `set_wifi`,
-`set_webdav`) were not exercised on hardware, process-death and
+`set_webdav`) and `set_lan_bridge` were not exercised on hardware;
+`set_bee_name` was exercised only with `reset=true`, not with a custom name;
+`disconnect_bee` with `forget=true` was not exercised. Process-death and
 foreground-service permission edge cases are covered by code review only, and
 multiple concurrent clients were not tested. Nothing in this guide claims those
 paths are hardware-verified.

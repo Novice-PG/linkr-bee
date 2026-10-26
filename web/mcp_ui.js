@@ -73,6 +73,12 @@ const labels = {
   tool_set_uart_config: ["修改桥接串口参数", "Change bridge UART settings"],
   tool_set_wifi: ["配置配件 WiFi", "Configure accessory WiFi"],
   tool_set_webdav: ["配置日志上传", "Configure log upload"],
+  tool_get_bee_status: ["读取主机状态", "Read Bee status"],
+  tool_scan_bee_devices: ["扫描附近的主机", "Scan for Bee boards"],
+  tool_connect_bee: ["连接主机", "Connect Bee"],
+  tool_disconnect_bee: ["断开主机", "Disconnect Bee"],
+  tool_set_bee_name: ["修改主机蓝牙名", "Change Bee BLE name"],
+  tool_set_lan_bridge: ["配置主机局域网桥接", "Configure Bee LAN bridge"],
 };
 
 const TOOL_LABEL_KEYS = {
@@ -85,6 +91,12 @@ const TOOL_LABEL_KEYS = {
   set_uart_config: "tool_set_uart_config",
   set_wifi: "tool_set_wifi",
   set_webdav: "tool_set_webdav",
+  get_bee_status: "tool_get_bee_status",
+  scan_bee_devices: "tool_scan_bee_devices",
+  connect_bee: "tool_connect_bee",
+  disconnect_bee: "tool_disconnect_bee",
+  set_bee_name: "tool_set_bee_name",
+  set_lan_bridge: "tool_set_lan_bridge",
 };
 
 const APPROVAL_TIMEOUT_MS = 90000;

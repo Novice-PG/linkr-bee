@@ -23,6 +23,12 @@ const TOOL_NAMES = [
   "set_uart_config",
   "set_wifi",
   "set_webdav",
+  "get_bee_status",
+  "scan_bee_devices",
+  "connect_bee",
+  "disconnect_bee",
+  "set_bee_name",
+  "set_lan_bridge",
 ];
 
 function memoryStorage(initial = {}) {
@@ -94,7 +100,7 @@ function fakeDevice({ status = {}, execute } = {}) {
 }
 
 function fakeAccessory(overrides = {}) {
-  const calls = { capability: 0, command: [], diagnostics: 0, scan: 0, execute: [] };
+  const calls = { capability: 0, command: [], diagnostics: 0, scan: 0, execute: [], changeBleName: [], changeLanBridge: [] };
   const capability = { available: true, wifi: true, webdav: true, asyncEvents: true, ...(overrides.capability || {}) };
   const accessory = {
     capability() {
@@ -129,6 +135,22 @@ function fakeAccessory(overrides = {}) {
         applied: true,
         settled: true,
       };
+    },
+    async readBleName() {
+      return { name: "Linkr Bee Test", custom: true };
+    },
+    async changeBleName(request) {
+      calls.changeBleName.push(request);
+      if (overrides.changeBleName) return overrides.changeBleName(request);
+      return { command: request.reset ? "@n default" : `@n=${request.name}`, accepted: true, applied: true, settled: true };
+    },
+    async readLanBridge() {
+      return { state: "off", enabled: false, listening: false, port: 80, clients: 0, hasToken: true };
+    },
+    async changeLanBridge(request) {
+      calls.changeLanBridge.push(request);
+      if (overrides.changeLanBridge) return overrides.changeLanBridge(request);
+      return { command: `@s ${request.action}`, accepted: true, applied: true, settled: true };
     },
   };
   return { accessory, calls };
@@ -194,6 +216,7 @@ function createHost({
   device = null,
   readLog = null,
   accessory = null,
+  bee = null,
   requestApproval = async () => ({ approved: true }),
   storage = memoryStorage(),
   onChange = () => {},
@@ -205,6 +228,7 @@ function createHost({
     getDevice: () => device,
     readLog: readLog || (() => ({ text: "", start: 0, cursor: 0, latestCursor: 0, truncated: false })),
     accessory,
+    bee,
     requestApproval,
     getLang,
     onChange,
@@ -973,3 +997,148 @@ test("redactToolArguments masks credentials and URL userinfo without mutating in
 function readCatalogNames() {
   return MCP_TOOLS.map((tool) => tool.name);
 }
+
+/* ------------------------------------------------------------------ *
+ * Linkr Bee board lifecycle + identity tools
+ * ------------------------------------------------------------------ */
+test("get_bee_status reports the app's bridge connection and identity", async () => {
+  const host = createHost({
+    bee: {
+      status: async () => ({
+        connected: true,
+        transport: "ble",
+        device: "Linkr Bee Test",
+        deviceId: "test-device-1",
+        legacy: false,
+        management: { available: true, wifi: true, webdav: true, asyncEvents: true },
+        bleName: "Linkr Bee Test",
+        bleNameCustom: false,
+        lanBridge: { state: "off", enabled: false, hasToken: true },
+      }),
+    },
+  });
+  const response = await callTool(host, "get_bee_status");
+  const payload = toolPayload(response.message);
+  assert.equal(payload.source, "linkr-bee-connection");
+  assert.equal(payload.connected, true);
+  assert.equal(payload.transport, "ble");
+  assert.equal(payload.bleName, "Linkr Bee Test");
+  assert.equal(payload.lanBridge.hasToken, true);
+  assert.match(payload.note, /target console/);
+});
+
+test("scan_bee_devices asks the phone and returns the scanned boards", async () => {
+  const approvals = [];
+  const scans = [];
+  const host = createHost({
+    bee: {
+      scan: async (options) => {
+        scans.push(options);
+        return [{ deviceId: "AA", name: "Linkr Bee 1", rssi: -42 }];
+      },
+    },
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "scan_bee_devices", { durationMs: 4000 });
+  const payload = toolPayload(response.message);
+  assert.deepEqual(payload.devices, [{ deviceId: "AA", name: "Linkr Bee 1", rssi: -42 }]);
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0].summary, /Linkr Bee/);
+  assert.equal(scans[0].durationMs, 4000);
+});
+
+test("connect_bee asks the phone and connects to the requested board", async () => {
+  const approvals = [];
+  const connects = [];
+  const host = createHost({
+    bee: {
+      connect: async (options) => {
+        connects.push(options);
+        return { connected: true, transport: "ble", deviceId: options.deviceId };
+      },
+    },
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "connect_bee", { deviceId: "AA:BB" });
+  const payload = toolPayload(response.message);
+  assert.equal(payload.connected, true);
+  assert.equal(connects[0].deviceId, "AA:BB");
+  assert.equal(approvals.length, 1);
+  assert.match(approvals[0].summary, /AA:BB/);
+});
+
+test("disconnect_bee passes forget through and reports the new state", async () => {
+  const calls = [];
+  const host = createHost({
+    bee: {
+      disconnect: async (options) => {
+        calls.push(options);
+        return { connected: false, savedDeviceId: null };
+      },
+    },
+  });
+  const response = await callTool(host, "disconnect_bee", { forget: true });
+  const payload = toolPayload(response.message);
+  assert.equal(payload.connected, false);
+  assert.equal(payload.forgotten, true);
+  assert.equal(calls[0].forget, true);
+});
+
+test("connection tools are refused in read-only mode and when the dependency is missing", async () => {
+  const host = createHost({ bee: { connect: async () => ({ connected: true }) } });
+  await host.setConfig({ access: "read" });
+  const refused = await callTool(host, "connect_bee", { deviceId: "AA" });
+  assert.match(toolErrorText(refused.message), /read-only mode/);
+
+  const missing = createHost();
+  const unavailable = await callTool(missing, "scan_bee_devices");
+  assert.match(toolErrorText(unavailable.message), /connection control is unavailable/i);
+
+  const both = await callTool(host, "connect_bee", { deviceId: "AA", name: "Bee" });
+  assert.equal(both.message.error.code, -32602);
+  assert.match(both.message.error.message, /cannot be combined/);
+});
+
+test("set_bee_name and set_lan_bridge use the accessory helpers and report the read-back", async () => {
+  const { accessory, calls } = fakeAccessory();
+  const host = createHost({ accessory });
+
+  const renamed = await callTool(host, "set_bee_name", { name: "Bench Bee" });
+  const renamePayload = toolPayload(renamed.message);
+  assert.equal(renamePayload.applied, true);
+  assert.deepEqual(calls.changeBleName[0].name, "Bench Bee");
+  assert.match(renamePayload.note, /Device ID/);
+
+  const reset = await callTool(host, "set_bee_name", { reset: true });
+  assert.equal(toolPayload(reset.message).applied, true);
+  assert.equal(calls.changeBleName[1].reset, true);
+
+  const lan = await callTool(host, "set_lan_bridge", { action: "rotate-token" });
+  assert.equal(toolPayload(lan.message).applied, true);
+  assert.equal(calls.changeLanBridge[0].action, "rotate-token");
+
+  const invalid = await callTool(host, "set_bee_name", {});
+  assert.equal(invalid.message.error.code, -32602);
+  const combined = await callTool(host, "set_bee_name", { name: "x", reset: true });
+  assert.equal(combined.message.error.code, -32602);
+});
+
+test("set_bee_name requires the management channel instead of approving an impossible call", async () => {
+  const approvals = [];
+  const host = createHost({
+    accessory: fakeAccessory({ capability: { available: false, reason: "LAN only" } }).accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const response = await callTool(host, "set_bee_name", { name: "x" });
+  assert.match(toolErrorText(response.message), /LAN only/);
+  assert.equal(approvals.length, 0);
+});

@@ -32,6 +32,7 @@ export const UART_QUERY_COMMAND = "@u?";
 export const WIFI_QUERY_COMMAND = "@w?";
 export const WEBDAV_QUERY_COMMAND = "@d?";
 export const BLE_NAME_QUERY_COMMAND = "@n?";
+export const LAN_BRIDGE_QUERY_COMMAND = "@s?";
 
 function invalid(reason) {
   throw new Error(reason);
@@ -106,6 +107,44 @@ export function bleNameCommand({ name, reset = false } = {}) {
 
 /* The WiFi password travels in the command, so anything shown to the user or
  * returned to the model is redacted. A WebDAV URL may embed credentials too. */
+/* The LAN WebSocket bridge on the bridge board itself. Rotating the token is
+ * deliberately the only token-related action exposed: reading or setting an
+ * explicit token would put a reusable LAN credential into a model conversation. */
+export function lanBridgeCommand({ action = "on" } = {}) {
+  const mode = String(action).toLowerCase();
+  if (mode === "on") return "@s on";
+  if (mode === "off") return "@s off";
+  if (mode === "rotate-token") return "@s token";
+  invalid("action must be on, off or rotate-token");
+}
+
+/* Parse the `@s?` / `@s on` / `@s token` reply. The reply is either a full
+ * status line (`OK ws=waiting port=80 clients=0 token=<32 hex>`) or the short
+ * acknowledgement (`OK ws on`). The token itself is never returned, only
+ * whether the bridge currently requires one. */
+export function parseLanBridge(text) {
+  const line = String(text ?? "")
+    .split(/\r?\n/)
+    .map((candidate) => candidate.trim())
+    .find((candidate) => /^OK\s+ws\b/i.test(candidate));
+  if (!line) return null;
+  const state = line.match(/\bws=([a-z-]+)/i)?.[1]?.toLowerCase()
+    || line.match(/^OK\s+ws\s+(on|off)\b/i)?.[1]?.toLowerCase()
+    || null;
+  if (!state) return null;
+  const port = Number(line.match(/\bport=(\d+)/i)?.[1]);
+  const clients = Number(line.match(/\bclients=(\d+)/i)?.[1]);
+  const token = line.match(/\btoken=(none|[0-9a-f]{32})\b/i)?.[1]?.toLowerCase() || null;
+  return {
+    state,
+    enabled: state !== "off",
+    listening: state === "on",
+    port: Number.isFinite(port) ? port : null,
+    clients: Number.isFinite(clients) ? clients : null,
+    hasToken: token === null ? null : token !== "none",
+  };
+}
+
 export function redactCommand(command) {
   const text = String(command ?? "");
   if (text.startsWith("@w=")) {

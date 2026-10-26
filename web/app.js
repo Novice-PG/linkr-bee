@@ -4,11 +4,14 @@ import { createLanTokenStore } from "./lan_token_store.js";
 import {
   BLE_NAME_QUERY_COMMAND,
   DIAGNOSTICS_COMMAND,
+  LAN_BRIDGE_QUERY_COMMAND,
   UART_QUERY_COMMAND,
   WIFI_QUERY_COMMAND,
   WEBDAV_QUERY_COMMAND,
   bleNameCommand,
+  lanBridgeCommand,
   parseBleName,
+  parseLanBridge,
   parseInfoGroups,
   parseUartSettings,
   parseWebdavStatus,
@@ -5044,6 +5047,211 @@ async function executeAccessoryChange({ action, args = {}, command, signal }) {
     applied: Boolean(queried.value) && (wantOff ? queried.value.state === "off" : queried.value.state === "on") };
 }
 
+/* ---- Linkr Bee board lifecycle + identity (MCP) ----
+ *
+ * These helpers only drive the app's own connection path (rememberDevice,
+ * connect, disconnect, sendControl), so the MCP tools never open a second BLE
+ * session or a second management channel. They are Android-only in practice:
+ * the agent settings panel never sees them and the bridge is only installed by
+ * the Android shell. */
+
+function beeConnectionStatus() {
+  const isLan = state.mode === "ws";
+  const capability = !isLan && state.mgmtReady
+    ? {
+      available: true,
+      wifi: hasManagementCapability(MGMT_CAP_WIFI),
+      webdav: hasManagementCapability(MGMT_CAP_WEBDAV),
+      asyncEvents: hasManagementCapability(MGMT_CAP_ASYNC_EVENTS),
+    }
+    : { available: false, wifi: false, webdav: false, asyncEvents: false };
+  const device = state.device;
+  return {
+    connected: state.connected,
+    transport: isLan ? "lan" : "ble",
+    device: isLan
+      ? printableDeviceName(state.wsHost, "")
+      : printableDeviceName(device?.name, device?.id || ""),
+    deviceId: isLan ? (state.wsHost || "") : (state.deviceId || device?.id || ""),
+    legacy: Boolean(state.legacy),
+    management: capability,
+    savedDeviceId: localStorage.getItem(LAST_DEVICE_ID_KEY) || null,
+  };
+}
+
+/* Board identity is best effort: a legacy board has no management channel, and
+ * a query that times out must not fail get_bee_status as a whole. */
+async function readBeeIdentity({ signal } = {}) {
+  const identity = { bleName: null, bleNameCustom: null, lanBridge: null, identityError: null };
+  if (state.mode !== "ble" || !state.connected || !state.mgmtReady) return identity;
+  try {
+    const parsed = parseBleName(
+      String((await sendControl(BLE_NAME_QUERY_COMMAND, { returnResponse: true })) ?? ""),
+      { query: true },
+    );
+    if (parsed) {
+      identity.bleName = parsed.name;
+      identity.bleNameCustom = parsed.custom;
+    }
+  } catch (error) {
+    identity.identityError = error?.message || "The BLE name could not be read.";
+  }
+  try {
+    identity.lanBridge = parseLanBridge(
+      String((await sendControl(LAN_BRIDGE_QUERY_COMMAND, { returnResponse: true })) ?? ""),
+    );
+  } catch {
+    // The bridge may not support @s?; the rest of the status is still useful.
+  }
+  signal?.throwIfAborted();
+  return identity;
+}
+
+async function beeStatus({ signal } = {}) {
+  signal?.throwIfAborted();
+  const status = beeConnectionStatus();
+  Object.assign(status, await readBeeIdentity({ signal }));
+  return status;
+}
+
+async function scanBeeDevices({ durationMs = 6000, signal } = {}) {
+  signal?.throwIfAborted();
+  if (state.mode !== "ble") {
+    throw new Error("Switch the app to Bluetooth LE mode before scanning for Linkr Bee boards.");
+  }
+  if (state.connected) {
+    throw new Error("Disconnect from the current Linkr Bee board before scanning for another one.");
+  }
+  if (!bleTransport || typeof bleTransport.scanDevices !== "function") {
+    throw new Error("Bluetooth scanning is not available in this build.");
+  }
+  await bleTransport.initialize();
+  const devices = await bleTransport.scanDevices({
+    services: [MGMT_SERVICE],
+    durationMs: Math.max(1000, Math.min(15000, Number(durationMs) || 6000)),
+  });
+  signal?.throwIfAborted();
+  return (Array.isArray(devices) ? devices : [])
+    .filter((device) => device && device.id)
+    .map((device) => ({
+      deviceId: String(device.id),
+      name: printableDeviceName(device.name, ""),
+      rssi: Number.isFinite(device.rssi) ? device.rssi : null,
+    }))
+    .slice(0, 40);
+}
+
+async function connectBee({ deviceId, name, signal } = {}) {
+  signal?.throwIfAborted();
+  if (state.connected) {
+    throw new Error("The app is already connected to a Linkr Bee board. Disconnect first (disconnect_bee).");
+  }
+  if (state.mode !== "ble") setTransportMode("ble");
+  let device = null;
+  if (deviceId) {
+    device = { id: String(deviceId), name: printableDeviceName(name, "") };
+  } else if (name) {
+    const wanted = String(name).trim().toLowerCase();
+    const found = (await scanBeeDevices({ durationMs: 8000, signal }))
+      .filter((candidate) => String(candidate.name || "").toLowerCase().includes(wanted));
+    if (!found.length) throw new Error(`No nearby Linkr Bee matched "${name}".`);
+    if (found.length > 1) {
+      throw new Error(`Several Linkr Bee boards matched "${name}"; pass a deviceId from scan_bee_devices.`);
+    }
+    device = { id: found[0].deviceId, name: found[0].name };
+  } else {
+    const saved = localStorage.getItem(LAST_DEVICE_ID_KEY);
+    if (!saved) throw new Error("No Linkr Bee is saved in the app. Run scan_bee_devices first.");
+    device = { id: saved, name: state.device?.name || "" };
+  }
+  rememberDevice(device);
+  await connect();
+  if (!state.connected) {
+    throw new Error(`Could not connect to ${printableDeviceName(device.name, device.id)}. Keep the board powered and in range, and check the app log for the pairing result.`);
+  }
+  return beeStatus({ signal });
+}
+
+async function disconnectBee({ forget = false, signal } = {}) {
+  signal?.throwIfAborted();
+  if (state.connected) {
+    await disconnect();
+  }
+  if (forget) {
+    localStorage.removeItem(LAST_DEVICE_ID_KEY);
+    state.device = null;
+    state.deviceRestored = false;
+  }
+  return beeStatus({ signal });
+}
+
+async function readMcpBleName({ signal } = {}) {
+  signal?.throwIfAborted();
+  const parsed = parseBleName(
+    String((await sendControl(BLE_NAME_QUERY_COMMAND, { returnResponse: true })) ?? ""),
+    { query: true },
+  );
+  if (!parsed) throw new Error("The accessory did not report its BLE name.");
+  return { name: parsed.name, custom: parsed.custom };
+}
+
+async function changeMcpBleName({ name, reset = false, signal } = {}) {
+  signal?.throwIfAborted();
+  const command = reset ? bleNameCommand({ reset: true }) : bleNameCommand({ name });
+  const wanted = reset ? null : command.slice("@n=".length);
+  const reply = String((await sendControl(command, { returnResponse: true })) ?? "");
+  const status = replyStatus(reply);
+  const evidence = { command: redactCommand(command), reply: redactSecrets(reply), accepted: status.ok };
+  if (!status.ok) {
+    return { ...evidence, error: status.error || "The accessory did not accept the command." };
+  }
+  const queried = await pollAccessoryStatus(
+    BLE_NAME_QUERY_COMMAND,
+    (text) => parseBleName(text, { query: true }),
+    (value) => (reset ? value.custom === false : value.name === wanted),
+    { signal, timeoutMs: 6000, intervalMs: 600 },
+  );
+  return {
+    ...evidence,
+    confirmed: queried.value,
+    settled: queried.settled,
+    applied: Boolean(queried.value) && (reset ? queried.value.custom === false : queried.value.name === wanted),
+  };
+}
+
+async function readMcpLanBridge({ signal } = {}) {
+  signal?.throwIfAborted();
+  const parsed = parseLanBridge(
+    String((await sendControl(LAN_BRIDGE_QUERY_COMMAND, { returnResponse: true })) ?? ""),
+  );
+  if (!parsed) throw new Error("The accessory did not report the LAN bridge state.");
+  return parsed;
+}
+
+async function changeMcpLanBridge({ action, signal } = {}) {
+  signal?.throwIfAborted();
+  const command = lanBridgeCommand({ action });
+  const reply = String((await sendControl(command, { returnResponse: true })) ?? "");
+  const status = replyStatus(reply);
+  const evidence = { command: redactCommand(command), reply: redactSecrets(reply), accepted: status.ok };
+  if (!status.ok) {
+    return { ...evidence, error: status.error || "The accessory did not accept the command." };
+  }
+  const wanted = action === "on" ? true : action === "off" ? false : null;
+  const queried = await pollAccessoryStatus(
+    LAN_BRIDGE_QUERY_COMMAND,
+    (text) => parseLanBridge(text),
+    (value) => wanted === null || value.enabled === wanted,
+    { signal, timeoutMs: 6000 },
+  );
+  return {
+    ...evidence,
+    state: queried.value,
+    settled: queried.settled,
+    applied: Boolean(queried.value) && (wanted === null || queried.value.enabled === wanted),
+  };
+}
+
 /* External MCP clients (Claude Desktop, Cursor, …) reach the same serial gate
  * the assistant uses. Only the Android shell installs window.LinkrMcp; on the
  * web, iOS and HarmonyOS builds this returns immediately and the settings card
@@ -5067,6 +5275,16 @@ function initMcp() {
       execute: executeAccessoryChange,
       diagnostics: collectAccessoryDiagnostics,
       scan: scanWifi,
+      readBleName: readMcpBleName,
+      changeBleName: changeMcpBleName,
+      readLanBridge: readMcpLanBridge,
+      changeLanBridge: changeMcpLanBridge,
+    },
+    bee: {
+      status: beeStatus,
+      scan: scanBeeDevices,
+      connect: connectBee,
+      disconnect: disconnectBee,
     },
     requestApproval: (request) => mcpUi
       ? mcpUi.requestApproval(request)

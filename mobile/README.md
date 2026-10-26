@@ -334,10 +334,15 @@ endpoint.
   `mobile/src/mcp-native.ts` exposes it as `window.LinkrMcp`. The protocol, tool
   catalog, approval flow, and audit live in the shared `web/mcp_server.js` and
   `web/mcp_ui.js`.
-- The card covers enable, read-only versus read-write access, port, listen
-  address, token copy and rotation, a client configuration snippet, and the most
-  recent calls. A foreground-service notification keeps the process alive while
-  the app is backgrounded and can stop the listener.
+- The card covers enable, read-only versus read-write access (including the
+  explicit no-confirmation mode), port, listen address, token copy and rotation,
+  a client configuration snippet, and the most recent calls. A foreground-service
+  notification keeps the process alive while the app is backgrounded and can
+  stop the listener.
+- Tools cover the target console (status, journal, search, input) and Linkr Bee
+  itself: `get_bee_status`, `scan_bee_devices`, `connect_bee`, `disconnect_bee`,
+  `set_bee_name` and `set_lan_bridge` drive or configure the app's own BLE/LAN
+  connection through the same helper paths the UI uses.
 - Caveats: Android only; the bearer token travels over plain HTTP on the LAN
   (trusted networks only); by default writes need approval on the phone and are
   refused while the app is backgrounded (the no-confirmation mode removes that
