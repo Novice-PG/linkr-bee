@@ -344,7 +344,9 @@ endpoint.
   process is destroyed; accessory tools need the BLE management channel; and
   serial output is untrusted device data where a successful send is delivery,
   not command completion.
-- Verification: host-JVM tests + build verified; real-device validation pending.
+- Verification: host-JVM tests + build verified; on a phone with a real
+  accessory, reads, the approval banner, a denied request and one approved
+  serial write are verified. Configuration changes and process death are not.
 
 Full guide: [MCP server](../docs/MCP.md) · [中文](../docs/MCP.zh-CN.md).
 

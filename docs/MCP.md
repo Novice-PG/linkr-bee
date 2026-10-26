@@ -13,8 +13,9 @@ runs through the same serial execution gate and accessory management channel tha
 the built-in assistant uses. The server is **Android-only**; the Web, iOS, and
 HarmonyOS clients have no MCP endpoint.
 
-This feature is verified on a phone for the HTTP/MCP surface, but not yet with a
-real accessory (the write approval flow and accessory tools). Read
+This feature is verified on a phone with a real accessory for reads, the write
+approval flow and one live write; the configuration-change tools and process
+death are still untested. Read
 [Verification status](#verification-status) before relying on it for hardware work.
 
 ## Contents
@@ -303,7 +304,9 @@ the client:
   WebDAV, or async-event capability also gets an explicit error.
 - **No discovery.** There is no mDNS or other discovery: copy the endpoint and
   token from the card into the client.
-- **Not verified on real hardware.** See below.
+- **Hardware verification is partial.** Reads, approval and a single serial
+  write are verified on a phone with a real accessory; configuration changes and
+  process death are not. See below.
 
 ## Troubleshooting
 
@@ -329,8 +332,9 @@ the client:
 
 ## Verification status
 
-**host-JVM tests + build verified; server reachability verified on a phone;
-accessory tools and the write approval flow still need a real accessory.**
+**host-JVM tests + build verified; server, read tools, approval and one live
+write verified on a phone with a real accessory; configuration-change tools and
+process-death handling are still untested.**
 
 Concretely: the Java transport has host-JVM unit tests (routing, authentication,
 `Origin` precedence, body limits, status page, bind-failure and token-rotation
@@ -340,25 +344,35 @@ single-write guard), the settings card and approval banner have Playwright
 coverage against a fake native bridge, and the Android and web builds succeed.
 
 Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
-over adb):
+over adb, connected to a Linkr Bee accessory over BLE):
 
 - the card starts the server on port 8712 with `lan` binding, generates a
   64-hex token and shows `http://<wifi-ip>:8712/mcp`;
 - from another machine on the same Wi-Fi, `GET /` returns the status JSON,
   `POST /mcp` returns 401 without a bearer token and 403 with an `Origin`
-  header, `initialize` negotiates `2025-06-18`, `tools/list` returns the nine
-  tools, and a `get_device_status` call returns the explicit "target is not
-  connected" `isError` result;
+  header, `initialize` negotiates `2025-06-18` and `tools/list` returns the nine
+  tools;
+- `get_device_status` reports the live accessory (`connected:true`,
+  `transport:"ble"`, device name/id, `115200,8,n,1,n`, byte counters);
+  `get_accessory_diagnostics` returns the bridge's own `@i?` groups (firmware
+  0.1.2, Zephyr 4.4.1, UART/WiFi/WebDAV/ws counters); `read_serial_log` returns
+  the journal window and cursors; `search_serial_log` returns an empty match set
+  for a phrase outside the window rather than a false positive;
+- a write (`send_serial_input`) raised the approval banner on the phone: denying
+  it returned `isError: "Not executed: the request was denied on the phone."`,
+  and approving it delivered the text to the target shell (the target echoed it
+  back, visible in the serial log);
+- `wifi_scan` ran after on-phone approval and returned real access points with
+  RSSI/channel/security;
 - the `connectedDevice` foreground service is running with its ongoing
   notification, and the endpoint stays reachable after the app is sent to the
   background (`ping` answered).
 
-Not verified: a real accessory — a BLE target connection, a write that raises
-the on-phone approval banner, accessory diagnostics/scan/configuration over the
-management channel, and therefore any claim about actual serial writes or
-accessory changes. Process-death and foreground-service permission edge cases
-are covered by code review only. Nothing in this guide is hardware acceptance
-evidence for the accessory tools.
+Not verified: the accessory configuration tools (`set_uart_config`, `set_wifi`,
+`set_webdav`) were not exercised on hardware, process-death and
+foreground-service permission edge cases are covered by code review only, and
+multiple concurrent clients were not tested. Nothing in this guide claims those
+paths are hardware-verified.
 
 ## Related documentation
 

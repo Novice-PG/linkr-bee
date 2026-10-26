@@ -32,11 +32,15 @@ HTTP 传输与前台服务生命周期。
   `mobile/browser-test/mcp_server.spec.mjs`（设置卡片与转发传输）、
   `mobile/browser-test/mcp_ui.spec.mjs`（卡片可见性、端口/监听地址、审计列表、确认横幅
   的允许与拒绝、只读模式）。
-- 验证边界：**主机 JVM 测试、构建与手机侧连通性已验证；真实配件待验证**。2026-10-26
-  在 StepX PZ261A（Android 16）上验证：卡片启动服务、令牌与地址正确、同 WiFi 另一台机器
-  可访问（`GET /`、`initialize`、`tools/list`、鉴权与 `Origin` 拒绝、`get_device_status`
-  的显式 `isError`）、`connectedDevice` 前台服务常驻通知、退后台后端点仍可达；尚未验证
-  真实 BLE 目标连接、真机写入确认卡片与配件管理工具。
+- 验证边界：**主机 JVM 测试、构建、真机 + 真实配件的读取/确认/一次写入已验证；配置修改
+  与进程被杀未验证**。2026-10-26 在 StepX PZ261A（Android 16，BLE 连接 Linkr Bee 配件）
+  上验证：卡片启动服务、令牌与地址正确、同 WiFi 另一台机器可访问（`GET /`、
+  `initialize`、`tools/list`、鉴权与 `Origin` 拒绝）、`get_device_status` 返回真实配件、
+  `get_accessory_diagnostics` 返回固件/Zephyr/UART/WiFi 统计、`read_serial_log`/
+  `search_serial_log` 返回真实日志窗口、写入在手机上弹出确认（拒绝返回 `isError`，允许
+  后文本送达目标 shell 并回显）、`wifi_scan` 返回真实热点、`connectedDevice` 前台服务
+  常驻通知、退后台后端点仍可达。未验证：`set_uart_config`/`set_wifi`/`set_webdav`、
+  进程被杀、多客户端并发。
 - 使用与安全说明见 [MCP.zh-CN.md](MCP.zh-CN.md)（[English](MCP.md)）。
 
 ## 2026-10-23：上下文与工具加载优化
