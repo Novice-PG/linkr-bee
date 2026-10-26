@@ -1269,7 +1269,7 @@ hardware.
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.4` | Reported firmware version |
 
 ### Test Configuration
 

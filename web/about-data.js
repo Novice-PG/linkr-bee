@@ -7,7 +7,7 @@
 export const ABOUT_DATA = {
   "app": {
     "name": "Linkr Bee Terminal",
-    "version": "0.1.2",
+    "version": "0.1.4",
     "license": "Apache-2.0",
     "licenseUrl": "https://github.com/radxa/linkr-bee/blob/main/LICENSE",
     "repository": "https://github.com/radxa/linkr-bee",

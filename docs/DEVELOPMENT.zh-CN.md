@@ -1030,7 +1030,7 @@ C3 已验证启动和故障恢复时无此告警；其他支持板型目前仅�
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | 上报的固件版本 |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.4` | 上报的固件版本 |
 
 ### 测试配置
 
