@@ -1,5 +1,14 @@
 :root {
   color-scheme: dark;
+  /* Edge-to-edge safe areas. Android 15+ forbids fitting the window above the
+   * system bars, and the WebView does not report env(safe-area-inset-*) for the
+   * status and navigation bars (measured 0 on Chromium 141). Capacitor's
+   * SystemBars plugin injects the real WindowInsets as --safe-area-inset-*,
+   * so prefer that and keep env() for iOS and plain browsers. */
+  --safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
   --bg: #090d14;
   --bg-glow-1: rgba(63, 200, 138, 0.09);
   --bg-glow-2: rgba(80, 130, 240, 0.07);
@@ -281,10 +290,10 @@ button {
   height: 100dvh;
   margin: 0 auto;
   padding:
-    max(var(--layout-gutter), env(safe-area-inset-top, 0px))
-    max(var(--layout-gutter), env(safe-area-inset-right, 0px))
-    max(var(--layout-gutter), env(safe-area-inset-bottom, 0px))
-    max(var(--layout-gutter), env(safe-area-inset-left, 0px));
+    max(var(--layout-gutter), var(--safe-top))
+    max(var(--layout-gutter), var(--safe-right))
+    max(var(--layout-gutter), var(--safe-bottom))
+    max(var(--layout-gutter), var(--safe-left));
 }
 
 .topbar {
@@ -1222,10 +1231,10 @@ body.terminal-fullscreen-fallback {
 @media (max-width: 520px) {
   .app-shell {
     padding:
-      max(10px, env(safe-area-inset-top, 0px))
-      max(10px, env(safe-area-inset-right, 0px))
-      max(10px, env(safe-area-inset-bottom, 0px))
-      max(10px, env(safe-area-inset-left, 0px));
+      max(10px, var(--safe-top))
+      max(10px, var(--safe-right))
+      max(10px, var(--safe-bottom))
+      max(10px, var(--safe-left));
   }
 
   .topbar {
@@ -1957,10 +1966,10 @@ body,
   .app-shell {
     gap: 6px;
     padding:
-      max(6px, env(safe-area-inset-top, 0px))
-      max(6px, env(safe-area-inset-right, 0px))
-      max(6px, env(safe-area-inset-bottom, 0px))
-      max(6px, env(safe-area-inset-left, 0px));
+      max(6px, var(--safe-top))
+      max(6px, var(--safe-right))
+      max(6px, var(--safe-bottom))
+      max(6px, var(--safe-left));
   }
 
   .topbar {
@@ -2217,10 +2226,10 @@ body,
     left: auto;
     width: min(440px, 68vw);
     padding:
-      max(14px, env(safe-area-inset-top, 0px))
-      max(14px, env(safe-area-inset-right, 0px))
-      max(14px, env(safe-area-inset-bottom, 0px))
-      max(14px, env(safe-area-inset-left, 0px));
+      max(14px, var(--safe-top))
+      max(14px, var(--safe-right))
+      max(14px, var(--safe-bottom))
+      max(14px, var(--safe-left));
     border-right: 0;
     border-left: 1px solid var(--line);
     transform: translateX(100%);
@@ -2253,10 +2262,10 @@ body,
   .controls {
     width: 100vw;
     padding:
-      max(8px, env(safe-area-inset-top, 0px))
-      max(8px, env(safe-area-inset-right, 0px))
-      max(10px, env(safe-area-inset-bottom, 0px))
-      max(8px, env(safe-area-inset-left, 0px));
+      max(8px, var(--safe-top))
+      max(8px, var(--safe-right))
+      max(10px, var(--safe-bottom))
+      max(8px, var(--safe-left));
     border-left: 0;
   }
 
@@ -2321,9 +2330,9 @@ html.settings-drawer-layout .mobile-connect {
 
 html.settings-drawer-layout .controls {
   position: fixed;
-  top: max(12px, env(safe-area-inset-top, 0px));
-  right: max(12px, env(safe-area-inset-right, 0px));
-  bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  top: max(12px, var(--safe-top));
+  right: max(12px, var(--safe-right));
+  bottom: max(12px, var(--safe-bottom));
   left: auto;
   z-index: 60;
   width: min(420px, calc(100vw - 32px));
@@ -2396,10 +2405,10 @@ html.settings-drawer-layout .controls[data-settings-active="network"] [data-sett
     bottom: 0;
     width: 100vw;
     padding:
-      max(8px, env(safe-area-inset-top, 0px))
-      max(8px, env(safe-area-inset-right, 0px))
-      max(10px, env(safe-area-inset-bottom, 0px))
-      max(8px, env(safe-area-inset-left, 0px));
+      max(8px, var(--safe-top))
+      max(8px, var(--safe-right))
+      max(10px, var(--safe-bottom))
+      max(8px, var(--safe-left));
     border: 0;
     border-radius: 0;
   }
@@ -2418,10 +2427,10 @@ html.soft-keyboard-open .app-shell {
   height: var(--terminal-viewport-height, 100vh);
   min-height: 0;
   padding:
-    max(4px, env(safe-area-inset-top, 0px))
-    max(6px, env(safe-area-inset-right, 0px))
+    max(4px, var(--safe-top))
+    max(6px, var(--safe-right))
     2px
-    max(6px, env(safe-area-inset-left, 0px));
+    max(6px, var(--safe-left));
   overflow: hidden;
 }
 
@@ -2661,7 +2670,7 @@ html.agent-mode.settings-drawer-layout .app-shell {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
-  padding: max(6px, env(safe-area-inset-top, 0px)) max(6px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px));
+  padding: max(6px, var(--safe-top)) max(6px, var(--safe-right)) max(6px, var(--safe-bottom)) max(6px, var(--safe-left));
 }
 @supports (height: 100dvh) {
   html.agent-mode.settings-drawer-layout .app-shell {
@@ -2711,9 +2720,9 @@ html.agent-keyboard-terminal .agent-console { display: none; }
 /* Keep the shared drawer usable above the soft keyboard, including Agent mode. */
 html.settings-drawer-layout .app-shell.sidebar-open .controls {
   display: flex;
-  top: calc(var(--settings-viewport-top, 0px) + max(12px, env(safe-area-inset-top, 0px)));
+  top: calc(var(--settings-viewport-top, 0px) + max(12px, var(--safe-top)));
   bottom: auto;
-  height: calc(var(--terminal-viewport-height, 100vh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
+  height: calc(var(--terminal-viewport-height, 100vh) - max(12px, var(--safe-top)) - max(12px, var(--safe-bottom)));
 }
 @media (max-width: 600px) {
   html.settings-drawer-layout .app-shell.sidebar-open .controls {
@@ -2723,7 +2732,7 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
 }
 @supports (height: 100dvh) {
   html.settings-drawer-layout .app-shell.sidebar-open .controls {
-    height: calc(var(--terminal-viewport-height, 100dvh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
+    height: calc(var(--terminal-viewport-height, 100dvh) - max(12px, var(--safe-top)) - max(12px, var(--safe-bottom)));
   }
   @media (max-width: 600px) {
     html.settings-drawer-layout .app-shell.sidebar-open .controls {

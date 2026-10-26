@@ -117,13 +117,13 @@ html.settings-drawer-layout .settings-tabs { top: var(--window-header-height); b
 
 @media (max-width: 600px) {
   html.settings-drawer-layout .controls.window-surface {
-    padding-top: env(safe-area-inset-top, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
     border: 0;
     border-radius: 0;
   }
-  html.settings-drawer-layout .drawer-head.window-header { top: env(safe-area-inset-top, 0px); }
-  html.settings-drawer-layout .settings-tabs { top: calc(var(--window-header-height) + env(safe-area-inset-top, 0px)); }
+  html.settings-drawer-layout .drawer-head.window-header { top: var(--safe-top); }
+  html.settings-drawer-layout .settings-tabs { top: calc(var(--window-header-height) + var(--safe-top)); }
   .controls .card { border-radius: var(--window-radius); }
 }
 

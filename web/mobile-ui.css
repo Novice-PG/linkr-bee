@@ -175,7 +175,7 @@
 .mcp-approval {
   position: fixed;
   left: 50%;
-  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  bottom: max(16px, var(--safe-bottom));
   z-index: 60;
   width: min(92vw, 460px);
   transform: translateX(-50%);
