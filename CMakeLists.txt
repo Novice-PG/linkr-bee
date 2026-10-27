@@ -16,6 +16,8 @@ if(CONFIG_SOC_SERIES_ESP32 AND NOT CONFIG_SOC_SERIES_ESP32C3)
 endif()
 
 target_sources(app PRIVATE
+  src/serial_session.c
+  src/ble_peers.c
   src/target_binding.c
   src/ble_security.c
   src/ble_nus.c

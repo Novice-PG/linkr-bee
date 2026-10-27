@@ -5,6 +5,8 @@
 本文集中说明固件构建与刷写、UART 集成、控制命令、测试模式、客户端工具、
 通信协议和 Kconfig 配置。
 
+多连接容量、单输入控制权及暂缓的 Linkr 适配范围见[多客户端串口会话](MULTI_CLIENT.zh-CN.md)。
+
 基于 Zephyr 的 ESP32-C3/C5/WROOM BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
 
 - BLE 外设以 `Linkr Bee XXXX` 广播；`XXXX` 是硬件 MAC 最后四位十六进制

@@ -7,6 +7,7 @@
 #include <zephyr/bluetooth/services/nus.h>
 
 extern struct bt_nus_inst linkr_nus;
+bool linkr_nus_subscribed(struct bt_conn *conn);
 
 static inline int linkr_nus_send(struct bt_conn *conn, const void *data, uint16_t len)
 {

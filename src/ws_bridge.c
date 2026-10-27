@@ -5,13 +5,14 @@
  * while WiFi has an IP address. UART RX bytes are fanned out to every
  * connected client from the uart_to_ble thread via per-client ring
  * buffers; bytes received from clients are queued into the shared
- * BLE-to-UART path in main.c via linkr_uart_write().
+ * BLE-to-UART path in main.c via linkr_uart_write_peer().
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "ws_bridge.h"
 #include "wifi.h"
+#include "serial_session.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
@@ -76,6 +77,7 @@ struct ws_client {
 	atomic_t rx_bytes;
 	atomic_t tx_dropped;
 	bool rx_fragmented;
+	bool rx_control;
 };
 
 static struct ws_client clients[WS_MAX_CLIENTS];
@@ -318,6 +320,7 @@ static int ws_token_resolve(void)
 static void ws_client_cleanup(struct ws_client *client)
 {
 	int sock;
+	linkr_session_close(client);
 
 	atomic_set(&client->state, WS_CLIENT_CLOSING);
 
@@ -475,10 +478,26 @@ static int ws_client_rx_drain_locked(struct ws_client *client, int slot)
 			(void)websocket_send_msg(client->sock, ws_rx_buf,
 					 received, WEBSOCKET_OPCODE_PONG, false,
 					 true, 100);
+		} else if ((message_type & WEBSOCKET_FLAG_TEXT) || client->rx_control) {
+			char response[192];
+			client->rx_control = remaining != 0 || !(message_type & WEBSOCKET_FLAG_FINAL);
+			if (!client->rx_control && received > 0 && received < sizeof(ws_rx_buf) &&
+			    (message_type & WEBSOCKET_FLAG_TEXT) &&
+			    received >= 9 && received < 180 && !memcmp(ws_rx_buf, "@control ", 9)) {
+				ws_rx_buf[received] = '\0';
+				char command[192];
+				snprintk(command, sizeof(command), "control %.*s", received - 9, (char *)ws_rx_buf + 9);
+				if (!linkr_session_control(client, command, response, sizeof(response)))
+					snprintk(response, sizeof(response), "ERR control=bad_action\r\n");
+			} else snprintk(response, sizeof(response), "ERR control=bad_frame\r\n");
+			if (ws_send_text(client, response) < 0) return -ENOTCONN;
 		} else if (ws_client_is_data_fragment(client, message_type,
 						   remaining) &&
 			   received > 0) {
-			if (linkr_uart_write(ws_rx_buf, received) != 0) {
+			int result = linkr_uart_write_peer(client, ws_rx_buf, received);
+			if (result == -EACCES) {
+				if (ws_send_text(client, "ERR control=readonly\r\n") < 0) return -ENOTCONN;
+			} else if (result != 0) {
 				LOG_WRN("[%d] UART queue full; dropping %d WS RX bytes",
 					slot, received);
 			} else {
@@ -538,6 +557,11 @@ static void ws_client_thread(void *p1, void *p2, void *p3)
 			goto out;
 		}
 		LOG_INF("[%d] WS client connected", slot);
+		if (linkr_session_open(client, LINKR_SESSION_LAN)) goto out;
+		client->rx_control = false;
+		char control_status[192];
+		linkr_session_status(client, control_status, sizeof(control_status));
+		if (ws_send_text(client, control_status) < 0) goto out;
 
 		fds[0].fd = client->sock;
 		fds[0].events = ZSOCK_POLLIN;

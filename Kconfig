@@ -1,5 +1,13 @@
 menu "Linkr Bee bridge"
 
+config LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH
+	int "Buffered UART chunks per BLE peer"
+	default 16
+	range 4 64
+	help
+	  Each peer has its own bounded queue and sender. A peer that cannot
+	  keep up is disconnected without stalling UART capture or other peers.
+
 # ESP32 uses Espressif's controller, not Zephyr's BT_CTLR. The upstream
 # controller encryption default follows BT_CTLR_LE_ENC, which is unset with
 # this external controller even when the host enables SMP.

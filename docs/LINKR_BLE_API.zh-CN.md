@@ -73,6 +73,7 @@ capability bits：
 
 - bit 0：WiFi；bit 1：WebDAV；bit 2：WebSocket；
 - bit 3：Device ID；bit 4：异步事件；bit 5：Reliable UART。
+- bit 7：多客户端单控制权。指令、状态及交接边界见[多客户端协议](MULTI_CLIENT.zh-CN.md#协议)。
 
 连接后应先读取 Protocol Info 并检查 major，再读取 Device ID，最后订阅
 Response / Event indication。不要在订阅完成前发送命令。

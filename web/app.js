@@ -1,5 +1,6 @@
 "use strict";
 
+import { MGMT_CAP_MULTI_SESSION, parseSerialControl, isReadonlyManagementCommand } from "./serial_control.js";
 import { createLanTokenStore } from "./lan_token_store.js";
 import {
   BLE_NAME_QUERY_COMMAND,
@@ -63,6 +64,9 @@ let mcpHost = null;
 let mcpUi = null;
 let terminalKeyPreferences = null;
 let aboutPage = null;
+let serialControlTimer = null;
+let serialControlPolling = false;
+let serialControlPending = false;
 let serialInputRevision = 0;
 let serialInputPending = false;
 let bleNotificationSession = null;
@@ -181,6 +185,8 @@ const state = {
   device: null,
   nusReady: false,
   mgmtReady: false,
+  serialControl: null,
+  serialControlRevision: 0,
   reliableReady: false,
   legacy: false,
   reliableTxSequence: 1,
@@ -392,6 +398,9 @@ const XTERM_LIGHT = {
 
 const I18N = {
   en: {
+    serialReadonly: "Read only", serialControlled: "In control", serialAvailable: "No controller",
+    claimControl: "Take control", releaseControl: "Release",
+    serialReadonlyError: "Read-only session. Take control before sending input.",
     title: "Linkr Bee Terminal",
     checking: "Checking Web Bluetooth…",
     supported: "Chrome/Chromium Web Bluetooth over HTTPS or localhost",
@@ -595,6 +604,9 @@ const I18N = {
     dark: "Dark",
   },
   zh: {
+    serialReadonly: "只读", serialControlled: "控制中", serialAvailable: "无人控制",
+    claimControl: "申请控制", releaseControl: "释放",
+    serialReadonlyError: "当前为只读会话，请先申请控制权。",
     title: "Linkr Bee 终端",
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
@@ -1150,6 +1162,7 @@ function applyLang() {
   mcpUi?.refreshLang();
   terminalKeyPreferences?.refreshLang();
   aboutPage?.refreshLang();
+  renderSerialControl();
 }
 
 function fitTerminal() {
@@ -1190,6 +1203,7 @@ function markTerminalBusy() {
 }
 
 function scheduleTerminalGeometrySync() {
+  if (!canSerialInput()) return;
   if (handlesTerminalGeometryLocally()) {
     return;
   }
@@ -1786,6 +1800,139 @@ function scheduleWifiOperationFallback() {
   }, WIFI_EVENT_FALLBACK_MS);
 }
 
+function canSerialInput() {
+  return state.connected && (!state.serialControl || state.serialControl.mode === "control");
+}
+
+function assertSerialInput(revision = state.serialControlRevision) {
+  if (!canSerialInput() || revision !== state.serialControlRevision) {
+    throw new Error(t("serialReadonlyError"));
+  }
+}
+
+function renderSerialControl() {
+  const status = document.getElementById("serialControlStatus");
+  const button = document.getElementById("serialControlButton");
+  const control = state.connected ? state.serialControl : null;
+  if (status) {
+    status.hidden = !control;
+    if (control) {
+      const key = control.mode === "control" ? "serialControlled" :
+        control.mode === "available" ? "serialAvailable" : "serialReadonly";
+      status.textContent = `${t(key)} · ${control.peers}`;
+      status.title = `#${control.self} / controller #${control.owner || "–"}`;
+    }
+  }
+  if (button) {
+    button.hidden = !control;
+    button.disabled = serialControlPending;
+    button.textContent = t(control?.mode === "control" ? "releaseControl" : "claimControl");
+    button.title = button.textContent;
+    button.setAttribute("aria-label", button.textContent);
+  }
+  const writable = canSerialInput();
+  if (state.term) {
+    state.term.options.disableStdin = !writable;
+    if (!writable) state.term.blur();
+  }
+  for (const element of [elements.breakButton, elements.controlKeyButton,
+    elements.pasteTerminalButton, ...elements.modifierButtons, ...elements.terminalKeyButtons]) {
+    if (element) element.disabled = !writable;
+  }
+  const management = writable && state.mode === "ble" && state.mgmtReady;
+  elements.setUartButton.disabled = !management;
+  elements.wifiSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
+  elements.wifiOffButton.disabled = elements.wifiSetButton.disabled;
+  elements.wifiScanButton.disabled = elements.wifiSetButton.disabled;
+  elements.webdavSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_WEBDAV);
+  elements.webdavOffButton.disabled = elements.webdavSetButton.disabled;
+  elements.webdavQueryButton.disabled = !management || !hasManagementCapability(MGMT_CAP_WEBDAV);
+  updateBleNameControls();
+  document.querySelectorAll("#cheatList button[data-cmd], #presets button, .presets button")
+    .forEach(item => { item.disabled = !writable; });
+  if (control && !writable) elements.terminalInputHint.textContent = t("serialReadonlyError");
+  else if (state.connected) elements.terminalInputHint.textContent = t("terminalInputHint");
+}
+
+function applySerialControl(control) {
+  const previous = state.serialControl;
+  if (!state.connected) return;
+  if (previous?.epoch !== control.epoch || previous?.mode !== control.mode) {
+    state.serialControlRevision++;
+    serialInputPending = false;
+    serialInputRevision++;
+    clearTerminalGeometrySyncTimer();
+    if (previous?.mode === "control") agentPanel?.connectionChanged(false);
+    if (control.mode === "control") {
+      state.terminalGeometrySynced = "";
+      agentPanel?.connectionChanged(true);
+    }
+  }
+  state.serialControl = control;
+  serialControlPending = false;
+  renderSerialControl();
+  if (control.mode === "control") scheduleTerminalGeometrySync();
+}
+
+function consumeSerialControl(text) {
+  const control = parseSerialControl(text);
+  if (control) {
+    const first = !state.serialControl;
+    applySerialControl(control);
+    if (state.mode === "ws") {
+      startSerialControlPoll();
+      if (first && control.mode === "available") requestSerialControl("claim").catch(() => {});
+    }
+    return true;
+  }
+  if (String(text).trim().startsWith("ERR control=")) {
+    serialControlPending = false;
+    if (state.serialControl && String(text).includes("readonly")) {
+      applySerialControl({ ...state.serialControl, mode: "readonly" });
+    }
+    renderSerialControl();
+    return true;
+  }
+  return false;
+}
+
+async function requestSerialControl(action = "?") {
+  if (!state.connected) return;
+  if (state.mode === "ws") {
+    if (!state.serialControl || state.ws?.readyState !== WebSocket.OPEN) return;
+    state.ws.send(`@control ${action}`);
+  } else {
+    await sendControl(action === "?" ? "@c?" : `@c ${action}`, { returnResponse: true, quiet: true });
+  }
+}
+
+function startSerialControlPoll() {
+  if (serialControlTimer) return;
+  serialControlTimer = setInterval(async () => {
+    if (serialControlPolling || !state.connected || !state.serialControl) return;
+    const operation = {};
+    const generation = state.writeGeneration;
+    serialControlPolling = operation;
+    try { await requestSerialControl(); }
+    catch (_error) {
+      if (generation === state.writeGeneration && state.serialControl) {
+        applySerialControl({ ...state.serialControl, mode: "readonly" });
+      }
+    } finally {
+      if (serialControlPolling === operation) serialControlPolling = false;
+    }
+  }, 2000);
+}
+
+document.getElementById("serialControlButton")?.addEventListener("click", async () => {
+  if (serialControlPending || !state.serialControl) return;
+  serialControlPending = true;
+  renderSerialControl();
+  try { await requestSerialControl(state.serialControl.mode === "control" ? "release" : "claim"); }
+  catch (error) { toast(error.message, "error"); }
+  finally { serialControlPending = false; renderSerialControl(); }
+});
+
 function hasManagementCapability(capability) {
   return (state.mgmtCapabilities & capability) !== 0;
 }
@@ -1803,7 +1950,7 @@ function requestDeviceState() {
     // web UI has no other management-command entry point. Capturing it during
     // the BLE session means the token field is already filled when the user
     // switches to LAN mode. "@i?" diagnostics deliberately omit the token.
-    requests.push(sendControl("@s?"));
+    if (canSerialInput()) requests.push(sendControl("@s?"));
   }
   return Promise.all(requests);
 }
@@ -1814,9 +1961,9 @@ function updateBleNameControls() {
     state.mode === "ble" &&
     state.mgmtReady &&
     state.bleNameSupported !== false;
-  elements.bleNameInput.disabled = !enabled;
-  elements.bleNameSetButton.disabled = !enabled;
-  elements.bleNameDefaultButton.disabled = !enabled;
+  elements.bleNameInput.disabled = !enabled || !canSerialInput();
+  elements.bleNameSetButton.disabled = !enabled || !canSerialInput();
+  elements.bleNameDefaultButton.disabled = !enabled || !canSerialInput();
   elements.bleNameQueryButton.disabled = !enabled;
 }
 
@@ -3010,6 +3157,14 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   const connectionChanged = state.connected !== connected;
+  if (!connected) {
+    clearInterval(serialControlTimer);
+    serialControlTimer = null;
+    serialControlPolling = false;
+    state.serialControl = null;
+    state.serialControlRevision++;
+    serialControlPending = false;
+  }
   state.writeGeneration += 1;
   state.uartWriteError = "";
   state.mgmtWriteError = "";
@@ -3089,6 +3244,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     setAutoScroll(true, true);
     state.term?.focus();
   }
+  renderSerialControl();
 }
 
 function rememberDevice(device, restored = false) {
@@ -3203,8 +3359,9 @@ function isAttSizeRejection(error) {
   return /\blength\b[^.]*\binvalid\b/i.test(message) || /\binvalid\b[^.]*\blength\b/i.test(message);
 }
 
-async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal) {
+async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal, revision = state.serialControlRevision) {
   assertWriteSession(generation, signal);
+  assertSerialInput(revision);
   if (state.uartWriteError) throw new Error(state.uartWriteError);
   if (state.mode === "ws") {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
@@ -3232,6 +3389,7 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
     : Math.min(chunkSize(), 20);
   for (let offset = 0; offset < bytes.length; offset += size) {
     assertWriteSession(generation, signal);
+    assertSerialInput(revision);
     const chunk = bytes.slice(offset, offset + size);
     if (elements.debugInput.checked) {
       appendLine(
@@ -3242,7 +3400,7 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
     }
     try {
       if (state.reliableReady) {
-        await writeReliableUartChunk(chunk, generation, signal);
+        await writeReliableUartChunk(chunk, generation, signal, revision);
         state.txBytes += chunk.length;
         continue;
       }
@@ -3254,10 +3412,12 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
         false,
       );
       assertWriteSession(generation, signal);
+      assertSerialInput(revision);
       state.txBytes += chunk.length;
     } catch (error) {
       if (state.uartWriteError && generation === state.writeGeneration) throw error;
       assertWriteSession(generation, signal);
+      assertSerialInput(revision);
       // Agent writes cannot be replayed after an uncertain legacy write, and
       // an earlier successful chunk must never be resent as part of fallback.
       if (signal || offset > 0 || !isAttSizeRejection(error)) throw error;
@@ -3269,7 +3429,7 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
       }
       elements.chunkInput.value = "20";
       appendLine("[warn] BLE write failed; retrying with 20-byte chunks");
-      await writeBytes(bytes, sensitive, generation, signal);
+      await writeBytes(bytes, sensitive, generation, signal, revision);
       return;
     }
   }
@@ -3280,7 +3440,8 @@ function nextSequence(sequence) {
   return sequence === 0xffffffff ? 1 : sequence + 1;
 }
 
-async function writeReliableUartChunk(payload, generation = state.writeGeneration, signal) {
+async function writeReliableUartChunk(payload, generation = state.writeGeneration, signal, revision = state.serialControlRevision) {
+  assertSerialInput(revision);
   const sequence = state.reliableTxSequence;
   const frame = new Uint8Array(RELIABLE_UART_HEADER_SIZE + payload.length);
   const view = new DataView(frame.buffer);
@@ -3315,6 +3476,7 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
     try {
       for (let offset = 0; offset < frame.length; offset += attSize) {
         assertWriteSession(generation, signal);
+        assertSerialInput(revision);
         writesAttempted += 1;
         await bleTransport.write(
           state.device.id,
@@ -3326,6 +3488,7 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
         writesCompleted += 1;
       }
       assertWriteSession(generation, signal);
+      assertSerialInput(revision);
       state.reliableWriteSize = attSize;
       state.reliableTxSequence = nextSequence(sequence);
       return;
@@ -3339,6 +3502,7 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
         throw new Error(state.uartWriteError, { cause: error });
       }
       assertWriteSession(generation, signal);
+      assertSerialInput(revision);
       lastError = error;
       /* Explicit size rejection before the first fragment is safe to retry
        * with the next common ATT payload size. */
@@ -3348,10 +3512,11 @@ async function writeReliableUartChunk(payload, generation = state.writeGeneratio
 }
 
 function enqueueBytes(bytes, sensitive = false, { generation = state.writeGeneration, signal, inputRevision, trackPending = true } = {}) {
-  try { assertWriteSession(generation, signal); } catch (error) { return Promise.reject(error); }
+  try { assertWriteSession(generation, signal); assertSerialInput(); } catch (error) { return Promise.reject(error); }
   if (inputRevision !== undefined && inputRevision !== serialInputRevision) {
     return Promise.reject(new Error("Terminal input changed; request a new command before sending."));
   }
+  const ownershipRevision = state.serialControlRevision;
   const queuedRevision = trackPending ? ++serialInputRevision : serialInputRevision;
   if (trackPending) {
     serialInputPending = inputLeavesPendingLine(bytes, serialInputPending);
@@ -3362,11 +3527,12 @@ function enqueueBytes(bytes, sensitive = false, { generation = state.writeGenera
       if (inputRevision !== undefined && queuedRevision !== serialInputRevision) {
         throw new Error("Terminal input changed; request a new command before sending.");
       }
-      await writeBytes(bytes, sensitive, generation, signal);
+      await writeBytes(bytes, sensitive, generation, signal, ownershipRevision);
     } catch (error) {
       // A partially delivered line has unknown contents; Auto must ask next time.
       // Transport replies are not terminal input and must not latch the line.
-      if (trackPending && generation === state.writeGeneration) {
+      if (trackPending && generation === state.writeGeneration &&
+          ownershipRevision === state.serialControlRevision) {
         serialInputPending = true;
         serialInputRevision++;
       }
@@ -3415,7 +3581,7 @@ function resetModifiers() {
 }
 
 function onTerminalData(data, { raw = false, userInput = true } = {}) {
-  if (!state.connected || !data) {
+  if (!canSerialInput() || !data) {
     return;
   }
   if (!userInput) {
@@ -3443,9 +3609,12 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
   writeText(payload).catch((error) => appendLine(`[error] ${error.message}`));
 }
 
-async function sendControl(command, { returnResponse = false } = {}) {
+async function sendControl(command, { returnResponse = false, quiet = false } = {}) {
+  if (state.serialControl && !canSerialInput() && !isReadonlyManagementCommand(command)) {
+    throw new Error(t("serialReadonlyError"));
+  }
   const sensitive = command.startsWith("@w=") || command.startsWith("@d=");
-  appendLine(
+  if (!quiet) appendLine(
     `[control] ${sensitive ? `${command.slice(0, 2)}=<redacted>` : command}`,
   );
   if (state.mode !== "ble" || !state.mgmtReady) {
@@ -3453,6 +3622,11 @@ async function sendControl(command, { returnResponse = false } = {}) {
   }
   if (state.mgmtWriteError) throw new Error(state.mgmtWriteError);
   const generation = state.writeGeneration;
+  const ownershipRevision = state.serialControlRevision;
+  const requiresControl = !isReadonlyManagementCommand(command);
+  const checkOwnership = () => {
+    if (requiresControl && state.serialControl) assertSerialInput(ownershipRevision);
+  };
   const deviceId = state.device?.id;
   const responses = state.mgmtResponses;
 
@@ -3475,6 +3649,7 @@ async function sendControl(command, { returnResponse = false } = {}) {
 
   const operation = state.controlWriteQueue.then(async () => {
     assertWriteSession(generation);
+    checkOwnership();
     if (state.mgmtWriteError) throw new Error(state.mgmtWriteError);
     if (!state.connected || !state.mgmtReady || !state.device) {
       throw new Error("Management characteristic is not ready");
@@ -3493,6 +3668,7 @@ async function sendControl(command, { returnResponse = false } = {}) {
       const size = 20;
       for (let offset = 0; offset < frame.length; offset += size) {
         assertWriteSession(generation);
+        checkOwnership();
         const chunk = frame.slice(offset, offset + size);
         if (elements.debugInput.checked) {
           appendLine(
@@ -3537,9 +3713,10 @@ function dispatchManagementMessage(message) {
       `[mgmt ${kind} #${message.requestId} flags=0x${message.flags.toString(16)}]`,
     );
   }
-  feedManagementText(text);
+  const controlMessage = consumeSerialControl(text);
+  if (!controlMessage) feedManagementText(text);
   for (const line of text.split(/\r?\n/)) {
-    if (line) {
+    if (line && !controlMessage) {
       appendLine(`[${kind} #${message.requestId}] ${redactSecrets(line)}`);
     }
   }
@@ -3776,7 +3953,7 @@ function connectWs() {
       if (event.data instanceof ArrayBuffer) {
         handleIncomingBytes(new Uint8Array(event.data));
       } else if (typeof event.data === "string") {
-        handleIncomingBytes(encoder.encode(event.data));
+        if (!consumeSerialControl(event.data)) handleIncomingBytes(encoder.encode(event.data));
       }
     };
     ws.onclose = () => {
@@ -4053,7 +4230,15 @@ async function connectOnce({ chooseDevice = false } = {}) {
     }
     state.legacy = false;
     state.deviceRestored = false;
+    if (hasManagementCapability(MGMT_CAP_MULTI_SESSION)) {
+      state.serialControl = { mode: "readonly", epoch: 0, peers: 1, owner: 0, self: 0 };
+    }
     setConnected(true, { preserveJournal: true });
+    if (state.serialControl) {
+      await requestSerialControl();
+      if (state.serialControl.mode === "available") await requestSerialControl("claim");
+      startSerialControlPoll();
+    }
     appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId} transport=${state.reliableReady ? "RELIABLE" : "NUS"} build=${APP_BUILD}`);
     requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),

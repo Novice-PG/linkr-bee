@@ -61,7 +61,7 @@ static inline int  linkr_ws_diagnostics(char *buf, size_t len) { return snprintk
 /* Implemented in main.c: atomically queue a complete write for bridge UART TX,
  * sharing the BLE RX path. Returns 0 on success, -ENOMEM without queuing a
  * partial prefix when capacity is insufficient. */
-int linkr_uart_write(const uint8_t *data, size_t len);
+int linkr_uart_write_peer(const void *peer, const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

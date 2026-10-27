@@ -165,9 +165,7 @@ static int http_put(const struct webdav_url *url, const uint8_t *data, size_t le
     return ++requests == 1 ? -EIO : 0;
 }
 
-static int ws_feeds, log_feeds, uart_reliable_drop_no_conn;
-static int ble_result = -ENOTCONN;
-static bool reliable_mode = true;
+static int ws_feeds, log_feeds, ble_feeds;
 static void linkr_log_feed(const uint8_t *data, uint16_t len)
 {
     (void)data; (void)len; ++log_feeds;
@@ -176,14 +174,9 @@ static void linkr_ws_feed(const uint8_t *data, uint16_t len)
 {
     (void)data; (void)len; ++ws_feeds;
 }
-static bool linkr_uart_reliable_mode(void) { return reliable_mode; }
-static int nus_send_chunk(const uint8_t *data, uint16_t len)
+static void linkr_ble_feed(const uint8_t *data, uint16_t len)
 {
-    (void)data; (void)len; return 0;
-}
-static int reliable_send_chunk(const uint8_t *data, uint16_t len)
-{
-    (void)data; (void)len; return ble_result;
+    (void)data; (void)len; ++ble_feeds;
 }
 
 #include "production_functions.inc"
@@ -205,21 +198,17 @@ int main(int argc, char **argv)
         if (ws_feeds != 100 || log_feeds != 100) {
             return 4;
         }
-        /* A connected peer's transient failure must still be retried without
-         * duplicating bytes in the LAN or log sinks. */
+        /* Re-entering for the same capture chunk must not duplicate any sink.
+         * BLE now queues independently instead of stalling capture on retry. */
         bool accounted = false;
-        ble_result = -EIO;
-        if (uart_forward_chunk(data, sizeof(data), &accounted) != -EIO) {
+        if (uart_forward_chunk(data, sizeof(data), &accounted) != 0) {
             return 5;
         }
-        ble_result = 0;
         if (uart_forward_chunk(data, sizeof(data), &accounted) != 0 ||
-            ws_feeds != 101 || log_feeds != 101) {
+            ws_feeds != 101 || log_feeds != 101 || ble_feeds != 101) {
             return 6;
         }
-        /* Asserted by tests/test_regressions.py: both sinks saw every idle
-         * chunk, the failed send fed neither, and the retry fed both exactly
-         * once more — the "LAN and logs keep flowing" the test name promises. */
+        /* Each captured chunk reaches every fan-out sink exactly once. */
         printf("forward|%d|%d\n", ws_feeds, log_feeds);
         return 0;
     }

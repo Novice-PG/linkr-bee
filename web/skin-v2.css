@@ -677,6 +677,30 @@ h1 {
   flex-wrap: nowrap;
 }
 
+.serial-control-status {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.term-tools .serial-control-button {
+  width: auto;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  white-space: nowrap;
+  color: var(--text);
+  border-color: var(--line);
+}
+
+@media (max-width: 600px) {
+  .terminal-head:has(#serialControlButton:not([hidden])) .term-title { display: none; }
+  .terminal-head:has(#serialControlButton:not([hidden])) .term-tools { width: 100%; }
+  .terminal-head:has(#serialControlButton:not([hidden])) :is(#zoomOutBtn, #zoomInBtn) { display: none; }
+  .term-tools .serial-control-status { margin-inline-end: auto; }
+  .term-tools .serial-control-status { font-size: 11px; }
+  .term-tools .serial-control-button { padding-inline: 7px; }
+}
+
 .term-tool {
   min-width: 28px;
   height: 28px;

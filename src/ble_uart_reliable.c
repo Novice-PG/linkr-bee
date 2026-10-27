@@ -17,7 +17,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "ble_uart_reliable.h"
-#include "watchdog.h"
+#include "serial_session.h"
 
 LOG_MODULE_REGISTER(linkr_ble_uart_reliable, LOG_LEVEL_INF);
 
@@ -48,22 +48,24 @@ BUILD_ASSERT(sizeof(struct reliable_state_value) == 16);
 
 static linkr_uart_reliable_write_fn uart_write_fn;
 static struct k_mutex rx_lock;
-static struct {
-	struct bt_conn *conn;
-	uint32_t sequence;
-	uint16_t expected;
-	uint16_t received;
-	int64_t started_at;
-	uint8_t payload[LINKR_UART_RELIABLE_MAX_PAYLOAD];
-} rx_state;
-static uint32_t rx_next_sequence = 1;
-static uint32_t tx_next_sequence = 1;
-static uint32_t tx_acked_sequence;
-static atomic_t reliable_mode;
-static atomic_t indication_enabled;
-static struct k_sem indication_done;
-static struct bt_gatt_indicate_params indication_params;
-static int indication_result;
+static struct reliable_peer {
+	struct {
+		struct bt_conn *conn;
+		uint32_t ticket;
+		uint32_t sequence;
+		uint16_t expected;
+		uint16_t received;
+		int64_t started_at;
+		uint8_t payload[LINKR_UART_RELIABLE_MAX_PAYLOAD];
+	} rx;
+	uint32_t rx_next;
+	uint32_t tx_next;
+	uint32_t tx_acked;
+	atomic_t selected;
+	struct k_sem done;
+	struct bt_gatt_indicate_params params;
+	int result;
+} reliable_peers[CONFIG_BT_MAX_CONN];
 
 /*
  * Instrumentation for the confirmed-indication handoff.
@@ -138,21 +140,23 @@ static uint32_t sequence_next(uint32_t sequence)
 	return sequence == UINT32_MAX ? 1 : sequence + 1;
 }
 
-static void rx_reset_locked(void)
+static void rx_reset_locked(struct bt_conn *conn)
 {
-	if (rx_state.conn) {
-		bt_conn_unref(rx_state.conn);
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
+	if (peer->rx.conn) {
+		bt_conn_unref(peer->rx.conn);
 	}
-	memset(&rx_state, 0, sizeof(rx_state));
+	memset(&peer->rx, 0, sizeof(peer->rx));
 }
 
 static ssize_t state_read(struct bt_conn *conn,
 			  const struct bt_gatt_attr *attr, void *buf,
 			  uint16_t len, uint16_t offset)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	struct reliable_state_value state = {
 		.version = LINKR_UART_RELIABLE_API_MAJOR,
-		.flags = atomic_get(&reliable_mode) ? 1 : 0,
+		.flags = linkr_uart_reliable_mode(conn) ? 1 : 0,
 		.max_payload_le = {
 			LINKR_UART_RELIABLE_MAX_PAYLOAD & 0xff,
 			LINKR_UART_RELIABLE_MAX_PAYLOAD >> 8,
@@ -160,9 +164,9 @@ static ssize_t state_read(struct bt_conn *conn,
 	};
 
 	ARG_UNUSED(attr);
-	sys_put_le32(rx_next_sequence, state.rx_next_sequence_le);
-	sys_put_le32(tx_next_sequence, state.tx_next_sequence_le);
-	sys_put_le32(tx_acked_sequence, state.tx_acked_sequence_le);
+	sys_put_le32(peer->rx_next, state.rx_next_sequence_le);
+	sys_put_le32(peer->tx_next, state.tx_next_sequence_le);
+	sys_put_le32(peer->tx_acked, state.tx_acked_sequence_le);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &state,
 				 sizeof(state));
 }
@@ -171,11 +175,12 @@ static ssize_t rx_write(struct bt_conn *conn,
 			const struct bt_gatt_attr *attr, const void *buf,
 			uint16_t len, uint16_t offset, uint8_t flags)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	const uint8_t *bytes = buf;
 	const struct reliable_header *header;
 	uint16_t fragment_len;
-	uint32_t previous_sequence = rx_next_sequence == 1 ?
-				     UINT32_MAX : rx_next_sequence - 1;
+	uint32_t previous_sequence = peer->rx_next == 1 ?
+				     UINT32_MAX : peer->rx_next - 1;
 	int err = 0;
 
 	ARG_UNUSED(attr);
@@ -184,12 +189,23 @@ static ssize_t rx_write(struct bt_conn *conn,
 	}
 
 	k_mutex_lock(&rx_lock, K_FOREVER);
-	if (rx_state.expected &&
-	    k_uptime_get() - rx_state.started_at > RX_TIMEOUT_MS) {
-		rx_reset_locked();
+	/* Ownership changes abandon an old partial frame before the next owner
+	 * starts a frame; never infer framing from bytes inside an active epoch. */
+	if (peer->rx.expected && peer->rx.ticket != linkr_session_ticket(conn, false)) {
+		rx_reset_locked(conn);
+	}
+	uint32_t ticket = peer->rx.expected ? peer->rx.ticket : linkr_session_ticket(conn, true);
+	if (!linkr_session_begin(ticket)) {
+		rx_reset_locked(conn);
+		k_mutex_unlock(&rx_lock);
+		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+	}
+	if (peer->rx.expected &&
+	    k_uptime_get() - peer->rx.started_at > RX_TIMEOUT_MS) {
+		rx_reset_locked(conn);
 	}
 
-	if (!rx_state.expected) {
+	if (!peer->rx.expected) {
 		if (len < sizeof(*header)) {
 			err = BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 			goto out;
@@ -205,34 +221,35 @@ static ssize_t rx_write(struct bt_conn *conn,
 			err = BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 			goto out;
 		}
-		rx_state.conn = bt_conn_ref(conn);
-		rx_state.sequence = sys_get_le32(header->sequence_le);
-		rx_state.expected = sys_get_le16(header->payload_len_le);
-		rx_state.received = fragment_len;
-		rx_state.started_at = k_uptime_get();
-		memcpy(rx_state.payload, bytes + sizeof(*header), fragment_len);
+		peer->rx.conn = bt_conn_ref(conn);
+		peer->rx.ticket = ticket;
+		peer->rx.sequence = sys_get_le32(header->sequence_le);
+		peer->rx.expected = sys_get_le16(header->payload_len_le);
+		peer->rx.received = fragment_len;
+		peer->rx.started_at = k_uptime_get();
+		memcpy(peer->rx.payload, bytes + sizeof(*header), fragment_len);
 	} else {
-		uint16_t remaining = rx_state.expected - rx_state.received;
+		uint16_t remaining = peer->rx.expected - peer->rx.received;
 
-		if (rx_state.conn != conn || len > remaining) {
-			rx_reset_locked();
+		if (peer->rx.conn != conn || len > remaining) {
+			rx_reset_locked(conn);
 			err = BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 			goto out;
 		}
-		memcpy(rx_state.payload + rx_state.received, bytes, len);
-		rx_state.received += len;
+		memcpy(peer->rx.payload + peer->rx.received, bytes, len);
+		peer->rx.received += len;
 	}
 
-	if (rx_state.received == rx_state.expected) {
-		if (rx_state.sequence == rx_next_sequence) {
-			err = uart_write_fn(rx_state.payload, rx_state.expected);
+	if (peer->rx.received == peer->rx.expected) {
+		if (peer->rx.sequence == peer->rx_next) {
+			err = uart_write_fn(conn, peer->rx.payload, peer->rx.expected);
 			if (!err) {
-				rx_next_sequence = sequence_next(rx_next_sequence);
+				peer->rx_next = sequence_next(peer->rx_next);
 			}
-		} else if (rx_state.sequence != previous_sequence) {
+		} else if (peer->rx.sequence != previous_sequence) {
 			err = -EILSEQ;
 		}
-		rx_reset_locked();
+		rx_reset_locked(conn);
 		if (err) {
 			err = BT_GATT_ERR(err == -ENOMEM ?
 					  BT_ATT_ERR_INSUFFICIENT_RESOURCES :
@@ -242,19 +259,18 @@ static ssize_t rx_write(struct bt_conn *conn,
 
 out:
 	k_mutex_unlock(&rx_lock);
+	linkr_session_end();
 	return err ? err : len;
 }
 
-static void tx_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+static ssize_t tx_ccc_write(struct bt_conn *conn,
+			    const struct bt_gatt_attr *attr, uint16_t value)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	ARG_UNUSED(attr);
-	atomic_set(&indication_enabled,
-		   value == BT_GATT_CCC_INDICATE ? 1 : 0);
-	if (atomic_get(&indication_enabled)) {
-		atomic_set(&reliable_mode, 1);
-	}
-	LOG_INF("Reliable UART indications %s",
-		 atomic_get(&indication_enabled) ? "enabled" : "disabled");
+	if (value == BT_GATT_CCC_INDICATE) atomic_set(&peer->selected, 1);
+	else if (!value && atomic_get(&peer->selected) == 1) atomic_clear(&peer->selected);
+	return sizeof(value);
 }
 
 BT_GATT_SERVICE_DEFINE(linkr_uart_reliable_service,
@@ -265,7 +281,7 @@ BT_GATT_SERVICE_DEFINE(linkr_uart_reliable_service,
 	BT_GATT_CHARACTERISTIC(BT_UUID_LINKR_UART_RELIABLE_TX,
 			       BT_GATT_CHRC_INDICATE, BT_GATT_PERM_READ_ENCRYPT,
 			       NULL, NULL, NULL),
-	BT_GATT_CCC(tx_ccc_changed,
+	BT_GATT_CCC_WITH_WRITE_CB(NULL, tx_ccc_write,
 		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 	BT_GATT_CHARACTERISTIC(BT_UUID_LINKR_UART_RELIABLE_STATE,
 			       BT_GATT_CHRC_READ, BT_GATT_PERM_READ_ENCRYPT,
@@ -275,41 +291,41 @@ static void indication_complete(struct bt_conn *conn,
 				struct bt_gatt_indicate_params *params,
 				uint8_t err)
 {
-	ARG_UNUSED(conn);
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	ARG_UNUSED(params);
-	indication_result = err ? -EIO : 0;
+	peer->result = err ? -EIO : 0;
 	/* params remains owned by the GATT stack until the destroy callback. */
 }
 
 static void indication_destroy(struct bt_gatt_indicate_params *params)
 {
-	ARG_UNUSED(params);
-	k_sem_give(&indication_done);
+	struct reliable_peer *peer = CONTAINER_OF(params, struct reliable_peer, params);
+	k_sem_give(&peer->done);
 }
 
 static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 			     uint16_t len)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	int err;
 	int64_t started_at = k_uptime_get();
 
-	if (!atomic_get(&indication_enabled) ||
-	    !bt_gatt_is_subscribed(conn, &linkr_uart_reliable_service.attrs[4],
+	if (!bt_gatt_is_subscribed(conn, &linkr_uart_reliable_service.attrs[4],
 				   BT_GATT_CCC_INDICATE)) {
 		return -ENOTCONN;
 	}
 
 	atomic_inc(&diag_ind_total);
 	for (int retry = 0; retry < 20; retry++) {
-		k_sem_reset(&indication_done);
-		indication_result = -ETIMEDOUT;
-		memset(&indication_params, 0, sizeof(indication_params));
-		indication_params.attr = &linkr_uart_reliable_service.attrs[4];
-		indication_params.func = indication_complete;
-		indication_params.destroy = indication_destroy;
-		indication_params.data = data;
-		indication_params.len = len;
-		err = bt_gatt_indicate(conn, &indication_params);
+		k_sem_reset(&peer->done);
+		peer->result = -ETIMEDOUT;
+		memset(&peer->params, 0, sizeof(peer->params));
+		peer->params.attr = &linkr_uart_reliable_service.attrs[4];
+		peer->params.func = indication_complete;
+		peer->params.destroy = indication_destroy;
+		peer->params.data = data;
+		peer->params.len = len;
+		err = bt_gatt_indicate(conn, &peer->params);
 		if (err != -EBUSY && err != -ENOMEM) {
 			break;
 		}
@@ -328,13 +344,13 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	if (err) {
 		return err;
 	}
-	if (k_sem_take(&indication_done, K_MSEC(INDICATE_TIMEOUT_MS))) {
-		/* Do not return while Zephyr still owns indication_params. Force the
+	if (k_sem_take(&peer->done, K_MSEC(INDICATE_TIMEOUT_MS))) {
+		/* Do not return while Zephyr still owns peer->params. Force the
 		 * connection down so GATT completes the request, then wait for destroy. */
 		atomic_inc(&diag_ind_timeout);
 		LOG_WRN("Reliable UART indication timed out; disconnecting peer");
 		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		(void)k_sem_take(&indication_done, K_FOREVER);
+		(void)k_sem_take(&peer->done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
 	/* Wall time from submitting the indication to its confirmation landing.
@@ -342,10 +358,7 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	 * climbing while `slept_ms` stays flat means the stall is elsewhere. */
 	diag_note_max(&diag_ind_wait_max_ms,
 		      (uint32_t)(k_uptime_get() - started_at));
-	if (indication_result == 0) {
-		linkr_watchdog_feed(LINKR_WDT_UART_RX);
-	}
-	return indication_result;
+	return peer->result;
 }
 
 int linkr_uart_reliable_init(linkr_uart_reliable_write_fn write_fn)
@@ -355,35 +368,52 @@ int linkr_uart_reliable_init(linkr_uart_reliable_write_fn write_fn)
 	}
 	uart_write_fn = write_fn;
 	k_mutex_init(&rx_lock);
-	k_sem_init(&indication_done, 0, 1);
+	for (size_t i = 0; i < ARRAY_SIZE(reliable_peers); i++) {
+		reliable_peers[i].rx_next = 1;
+		reliable_peers[i].tx_next = 1;
+		k_sem_init(&reliable_peers[i].done, 0, 1);
+	}
 	return 0;
 }
 
 void linkr_uart_reliable_disconnected(struct bt_conn *conn)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	k_mutex_lock(&rx_lock, K_FOREVER);
-	if (rx_state.conn == conn) {
-		rx_reset_locked();
+	if (peer->rx.conn == conn) {
+		rx_reset_locked(conn);
 	}
 	k_mutex_unlock(&rx_lock);
-	atomic_clear(&indication_enabled);
+	atomic_clear(&peer->selected);
 }
 
-bool linkr_uart_reliable_mode(void)
+void linkr_uart_reliable_connected(struct bt_conn *conn)
 {
-	return atomic_get(&reliable_mode) != 0;
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
+	peer->rx_next = 1;
+	peer->tx_next = 1;
+	peer->tx_acked = 0;
+	atomic_clear(&peer->selected);
 }
 
-void linkr_uart_reliable_nus_selected(void)
+bool linkr_uart_reliable_mode(struct bt_conn *conn)
 {
-	if (!atomic_get(&indication_enabled)) {
-		atomic_clear(&reliable_mode);
-	}
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
+	int selected = atomic_get(&peer->selected);
+	return selected != 2 && bt_gatt_is_subscribed(conn,
+		&linkr_uart_reliable_service.attrs[4], BT_GATT_CCC_INDICATE);
+}
+
+void linkr_uart_reliable_nus_selected(struct bt_conn *conn)
+{
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
+	atomic_set(&peer->selected, 2);
 }
 
 int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 			     uint16_t len)
 {
+	struct reliable_peer *peer = &reliable_peers[bt_conn_index(conn)];
 	uint8_t fragment[FRAGMENT_MAX];
 	struct reliable_header *header = (struct reliable_header *)fragment;
 	uint16_t mtu_payload;
@@ -408,7 +438,7 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	header->magic[1] = 'R';
 	header->version = LINKR_UART_RELIABLE_API_MAJOR;
 	header->flags = 0;
-	sys_put_le32(tx_next_sequence, header->sequence_le);
+	sys_put_le32(peer->tx_next, header->sequence_le);
 	sys_put_le16(len, header->payload_len_le);
 	header->reserved[0] = 0;
 	header->reserved[1] = 0;
@@ -436,7 +466,7 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 		}
 		sent += chunk;
 	}
-	tx_acked_sequence = tx_next_sequence;
-	tx_next_sequence = sequence_next(tx_next_sequence);
+	peer->tx_acked = peer->tx_next;
+	peer->tx_next = sequence_next(peer->tx_next);
 	return 0;
 }

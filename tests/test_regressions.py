@@ -94,8 +94,8 @@ class FirmwareTests(unittest.TestCase):
     def test_default_firmware_keeps_lan_and_logs_flowing_after_ble_disconnect(self):
         # The exit code alone would pass even if a chunk were dropped from, or
         # duplicated into, the LAN or log sink, so assert the counts the
-        # firmware reports: 100 idle chunks reach both, a connected peer's
-        # transient failure feeds neither, and the retry feeds both once more.
+        # firmware reports: 100 idle chunks reach both, and re-entering a
+        # captured chunk feeds both exactly once rather than duplicating it.
         (summary,) = self.run_scenario("forward")
         self.assertEqual(summary, ["forward", "101", "101"])
 

@@ -19,6 +19,7 @@
 #include <zephyr/sys/util.h>
 
 #include "ble_mgmt.h"
+#include "serial_session.h"
 #include "watchdog.h"
 
 LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
@@ -31,6 +32,7 @@ LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 
 #define LINKR_MGMT_CAPABILITIES                                               \
 	(LINKR_MGMT_CAP_DEVICE_ID | LINKR_MGMT_CAP_RELIABLE_UART |             \
+	 LINKR_MGMT_CAP_MULTI_SESSION |                                      \
 	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI) ?                            \
 		(LINKR_MGMT_CAP_WIFI | LINKR_MGMT_CAP_ASYNC_EVENTS) : 0) |      \
 	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV) ?                          \
@@ -59,6 +61,7 @@ BUILD_ASSERT(sizeof(struct linkr_mgmt_header) == LINKR_MGMT_HEADER_SIZE);
 
 struct linkr_mgmt_request {
 	struct bt_conn *conn;
+	uint32_t epoch;
 	uint32_t request_id;
 	uint16_t payload_len;
 	uint8_t payload[LINKR_MGMT_MAX_PAYLOAD];
@@ -75,6 +78,7 @@ struct linkr_mgmt_tx_message {
 
 struct linkr_mgmt_rx_state {
 	struct bt_conn *conn;
+	uint32_t epoch;
 	uint32_t request_id;
 	uint16_t expected;
 	uint16_t received;
@@ -99,17 +103,21 @@ static const struct linkr_mgmt_protocol_info protocol_info = {
 
 static uint8_t stable_device_id[16];
 static linkr_mgmt_request_handler_t request_handler;
-static struct linkr_mgmt_rx_state rx_state;
+static struct linkr_mgmt_rx_state rx_states[CONFIG_BT_MAX_CONN];
 static struct k_mutex rx_lock;
-static atomic_t indication_enabled;
-static struct k_sem indication_done;
-static struct bt_gatt_indicate_params indication_params;
-static int indication_result;
+struct mgmt_tx_peer {
+	struct k_mutex lock;
+	bool active;
+	struct k_sem done;
+	struct bt_gatt_indicate_params params;
+	int result;
+	struct k_msgq queue;
+	char storage[LINKR_MGMT_TX_QUEUE_DEPTH * sizeof(struct linkr_mgmt_tx_message *)] __aligned(4);
+};
+static struct mgmt_tx_peer tx_peers[CONFIG_BT_MAX_CONN];
 
 K_MSGQ_DEFINE(request_queue, sizeof(struct linkr_mgmt_request),
 	      LINKR_MGMT_REQUEST_QUEUE_DEPTH, 4);
-K_MSGQ_DEFINE(tx_queue, sizeof(struct linkr_mgmt_tx_message *),
-	      LINKR_MGMT_TX_QUEUE_DEPTH, 4);
 
 static void tx_message_free(struct linkr_mgmt_tx_message *message)
 {
@@ -122,12 +130,13 @@ static void tx_message_free(struct linkr_mgmt_tx_message *message)
 	k_free(message);
 }
 
-static void rx_reset_locked(void)
+static void rx_reset_locked(struct bt_conn *conn)
 {
-	if (rx_state.conn) {
-		bt_conn_unref(rx_state.conn);
+	struct linkr_mgmt_rx_state *rx = &rx_states[bt_conn_index(conn)];
+	if (rx->conn) {
+		bt_conn_unref(rx->conn);
 	}
-	memset(&rx_state, 0, sizeof(rx_state));
+	memset(rx, 0, sizeof(*rx));
 }
 
 static ssize_t protocol_read(struct bt_conn *conn,
@@ -150,18 +159,20 @@ static ssize_t device_id_read(struct bt_conn *conn,
 				 sizeof(stable_device_id));
 }
 
-static int request_finish_locked(void)
+static int request_finish_locked(struct bt_conn *conn)
 {
+	struct linkr_mgmt_rx_state *rx = &rx_states[bt_conn_index(conn)];
 	struct linkr_mgmt_request request = {
-		.conn = rx_state.conn,
-		.request_id = rx_state.request_id,
-		.payload_len = rx_state.expected,
+		.conn = rx->conn,
+		.epoch = rx->epoch,
+		.request_id = rx->request_id,
+		.payload_len = rx->expected,
 	};
 	int err;
 
-	memcpy(request.payload, rx_state.payload, request.payload_len);
-	rx_state.conn = NULL;
-	memset(&rx_state, 0, sizeof(rx_state));
+	memcpy(request.payload, rx->payload, request.payload_len);
+	rx->conn = NULL;
+	memset(rx, 0, sizeof(*rx));
 
 	err = k_msgq_put(&request_queue, &request, K_NO_WAIT);
 	if (err && request.conn) {
@@ -174,6 +185,7 @@ static ssize_t command_write(struct bt_conn *conn,
 			     const struct bt_gatt_attr *attr, const void *buf,
 			     uint16_t len, uint16_t offset, uint8_t flags)
 {
+	struct linkr_mgmt_rx_state *rx = &rx_states[bt_conn_index(conn)];
 	const uint8_t *bytes = buf;
 	const struct linkr_mgmt_header *header;
 	uint16_t payload_len;
@@ -188,12 +200,12 @@ static ssize_t command_write(struct bt_conn *conn,
 
 	k_mutex_lock(&rx_lock, K_FOREVER);
 
-	if (rx_state.expected > 0 &&
-	    k_uptime_get() - rx_state.started_at > LINKR_MGMT_RX_TIMEOUT_MS) {
-		rx_reset_locked();
+	if (rx->expected > 0 &&
+	    k_uptime_get() - rx->started_at > LINKR_MGMT_RX_TIMEOUT_MS) {
+		rx_reset_locked(conn);
 	}
 
-	if (rx_state.expected == 0) {
+	if (rx->expected == 0) {
 		if (len < sizeof(*header)) {
 			err = BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 			goto out;
@@ -216,26 +228,27 @@ static ssize_t command_write(struct bt_conn *conn,
 			goto out;
 		}
 
-		rx_state.conn = bt_conn_ref(conn);
-		rx_state.request_id = sys_get_le32(header->request_id_le);
-		rx_state.expected = payload_len;
-		rx_state.received = fragment_len;
-		rx_state.started_at = k_uptime_get();
-		memcpy(rx_state.payload, bytes + sizeof(*header), fragment_len);
+		rx->conn = bt_conn_ref(conn);
+		rx->epoch = linkr_session_epoch(conn);
+		rx->request_id = sys_get_le32(header->request_id_le);
+		rx->expected = payload_len;
+		rx->received = fragment_len;
+		rx->started_at = k_uptime_get();
+		memcpy(rx->payload, bytes + sizeof(*header), fragment_len);
 	} else {
-		uint16_t remaining = rx_state.expected - rx_state.received;
+		uint16_t remaining = rx->expected - rx->received;
 
-		if (len > remaining || rx_state.conn != conn) {
-			rx_reset_locked();
+		if (len > remaining || rx->conn != conn) {
+			rx_reset_locked(conn);
 			err = BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 			goto out;
 		}
-		memcpy(rx_state.payload + rx_state.received, bytes, len);
-		rx_state.received += len;
+		memcpy(rx->payload + rx->received, bytes, len);
+		rx->received += len;
 	}
 
-	if (rx_state.received == rx_state.expected &&
-	    request_finish_locked() != 0) {
+	if (rx->received == rx->expected &&
+	    request_finish_locked(conn) != 0) {
 		err = BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
 	}
 
@@ -248,10 +261,8 @@ static void response_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value
 {
 	ARG_UNUSED(attr);
 
-	atomic_set(&indication_enabled,
-		   value == BT_GATT_CCC_INDICATE ? 1 : 0);
 	LOG_INF("Management indications %s",
-		atomic_get(&indication_enabled) ? "enabled" : "disabled");
+		value == BT_GATT_CCC_INDICATE ? "enabled" : "disabled");
 }
 
 BT_GATT_SERVICE_DEFINE(linkr_mgmt_service,
@@ -275,56 +286,52 @@ static void indication_complete(struct bt_conn *conn,
 				struct bt_gatt_indicate_params *params,
 				uint8_t err)
 {
-	ARG_UNUSED(conn);
 	ARG_UNUSED(params);
 
-	indication_result = err ? -EIO : 0;
+	tx_peers[bt_conn_index(conn)].result = err ? -EIO : 0;
 	/* params remains owned by the GATT stack until the destroy callback. */
 }
 
 static void indication_destroy(struct bt_gatt_indicate_params *params)
 {
-	ARG_UNUSED(params);
-	k_sem_give(&indication_done);
+	struct mgmt_tx_peer *peer = CONTAINER_OF(params, struct mgmt_tx_peer, params);
+	k_sem_give(&peer->done);
 }
 
 static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 			     uint16_t len)
 {
+	struct mgmt_tx_peer *peer = &tx_peers[bt_conn_index(conn)];
 	int err;
 
-	if (!atomic_get(&indication_enabled) ||
-	    !bt_gatt_is_subscribed(conn, &linkr_mgmt_service.attrs[8],
+	if (!bt_gatt_is_subscribed(conn, &linkr_mgmt_service.attrs[8],
 				   BT_GATT_CCC_INDICATE)) {
 		return -EACCES;
 	}
 
-	k_sem_reset(&indication_done);
-	indication_result = -ETIMEDOUT;
-	memset(&indication_params, 0, sizeof(indication_params));
-	indication_params.attr = &linkr_mgmt_service.attrs[8];
-	indication_params.func = indication_complete;
-	indication_params.destroy = indication_destroy;
-	indication_params.data = data;
-	indication_params.len = len;
+	k_sem_reset(&peer->done);
+	peer->result = -ETIMEDOUT;
+	memset(&peer->params, 0, sizeof(peer->params));
+	peer->params.attr = &linkr_mgmt_service.attrs[8];
+	peer->params.func = indication_complete;
+	peer->params.destroy = indication_destroy;
+	peer->params.data = data;
+	peer->params.len = len;
 
-	err = bt_gatt_indicate(conn, &indication_params);
+	err = bt_gatt_indicate(conn, &peer->params);
 	if (err) {
 		return err;
 	}
-	if (k_sem_take(&indication_done,
+	if (k_sem_take(&peer->done,
 		       K_MSEC(LINKR_MGMT_INDICATE_TIMEOUT_MS)) != 0) {
 		/* The params object cannot be reused until destroy runs. Disconnect to
 		 * complete the outstanding ATT procedure, then wait for its cleanup. */
 		LOG_WRN("Management indication timed out; disconnecting peer");
 		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		(void)k_sem_take(&indication_done, K_FOREVER);
+		(void)k_sem_take(&peer->done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
-	if (indication_result == 0) {
-		linkr_watchdog_feed(LINKR_WDT_MGMT_TX);
-	}
-	return indication_result;
+	return peer->result;
 }
 
 static void tx_message_send(struct linkr_mgmt_tx_message *message)
@@ -397,9 +404,11 @@ static void request_thread(void)
 		if (k_msgq_get(&request_queue, &request, K_SECONDS(1)) != 0) {
 			continue;
 		}
-		if (request_handler) {
+		struct bt_conn_info info;
+		if (request_handler && !bt_conn_get_info(request.conn, &info) &&
+		    info.state == BT_CONN_STATE_CONNECTED) {
 			request_handler(request.conn, request.request_id,
-					request.payload, request.payload_len);
+					request.payload, request.payload_len, request.epoch);
 		}
 		if (request.conn) {
 			bt_conn_unref(request.conn);
@@ -407,28 +416,18 @@ static void request_thread(void)
 	}
 }
 
-static void tx_thread(void)
+void linkr_mgmt_tx_poll(struct bt_conn *conn)
 {
 	struct linkr_mgmt_tx_message *message;
-
-	for (;;) {
-		linkr_watchdog_feed(LINKR_WDT_MGMT_TX);
-		if (k_msgq_get(&tx_queue, &message, K_SECONDS(1)) != 0) {
-			continue;
-		}
-		if (message && message->conn) {
-			tx_message_send(message);
-		}
-		tx_message_free(message);
-	}
+	if (k_msgq_get(&tx_peers[bt_conn_index(conn)].queue, &message, K_NO_WAIT)) return;
+	if (message && message->conn) tx_message_send(message);
+	tx_message_free(message);
 }
 
 /* On the C5 target the measured high-water mark is 2140 B, so the
  * board overlay trims the default; STACK_SENTINEL guards the margin. */
 K_THREAD_DEFINE(linkr_mgmt_request_tid,
 		CONFIG_LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK, request_thread,
-		NULL, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(linkr_mgmt_tx_tid, 2048, tx_thread,
 		NULL, NULL, NULL, 7, 0, 0);
 
 int linkr_mgmt_init(linkr_mgmt_request_handler_t handler)
@@ -454,33 +453,44 @@ int linkr_mgmt_init(linkr_mgmt_request_handler_t handler)
 	       sizeof(hardware_id));
 	request_handler = handler;
 	k_mutex_init(&rx_lock);
-	k_sem_init(&indication_done, 0, 1);
+	for (size_t i = 0; i < ARRAY_SIZE(tx_peers); i++) {
+		k_mutex_init(&tx_peers[i].lock);
+		k_sem_init(&tx_peers[i].done, 0, 1);
+		k_msgq_init(&tx_peers[i].queue, tx_peers[i].storage,
+			    sizeof(struct linkr_mgmt_tx_message *), LINKR_MGMT_TX_QUEUE_DEPTH);
+	}
 
 	LOG_INF("Linkr Management API v%u.%u ready",
 		LINKR_MGMT_API_MAJOR, LINKR_MGMT_API_MINOR);
 	return 0;
 }
 
+void linkr_mgmt_connected(struct bt_conn *conn)
+{
+	struct mgmt_tx_peer *peer = &tx_peers[bt_conn_index(conn)];
+	k_mutex_lock(&peer->lock, K_FOREVER);
+	peer->active = true;
+	k_mutex_unlock(&peer->lock);
+}
+
 void linkr_mgmt_disconnected(struct bt_conn *conn)
 {
-	struct linkr_mgmt_request request;
-	struct linkr_mgmt_tx_message *message;
-
+	struct linkr_mgmt_rx_state *rx = &rx_states[bt_conn_index(conn)];
 	k_mutex_lock(&rx_lock, K_FOREVER);
-	if (rx_state.conn == conn) {
-		rx_reset_locked();
+	if (rx->conn == conn) {
+		rx_reset_locked(conn);
 	}
 	k_mutex_unlock(&rx_lock);
-	atomic_clear(&indication_enabled);
-
-	while (k_msgq_get(&request_queue, &request, K_NO_WAIT) == 0) {
-		if (request.conn) {
-			bt_conn_unref(request.conn);
-		}
-	}
-	while (k_msgq_get(&tx_queue, &message, K_NO_WAIT) == 0) {
+	struct mgmt_tx_peer *peer = &tx_peers[bt_conn_index(conn)];
+	k_mutex_lock(&peer->lock, K_FOREVER);
+	peer->active = false;
+	struct linkr_mgmt_tx_message *message;
+	while (!k_msgq_get(&tx_peers[bt_conn_index(conn)].queue, &message, K_NO_WAIT)) {
 		tx_message_free(message);
 	}
+	k_mutex_unlock(&peer->lock);
+	/* The shared request worker rejects disconnected peers without discarding
+	 * another client's commands. */
 }
 
 int linkr_mgmt_send(struct bt_conn *conn, uint8_t type, uint32_t request_id,
@@ -507,7 +517,10 @@ int linkr_mgmt_send(struct bt_conn *conn, uint8_t type, uint32_t request_id,
 	message->type = type;
 	memcpy(message->payload, payload, payload_len);
 
-	err = k_msgq_put(&tx_queue, &message, K_NO_WAIT);
+	struct mgmt_tx_peer *peer = &tx_peers[bt_conn_index(conn)];
+	k_mutex_lock(&peer->lock, K_FOREVER);
+	err = peer->active ? k_msgq_put(&peer->queue, &message, K_NO_WAIT) : -ENOTCONN;
+	k_mutex_unlock(&peer->lock);
 	if (err) {
 		tx_message_free(message);
 	}

@@ -36,16 +36,15 @@
 #define BT_UUID_LINKR_UART_RELIABLE_STATE \
 	BT_UUID_DECLARE_128(BT_UUID_LINKR_UART_RELIABLE_STATE_VAL)
 
-typedef int (*linkr_uart_reliable_write_fn)(const uint8_t *data, size_t len);
+typedef int (*linkr_uart_reliable_write_fn)(struct bt_conn *conn, const uint8_t *data, size_t len);
 
 int linkr_uart_reliable_init(linkr_uart_reliable_write_fn write_fn);
 void linkr_uart_reliable_disconnected(struct bt_conn *conn);
+void linkr_uart_reliable_connected(struct bt_conn *conn);
 
-/* True while reliable mode owns UART-to-BLE delivery. It intentionally stays
- * true across a disconnect so an unconfirmed chunk can be retried after the
- * same client reconnects. A later NUS-only subscription selects raw mode. */
-bool linkr_uart_reliable_mode(void);
-void linkr_uart_reliable_nus_selected(void);
+/* Transport selection belongs to a peer, never to an aggregate CCC value. */
+bool linkr_uart_reliable_mode(struct bt_conn *conn);
+void linkr_uart_reliable_nus_selected(struct bt_conn *conn);
 
 /* Send one UART chunk using a sequence-numbered confirmed indication. The
  * sequence advances only after the central confirms the indication. */

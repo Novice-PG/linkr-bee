@@ -5,6 +5,9 @@
 This guide covers firmware builds, flashing, UART integration, control commands,
 test modes, client tooling, protocols, and Kconfig options.
 
+See [Multi-client serial sessions](MULTI_CLIENT.md) for connection capacity,
+single-writer ownership and the deferred Linkr integration boundary.
+
 Zephyr application for an ESP32-C3/C5/WROOM BLE serial bridge. The first milestone is a
 plain Bluetooth LE UART window:
 

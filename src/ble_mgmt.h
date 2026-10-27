@@ -28,6 +28,7 @@ extern "C" {
 #define LINKR_MGMT_CAP_DEVICE_ID BIT(3)
 #define LINKR_MGMT_CAP_ASYNC_EVENTS BIT(4)
 #define LINKR_MGMT_CAP_RELIABLE_UART BIT(5)
+#define LINKR_MGMT_CAP_MULTI_SESSION BIT(7)
 
 #define LINKR_MGMT_FLAG_FINAL BIT(0)
 #define LINKR_MGMT_FLAG_ERROR BIT(1)
@@ -72,13 +73,17 @@ enum linkr_mgmt_message_type {
 typedef void (*linkr_mgmt_request_handler_t)(struct bt_conn *conn,
 					      uint32_t request_id,
 					      const uint8_t *payload,
-					      uint16_t payload_len);
+					      uint16_t payload_len,
+					      uint32_t epoch);
 
 /* Load the stable hardware Device ID and install the request handler. */
 int linkr_mgmt_init(linkr_mgmt_request_handler_t handler);
 
 /* Release per-connection RX state and queued messages after disconnect. */
 void linkr_mgmt_disconnected(struct bt_conn *conn);
+void linkr_mgmt_connected(struct bt_conn *conn);
+/* Called by this peer's sender; one slow indication never blocks other peers. */
+void linkr_mgmt_tx_poll(struct bt_conn *conn);
 
 /* Send one logical response or event. The transport fragments it into
  * confirmed GATT indications and preserves request_id across all fragments. */
