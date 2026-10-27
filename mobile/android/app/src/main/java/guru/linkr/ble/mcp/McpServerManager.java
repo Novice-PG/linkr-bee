@@ -302,6 +302,8 @@ public final class McpServerManager {
         if (current != null) {
             current.setToken(rotated);
         }
+        failAllPending(503, McpHttpServer.NOT_READY_BODY);
+        cancelAllApprovals();
         emitStateChanged();
         return getState();
     }
@@ -350,12 +352,14 @@ public final class McpServerManager {
         }
 
         String id = UUID.randomUUID().toString();
+        long deadlineMs = System.currentTimeMillis() + RESPONSE_TIMEOUT_MS;
         CompletableFuture<McpHttpServer.Response> future = new CompletableFuture<>();
         Pending entry = new Pending(future);
         pending.put(id, entry);
         entry.timeout = scheduler.schedule(() -> {
             if (pending.remove(id, entry)) {
                 future.complete(new McpHttpServer.Response(504, TIMEOUT_BODY));
+                emitRequestCancelled(id);
             }
         }, RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         future.whenComplete((response, error) -> pending.remove(id, entry));
@@ -367,8 +371,11 @@ public final class McpServerManager {
         payload.put("body", request.body);
         payload.put("remote", request.remote);
         payload.put("userAgent", request.userAgent);
+        payload.put("deadlineMs", deadlineMs);
 
         boolean posted = mainHandler.post(() -> {
+            /* A paused main loop may run this after its native timeout/stop. */
+            if (pending.get(id) != entry) return;
             LinkrMcpPlugin current;
             synchronized (lock) {
                 current = plugin;
@@ -419,6 +426,20 @@ public final class McpServerManager {
             }
             if (current != null) {
                 current.emitStateChanged(getState());
+            }
+        });
+    }
+
+    private void emitRequestCancelled(String id) {
+        mainHandler.post(() -> {
+            LinkrMcpPlugin current;
+            synchronized (lock) {
+                current = plugin;
+            }
+            if (current != null) {
+                JSObject payload = new JSObject();
+                payload.put("id", id);
+                current.emitRequestCancelled(payload);
             }
         });
     }
@@ -625,6 +646,7 @@ public final class McpServerManager {
             if (entry != null) {
                 entry.cancelTimeout();
                 entry.future.complete(new McpHttpServer.Response(status, body));
+                emitRequestCancelled(id);
             }
         }
     }

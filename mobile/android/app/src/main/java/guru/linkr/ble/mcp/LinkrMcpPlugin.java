@@ -184,6 +184,10 @@ public class LinkrMcpPlugin extends Plugin {
         notifyListeners("httpRequest", payload);
     }
 
+    public void emitRequestCancelled(JSObject payload) {
+        notifyListeners("requestCancelled", payload);
+    }
+
     public void emitStateChanged(JSObject state) {
         notifyListeners("stateChanged", state);
     }

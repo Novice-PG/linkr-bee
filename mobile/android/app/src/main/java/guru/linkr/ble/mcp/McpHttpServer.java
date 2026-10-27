@@ -193,7 +193,11 @@ public final class McpHttpServer {
         ThreadPoolExecutor pool = executor;
         executor = null;
         if (pool != null) {
-            pool.shutdownNow();
+            /* Queued tasks never reach handleConnection's try-with-resources.
+             * Close their sockets explicitly when discarding the queue. */
+            for (Runnable queued : pool.shutdownNow()) {
+                if (queued instanceof ClientTask) ((ClientTask) queued).close();
+            }
         }
     }
 
@@ -225,7 +229,7 @@ public final class McpHttpServer {
                     closeQuietly(client);
                     return;
                 }
-                pool.execute(() -> handleConnection(client));
+                pool.execute(new ClientTask(client));
             } catch (RejectedExecutionException rejected) {
                 try {
                     writeResponse(client, new Response(503, NOT_READY_BODY), null);
@@ -237,6 +241,23 @@ public final class McpHttpServer {
             } catch (IOException ignored) {
                 closeQuietly(client);
             }
+        }
+    }
+
+    private final class ClientTask implements Runnable {
+        private final Socket socket;
+
+        ClientTask(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            handleConnection(socket);
+        }
+
+        void close() {
+            closeQuietly(socket);
         }
     }
 
@@ -355,6 +376,10 @@ public final class McpHttpServer {
         byte[] body = readBody(input, (int) length);
         if (body == null) {
             return null;
+        }
+        /* Reading a slow body can straddle token rotation. */
+        if (!isAuthorized(headers.get("authorization"))) {
+            return new Response(401, UNAUTHORIZED_BODY);
         }
         String remote = socket.getInetAddress() == null ? "" : socket.getInetAddress().getHostAddress();
         String userAgent = headers.get("user-agent");

@@ -10,10 +10,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -22,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
@@ -352,6 +356,81 @@ public class McpHttpServerTest {
             assertFalse(started.isRunning());
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void stopClosesSocketsThatWereStillQueued() throws Exception {
+        CountDownLatch busy = new CountDownLatch(McpHttpServer.MAX_CONCURRENT_REQUESTS);
+        CountDownLatch release = new CountDownLatch(1);
+        McpHttpServer started = start(request -> {
+            busy.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException stopped) {
+                Thread.currentThread().interrupt();
+            }
+            return new CompletableFuture<>();
+        });
+        List<Socket> clients = new ArrayList<>();
+        try {
+            for (int i = 0; i < McpHttpServer.MAX_CONCURRENT_REQUESTS; i++) {
+                Socket socket = new Socket(InetAddress.getLoopbackAddress(), started.getPort());
+                clients.add(socket);
+                socket.getOutputStream().write(http("POST", "/mcp", authorizedHeaders("{}"), bytes("{}")));
+            }
+            assertTrue(busy.await(5, TimeUnit.SECONDS));
+            Socket queued = new Socket(InetAddress.getLoopbackAddress(), started.getPort());
+            clients.add(queued);
+            queued.getOutputStream().write(http("GET", "/", headers(), null));
+            // Barrier only: ensure the accepted socket really is queued before
+            // stopping. The assertion below observes socket closure, not a field.
+            Field executorField = McpHttpServer.class.getDeclaredField("executor");
+            executorField.setAccessible(true);
+            ThreadPoolExecutor pool = (ThreadPoolExecutor) executorField.get(started);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (pool.getQueue().isEmpty() && System.nanoTime() < deadline) Thread.sleep(10);
+            assertFalse("the ninth connection must be waiting in the queue", pool.getQueue().isEmpty());
+            started.stop();
+            queued.setSoTimeout(1000);
+            try {
+                assertEquals(-1, queued.getInputStream().read());
+            } catch (java.net.SocketException closed) {
+                // Reset is also a valid close of an unparsed request.
+            }
+        } finally {
+            release.countDown();
+            for (Socket client : clients) client.close();
+        }
+    }
+
+    @Test
+    public void tokenRotationRejectsAnOldTokenWhoseBodyWasStillBeingRead() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        });
+        try (Socket client = new Socket(InetAddress.getLoopbackAddress(), started.getPort())) {
+            client.setSoTimeout(5000);
+            client.getOutputStream().write(http("POST", "/mcp", authorizedHeaders("{}"), null));
+            // Wait until the body read blocks, after the initial auth check.
+            boolean readingBody = false;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!readingBody && System.nanoTime() < deadline) {
+                for (StackTraceElement[] trace : Thread.getAllStackTraces().values()) {
+                    for (StackTraceElement frame : trace) {
+                        if (frame.getClassName().equals(McpHttpServer.class.getName())
+                                && frame.getMethodName().equals("readBody")) readingBody = true;
+                    }
+                }
+                if (!readingBody) Thread.sleep(10);
+            }
+            assertTrue("server must have authenticated and started reading the body", readingBody);
+            started.setToken(ROTATED_TOKEN);
+            client.getOutputStream().write(bytes("{}"));
+            assertEquals(401, readResponse(client.getInputStream()).status);
+            assertEquals(0, calls.get());
         }
     }
 

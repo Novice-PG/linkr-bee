@@ -30,6 +30,8 @@ export type McpHttpRequest = {
   body: string;
   remote: string;
   userAgent: string;
+  /** Absolute native deadline; reject events delayed by a paused WebView. */
+  deadlineMs?: number;
 };
 
 export type McpStartConfig = {
@@ -91,6 +93,10 @@ export interface LinkrMcpBridge {
   addListener(
     event: "approvalAction",
     listener: (payload: McpApprovalAction) => void,
+  ): Promise<McpListenerHandle>;
+  addListener(
+    event: "requestCancelled",
+    listener: (payload: { id: string }) => void,
   ): Promise<McpListenerHandle>;
 }
 

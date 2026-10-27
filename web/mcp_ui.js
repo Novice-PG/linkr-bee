@@ -336,6 +336,8 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
       else state = host.getState();
       config = host.getConfig();
       render();
+      /* Android can pause the Activity without changing WebView visibility. */
+      void notificationOnHide();
     } finally {
       refreshInFlight = false;
     }
@@ -475,6 +477,7 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
         if (pendingApproval !== pending) return;
         pendingApproval = null;
         clearTimeout(timer);
+        request?.signal?.removeEventListener("abort", aborted);
         hideBanner();
         if (pending.notificationId) {
           const bridge = getBridge?.();
@@ -483,6 +486,12 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
         resolve({ approved, reason });
       };
       const settle = pending.settle;
+      const aborted = () => settle(false, text("approvalDenied"));
+      request?.signal?.addEventListener("abort", aborted, { once: true });
+      if (request?.signal?.aborted) {
+        aborted();
+        return;
+      }
       if (showBannerNow) showBanner(request || {});
     });
   }
@@ -509,30 +518,22 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     if (pendingApproval) {
       return { approved: false, reason: text("approvalBusy") };
     }
+    /* Reserve synchronously, before native getState/showApproval can yield.
+     * Otherwise concurrent scans or a scan plus a write overwrite the slot. */
+    const decision = beginApproval(request, { showBannerNow: false });
+    const pending = pendingApproval;
+    if (!pending) return decision;
     /* Foreground: the in-app banner is faster and shows the arguments. While
      * the app is hidden (screen off, another app) the native notification is
      * the only place the user can answer, so ask the Android shell for it. */
     const hidden = await isAppHidden();
+    if (pendingApproval !== pending) return decision;
     if (hidden) {
-      const bridge = getBridge?.();
-      if (!bridge || typeof bridge.showApproval !== "function") {
-        return { approved: false, reason: text("approvalBackground") };
+      if (!await postApprovalNotification(pending) && pendingApproval === pending) {
+        pending.settle(false, text("approvalBackground"));
       }
-      const id = `mcp-${Date.now()}-${++approvalCounter}`;
-      let shown = false;
-      try {
-        shown = (await bridge.showApproval({
-          id,
-          title: text("approvalTitle"),
-          body: notificationBody(request),
-        })) === true;
-      } catch {
-        shown = false;
-      }
-      if (!shown) return { approved: false, reason: text("approvalBackground") };
-      return beginApproval(request, { notificationId: id, showBannerNow: false });
-    }
-    return beginApproval(request, { showBannerNow: true });
+    } else showBanner(request || {});
+    return decision;
   }
 
   function handleApprovalAction(payload) {
@@ -554,12 +555,14 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
 
   /* If the user backgrounds the app while the in-app banner is waiting, move
    * the same request to a notification instead of letting it expire unseen. */
-  async function notificationOnHide() {
-    const pending = pendingApproval;
-    if (!pending || pending.notificationId || document.visibilityState === "visible") return;
+  async function postApprovalNotification(pending) {
+    if (pendingApproval !== pending) return false;
+    if (pending.notificationId) return true;
     const bridge = getBridge?.();
-    if (!bridge || typeof bridge.showApproval !== "function") return;
+    if (!bridge || typeof bridge.showApproval !== "function") return false;
     const id = `mcp-${Date.now()}-${++approvalCounter}`;
+    /* An Allow/Deny event may arrive before showApproval's promise resolves. */
+    pending.notificationId = id;
     let shown = false;
     try {
       shown = (await bridge.showApproval({
@@ -570,13 +573,25 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     } catch {
       shown = false;
     }
-    if (!shown) return;
     if (pendingApproval !== pending) {
       try { Promise.resolve(bridge.cancelApproval?.(id)).catch(() => {}); } catch { /* ignore */ }
-      return;
+      return false;
     }
-    pending.notificationId = id;
+    if (!shown) {
+      pending.notificationId = null;
+      return false;
+    }
     hideBanner();
+    return true;
+  }
+
+  async function notificationOnHide() {
+    const pending = pendingApproval;
+    if (!pending || pending.notificationId || !await isAppHidden()) return;
+    if (pendingApproval !== pending) return;
+    if (!await postApprovalNotification(pending) && pendingApproval === pending) {
+      pending.settle(false, text("approvalBackground"));
+    }
   }
 
   function settlePending(approved, reason) {

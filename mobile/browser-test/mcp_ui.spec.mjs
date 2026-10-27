@@ -3,7 +3,7 @@
  *
  * On a real phone the bridge is installed by Capacitor (mobile/src/mcp-native.ts
  * -> window.LinkrMcp). Here `page.addInitScript` installs the same contract
- * (mobile/.tmp_mcp_contract.md) before any app script runs, so the whole path —
+ * (mobile/src/mcp-native.ts) before any app script runs, so the whole path —
  * app.js initMcp() -> web/mcp_server.js -> web/mcp_ui.js — is exercised in a
  * real Chromium: settings card rendering, start/stop state, endpoint/token
  * display, audit list and the on-phone approval banner.
@@ -36,7 +36,7 @@ async function installFakeBridge(page) {
         lastError: null,
       };
       const clone = () => JSON.parse(JSON.stringify(state));
-      const listeners = { httpRequest: [], stateChanged: [], approvalAction: [] };
+      const listeners = { httpRequest: [], stateChanged: [], approvalAction: [], requestCancelled: [] };
 
       /* Answer log and call log the spec reads back with page.evaluate(). */
       window.__mcpCalls = {
@@ -376,10 +376,10 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
 
   await enableMcp(page);
 
-  // initMcp() subscribes to both bridge events before the server is started.
+  // The host and UI register their bridge event subscriptions during initMcp().
   await expect
     .poll(() => page.evaluate(() => [...new Set(window.__mcpCalls.addListener)].sort()))
-    .toEqual(["approvalAction", "httpRequest", "stateChanged"]);
+    .toEqual(["approvalAction", "httpRequest", "requestCancelled", "stateChanged"]);
 
   // The bridge received exactly the configured port/bind, and the card mirrors
   // the native snapshot (endpoint + 64-hex token, masked with type=password).

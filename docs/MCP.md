@@ -344,9 +344,14 @@ the client:
 - only one device-changing call runs at a time. A second one is refused
   immediately with an error while the first is pending or executing; read tools
   are not serialized behind that guard;
-- every device or accessory call is abandoned after 120 seconds. A call that
-  cannot be answered within the native 180-second request window returns HTTP
-  `504` instead of a tool result.
+- approval and execution share a 165-second overall budget (or the shorter
+  remaining native deadline); the execution phase is capped at 120 seconds.
+  Expired native requests are cancelled, including events delayed by a paused
+  WebView. Disabling/rebinding the server, rotating its token or changing access
+  policy revokes pending authorization. A changed target connection session also
+  requires a fresh request. Input already delivered cannot be recalled.
+  A call that cannot be answered within the native 180-second request window
+  returns HTTP `504` instead of a tool result.
 
 ## Security
 

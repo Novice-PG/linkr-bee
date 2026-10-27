@@ -49,6 +49,8 @@ const MCP_ACCESS_MODES = [MCP_ACCESS_READ, MCP_ACCESS_CONFIRM, MCP_ACCESS_GUARDE
  * tool error instead of letting the HTTP request expire first. */
 const DEVICE_CALL_TIMEOUT_MS = 120_000;
 const APPROVAL_TIMEOUT_MS = 120_000;
+/* One budget includes approval and execution, below the native 180 s limit. */
+const REQUEST_TIMEOUT_MS = 165_000;
 
 const AUDIT_LIMIT = 50;
 const DEFAULT_READ_LIMIT = 6000;
@@ -594,13 +596,36 @@ function toolOkResult(text) {
 /* AbortSignal plus a timer. AbortSignal.timeout() would be shorter, but some
  * engines keep that timer referenced; an explicit timer with unref() keeps a
  * host process (node --test) from waiting two minutes on an idle signal. */
-function deviceCallController() {
+function deviceCallController(deadlineMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error("The device call timed out after 120 seconds."));
-  }, DEVICE_CALL_TIMEOUT_MS);
-  timer.unref?.();
-  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+  let timer;
+  const deadline = Math.min(Date.now() + REQUEST_TIMEOUT_MS,
+    Number.isFinite(deadlineMs) ? deadlineMs - 1000 : Infinity);
+  const arm = (maximum) => {
+    clearTimeout(timer);
+    const remaining = Math.min(maximum, deadline - Date.now());
+    if (remaining <= 0) controller.abort(new Error("The MCP request expired before execution."));
+    else {
+      timer = setTimeout(() => controller.abort(new Error("The MCP request timed out.")), remaining);
+      timer.unref?.();
+    }
+  };
+  arm(REQUEST_TIMEOUT_MS);
+  return {
+    signal: controller.signal,
+    abort: (reason) => controller.abort(new Error(reason)),
+    execute: () => arm(DEVICE_CALL_TIMEOUT_MS),
+    clear: () => clearTimeout(timer),
+  };
+}
+
+function withAbort(promise, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 export function createMcpHost(deps = {}) {
@@ -613,6 +638,27 @@ export function createMcpHost(deps = {}) {
   let removing = [];
   let writeBusy = false;
   let starting = null;
+  const activeCalls = new Set();
+  const nativeCalls = new Map();
+  const cancelledNativeRequests = new Set();
+
+  function revokeCalls(reason) {
+    for (const call of activeCalls) call.abort(reason);
+  }
+
+  function captureTarget() {
+    const device = getDevice();
+    const status = device?.getStatus?.() ?? {};
+    return { device, sessionId: status.sessionId, deviceId: status.deviceId,
+      connected: status.connected, transport: status.transport };
+  }
+
+  function checkTarget(previous) {
+    const current = captureTarget();
+    if (Object.keys(previous).some((key) => previous[key] !== current[key])) {
+      throw new Error("Not executed: the target session changed while awaiting approval. Request again for the current target.");
+    }
+  }
   /* Native replies can arrive out of order (app.js attaches without awaiting,
    * then enables immediately). Every operation that sets the snapshot takes a
    * sequence number first, and an older reply never overwrites a newer one. */
@@ -669,6 +715,11 @@ export function createMcpHost(deps = {}) {
 
   function applyBridgeState(state) {
     if (!isPlainObject(state)) return;
+    if (bridgeSnapshot?.running === true && state.running === false) {
+      revokeCalls("The MCP server stopped; pending authorization was revoked.");
+    } else if (bridgeSnapshot?.token && state.token && bridgeSnapshot.token !== state.token) {
+      revokeCalls("The MCP token changed; pending authorization was revoked.");
+    }
     bridgeSnapshot = { ...state };
     if (state.running === true) lastError = null;
     else if (typeof state.lastError === "string" && state.lastError) lastError = state.lastError;
@@ -771,6 +822,10 @@ export function createMcpHost(deps = {}) {
   }
 
   async function stopBridge() {
+    revokeCalls("The MCP server stopped; pending authorization was revoked.");
+    /* A start already sent to Android must finish before stop is sent. Merely
+     * ignoring its stale snapshot would still leave a real listener running. */
+    if (starting) await starting;
     const sequence = nextStateSequence();
     const bridge = getBridge();
     if (!bridge) {
@@ -821,6 +876,16 @@ export function createMcpHost(deps = {}) {
       commitBridgeState(state, nextStateSequence());
       notifyChange();
     });
+    await subscribe("requestCancelled", (event) => {
+      const id = String(event?.id);
+      cancelledNativeRequests.add(id);
+      /* Cancellation can reach JS before a previously emitted HTTP callback.
+       * Keep a bounded tombstone so that delayed callback cannot execute. */
+      if (cancelledNativeRequests.size > 256) {
+        cancelledNativeRequests.delete(cancelledNativeRequests.values().next().value);
+      }
+      nativeCalls.get(id)?.abort("The native MCP request expired or was cancelled.");
+    });
     if (getBridge()) await refreshState();
     notifyChange();
     return getState();
@@ -846,6 +911,7 @@ export function createMcpHost(deps = {}) {
    * snapshot. A rotation invalidates every client configuration, so the UI
    * always re-renders the snippet and state after this call. */
   async function regenerateToken() {
+    revokeCalls("The MCP token changed; pending authorization was revoked.");
     const sequence = nextStateSequence();
     const bridge = getBridge();
     if (!bridge || typeof bridge.regenerateToken !== "function") return getState();
@@ -870,12 +936,13 @@ export function createMcpHost(deps = {}) {
   }
 
   async function disable() {
+    revokeCalls("MCP was disabled; pending authorization was revoked.");
     if (config.enabled) {
       config = { ...config, enabled: false };
       persistConfig(config);
       notifyChange();
     }
-    if (getState().running) await stopBridge();
+    if (getState().running || starting) await stopBridge();
     return getState();
   }
 
@@ -887,12 +954,16 @@ export function createMcpHost(deps = {}) {
     const previous = config;
     const wasRunning = getState().running;
     const next = validateMcpConfig({ ...previous, ...patch });
+    if (next.access !== previous.access || next.enabled !== previous.enabled
+        || next.port !== previous.port || next.bind !== previous.bind) {
+      revokeCalls("The MCP configuration changed; pending authorization was revoked.");
+    }
     config = next;
     persistConfig(next);
     const bindingChanged = next.port !== previous.port || next.bind !== previous.bind;
-    if (!next.enabled && wasRunning) {
+    if (!next.enabled && (wasRunning || starting)) {
       await stopBridge();
-    } else if (next.enabled && wasRunning && bindingChanged) {
+    } else if (next.enabled && (wasRunning || starting) && bindingChanged) {
       /* The native socket is bound at start time, so a port/bind change only
        * takes effect after a restart. The token survives in SharedPreferences. */
       await stopBridge();
@@ -1050,19 +1121,21 @@ export function createMcpHost(deps = {}) {
     }
   }
 
-  async function requestToolApproval(tool, args) {
+  async function requestToolApproval(tool, args, signal) {
     if (typeof deps.requestApproval !== "function") {
       return { approved: false, failure: "Approval is unavailable in this app build." };
     }
     try {
-      const decision = await deps.requestApproval({
+      const decision = await withAbort(deps.requestApproval({
         tool: tool.name,
         args: redactToolArguments(tool.name, args),
         summary: approvalSummary(tool, args),
         timeoutMs: APPROVAL_TIMEOUT_MS,
-      });
+        signal,
+      }), signal);
       return { approved: Boolean(decision?.approved), reason: typeof decision?.reason === "string" ? decision.reason : "" };
     } catch (error) {
+      signal.throwIfAborted();
       return { approved: false, failure: error?.message || "The approval request did not complete." };
     }
   }
@@ -1420,6 +1493,7 @@ export function createMcpHost(deps = {}) {
       writeBusy = true;
     }
 
+    let call;
     try {
       const preflightError = preflightTool(tool);
       if (preflightError) {
@@ -1427,8 +1501,14 @@ export function createMcpHost(deps = {}) {
         return toolErrorResult(preflightError);
       }
 
+      const target = captureTarget();
+      call = deviceCallController(context?.deadlineMs);
+      activeCalls.add(call);
+      if (context?.requestId != null) nativeCalls.set(String(context.requestId), call);
+      call.signal.throwIfAborted();
+
       if (toolNeedsApproval(tool, args, config.access)) {
-        const decision = await requestToolApproval(tool, args);
+        const decision = await requestToolApproval(tool, args, call.signal);
         if (!decision.approved) {
           const message = decision.failure
             ? `Not executed: the approval request did not complete (${decision.failure}).`
@@ -1438,7 +1518,10 @@ export function createMcpHost(deps = {}) {
         }
       }
 
-      const call = deviceCallController();
+      call.signal.throwIfAborted();
+      checkTarget(target);
+      call.execute();
+      call.signal.throwIfAborted();
       let value;
       try {
         value = await executeTool(name, args, { signal: call.signal });
@@ -1452,7 +1535,16 @@ export function createMcpHost(deps = {}) {
 
       recordAudit({ tool: name, args, outcome: "ok", durationMs: Date.now() - startedAt, remote });
       return toolOkResult(stringifyToolResult(value, args));
+    } catch (error) {
+      const message = String(error?.message || error || "The MCP call was cancelled.");
+      recordAudit({ tool: name, args, outcome: "error", message, durationMs: Date.now() - startedAt, remote });
+      return toolErrorResult(message);
     } finally {
+      call?.clear();
+      activeCalls.delete(call);
+      if (context?.requestId != null && nativeCalls.get(String(context.requestId)) === call) {
+        nativeCalls.delete(String(context.requestId));
+      }
       if (tool.write) writeBusy = false;
     }
   }
@@ -1550,11 +1642,21 @@ export function createMcpHost(deps = {}) {
     const remote = typeof payload?.remote === "string" ? payload.remote : null;
     let response;
     try {
-      response = await handleRpc(String(payload?.body ?? ""), { remote, userAgent: payload?.userAgent });
+      const expired = Number.isFinite(payload?.deadlineMs) && payload.deadlineMs <= Date.now();
+      if (!config.enabled || bridgeSnapshot?.running === false) {
+        response = { status: 503, body: rpcErrorBody(null, -32000, "MCP is disabled or stopped; request not executed.") };
+      } else if (expired || cancelledNativeRequests.has(String(id))) {
+        response = { status: 504, body: rpcErrorBody(null, -32000, "The native MCP request expired or was cancelled.") };
+      } else {
+        response = await handleRpc(String(payload?.body ?? ""), {
+          remote, userAgent: payload?.userAgent, requestId: id, deadlineMs: payload?.deadlineMs,
+        });
+      }
     } catch (error) {
       response = { status: 500, body: rpcErrorBody(null, -32603, "Internal error") };
       lastError = `MCP request handling failed: ${error?.message ?? error}`;
     }
+    cancelledNativeRequests.delete(String(id));
     const bridge = getBridge();
     if (id !== null && bridge && typeof bridge.respond === "function") {
       try {
@@ -1571,6 +1673,7 @@ export function createMcpHost(deps = {}) {
    * to the plugin and foreground service, so dispose() intentionally leaves a
    * running server alone; the next attach() re-subscribes. */
   async function dispose() {
+    revokeCalls("The MCP host was disposed; pending authorization was revoked.");
     attached = false;
     const subscriptions = removing;
     removing = [];

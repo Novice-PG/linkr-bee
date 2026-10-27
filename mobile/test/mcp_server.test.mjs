@@ -986,9 +986,9 @@ test("enable/disable and setConfig drive the native bridge", async () => {
 
   const attached = await host.attach();
   assert.equal(attached.running, false);
-  assert.equal(calls.listeners, 2);
+  assert.equal(calls.listeners, 3);
   await host.attach();
-  assert.equal(calls.listeners, 2, "attach must be idempotent");
+  assert.equal(calls.listeners, 3, "attach must be idempotent");
 
   const [enabled] = await Promise.all([host.enable(), host.enable()]);
   assert.equal(enabled.enabled, true);
@@ -1063,6 +1063,7 @@ test("handleHttp answers every forwarded request through the native bridge", asy
   const { bridge, calls } = fakeBridge();
   const { device } = fakeDevice();
   const host = createHost({ bridge, device });
+  await host.enable();
   await host.attach();
 
   const ok = await host.handleHttp({
@@ -1097,6 +1098,7 @@ test("attach subscribes to forwarded HTTP requests and mirrors stateChanged", as
   const { device } = fakeDevice();
   const host = createHost({ bridge, device });
   await host.attach();
+  await host.enable();
   const requestListener = listeners.find((entry) => entry.event === "httpRequest").callback;
   const stateListener = listeners.find((entry) => entry.event === "stateChanged").callback;
   assert.equal(typeof requestListener, "function");
@@ -1383,4 +1385,176 @@ test("execution tracking validates its arguments and reports unknown ids", async
   const missing = await callTool(host, "get_execution_status", { id: "serial-unknown" });
   assert.equal(missing.message.result.isError, true);
   assert.match(missing.message.result.content[0].text, /No execution/);
+});
+
+test("pending approval is revoked when MCP access changes to read-only", async () => {
+  let approve;
+  const decision = new Promise((resolve) => { approve = resolve; });
+  const { device, calls } = fakeDevice();
+  const host = createHost({ device, requestApproval: () => decision });
+  const pending = callTool(host, "send_serial_input", { text: "echo pending", appendEnter: true });
+  await host.setConfig({ access: "read" });
+  approve({ approved: true });
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(toolErrorText(response.message), /changed|revoked|read.only/i);
+});
+
+test("approval cannot move a serial write into a replacement target session", async () => {
+  let approve;
+  const decision = new Promise((resolve) => { approve = resolve; });
+  const status = { deviceId: "board-A", sessionId: "session-A" };
+  const { device, calls } = fakeDevice({ status });
+  const host = createHost({ device, requestApproval: () => decision });
+  const pending = callTool(host, "send_serial_input", { text: "echo target-A", appendEnter: true });
+  status.deviceId = "board-B";
+  status.sessionId = "session-B";
+  approve({ approved: true });
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(toolErrorText(response.message), /session|target.*changed/i);
+});
+
+test("disabling MCP revokes an approval that was already displayed", async () => {
+  let approve;
+  const decision = new Promise((resolve) => { approve = resolve; });
+  const { bridge } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device, requestApproval: () => decision });
+  await host.enable();
+  const pending = callTool(host, "send_serial_input", { text: "echo stale", appendEnter: true });
+  await host.disable();
+  approve({ approved: true });
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(toolErrorText(response.message), /stopped|disabled|revoked/i);
+});
+
+test("an expired native request cannot submit serial input after WebView resumes", async () => {
+  const { bridge } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device });
+  await host.enable();
+  const response = await host.handleHttp({
+    id: "expired-native-call", deadlineMs: Date.now() - 1,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 71, method: "tools/call", params: {
+      name: "send_serial_input", arguments: { text: "echo too-late", appendEnter: true },
+    } }),
+  });
+  assert.equal(calls.execute.length, 0);
+  assert.match(response.body, /expired|timed out/i);
+});
+
+test("disable during an in-flight start still leaves the native listener stopped", async () => {
+  let finishStart;
+  const ready = new Promise((resolve) => { finishStart = resolve; });
+  const { bridge, calls, state } = fakeBridge();
+  const originalStart = bridge.start;
+  bridge.start = async (config) => { await ready; return originalStart(config); };
+  const host = createHost({ bridge });
+  const enabling = host.enable();
+  const disabling = host.disable();
+  finishStart();
+  await Promise.all([enabling, disabling]);
+  assert.equal(host.getConfig().enabled, false);
+  assert.equal(state.running, false);
+  assert.ok(calls.stop > 0);
+});
+
+test("native timeout cancellation revokes only its own pending request", async () => {
+  let approvalSignal;
+  const { bridge, listeners } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device, requestApproval: (request) => {
+    approvalSignal = request.signal;
+    return new Promise(() => {});
+  } });
+  await host.attach();
+  await host.enable();
+  const pending = host.handleHttp({ id: "native-cancelled", body: JSON.stringify({
+    jsonrpc: "2.0", id: 9, method: "tools/call", params: {
+      name: "send_serial_input", arguments: { text: "echo waiting", appendEnter: true },
+    },
+  }) });
+  const cancel = listeners.find(entry => entry.event === "requestCancelled").callback;
+  cancel({ id: "a-different-request" });
+  assert.equal(approvalSignal.aborted, false);
+  cancel({ id: "native-cancelled" });
+  const response = await pending;
+  assert.equal(approvalSignal.aborted, true);
+  assert.equal(calls.execute.length, 0);
+  assert.match(response.body, /expired|cancelled/i);
+});
+
+test("rotating the bearer token revokes a pending approval immediately", async () => {
+  const { bridge } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device, requestApproval: () => new Promise(() => {}) });
+  await host.enable();
+  const pending = callTool(host, "send_serial_input", { text: "echo waiting", appendEnter: true });
+  await host.regenerateToken();
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(toolErrorText(response.message), /token.*changed|revoked/i);
+});
+
+test("native stop events revoke pending approvals", async () => {
+  const { bridge, listeners } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device, requestApproval: () => new Promise(() => {}) });
+  await host.attach();
+  await host.enable();
+  const pending = callTool(host, "send_serial_input", { text: "echo waiting", appendEnter: true });
+  listeners.find(entry => entry.event === "stateChanged").callback({ running: false });
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(toolErrorText(response.message), /stopped|revoked/i);
+});
+
+test("the native deadline also bounds an unresolved approval", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { bridge } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device, requestApproval: () => new Promise(() => {}) });
+  await host.enable();
+  const pending = host.handleHttp({ id: "native-deadline", deadlineMs: Date.now() + 5000,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: {
+      name: "send_serial_input", arguments: { text: "echo waiting", appendEnter: true },
+    } }),
+  });
+  t.mock.timers.tick(4001);
+  const response = await pending;
+  assert.equal(calls.execute.length, 0);
+  assert.match(response.body, /timed out/i);
+});
+
+test("a forwarded request delivered after stop cannot act on the device", async () => {
+  const { bridge } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device });
+  await host.enable();
+  await host.disable();
+  const response = await host.handleHttp({ id: "late-after-stop", body: JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+      name: "send_serial_input", arguments: { text: "echo late", appendEnter: true },
+    },
+  }) });
+  assert.equal(response.status, 503);
+  assert.equal(calls.execute.length, 0);
+});
+
+test("a native cancellation arriving before its HTTP event still prevents execution", async () => {
+  const { bridge, listeners } = fakeBridge();
+  const { device, calls } = fakeDevice();
+  const host = createHost({ bridge, device });
+  await host.attach();
+  await host.enable();
+  listeners.find(entry => entry.event === "requestCancelled").callback({ id: "late-cancelled-call" });
+  const response = await host.handleHttp({ id: "late-cancelled-call", body: JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+      name: "send_serial_input", arguments: { text: "echo late", appendEnter: true },
+    },
+  }) });
+  assert.equal(response.status, 504);
+  assert.equal(calls.execute.length, 0);
 });
