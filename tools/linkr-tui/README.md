@@ -14,6 +14,16 @@ Run `bee`, focus navigation with **Ctrl+Up**, choose **Connect**, and press
 reuse the chosen board. For a device-free walkthrough, use `bee --bridge -`.
 **F1** opens help and **Ctrl+P** opens the searchable command palette.
 
+If a live BLE or LAN link drops unexpectedly (the board goes out of range or is
+power-cycled), `bee` redials it on its own with a bounded backoff of 1, 2, 4, 8,
+16 and 30 seconds, six attempts in total. The log says when the redial starts,
+names each attempt, and ends with "link restored automatically" or with the
+give-up warning; the terminal journal is kept, the gap stays visible, and no
+input or command is replayed. A deliberate **Disconnect** (and quit, a transport
+change, or a new scan) cancels the redial. Pass `--no-auto-reconnect` to leave a
+dropped link down; `--auto-reconnect` is accepted too and is the default. The
+`--bridge` child process and a failed startup dial are never retried.
+
 | Task | Keys / behavior |
 |---|---|
 | Switch workspaces | F2 terminal, F4 network, F5 assistant |

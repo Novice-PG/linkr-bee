@@ -111,7 +111,11 @@ bee-cli --ble-name "Linkr Bee" --serve
 {"event":"end","id":3,"code":0}
 ```
 
-The `ops` list in the ready event reports what the current transport can serve.
+`--serve` has its own reconnect rule: when a request that needs the link
+arrives and the link is gone, that request dials it again; there is no timer
+redialling between requests. The TUI's automatic redial is therefore
+off for this mode. The `ops` list in the ready event reports what the current
+transport can serve.
 The same operations are available as flags; `--capabilities` lists the full set
 for this build. Request fields are documented by the `capabilities` output and
 the project repository.

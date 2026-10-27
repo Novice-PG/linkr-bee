@@ -416,6 +416,18 @@ pub struct Strings {
     pub link_closed: &'static str,
     /// Prefix of the notice raised when a dial fails.
     pub link_failed: &'static str,
+    /// Prefix of the notice raised when a live link drops and the last dial is
+    /// retried on its own. The link's description follows it.
+    pub auto_reconnect_lost: &'static str,
+    /// Prefix of the notice raised when that retry brings the link back. The
+    /// link's description follows it.
+    pub auto_reconnect_restored: &'static str,
+    /// The words before the attempt's number: the notice reads
+    /// `"<this> 1/6"`.
+    pub auto_reconnect_attempt: &'static str,
+    /// The warning raised when every automatic attempt has failed and the user
+    /// has to ask for the link again.
+    pub auto_reconnect_gave_up: &'static str,
     /// Shown when something was to be sent and there was no link to send it
     /// over. A silent drop reads as success, which for `reboot` is the worst
     /// possible lie.
@@ -619,6 +631,10 @@ const ZH: Strings = Strings {
     link_opened: "链路已建立：",
     link_closed: "链路已断开：",
     link_failed: "连接失败：",
+    auto_reconnect_lost: "链路意外断开，正在自动重连：",
+    auto_reconnect_restored: "链路已自动恢复：",
+    auto_reconnect_attempt: "自动重连尝试",
+    auto_reconnect_gave_up: "自动重连 6 次后失败；请按“重新连接”再试",
     not_connected: "未连接——没有发送任何内容。",
     language_switched_prefix: "界面语言",
     language_zh: "中文",
@@ -817,6 +833,11 @@ const EN: Strings = Strings {
     link_opened: "link open: ",
     link_closed: "link closed: ",
     link_failed: "connect failed: ",
+    auto_reconnect_lost: "link lost, reconnecting automatically: ",
+    auto_reconnect_restored: "link restored automatically: ",
+    auto_reconnect_attempt: "auto-reconnect attempt",
+    auto_reconnect_gave_up:
+        "automatic reconnect failed after 6 attempts; press Reconnect to try again",
     not_connected: "Not connected — nothing was sent.",
     language_switched_prefix: "Interface language",
     language_zh: "中文",
@@ -1190,6 +1211,10 @@ mod tests {
                 s.link_opened,
                 s.link_closed,
                 s.link_failed,
+                s.auto_reconnect_lost,
+                s.auto_reconnect_restored,
+                s.auto_reconnect_attempt,
+                s.auto_reconnect_gave_up,
                 s.not_connected,
                 s.language_switched_prefix,
                 s.language_zh,

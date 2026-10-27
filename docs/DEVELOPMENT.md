@@ -1017,6 +1017,16 @@ reuse the authorization without reopening the chooser.  If the saved device is
 no longer available, the page clears it and falls back to the normal chooser on
 the next attempt.  Browsers without `getDevices()` always use the chooser.
 
+After a link that had been up is lost unexpectedly (the board went out of
+range, was power-cycled, or the battery died; the LAN WebSocket closed), the
+page redials on its own with a bounded backoff of 1, 2, 4, 8, 16 and 30 seconds
+(six attempts). The status line shows the attempt/countdown and the Connect
+button becomes **Cancel reconnect**. A successful redial appends
+`[reconnect] Link restored automatically` and keeps the transcript, so the gap
+stays visible; a successful manual `Disconnect` is never treated as a lost
+link, and no input or command is replayed. If all attempts fail the page stops
+and asks the user to press Reconnect.
+
 The firmware places the Management Service UUID in the primary advertising
 packet and the advertised name in the scan response. The default name is
 `Linkr Bee XXXX` on every board, where `XXXX` is the last four hex digits of the
@@ -1053,6 +1063,9 @@ The page can:
 - connect to devices advertising the Linkr Management Service UUID
 - restore the last authorized Linkr device after a page refresh for quick
   reconnect, when the browser supports `navigator.bluetooth.getDevices()`
+- redial a BLE or LAN link automatically after an unexpected drop, with a
+  bounded 1/2/4/8/16/30-second backoff, a visible attempt/countdown, and a
+  Cancel action; user-initiated disconnects are never retried
 - read API version and stable Device ID, and subscribe to separate management
   indications and Reliable UART indications
 - keep firmware/runtime diagnostics collapsed by default; expanding the panel

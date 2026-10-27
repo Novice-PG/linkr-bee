@@ -240,6 +240,10 @@ struct Args {
     /// `--connect-timeout`, when the command line named one: how long a
     /// dialled link gets to come up, and how long a script run waits for it.
     connect_timeout: Option<Duration>,
+    /// Whether a link that had been live and then dropped is dialled again on
+    /// its own. On unless `--no-auto-reconnect` says otherwise: a board that
+    /// walks out of range should not need a keypress to be met again.
+    auto_reconnect: bool,
     /// Connect, do what was asked, hang up — no terminal is taken over.
     no_terminal: bool,
     /// Run the asked-for commands first, then take the terminal over. The
@@ -597,6 +601,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
         scan: false,
         timeout: None,
         connect_timeout: None,
+        auto_reconnect: true,
         no_terminal: false,
         cli_then_tui: false,
         serve: false,
@@ -669,6 +674,10 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
                 let raw = value("--connect-timeout");
                 args.connect_timeout = Some(parse_seconds(prog, "--connect-timeout", &raw));
             }
+            // The pair is one switch read two ways, not two settings to rank:
+            // the last word on the line wins, and the default is on.
+            "--auto-reconnect" => args.auto_reconnect = true,
+            "--no-auto-reconnect" => args.auto_reconnect = false,
             "--exec" => args.exec = Some(value("--exec")),
             "--idle" => {
                 let raw = value("--idle");
@@ -1502,6 +1511,10 @@ fn main() -> io::Result<()> {
         state: preview_state,
         transport_locked: args.transport.is_some(),
         transport_pinned: args.transport.is_some(),
+        // A preview never pumps, so the switch cannot make a printed frame
+        // depend on the clock; it is still set so the preview is the session
+        // the flag describes.
+        auto_reconnect: args.auto_reconnect,
         sidebar_visible: stored.sidebar_visible.unwrap_or(true),
         assistant_panel: stored.assistant_panel.unwrap_or(true),
         ..App::default()
@@ -3530,6 +3543,24 @@ mod tests {
         // And the endings conflict rather than rank: `--rc-marker` with
         // `--idle` is a command line that has not decided.
         assert_eq!(args(&["--exec", "x", "--rc-marker"]).exec_idle, None);
+    }
+
+    /// Automatic reconnection is on unless the command line says otherwise.
+    /// The pair is one switch read two ways: the last word on the line wins
+    /// rather than the two being a contradiction to rank.
+    #[test]
+    fn automatic_reconnect_is_parsed_and_documented() {
+        for flag in ["--auto-reconnect", "--no-auto-reconnect"] {
+            assert!(
+                cli::FLAGS.iter().any(|entry| entry.name == flag),
+                "{flag} is missing from the flag table"
+            );
+        }
+        assert!(args(&[]).auto_reconnect, "on by default");
+        assert!(args(&["--auto-reconnect"]).auto_reconnect);
+        assert!(!args(&["--no-auto-reconnect"]).auto_reconnect);
+        assert!(!args(&["--auto-reconnect", "--no-auto-reconnect"]).auto_reconnect);
+        assert!(args(&["--no-auto-reconnect", "--auto-reconnect"]).auto_reconnect);
     }
 
     /// The checkup and the send-only mode are actions like any other: named in

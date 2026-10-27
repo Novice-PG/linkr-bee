@@ -216,6 +216,81 @@ impl std::fmt::Debug for DialJob {
     }
 }
 
+/// How long the automatic redial waits before each attempt, in order.
+///
+/// Six attempts spread over a little under two minutes: long enough for a
+/// board that is rebooting or a bridge that is restarting, short enough that a
+/// board which is simply switched off does not keep a program dialling all
+/// afternoon. The sequence is bounded on purpose — a redial that never gave up
+/// would be a program that never told the user the link was gone, and the
+/// last word here is the one the interface owes them. See [`AutoReconnect`].
+pub const AUTO_RECONNECT_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+    Duration::from_secs(30),
+];
+
+/// The wait before automatic attempt number `attempt` (zero-based), or `None`
+/// once the six are spent.
+///
+/// Pure on purpose: the schedule is the part of reconnection worth testing,
+/// and a test that had to sit through a minute and a half to read it would not
+/// be run. The state machine that spends these waits — [`AutoReconnect`] — is
+/// the only caller, and it asks this rather than keeping its own copy.
+pub fn auto_reconnect_delay(attempt: usize) -> Option<Duration> {
+    AUTO_RECONNECT_DELAYS.get(attempt).copied()
+}
+
+/// The automatic redial that follows an unexpected link loss.
+///
+/// One of these exists only between the loss and the first of the three things
+/// that end it: the link comes back, the user takes the wheel, or the sixth
+/// attempt fails. It owns the dial being repeated, so a LAN token stays inside
+/// it and never reaches a notice — what the interface shows is
+/// [`Dial::describe`], which leaves the token out by construction. See
+/// [`App::begin_auto_reconnect`] for where it starts and
+/// [`App::cancel_reconnect`] for every way out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReconnect {
+    /// The dial that last opened the link. Repeated verbatim, token included.
+    dial: Dial,
+    /// How many attempts have been launched, which is also the index of the
+    /// next wait in [`AUTO_RECONNECT_DELAYS`].
+    attempt: usize,
+    /// When the next attempt is due.
+    due: Instant,
+    /// Whether the attempt that was due has been launched and the dial it
+    /// started is in flight. While this is set the wait is not consulted; what
+    /// ends the wait is the landing, collected by [`App::poll_dial`].
+    in_flight: bool,
+}
+
+impl AutoReconnect {
+    /// The dial this redial repeats.
+    pub fn dial(&self) -> &Dial {
+        &self.dial
+    }
+
+    /// How many attempts have been launched so far, out of
+    /// [`AUTO_RECONNECT_DELAYS`]'s length.
+    pub fn attempt(&self) -> usize {
+        self.attempt
+    }
+
+    /// Whether an attempt is on the wire right now.
+    pub fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+
+    /// When the next attempt is due. Meaningless while [`Self::in_flight`].
+    pub fn due(&self) -> Instant {
+        self.due
+    }
+}
+
 /// What `@s?` reported: LAN access state and the token the bridge expects.
 ///
 /// Deliberately *not* part of the network view's state. A token is a secret and
@@ -699,6 +774,14 @@ pub struct App {
     /// announced to nobody: a program that announces its own routine has a
     /// corner full of its own voice.
     pub quiet_connect: bool,
+    /// Whether an unexpected loss is dialled again on its own. On by default;
+    /// `--no-auto-reconnect` turns it off for a session that wants a dropped
+    /// link to stay dropped.
+    pub auto_reconnect: bool,
+    /// The automatic redial in progress, if any. See [`AutoReconnect`]: it
+    /// exists only after a link that had been live died, and every hand on the
+    /// wheel puts it away.
+    pub reconnecting: Option<AutoReconnect>,
     /// The assistant's session state for the assistant view.
     pub assistant: crate::views::assistant::AssistantState,
     /// The agent's durable state: tasks, notes and the saved session.
@@ -887,6 +970,8 @@ impl Default for App {
             scan_connects_one: false,
             dialing: None,
             quiet_connect: false,
+            auto_reconnect: true,
+            reconnecting: None,
             assistant: crate::views::assistant::AssistantState::default(),
             agent_store: None,
             agent_device: "unknown".to_string(),
@@ -1322,6 +1407,10 @@ impl App {
     /// a command-line flag decided it, or a dial did, and a keypress that
     /// quietly overrode either would make the sidebar's `locked` suffix a lie.
     pub fn toggle_transport(&mut self) -> Notice {
+        // Moving off the transport a redial is repeating makes the pending
+        // attempt moot: the user has already decided the next link is a
+        // different one.
+        self.cancel_reconnect();
         if self.transport_locked {
             return Notice {
                 text: self.strings().transport_is_locked.to_string(),
@@ -1358,6 +1447,8 @@ impl App {
     /// palette's `quit` action and the `Ctrl+Q` chord end the session the same
     /// way.
     pub fn request_quit(&mut self) {
+        // A redial in flight would outlive the interface that asked for it.
+        self.cancel_reconnect();
         self.quit = true;
     }
 
@@ -1610,6 +1701,9 @@ impl App {
     /// Opens on the calling thread. A caller that cannot afford the wait dials
     /// through [`App::dial_async`] instead, which lands the same way.
     pub fn connect(&mut self, link: Box<dyn Link>) -> io::Result<()> {
+        // A link handed in whole is not something a redial should be holding
+        // the session for.
+        self.cancel_reconnect();
         self.adopt(OpenedLink::open(link)?);
         Ok(())
     }
@@ -1851,6 +1945,9 @@ impl App {
 
     /// Dial what the command line asked for.
     pub fn dial(&mut self, dial: &Dial) -> io::Result<()> {
+        // A dial that is about to happen is the answer to "is the link coming
+        // back", so a pending redial has nothing left to do.
+        self.cancel_reconnect();
         // A LAN dial needs the token, and `@s?` is the only place there is to
         // get one. Asked while the old link is still up — before the new one
         // closes it — so a user who was on Bluetooth and picks LAN from the
@@ -1888,6 +1985,9 @@ impl App {
     /// Connect using the visible LAN settings or the last saved dial. A first
     /// BLE connection opens discovery; an in-flight attempt is never duplicated.
     pub fn reconnect(&mut self) {
+        // A manual Connect is the user taking the wheel: whatever the automatic
+        // redial was waiting for, this is what they want instead.
+        self.cancel_reconnect();
         if self.session.is_live() {
             return;
         }
@@ -1919,6 +2019,162 @@ impl App {
             }
         };
         self.dial_async(&dial, false);
+    }
+
+    /// Stop waiting for a lost link to come back.
+    ///
+    /// Every hand on the wheel goes through here: Disconnect, Connect, a
+    /// transport change, a scan, a quit. An attempt already on the wire is not
+    /// killed — a dial owns its own thread — but it stops being the automatic
+    /// redial: it is the last thing the user asked for, so the link it brings
+    /// up is announced the ordinary way rather than as a restoration. See
+    /// [`App::poll_dial`].
+    pub fn cancel_reconnect(&mut self) {
+        if let Some(state) = self.reconnecting.take() {
+            if state.in_flight {
+                if let Some(job) = self.dialing.as_mut() {
+                    job.quiet = false;
+                }
+            }
+        }
+    }
+
+    /// Begin the automatic redial after a link that had been live died.
+    ///
+    /// Called from the pump's own loss edge, which is the only place that knows
+    /// the difference between a link the user ended and one that ended itself.
+    /// Returns whether a redial was started, so the caller can fall back to the
+    /// ordinary "link closed" wording when this is not the right answer.
+    ///
+    /// Nothing is started when the switch is off, when no dial was ever
+    /// remembered, or when the remembered dial is a child process: a bridge
+    /// that was asked to run is not a bridge to run again, and a command line
+    /// that exited did not lose a link — it finished one. Only Bluetooth and
+    /// LAN can be re-opened without replaying somebody's command.
+    fn begin_auto_reconnect(&mut self, describe: &str) -> bool {
+        if self.reconnecting.is_some() || !self.auto_reconnect {
+            return false;
+        }
+        let Some(dial) = self.last_dial.clone() else {
+            return false;
+        };
+        if matches!(dial, Dial::Stdio(_)) {
+            return false;
+        }
+        let Some(delay) = auto_reconnect_delay(0) else {
+            return false;
+        };
+        self.reconnecting = Some(AutoReconnect {
+            dial,
+            attempt: 0,
+            due: Instant::now() + delay,
+            in_flight: false,
+        });
+        let text = format!("{}{describe}", self.strings().auto_reconnect_lost);
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Warn,
+        });
+        true
+    }
+
+    /// Launch the next automatic attempt when its wait is over.
+    ///
+    /// `now` is passed rather than read so a test can walk the whole backoff
+    /// without waiting through it; the pump passes the clock it already has.
+    /// The dial is quiet because the link coming up is announced as a
+    /// *restoration*, below, and not as a fresh connection — the sentence
+    /// belongs to the event and not to the mechanism that produced it.
+    fn drive_reconnect(&mut self, now: Instant) {
+        let Some((due, in_flight, attempt, dial)) = self.reconnecting.as_ref().map(|state| {
+            (
+                state.due,
+                state.in_flight,
+                state.attempt,
+                state.dial.clone(),
+            )
+        }) else {
+            return;
+        };
+        if self.session.is_live() {
+            // Something brought the link back outside this machinery — a
+            // link the user opened, most likely — so there is nothing left to
+            // drive.
+            self.cancel_reconnect();
+            return;
+        }
+        if in_flight || self.dialing.is_some() || now < due {
+            return;
+        }
+        let attempt = attempt + 1;
+        let total = AUTO_RECONNECT_DELAYS.len();
+        let text = format!(
+            "{} {attempt}/{total}",
+            self.strings().auto_reconnect_attempt
+        );
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Info,
+        });
+        if !self.start_dial(&dial, true) {
+            return;
+        }
+        if let Some(state) = self.reconnecting.as_mut() {
+            state.attempt = attempt;
+            state.in_flight = true;
+        }
+    }
+
+    /// File a failed automatic attempt: wait again, or give up.
+    ///
+    /// Called from [`App::poll_dial`] rather than from the timer, because only
+    /// the landing knows whether the board answered. The generic "connect
+    /// failed" notice is not raised for these: a line per failed attempt is the
+    /// noise the feature exists not to make, and the give-up sentence below is
+    /// the one that asks the user to act.
+    fn note_reconnect_failure(&mut self, now: Instant) {
+        let Some(attempt) = self.reconnecting.as_ref().map(|state| state.attempt) else {
+            return;
+        };
+        match auto_reconnect_delay(attempt) {
+            Some(delay) => {
+                if let Some(state) = self.reconnecting.as_mut() {
+                    state.in_flight = false;
+                    state.due = now + delay;
+                }
+            }
+            None => {
+                self.reconnecting = None;
+                let text = self.strings().auto_reconnect_gave_up.to_string();
+                self.push_notice(Notice {
+                    text,
+                    level: NoticeLevel::Error,
+                });
+            }
+        }
+    }
+
+    /// File the link the automatic redial brought back.
+    ///
+    /// Called from [`App::poll_dial`] before the link is adopted, because the
+    /// state machine and the notice both belong to the landing and not to a
+    /// later frame. `false` means the dial that landed was not the redial's,
+    /// which is the caller's answer to whether to announce it as one.
+    fn note_reconnect_success(&mut self, describe: &str) -> bool {
+        if !self
+            .reconnecting
+            .as_ref()
+            .is_some_and(|state| state.in_flight)
+        {
+            return false;
+        }
+        self.reconnecting = None;
+        let text = format!("{}{describe}", self.strings().auto_reconnect_restored);
+        self.push_notice(Notice {
+            text,
+            level: NoticeLevel::Info,
+        });
+        true
     }
 
     /// The dial Connect would make.
@@ -2125,7 +2381,18 @@ impl App {
     /// pump collects the answer, because the open is where a Bluetooth dial
     /// spends its seconds. Returns whether the dial was started: a second
     /// Connect pressed while one is in flight is not a second dial.
+    ///
+    /// A dial started from here is the user's, so it cancels any automatic
+    /// redial that was waiting: starting another dial is another way of taking
+    /// the wheel.
     pub fn dial_async(&mut self, dial: &Dial, quiet: bool) -> bool {
+        self.cancel_reconnect();
+        self.start_dial(dial, quiet)
+    }
+
+    /// Start the dial itself, for a caller that has already decided who owns
+    /// the wheel — the automatic redial starts its own attempts through here.
+    fn start_dial(&mut self, dial: &Dial, quiet: bool) -> bool {
         if self.dialing.is_some() {
             return false;
         }
@@ -2173,6 +2440,11 @@ impl App {
         let job = self.dialing.take().expect("checked just above");
         match outcome {
             Ok(opened) => {
+                // A landing that belongs to the automatic redial says so
+                // before the link replaces the session: the sentence is about
+                // the wait that just ended, and the adopt below is what ends
+                // it.
+                self.note_reconnect_success(&opened.description);
                 // Remembered only once the link opened: a dial that failed is
                 // not something `reconnect` should try again behind the user's
                 // back.
@@ -2187,11 +2459,22 @@ impl App {
                 self.quiet_connect = false;
                 self.transport_locked = self.transport_pinned;
                 self.session.fail();
-                let text = format!("{}{why}", self.strings().link_failed);
-                self.push_notice(Notice {
-                    text,
-                    level: NoticeLevel::Error,
-                });
+                // An attempt of the automatic redial reports by its own
+                // schedule — the next wait, or the sentence that gives up —
+                // rather than by one error toast per try.
+                if self
+                    .reconnecting
+                    .as_ref()
+                    .is_some_and(|state| state.in_flight)
+                {
+                    self.note_reconnect_failure(Instant::now());
+                } else {
+                    let text = format!("{}{why}", self.strings().link_failed);
+                    self.push_notice(Notice {
+                        text,
+                        level: NoticeLevel::Error,
+                    });
+                }
             }
         }
     }
@@ -2199,6 +2482,11 @@ impl App {
     /// Hang up, and say so once. Announcing it here rather than in the pump is
     /// what keeps a deliberate hang-up from reading as a dropped link.
     pub fn disconnect(&mut self) {
+        // A deliberate hang-up is the opposite of a loss to reconnect: the
+        // automatic redial stops here whether or not there is a link left to
+        // end (a redial waiting on a dead link is exactly what Disconnect is
+        // pressed to call off).
+        self.cancel_reconnect();
         if !self.session.is_live() {
             return;
         }
@@ -2231,6 +2519,9 @@ impl App {
     /// free the moment this process is" is a promise the next client depends
     /// on. No notice and no state: nobody is left to read one.
     pub fn hang_up(&mut self, grace: Duration) -> bool {
+        // Nobody is left to read a "restored" notice: the redial goes with the
+        // session.
+        self.cancel_reconnect();
         let ended = self.session.hang_up(grace);
         self.state = ConnectionState::Disconnected;
         self.transport_locked = self.transport_pinned;
@@ -2453,6 +2744,10 @@ impl App {
         // already in `was_live` — the tick that catches a dial is the tick the
         // link came up on, not one that finds it already there.
         self.poll_dial();
+        // The automatic redial's own clock, on the same beat as the rest: a
+        // wait that is over launches its attempt here, and a pump that only
+        // painted would never bring the link back.
+        self.drive_reconnect(Instant::now());
         // The toasts' own clock, on the same beat as everything else. The
         // log keeps every word; the corner empties.
         self.expire_notices(Instant::now());
@@ -2643,14 +2938,23 @@ impl App {
             // A quiet dial that died before it was ever announced has nothing
             // left to be quiet about; the next connection is its own news.
             self.quiet_connect = false;
-            let s = self.strings();
-            let (prefix, level) = if self.state == ConnectionState::Failed {
-                (s.link_failed, NoticeLevel::Error)
-            } else {
-                (s.link_closed, NoticeLevel::Warn)
-            };
-            let text = format!("{prefix}{describe}");
-            self.push_notice(Notice { text, level });
+            // This edge is the one place that knows a loss was *not* asked
+            // for: a deliberate hang-up drops the handle before the pump can
+            // see it, so reaching here means the link ended by itself. The
+            // last dial is tried again, unless the switch is off or there is
+            // nothing re-openable to try; when it is, the loss notice is the
+            // redial's own (it names the retry, which the generic one would
+            // not) and the generic notice is left out rather than doubled.
+            if !self.begin_auto_reconnect(&describe) {
+                let s = self.strings();
+                let (prefix, level) = if self.state == ConnectionState::Failed {
+                    (s.link_failed, NoticeLevel::Error)
+                } else {
+                    (s.link_closed, NoticeLevel::Warn)
+                };
+                let text = format!("{prefix}{describe}");
+                self.push_notice(Notice { text, level });
+            }
         }
         if was_live && !now_live {
             // The last thing a target says very often has no newline after it —
@@ -2780,6 +3084,9 @@ impl App {
     /// the answer's other half — where the startup scan has nothing to say
     /// until it has heard something to say.
     fn begin_ble_scan(&mut self, first_board: bool) -> Result<(), String> {
+        // Looking for a board is a hand on the wheel too: a redial of the last
+        // one would race the pick the user is about to make.
+        self.cancel_reconnect();
         self.ble_scan.reset();
         if first_board {
             self.ble_scan.start_first_board(BLE_SCAN_TIMEOUT)?;
@@ -7748,5 +8055,333 @@ mod tests {
                 "the row shows the name the board reported: {name:?}"
             );
         }
+    }
+
+    // --- automatic reconnection -------------------------------------------
+
+    /// The address the in-memory board in these tests is named by. It is not a
+    /// reachable MAC on purpose: the redial tests are about the schedule, and
+    /// a dial to it must fail at once rather than touch a radio.
+    const LOST_BOARD: &str = "nonsense";
+
+    /// An app whose last link died by itself, with the redial armed — the
+    /// starting point for the scheduling tests.
+    fn armed_after_a_loss(lang: Lang) -> App {
+        let mut app = App {
+            lang,
+            ..App::default()
+        };
+        let dial = Dial::Ble(
+            crate::transport::ble::Selection::Address(LOST_BOARD.to_string()),
+            None,
+        );
+        app.last_dial = Some(dial);
+        live_until_it_was_not(&mut app);
+        app
+    }
+
+    /// Open an in-memory Bluetooth link, wait for the interface to say it is
+    /// up, then close the device end so the next pump sees a loss, and leave
+    /// the app at the loss's edge with the redial armed.
+    fn live_until_it_was_not(app: &mut App) {
+        let wire = crate::transport::testing::MemoryLink::ble_addressed("NONSENSE");
+        app.adopt(crate::transport::OpenedLink::open(wire.link()).expect("opens"));
+        assert!(pump_until(app, |app| app.state == ConnectionState::Connected));
+        wire.close();
+        assert!(
+            pump_until(app, |app| {
+                !app.session.is_live() && app.reconnecting.is_some()
+            }),
+            "the loss was noticed and the redial armed"
+        );
+    }
+
+    /// The contract a test can hold without waiting through it: 1, 2, 4, 8,
+    /// 16, 30 seconds, and then no seventh attempt.
+    #[test]
+    fn the_automatic_redial_backs_off_and_ends() {
+        let waits: Vec<u64> = (0..AUTO_RECONNECT_DELAYS.len())
+            .map(|attempt| {
+                auto_reconnect_delay(attempt)
+                    .expect("an attempt has a wait")
+                    .as_secs()
+            })
+            .collect();
+        assert_eq!(waits, vec![1, 2, 4, 8, 16, 30]);
+        assert_eq!(
+            auto_reconnect_delay(AUTO_RECONNECT_DELAYS.len()),
+            None,
+            "there is no attempt after the last wait"
+        );
+    }
+
+    /// A link that had been live and then died by itself arms the redial: the
+    /// loss is announced once, the dial being repeated is the last successful
+    /// one, and the generic failure wording is not stacked on top of it.
+    #[test]
+    fn an_unexpected_loss_arms_the_automatic_redial() {
+        let app = armed_after_a_loss(Lang::En);
+        let state = app.reconnecting.as_ref().expect("the redial is armed");
+        assert_eq!(
+            state.dial(),
+            &Dial::Ble(
+                crate::transport::ble::Selection::Address(LOST_BOARD.to_string()),
+                None
+            ),
+            "the dial that last opened is the one repeated"
+        );
+        assert_eq!(state.attempt(), 0, "no attempt has been made yet");
+        assert!(!state.in_flight(), "the first wait is still running");
+        assert!(
+            state.due().saturating_duration_since(Instant::now()) <= Duration::from_secs(1),
+            "the first wait is a second"
+        );
+        let text = app.log.last().expect("the loss was announced").text.clone();
+        assert_eq!(text, "link lost, reconnecting automatically: ble:NONSENSE");
+        assert!(
+            !app.log
+                .iter()
+                .any(|notice| notice.text.starts_with("connect failed: ")),
+            "the loss is announced once: {:?}",
+            app.log
+        );
+    }
+
+    /// A deliberate hang-up is not a loss: the user asked for the link to end,
+    /// and a program that dialled it back would be arguing with them.
+    #[test]
+    fn a_deliberate_hang_up_is_not_redialled() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.dial(&Dial::Stdio("-".into()))
+            .expect("the loopback opens");
+        assert!(pump_until(&mut app, |app| {
+            app.state == ConnectionState::Connected
+        }));
+        app.disconnect();
+        for _ in 0..4 {
+            app.pump();
+        }
+        assert!(
+            app.reconnecting.is_none(),
+            "a hang-up is not a dropped link"
+        );
+    }
+
+    /// And Disconnect calls off a redial that is already waiting: the row is
+    /// the same key whether there is a link to end or a wait to end.
+    #[test]
+    fn disconnect_calls_off_a_pending_redial() {
+        let mut app = armed_after_a_loss(Lang::En);
+        assert!(app.reconnecting.is_some());
+        app.disconnect();
+        assert!(app.reconnecting.is_none(), "called off");
+        app.pump();
+        assert!(app.reconnecting.is_none(), "the pump does not arm it again");
+    }
+
+    /// The switch turns the whole feature off: the loss keeps its ordinary
+    /// wording and no timer is armed.
+    #[test]
+    fn auto_reconnect_can_be_switched_off() {
+        let mut app = App {
+            lang: Lang::En,
+            auto_reconnect: false,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            crate::transport::ble::Selection::Address(LOST_BOARD.to_string()),
+            None,
+        ));
+        let wire = crate::transport::testing::MemoryLink::ble_addressed("NONSENSE");
+        app.adopt(crate::transport::OpenedLink::open(wire.link()).expect("opens"));
+        assert!(pump_until(&mut app, |app| {
+            app.state == ConnectionState::Connected
+        }));
+        wire.close();
+        assert!(pump_until(&mut app, |app| !app.session.is_live()));
+        for _ in 0..3 {
+            app.pump();
+        }
+        assert!(app.reconnecting.is_none(), "the switch is off");
+        assert!(
+            app.log
+                .iter()
+                .any(|notice| notice.text.starts_with("link closed: ble:NONSENSE")),
+            "the loss is still reported, in the ordinary words: {:?}",
+            app.log
+        );
+        assert!(
+            !app.log
+                .iter()
+                .any(|notice| notice.text.contains("reconnecting automatically")),
+            "and nothing promises a retry: {:?}",
+            app.log
+        );
+    }
+
+    /// A bridge that was asked to run is not a bridge to run again: a child
+    /// process that exited may have finished a job, and replaying its command
+    /// behind the user's back is not a reconnect.
+    #[test]
+    fn a_bridge_process_that_ended_is_not_restarted() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Stdio("-".into()));
+        let wire = crate::transport::testing::MemoryLink::new();
+        app.adopt(crate::transport::OpenedLink::open(wire.link()).expect("opens"));
+        assert!(pump_until(&mut app, |app| {
+            app.state == ConnectionState::Connected
+        }));
+        wire.close();
+        assert!(pump_until(&mut app, |app| !app.session.is_live()));
+        for _ in 0..3 {
+            app.pump();
+        }
+        assert!(app.reconnecting.is_none(), "a process is not a radio");
+    }
+
+    /// A dial that failed at startup is not retried behind the user's back:
+    /// the rule the app has always had, held here against the new state
+    /// machine so the two cannot drift apart.
+    #[test]
+    fn a_failed_startup_dial_is_not_redialled() {
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        assert!(app.dial_async(
+            &Dial::Ble(
+                crate::transport::ble::Selection::Address("nonsense".into()),
+                None,
+            ),
+            true
+        ));
+        assert!(pump_until(&mut app, |app| app.dialing.is_none()));
+        for _ in 0..3 {
+            app.pump();
+        }
+        assert!(app.reconnecting.is_none(), "nothing was ever live");
+        assert!(
+            app.last_dial.is_none(),
+            "and the failed dial is not remembered"
+        );
+    }
+
+    /// The attempts walk the schedule and stop at six: the sixth failure is
+    /// the one that asks the user for the link, in the words the docs quote.
+    #[test]
+    fn the_redial_walks_the_backoff_and_gives_up_after_six() {
+        let mut app = armed_after_a_loss(Lang::En);
+        // A fake clock, far from the real one, so seedings that are measured
+        // from "now" do not matter to the assertions below.
+        let base = Instant::now() + Duration::from_secs(60);
+        for attempt in 0..AUTO_RECONNECT_DELAYS.len() {
+            let due = app.reconnecting.as_ref().expect("still trying").due();
+            app.drive_reconnect(due);
+            assert!(
+                app.dialing.is_some(),
+                "attempt {} is on the wire",
+                attempt + 1
+            );
+            let state = app.reconnecting.as_ref().expect("still trying");
+            assert_eq!(state.attempt(), attempt + 1, "the attempt is counted");
+            assert!(state.in_flight());
+            let text = app
+                .log
+                .last()
+                .expect("the attempt was announced")
+                .text
+                .clone();
+            assert_eq!(text, format!("auto-reconnect attempt {}/6", attempt + 1));
+            // The landing is a failure; collect it by hand so the next wait is
+            // measured on the fake clock rather than after a real sleep.
+            app.dialing = None;
+            app.note_reconnect_failure(base);
+            if attempt + 1 < AUTO_RECONNECT_DELAYS.len() {
+                let state = app.reconnecting.as_ref().expect("a next attempt");
+                assert_eq!(
+                    state.due(),
+                    base + AUTO_RECONNECT_DELAYS[attempt + 1],
+                    "the next wait doubles down the schedule"
+                );
+                assert!(!state.in_flight());
+            }
+        }
+        assert!(app.reconnecting.is_none(), "six attempts and no more");
+        let text = app
+            .log
+            .last()
+            .expect("the give-up was announced")
+            .text
+            .clone();
+        assert_eq!(
+            text,
+            "automatic reconnect failed after 6 attempts; press Reconnect to try again"
+        );
+    }
+
+    /// An attempt that lands brings the link back, says so once as a
+    /// restoration — not also as a fresh connection — and ends the redial.
+    #[test]
+    fn a_restored_link_is_announced_and_ends_the_redial() {
+        let mut app = armed_after_a_loss(Lang::En);
+        // The loopback is a dial a test can really complete, standing in for
+        // the board coming back; the state machine does not care which dial it
+        // repeats.
+        if let Some(state) = app.reconnecting.as_mut() {
+            state.dial = Dial::Stdio("-".into());
+        }
+        let due = app.reconnecting.as_ref().expect("armed").due();
+        let before = app.log.len();
+        app.drive_reconnect(due);
+        assert!(app.dialing.is_some(), "the attempt is on the wire");
+        assert!(pump_until(&mut app, |app| {
+            app.state == ConnectionState::Connected
+        }));
+        assert!(app.reconnecting.is_none(), "the wait is over");
+        let restored = app
+            .log
+            .iter()
+            .map(|notice| notice.text.as_str())
+            .find(|text| text.starts_with("link restored automatically: "))
+            .unwrap_or_else(|| panic!("the restoration was announced: {:?}", app.log));
+        assert_eq!(restored, "link restored automatically: stdio: loopback");
+        assert!(
+            !app.log[before..]
+                .iter()
+                .any(|notice| notice.text.starts_with("link open: ")),
+            "a restoration is not also a fresh connection: {:?}",
+            app.log
+        );
+    }
+
+    /// A manual Connect is another answer to the loss: the redial stops, and
+    /// the dial the press makes is the ordinary one.
+    #[test]
+    fn the_connect_key_calls_off_the_automatic_redial() {
+        let mut app = armed_after_a_loss(Lang::En);
+        assert!(app.reconnecting.is_some());
+        app.reconnect();
+        assert!(app.reconnecting.is_none(), "the press is the answer");
+        assert!(app.dialing.is_some(), "and the press dials");
+        assert!(pump_until(&mut app, |app| app.dialing.is_none()));
+        assert_eq!(
+            app.state,
+            ConnectionState::Failed,
+            "the dial really failed — the board is not there"
+        );
+    }
+
+    /// Quitting ends the redial too: nobody is left to read its notices.
+    #[test]
+    fn quitting_calls_off_the_automatic_redial() {
+        let mut app = armed_after_a_loss(Lang::En);
+        app.request_quit();
+        assert!(app.reconnecting.is_none());
     }
 }

@@ -358,6 +358,16 @@ const WS_AUTH_NONE_FRAME = "@ws auth=none";
 const WS_AUTH_REQUIRED_FRAME = "@ws auth=required";
 const WS_AUTH_OK_FRAME = "@ws auth=ok";
 const WS_HANDSHAKE_TIMEOUT_MS = 5000;
+/* Automatic reconnect after an unexpected link loss. Bounded on purpose: a
+ * board that was switched off should not be redialled forever, and a user can
+ * always press Reconnect again. Tests shorten or disable the schedule through
+ * globalThis.__linkrReconnectDelays instead of faking the clock. */
+const AUTO_RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+function reconnectDelays() {
+  const override = globalThis.__linkrReconnectDelays;
+  return Array.isArray(override) ? override : AUTO_RECONNECT_DELAYS_MS;
+}
 
 const SYSTEM_TERMINAL_FONT =
   'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
@@ -425,6 +435,13 @@ const I18N = {
     connected: "Connected",
     disconnected: "Disconnected",
     authorizedDeviceReady: "Authorized device restored; click Connect to reconnect",
+    reconnectLost: "Link lost; reconnecting automatically",
+    reconnectDialing: "Reconnecting… attempt {n}/{total}",
+    reconnectWaiting: "Reconnecting in {s}s (attempt {n}/{total})",
+    reconnectRestored: "Link restored automatically",
+    reconnectGaveUp: "Automatic reconnect failed after {total} attempts. Press Reconnect to try again.",
+    reconnectCancelled: "Automatic reconnect cancelled",
+    reconnectCancel: "Cancel reconnect",
     authorizedDeviceFailed: "Saved device unavailable; choose it again",
     connection: "Connection",
     settingsConnection: "Connect",
@@ -631,6 +648,13 @@ const I18N = {
     connected: "已连接",
     disconnected: "未连接",
     authorizedDeviceReady: "已恢复授权设备，点击「连接」即可快速重连",
+    reconnectLost: "连接已断开，正在自动重连",
+    reconnectDialing: "正在重连…第 {n}/{total} 次",
+    reconnectWaiting: "{s} 秒后重连（第 {n}/{total} 次）",
+    reconnectRestored: "连接已自动恢复",
+    reconnectGaveUp: "自动重连 {total} 次失败，请点「重新连接」再试。",
+    reconnectCancelled: "已取消自动重连",
+    reconnectCancel: "取消重连",
     authorizedDeviceFailed: "已授权设备不可用，请重新选择设备",
     connection: "连接",
     settingsConnection: "连接",
@@ -1002,6 +1026,7 @@ function setTransportMode(mode) {
   if (state.connected || !["ble", "ws"].includes(mode)) {
     return;
   }
+  cancelAutoReconnect(t("reconnectCancelled"), { silent: true });
   state.mode = mode;
   if (mode === "ws") elements.wsTokenInput.value = lanTokens.selectHost(elements.wsHostInput.value);
   saveSetting(TRANSPORT_KEY, mode);
@@ -1022,6 +1047,10 @@ function refreshConnectionActions() {
 }
 
 function refreshDynamicTexts() {
+  if (autoReconnect.active) {
+    renderAutoReconnectStatus();
+    return;
+  }
   refreshConnectionActions();
   elements.statusText.textContent = t(
     state.connected ? "connected" : "disconnected",
@@ -3109,6 +3138,18 @@ async function copyToClipboard(text) {
 
 let connectionInFlight = false;
 let disconnectInFlight = false;
+/* The auto-reconnect state machine: one timer for the next attempt, one ticker
+ * for the countdown, and the attempt count that also drives the backoff. */
+const autoReconnect = {
+  active: false,
+  attempts: 0,
+  timer: null,
+  ticker: null,
+  nextAt: 0,
+};
+/* Set by a user-initiated disconnect so the teardown it causes is not treated
+ * as a lost link. onDisconnected() consumes it. */
+let userInitiatedDisconnect = false;
 
 function setConnecting(connecting) {
   connecting = connecting || connectionInFlight;
@@ -3793,8 +3834,11 @@ function handleIncomingBytes(bytes) {
   appendOutput(bytes);
 }
 
-function onDisconnected() {
+function onDisconnected({ unexpected = false } = {}) {
   bleNotificationSession = null;
+  const wasConnected = state.connected;
+  const manual = userInitiatedDisconnect;
+  userInitiatedDisconnect = false;
   const hadSession = Boolean(
     state.connected ||
       state.nusReady ||
@@ -3838,6 +3882,157 @@ function onDisconnected() {
   if (hadSession) {
     appendLine("[disconnected]");
   }
+  /* Only a link that had been up and was not hung up by the user is a lost
+   * link worth redialling. A failure during a connection attempt lands here
+   * too (transportConnected teardown), but state.connected is already false. */
+  if (unexpected && wasConnected && !manual) scheduleAutoReconnect();
+}
+
+function autoReconnectTargetAvailable() {
+  if (state.mode === "ws") return Boolean(elements.wsHostInput.value.trim());
+  return Boolean(state.device);
+}
+
+function reconnectStatusText() {
+  const total = reconnectDelays().length;
+  if (!autoReconnect.nextAt) {
+    return t("reconnectDialing")
+      .replace("{n}", String(autoReconnect.attempts))
+      .replace("{total}", String(total));
+  }
+  const seconds = Math.max(
+    0,
+    Math.ceil((autoReconnect.nextAt - Date.now()) / 1000),
+  );
+  return t("reconnectWaiting")
+    .replace("{s}", String(seconds))
+    .replace("{n}", String(autoReconnect.attempts + 1))
+    .replace("{total}", String(total));
+}
+
+function renderAutoReconnectStatus() {
+  if (!autoReconnect.active) return;
+  const text = reconnectStatusText();
+  elements.statusText.textContent = text;
+  if (elements.connStateText) elements.connStateText.textContent = text;
+  const cancelLabel = t("reconnectCancel");
+  for (const button of [elements.connectButton, elements.mobileConnectBtn]) {
+    if (!button) continue;
+    button.disabled = false;
+    button.classList.remove("loading");
+    const label = button.querySelector(".btn-label");
+    if (label) label.textContent = cancelLabel;
+  }
+}
+
+function stopAutoReconnectTicker() {
+  if (autoReconnect.ticker) clearInterval(autoReconnect.ticker);
+  autoReconnect.ticker = null;
+}
+
+function stopAutoReconnectTimer() {
+  if (autoReconnect.timer) clearTimeout(autoReconnect.timer);
+  autoReconnect.timer = null;
+}
+
+function cancelAutoReconnect(reason, { silent = false, refresh = true } = {}) {
+  if (!autoReconnect.active && !autoReconnect.timer) return false;
+  stopAutoReconnectTimer();
+  stopAutoReconnectTicker();
+  autoReconnect.active = false;
+  autoReconnect.attempts = 0;
+  autoReconnect.nextAt = 0;
+  if (!silent) appendLine(`[reconnect] ${reason || t("reconnectCancelled")}`);
+  if (refresh) {
+    setConnecting(false);
+    refreshDynamicTexts();
+  }
+  return true;
+}
+
+function autoReconnectGaveUp() {
+  const total = reconnectDelays().length;
+  const text = t("reconnectGaveUp").replace("{total}", String(total));
+  stopAutoReconnectTimer();
+  stopAutoReconnectTicker();
+  autoReconnect.active = false;
+  autoReconnect.attempts = 0;
+  autoReconnect.nextAt = 0;
+  appendLine(`[reconnect] ${text}`);
+  toast(text, "error");
+  setConnecting(false);
+  refreshDynamicTexts();
+}
+
+async function attemptAutoReconnect(index) {
+  if (!autoReconnect.active) return;
+  const delays = reconnectDelays();
+  if (index >= delays.length) {
+    autoReconnectGaveUp();
+    return;
+  }
+  autoReconnect.attempts = index + 1;
+  autoReconnect.nextAt = 0;
+  stopAutoReconnectTicker();
+  renderAutoReconnectStatus();
+  if (!autoReconnectTargetAvailable()) {
+    autoReconnectGaveUp();
+    return;
+  }
+  try {
+    await connect();
+  } catch (error) {
+    appendLine(`[reconnect] ${error.message}`);
+  }
+  if (!autoReconnect.active) return;
+  if (state.connected) {
+    autoReconnect.active = false;
+    autoReconnect.attempts = 0;
+    autoReconnect.nextAt = 0;
+    stopAutoReconnectTicker();
+    appendLine(`[reconnect] ${t("reconnectRestored")}`);
+    toast(t("reconnectRestored"));
+    refreshDynamicTexts();
+    return;
+  }
+  scheduleNextAutoReconnect(autoReconnect.attempts);
+}
+
+function startAutoReconnectTicker() {
+  stopAutoReconnectTicker();
+  autoReconnect.ticker = setInterval(() => {
+    if (!autoReconnect.active) {
+      stopAutoReconnectTicker();
+      return;
+    }
+    renderAutoReconnectStatus();
+  }, 500);
+}
+
+function scheduleNextAutoReconnect(index) {
+  const delays = reconnectDelays();
+  if (!autoReconnect.active) return;
+  if (index >= delays.length) {
+    autoReconnectGaveUp();
+    return;
+  }
+  autoReconnect.nextAt = Date.now() + delays[index];
+  autoReconnect.timer = setTimeout(() => {
+    autoReconnect.timer = null;
+    void attemptAutoReconnect(index);
+  }, delays[index]);
+  startAutoReconnectTicker();
+  renderAutoReconnectStatus();
+}
+
+function scheduleAutoReconnect() {
+  if (autoReconnect.active || autoReconnect.timer) return;
+  if (!autoReconnectTargetAvailable()) return;
+  autoReconnect.active = true;
+  autoReconnect.attempts = 0;
+  autoReconnect.nextAt = 0;
+  appendLine(`[reconnect] ${t("reconnectLost")}`);
+  scheduleNextAutoReconnect(0);
 }
 
 function connectWs() {
@@ -3959,7 +4154,7 @@ function connectWs() {
     ws.onclose = () => {
       if (state.ws !== ws) return;
       if (opened) {
-        onDisconnected();
+        onDisconnected({ unexpected: true });
         return;
       }
       if (sentToken) {
@@ -3977,6 +4172,7 @@ function connectWs() {
 
 async function connect({ chooseDevice = false } = {}) {
   if (connectionInFlight || state.connected) return;
+  userInitiatedDisconnect = false;
   connectionInFlight = true;
   try {
     await connectOnce({ chooseDevice });
@@ -4066,7 +4262,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     appendLine(`[pairing] ${t("pairingHint")}`);
     appendLine(`[connect] ${printableDeviceName(device.name, device.id)}`);
     pairingAttempted = true;
-    await bleTransport.connect(device.id, onDisconnected);
+    await bleTransport.connect(device.id, () => onDisconnected({ unexpected: true }));
     transportConnected = true;
     state.nusReady = true;
     state.legacy = false;
@@ -4277,6 +4473,8 @@ async function connectOnce({ chooseDevice = false } = {}) {
 }
 
 async function disconnect() {
+  cancelAutoReconnect(t("reconnectCancelled"), { silent: true });
+  userInitiatedDisconnect = true;
   if (state.mode === "ws") {
     if (state.ws) {
       state.ws.close();
@@ -4731,11 +4929,21 @@ function changeFontSize(delta) {
 
 function bind() {
   elements.connectButton.addEventListener("click", () => {
+    if (autoReconnect.active) {
+      cancelAutoReconnect(t("reconnectCancelled"));
+      toast(t("reconnectCancelled"));
+      return;
+    }
     connect().catch((error) => appendLine(`[error] ${error.message}`));
   });
 
   if (elements.mobileConnectBtn) {
     elements.mobileConnectBtn.addEventListener("click", () => {
+      if (autoReconnect.active) {
+        cancelAutoReconnect(t("reconnectCancelled"));
+        toast(t("reconnectCancelled"));
+        return;
+      }
       const action = state.connected ? disconnect() : connect();
       action.catch((error) => appendLine(`[error] ${error.message}`));
     });
@@ -4746,6 +4954,7 @@ function bind() {
   });
 
   elements.switchDeviceButton.addEventListener("click", () => {
+    cancelAutoReconnect(t("reconnectCancelled"), { silent: true });
     connect({ chooseDevice: true }).catch((error) => appendLine(`[error] ${error.message}`));
   });
 
@@ -5342,6 +5551,7 @@ async function scanBeeDevices({ durationMs = 6000, signal } = {}) {
 
 async function connectBee({ deviceId, name, signal } = {}) {
   signal?.throwIfAborted();
+  cancelAutoReconnect(t("reconnectCancelled"), { silent: true });
   if (state.connected) {
     throw new Error("The app is already connected to a Linkr Bee board. Disconnect first (disconnect_bee).");
   }
@@ -5373,6 +5583,7 @@ async function connectBee({ deviceId, name, signal } = {}) {
 
 async function disconnectBee({ forget = false, signal } = {}) {
   signal?.throwIfAborted();
+  cancelAutoReconnect(t("reconnectCancelled"), { silent: true });
   if (state.connected) {
     await disconnect();
   }

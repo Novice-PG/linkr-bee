@@ -188,6 +188,16 @@ pub const FLAGS: &[Flag] = &[
         Value::Free,
         "seconds to wait for a dialled link to come up",
     ),
+    Flag::new(
+        "--auto-reconnect",
+        Value::None,
+        "redial the last link after an unexpected drop (the default)",
+    ),
+    Flag::new(
+        "--no-auto-reconnect",
+        Value::None,
+        "leave a dropped link down instead of redialling it",
+    ),
     // Scripting
     Flag::new(
         "--no-terminal",

@@ -26,6 +26,15 @@ Only one BLE host can connect at a time. If another client owns the connection,
 disconnect it before selecting the accessory here. Use the
 [pairing and recovery guide (Chinese)](BLE_PAIRING.md) for lost bonds or a full bond list.
 
+If a live BLE or LAN link drops unexpectedly (the board goes out of range,
+reboots, or loses power), the terminal redials on its own with a bounded
+backoff of 1, 2, 4, 8, 16 and 30 seconds, six attempts in total. The status line
+shows the attempt and countdown and the Connect button becomes **Cancel
+reconnect**; a successful redial keeps the transcript and appends a
+`[reconnect]` line, and no input or command is replayed. A deliberate disconnect
+is never retried. After six failures the client stops and asks you to press
+Reconnect; the TUI has `--no-auto-reconnect` for the opposite behaviour.
+
 ## Interface tour
 
 ![English desktop terminal preview](../assets/screenshots/linkr-bee-terminal-desktop-en.jpg)

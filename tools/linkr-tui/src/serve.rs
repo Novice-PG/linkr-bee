@@ -196,6 +196,12 @@ fn needs_a_link(op: &str) -> bool {
 /// dials it if it is not up, so the first request pays for the radio and the
 /// rest do not.
 pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration, program: &str) -> i32 {
+    // The resident session has its own rule — the next request that needs the
+    // link dials it, see `ensure_link` — and that *is* its reconnection: the
+    // link is there when a request needs it, not before. The interface's
+    // timer-driven redial would dial between requests, which is exactly what
+    // this mode's rule exists not to do, so the switch is off for the run.
+    app.auto_reconnect = false;
     let link = dial
         .as_ref()
         .map(Dial::describe)
