@@ -155,7 +155,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::new(
         "--ble-address",
         Value::Free,
-        "dial the board at this Bluetooth address",
+        "dial the board at this MAC address or macOS device UUID",
     ),
     Flag::new(
         "--ble-name",
@@ -1010,17 +1010,9 @@ pub fn parse_escape(value: &str) -> Result<u8, String> {
 pub struct FoundDevice {
     /// The advertised name, when it advertised one.
     pub name: Option<String>,
-    /// Where the device is, as the platform spells an address — a MAC on
-    /// BlueZ, as in `FB:F6:91:14:33:3A`. This is the one spelling that names
-    /// the device everywhere: what the rows show, what `--ble-address` takes,
-    /// what the shelf remembers, and what a dial is matched against, because
-    /// it is the address a dial matches — see
-    /// `transport::ble::Selection::accepts`.
-    ///
-    /// It is deliberately *not* the platform's internal identifier: BlueZ
-    /// identifies a device by the path it keeps it under (`hci0/dev_FB_…`),
-    /// and a path shown where an address belongs is a device name nobody can
-    /// match against anything.
+    /// The connection identifier: a real MAC on Linux/Windows, or the full
+    /// CoreBluetooth UUID on macOS. The picker, --ble-address and saved
+    /// reconnects all retain this same value; zero placeholder MACs are not IDs.
     pub address: String,
     /// Whether the advertisement identifies a Linkr Bee. New firmware is
     /// identified by the Linkr Management Service and confirmed by its Device
@@ -1396,7 +1388,10 @@ fn rows_of_heard(
         }
         found.push(FoundDevice {
             name: crate::transport::ble::display_name(properties.local_name.as_deref()),
-            address: properties.address.to_string(),
+            address: crate::transport::ble::connection_identifier(
+                &id,
+                &properties.address.to_string(),
+            ),
             board: true,
             // The reading the advertisement that was just heard carried, or
             // the last one the daemon has on file when that event carried
@@ -2828,6 +2823,28 @@ mod tests {
             rssi,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn macos_scan_rows_retain_distinct_native_ids_with_placeholder_macs() {
+        let first = "11111111-1111-4111-8111-aabbccddeeff";
+        let second = "22222222-2222-4222-8222-aabbccddeeff";
+        let known = vec![
+            (
+                first.into(),
+                seen("00:00:00:00:00:00", "Linkr Bee 1", Some(-40)),
+            ),
+            (
+                second.into(),
+                seen("00:00:00:00:00:00", "Linkr Bee 2", Some(-50)),
+            ),
+        ];
+        let heard = HashMap::from([(first.into(), Some(-40)), (second.into(), Some(-50))]);
+        let rows = rows_of_heard(&heard, known);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].address, first.to_ascii_uppercase());
+        assert_eq!(rows[1].address, second.to_ascii_uppercase());
+        assert_ne!(rows[0].address, rows[1].address);
     }
 
     /// A scan is a question about the air, not about the daemon's memory: a

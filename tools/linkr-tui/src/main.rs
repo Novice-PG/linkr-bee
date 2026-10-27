@@ -1257,6 +1257,14 @@ fn restore_default_sigpipe() {
 #[cfg(not(unix))]
 fn restore_default_sigpipe() {}
 
+fn restored_ble_address(raw: &str) -> Option<String> {
+    let address = linkr_tui::transport::ble::written_address(raw);
+    Selection::Address(address.clone())
+        .reachable()
+        .ok()
+        .map(|_| address)
+}
+
 fn main() -> io::Result<()> {
     // A reader that quits first must end this process quietly, not with a
     // panic — before any output exists to fail.
@@ -1532,12 +1540,11 @@ fn main() -> io::Result<()> {
         app.lan_store = Some(linkr_tui::lan_token_store::TokenStore::load());
     }
     app.seed_lan_token_from_store();
-    if !stored.address.is_empty() {
+    if let Some(address) = restored_ble_address(&stored.address) {
         // A shelf written before addresses were kept as MACs holds BlueZ's
         // path for the board (`hci0/dev_FB_…`). The address is read back in
         // the one spelling that names the board everywhere; the next save
         // writes that spelling down.
-        let address = linkr_tui::transport::ble::written_address(&stored.address);
         app.last_dial = Some(Dial::Ble(
             Selection::Address(address.clone()),
             args.connect_timeout,
@@ -6051,5 +6058,24 @@ mod shrinking_layout {
         );
         assert_eq!(app.assistant.chat().composer, "x");
         assert_eq!(app.tx, sent);
+    }
+}
+
+#[cfg(test)]
+mod remembered_ble_identifiers {
+    use super::*;
+    #[test]
+    fn invalid_placeholders_are_rescanned_and_full_platform_ids_are_preserved() {
+        assert_eq!(restored_ble_address("00:00:00:00:00:00"), None);
+        assert_eq!(
+            restored_ble_address("00000000-0000-0000-0000-000000000000"),
+            None
+        );
+        assert_eq!(
+            restored_ble_address("hci0/dev_FB_F6_91_14_33_3A"),
+            Some("FB:F6:91:14:33:3A".into())
+        );
+        let uuid = "11111111-1111-4111-8111-aabbccddeeff";
+        assert_eq!(restored_ble_address(uuid), Some(uuid.to_ascii_uppercase()));
     }
 }

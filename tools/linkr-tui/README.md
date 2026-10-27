@@ -79,6 +79,12 @@ configuration; a reported rate always replaces the preset label. Opening UART
 settings reads the current configuration. Applying another rate requires Enter.
 The adjacent Follow / Paused indicator describes serial-output scrolling.
 
+Bluetooth device identifiers follow the host platform: Linux/Windows use the
+reported MAC address; macOS uses the full CoreBluetooth UUID because its MAC
+property is a zero placeholder. `bee scan --json`, the picker, saved reconnects
+and `--ble-address` use the same identifier. An older all-zero saved address is
+ignored at startup so the device can be scanned and selected again.
+
 ## Why a rebuild and not a patch
 
 The previous TUI grew to ~55k lines across 48 files, and its review never

@@ -293,8 +293,8 @@ impl Selection {
                 let digits = normalise_address(address);
                 if digits.len() < ADDRESS_DIGITS {
                     return Err(format!(
-                        "“{address}” is not a Bluetooth address; those are twelve \
-                         hexadecimal digits, as in EE:C7:42:34:48:CF"
+                        "“{address}” is not a Bluetooth address or a usable macOS UUID; \
+                         scan and select the Bee again"
                     ));
                 }
                 Ok(())
@@ -334,8 +334,8 @@ impl Selection {
     }
 }
 
-/// An address reduced to what identifies it: the last twelve hexadecimal
-/// digits, one case.
+/// Preserve full CoreBluetooth UUIDs; normalize MACs and BlueZ paths to their
+/// twelve hexadecimal digits. An all-zero placeholder is never an identity.
 ///
 /// Kept as a function rather than done inline because it has to behave the
 /// same on both sides of the comparison, and "the same" is easy to get wrong
@@ -347,13 +347,25 @@ impl Selection {
 /// `de` in `dev_`). Reading from the end is what makes a path, a MAC, and a
 /// shelf entry remembered from an older version all name the same board.
 fn normalise_address(address: &str) -> String {
+    if let Ok(id) = Uuid::parse_str(address.trim()) {
+        return if id.is_nil() {
+            String::new()
+        } else {
+            id.simple().to_string().to_ascii_uppercase()
+        };
+    }
     let digits: String = address
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
         .map(|c| c.to_ascii_uppercase())
         .collect();
     let start = digits.len().saturating_sub(ADDRESS_DIGITS);
-    digits[start..].to_string()
+    let digits = &digits[start..];
+    if digits.chars().all(|c| c == '0') {
+        String::new()
+    } else {
+        digits.to_string()
+    }
 }
 
 /// Whether two ways of writing a device's address name the same device.
@@ -376,6 +388,17 @@ pub fn same_device(left: &str, right: &str) -> bool {
 /// read out in the Device row names a device nobody can match against
 /// anything. Anything that is not such a path — a MAC already, a UUID, a name
 /// — keeps its own spelling, upper-cased like the rows are.
+/// A scan must retain a dialable identity. CoreBluetooth has no peer MAC and
+/// fills its address property with zeroes, while its peripheral ID is a UUID.
+pub fn connection_identifier(id: &str, address: &str) -> String {
+    let mac = normalise_address(address);
+    if mac.len() == ADDRESS_DIGITS {
+        written_address(address)
+    } else {
+        written_address(id)
+    }
+}
+
 pub fn written_address(address: &str) -> String {
     match bluez_path_address(address) {
         Some(mac) => mac,
@@ -1147,7 +1170,13 @@ async fn heard_boards(adapter: &btleplug::platform::Adapter) -> Vec<String> {
         }
         let name = display_name(properties.local_name.as_deref())
             .unwrap_or_else(|| "Linkr Bee".to_string());
-        heard.push(format!("{name} ({})", peripheral.address()));
+        heard.push(format!(
+            "{name} ({})",
+            connection_identifier(
+                &peripheral.id().to_string(),
+                &properties.address.to_string()
+            )
+        ));
     }
     heard.sort();
     heard.truncate(6);
@@ -1585,6 +1614,45 @@ mod tests {
         let any = Selection::any();
         assert!(any.accepts(Some("Linkr BLE UART-3"), "EE:C7:42:34:48:CF", None));
         assert!(any.accepts(None, "some-platform-uuid", None));
+    }
+
+    #[test]
+    fn macos_uses_the_native_uuid_and_zeroes_never_select_a_device() {
+        let id = "11111111-1111-4111-8111-aabbccddeeff";
+        let other = "22222222-2222-4222-8222-aabbccddeeff";
+        assert_eq!(
+            connection_identifier(id, "00:00:00:00:00:00"),
+            id.to_ascii_uppercase()
+        );
+        let selected = Selection::Address(id.into());
+        assert!(selected.reachable().is_ok());
+        assert!(selected.accepts(Some("Linkr Bee"), id, Some("00:00:00:00:00:00")));
+        assert!(!selected.accepts(Some("Linkr Bee"), other, Some("00:00:00:00:00:00")));
+        assert!(
+            !same_device(id, other),
+            "UUIDs with a shared suffix are distinct devices"
+        );
+        assert!(!same_device(id, "AA:BB:CC:DD:EE:FF"));
+        assert!(same_device(id, &id.to_ascii_uppercase()));
+        let zero = Selection::Address("00:00:00:00:00:00".into());
+        assert!(zero.reachable().is_err());
+        assert!(!zero.accepts(Some("Any device"), id, Some("00:00:00:00:00:00")));
+        assert!(!same_device("00:00:00:00:00:00", "00:00:00:00:00:00"));
+        assert!(Selection::Address(Uuid::nil().to_string())
+            .reachable()
+            .is_err());
+    }
+
+    #[test]
+    fn platforms_with_real_mac_addresses_keep_them_as_scan_identifiers() {
+        assert_eq!(
+            connection_identifier("some-platform-id", "FB:F6:91:14:33:3A"),
+            "FB:F6:91:14:33:3A"
+        );
+        assert_eq!(
+            connection_identifier("hci0/dev_FB_F6_91_14_33_3A", "00:00:00:00:00:00"),
+            "FB:F6:91:14:33:3A"
+        );
     }
 
     /// Names are matched on a substring ignoring case, because the same board
