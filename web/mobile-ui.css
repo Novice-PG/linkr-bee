@@ -225,3 +225,10 @@
   .mcp-settings .password-row { flex-wrap: wrap; }
   .mcp-approval { width: calc(100vw - 24px); }
 }
+
+/* Import shares the existing settings controls and scroll area. */
+.cliproxy-import { margin-bottom: 14px; }
+.cliproxy-import [hidden] { display: none; }
+.cliproxy-import .btn { width: 100%; margin-top: 8px; white-space: normal; }
+.cliproxy-import select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.cliproxy-import #cliproxyStatus:empty { display: none; }

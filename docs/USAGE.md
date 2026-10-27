@@ -137,6 +137,24 @@ command and subsequent output; sending input or seeing a prompt is not proof of
 success. **Stop** cancels pending assistant work, but cannot recall transmitted
 bytes. Use terminal Ctrl-C to interrupt the target when appropriate.
 
+### Import from CLIProxyAPI
+
+In AI settings, expand **Import from CLIProxyAPI**, enter the server URL
+(default `http://127.0.0.1:8317`) and temporary management key, then click
+**Connect and import**. Bee reads the client key list through the v8 management
+API, then fetches models using a client key. A single key and model are saved
+automatically; otherwise choose and click **Save imported configuration**.
+Import replaces the current AI configuration. Failure or cancellation preserves
+it. Listing models does not verify chat, streaming, or tool calling.
+
+The management key is cleared from the input when the read starts and is never
+persisted or sent to the model. Only the selected client key and ordinary model
+configuration are saved. Manual configuration remains available if management is
+disabled. This requires a CLIProxyAPI version with the v8 management API and the
+CORS fix; upstream OAuth credentials are never exported. On a phone, use the
+computer's LAN address. Remote management access must follow the
+[upstream management API documentation](https://help.router-for.me/cn/management/apiv8).
+
 ### Data and privacy
 
 - The API key is stored in plaintext in this browser/app's local storage

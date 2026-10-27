@@ -1,3 +1,4 @@
+import { createCLIProxySettings } from './cliproxy_settings.js';
 import { TARGET_DIRECTORY_SETUP } from './target_binding.js';
 import { available } from "./agent_runtime.js";
 import {
@@ -129,6 +130,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   let status = "";
   let error = false;
   let busy = false;
+  let importing = false;
   function renderStatus() {
     // The plaintext warning describes the saved configuration, so it stays
     // visible next to whatever status the last action produced. The context
@@ -161,7 +163,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   }
   let fetchingModels = false;
   async function fetchModels() {
-    if (busy || fetchingModels) return;
+    if (busy || importing || fetchingModels) return;
     if (!isValidEndpoint(inputs.endpoint.value)) {
       inputs.endpoint.setAttribute("aria-invalid", "true");
       showModelStatus("fetchEndpoint", {}, true);
@@ -177,6 +179,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
       return;
     }
     fetchingModels = true;
+    importer.setBusy(true);
     const button = $("agentModelFetch");
     button.disabled = true;
     showModelStatus("fetchBusy");
@@ -204,6 +207,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
       else showModelStatus("fetchNetwork", {}, true);
     } finally {
       fetchingModels = false;
+      importer.setBusy(busy);
       button.disabled = false;
     }
   }
@@ -260,7 +264,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   fill();
   $("agentSettingsForm").addEventListener("submit", (event) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || importing) return;
     resetErrors();
     const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
     delete draft.vendor;
@@ -317,7 +321,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     if (!previous || Object.keys(inputs).some((name) => previous[name] !== config[name])) onChange?.();
   });
   $("agentSettingsClear").addEventListener("click", () => {
-    if (busy) return;
+    if (busy || importing) return;
     try { clearAgentConfig(localStorage); } catch { showStatus("clearError", true); return; }
     config = null;
     fill();
@@ -375,9 +379,25 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     });
   }
   $("targetRegenerateConfirm").addEventListener("change", () => { $("targetRegenerate").disabled = !$("targetRegenerateConfirm").checked; });
+  function updateConfigControls() {
+    $("agentSettingsFields").disabled = busy || importing;
+    $("agentSettingsSave").disabled = busy || importing;
+    $("agentSettingsClear").disabled = busy || importing;
+  }
+  const importer = createCLIProxySettings({ section, getLang,
+    onPending(value) { importing = value; updateConfigControls(); },
+    onImport(draft) {
+      const previous = config;
+      const saved = saveAgentConfig(localStorage, draft);
+      config = saved;
+      fill(); resetErrors(); showModelStatus(""); showStatus("saved");
+      if (JSON.stringify(previous) !== JSON.stringify(saved)) onChange?.();
+    },
+  });
   function refreshLang() {
     for (const el of section.querySelectorAll("[data-ai-setting]")) el.textContent = text(el.dataset.aiSetting);
     fillOptions();
+    importer.refreshLang();
     // The status was written in the previous language; the fetched options stay.
     showModelStatus("");
     renderStatus();
@@ -389,10 +409,9 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     getConfig: () => config && { ...config },
     setBusy(value) {
       busy = value;
-      $("agentSettingsFields").disabled = value;
+      importer.setBusy(value || fetchingModels);
+      updateConfigControls();
       $("targetBindingFields").disabled = value;
-      $("agentSettingsSave").disabled = value;
-      $("agentSettingsClear").disabled = value;
       renderStatus();
     },
   };

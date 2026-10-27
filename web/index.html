@@ -393,6 +393,34 @@
           <div class="card-title"><span class="dot"></span><span id="agentSettingsTitle" data-ai-setting="title">AI configuration</span></div>
           <form id="agentSettingsForm" novalidate>
             <div class="agent-settings-scroll">
+              <!-- CLIProxy import extends the existing settings form: explicit server,
+                   temporary management key, verified client key, then saved model. -->
+              <details id="cliproxyImport" class="agent-advanced-settings cliproxy-import">
+                <summary data-cliproxy="title">Import from CLIProxyAPI</summary>
+                <fieldset id="cliproxyFields" class="agent-advanced-fields">
+                  <p class="field-hint" data-cliproxy="hint"></p>
+                  <label class="field"><span class="field-label" data-cliproxy="address">CLIProxyAPI server URL</span>
+                    <input id="cliproxyAddress" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="cliproxyAddressHint cliproxyStatus">
+                    <span id="cliproxyAddressHint" class="field-hint" data-cliproxy="addressHint"></span>
+                  </label>
+                  <label class="field"><span class="field-label" data-cliproxy="management">Temporary management key</span>
+                    <input id="cliproxySecret" type="password" autocomplete="off" spellcheck="false" aria-describedby="cliproxySecretHint cliproxyStatus">
+                    <span id="cliproxySecretHint" class="field-hint" data-cliproxy="secretHint"></span>
+                  </label>
+                  <button id="cliproxyConnect" class="btn btn-primary" type="button" data-cliproxy="connect">Connect and import</button>
+                  <div id="cliproxyChoices" hidden>
+                    <label id="cliproxyClientField" class="field" hidden><span class="field-label" data-cliproxy="client">Choose a client API key</span>
+                      <select id="cliproxyClient" aria-describedby="cliproxyStatus"></select>
+                    </label>
+                    <label id="cliproxyModelField" class="field" hidden><span class="field-label" data-cliproxy="model">Choose a model</span>
+                      <select id="cliproxyModel" aria-describedby="cliproxyStatus"></select>
+                    </label>
+                    <button id="cliproxySave" class="btn btn-primary" type="button" data-cliproxy="save" disabled>Save imported configuration</button>
+                  </div>
+                  <button id="cliproxyCancel" class="btn" type="button" data-cliproxy="cancel" hidden>Cancel import</button>
+                  <p id="cliproxyStatus" class="field-hint" role="status" aria-live="polite"></p>
+                </fieldset>
+              </details>
               <fieldset id="agentSettingsFields">
                 <label class="field"><span class="field-label" data-ai-setting="vendor">AI provider</span>
                   <select id="agentVendor" aria-describedby="agentVendorHint agentSettingsStatus"></select>
