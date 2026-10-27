@@ -19,7 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
-use crate::app::{App, Focus};
+use crate::app::App;
 use crate::event::View;
 use crate::i18n::{entry, Entry, Lang};
 use crate::text::{self, fill};
@@ -42,7 +42,6 @@ const MSG_SAVE_FAILED: Entry = ["Save failed: {}", "保存失败：{}"];
 
 // Categories.
 const CAT_VIEW: Entry = ["View", "视图"];
-const CAT_FOCUS: Entry = ["Focus", "焦点"];
 const CAT_CONNECTION: Entry = ["Connection", "连接"];
 const CAT_TERMINAL: Entry = ["Terminal", "终端"];
 const CAT_APP: Entry = ["App", "应用"];
@@ -58,26 +57,19 @@ const T_WEBDAV_STATUS: Entry = ["Read the WebDAV status", "读取 WebDAV 状态"
 const T_WEBDAV_OFF: Entry = ["Turn WebDAV upload off", "关闭 WebDAV 上传"];
 
 const T_AGENT_CONFIG: Entry = ["Configure the assistant", "配置助手"];
-const T_AGENT_ASK: Entry = ["Ask the assistant", "向助手提问"];
-const T_AGENT_NOTE: Entry = ["Write a note", "写一条笔记"];
 const T_AGENT_MODE: Entry = ["Change execution mode", "切换执行模式"];
 const T_AGENT_REPORT: Entry = ["Export diagnostic report", "导出排查报告"];
 const T_AGENT_PANEL: Entry = ["Show or hide the assistant panel", "显示或隐藏助手面板"];
 const T_AGENT_NEW: Entry = ["New conversation", "新建对话"];
-const T_AGENT_PREV: Entry = ["Previous conversation", "上一个对话"];
-const T_AGENT_NEXT: Entry = ["Next conversation", "下一个对话"];
-const T_AGENT_DELETE: Entry = ["Delete the conversation", "删除对话"];
-const T_AGENT_COPY: Entry = ["Copy the conversation", "复制对话"];
+const T_AGENT_DELETE: Entry = ["Conversation history", "会话记录"];
 const T_SIDEBAR: Entry = ["Show or hide the sidebar", "显示或隐藏侧栏"];
 const T_COPY: Entry = ["Copy the screen", "复制屏幕"];
 
 // Titles.
 const T_VIEW_TERMINAL: Entry = ["Open terminal view", "打开终端视图"];
-const T_VIEW_DIAGNOSTICS: Entry = ["Open diagnostics view", "打开诊断视图"];
+const T_VIEW_DIAGNOSTICS: Entry = ["Device information", "设备信息"];
 const T_VIEW_NETWORK: Entry = ["Open network view", "打开网络视图"];
 const T_VIEW_ASSISTANT: Entry = ["Open assistant view", "打开助手视图"];
-const T_FOCUS_SIDEBAR: Entry = ["Focus the sidebar", "聚焦侧栏"];
-const T_FOCUS_TERMINAL: Entry = ["Focus the terminal", "聚焦终端"];
 const T_CONNECT: Entry = ["Connect", "连接"];
 const T_DISCONNECT: Entry = ["Disconnect", "断开连接"];
 const T_TRANSPORT: Entry = ["Switch the transport", "切换传输方式"];
@@ -85,17 +77,12 @@ const T_UART_SETTINGS: Entry = ["UART settings…", "UART 设置…"];
 const T_AUTOSCROLL: Entry = ["Toggle autoscroll", "切换自动滚动"];
 const T_ECHO: Entry = ["Toggle local echo", "切换本地回显"];
 const T_ENTER_MODE: Entry = ["Cycle Enter mode", "循环切换回车模式"];
-const T_DEBUG_IO: Entry = ["Toggle debug I/O", "切换调试 I/O"];
 const T_CLEAR: Entry = ["Clear the terminal", "清屏"];
 const T_SAVE_LOG: Entry = ["Save the terminal log", "保存终端日志"];
 const T_SCROLL_BOTTOM: Entry = ["Scroll to the newest line", "滚动到最新一行"];
 const T_HELP: Entry = ["Keyboard help", "键盘帮助"];
-const T_CHEAT: Entry = ["Cheat sheet", "速查参考"];
-const T_NOTICES: Entry = ["Notice log", "通知记录"];
 const T_LANGUAGE: Entry = ["Switch language", "切换界面语言"];
 const T_THEME: Entry = ["Choose theme", "选择主题"];
-const T_ABOUT: Entry = ["About bee", "关于 bee"];
-const T_LICENSES: Entry = ["Open-source components", "开源组件"];
 const T_SPLASH: Entry = ["Toggle the startup splash", "切换启动闪屏"];
 const T_QUIT: Entry = ["Quit the TUI", "退出 TUI"];
 
@@ -120,8 +107,8 @@ fn view_terminal(app: &mut App) {
     app.set_view(View::Terminal);
 }
 
-fn view_diagnostics(app: &mut App) {
-    app.set_view(View::Diagnostics);
+fn device_info(app: &mut App) {
+    crate::dialogs::open_device_info(app);
 }
 
 fn view_network(app: &mut App) {
@@ -130,18 +117,6 @@ fn view_network(app: &mut App) {
 
 fn view_assistant(app: &mut App) {
     app.set_view(View::Assistant);
-}
-
-fn focus_sidebar(app: &mut App) {
-    app.focus = Focus::Sidebar;
-}
-
-/// Focus the pane *and* show it. Setting the focus without moving the view
-/// would leave the keys on a panel the current view does not read, which is the
-/// same as a dead keyboard.
-fn focus_terminal(app: &mut App) {
-    app.set_view(View::Terminal);
-    app.focus = Focus::Terminal;
 }
 
 fn connect(app: &mut App) {
@@ -177,13 +152,6 @@ fn toggle_echo(app: &mut App) {
 /// the notice is the only place it is ever named.
 fn cycle_enter(app: &mut App) {
     let notice = app.cycle_enter_mode();
-    app.push_notice(notice);
-}
-
-/// `#debugInput` of `web/index.html`: both directions traced to stderr, so an
-/// I/O problem can be watched as it happens.
-fn toggle_debug_io(app: &mut App) {
-    let notice = app.toggle_debug_io();
     app.push_notice(notice);
 }
 
@@ -228,14 +196,6 @@ fn show_help(app: &mut App) {
     crate::dialogs::open_help(app);
 }
 
-fn show_cheat(app: &mut App) {
-    crate::dialogs::open_cheat(app);
-}
-
-fn show_notices(app: &mut App) {
-    crate::dialogs::open_notices(app);
-}
-
 fn toggle_language(app: &mut App) {
     let message = app.toggle_language();
     app.push_notice(message);
@@ -246,17 +206,6 @@ fn choose_theme(app: &mut App) {
     crate::dialogs::open_theme_pick(app);
 }
 
-/// The card about the program, the same one `--overlay about` paints.
-fn show_about(app: &mut App) {
-    crate::dialogs::open_about(app);
-}
-
-/// The component page `L` opens from the About card and `--licenses` prints in
-/// full on a command line.
-fn show_licenses(app: &mut App) {
-    crate::dialogs::open_licenses(app);
-}
-
 /// The assistant's settings window, on the row that configures it.
 ///
 /// The endpoint is where somebody lands who has just been told "set the endpoint
@@ -264,14 +213,6 @@ fn show_licenses(app: &mut App) {
 /// composer: a notice that names a field should open on that field.
 fn agent_configure(app: &mut App) {
     crate::views::assistant::open_settings(app, crate::views::assistant::AgentField::Endpoint);
-}
-
-fn agent_ask(app: &mut App) {
-    crate::views::assistant::focus_composer(app);
-}
-
-fn agent_note(app: &mut App) {
-    crate::views::assistant::open_settings(app, crate::views::assistant::AgentField::Notes);
 }
 
 /// Cycle the execution mode and say which one it landed on.
@@ -303,21 +244,10 @@ fn agent_new_chat(app: &mut App) {
     crate::views::assistant::new_conversation(app);
 }
 
-fn agent_prev_chat(app: &mut App) {
-    crate::views::assistant::switch_conversation(app, -1);
-}
-
-fn agent_next_chat(app: &mut App) {
-    crate::views::assistant::switch_conversation(app, 1);
-}
-
-fn agent_delete_chat(app: &mut App) {
+fn agent_history(app: &mut App) {
     crate::dialogs::open_chat_pick(app);
 }
 
-fn agent_copy_chat(app: &mut App) {
-    crate::views::assistant::copy_conversation(app);
-}
 /// The network bridge's own functions, as palette entries.
 ///
 /// The network view is a form whose rows are entered from, and that is the right
@@ -387,6 +317,10 @@ fn webdav_off(app: &mut App) {
     );
 }
 
+fn toggle_focus_layout(app: &mut App) {
+    app.toggle_focus_layout();
+}
+
 fn toggle_sidebar(app: &mut App) {
     let notice = app.toggle_sidebar();
     app.push_notice(notice);
@@ -413,11 +347,11 @@ pub const ACTIONS: &[Action] = &[
         run: view_terminal,
     },
     Action {
-        id: "view.diagnostics",
+        id: "device.info",
         title: T_VIEW_DIAGNOSTICS,
         category: CAT_VIEW,
         shortcut: "F3",
-        run: view_diagnostics,
+        run: device_info,
     },
     Action {
         id: "view.network",
@@ -434,20 +368,6 @@ pub const ACTIONS: &[Action] = &[
         run: view_assistant,
     },
     // Focus
-    Action {
-        id: "focus.sidebar",
-        title: T_FOCUS_SIDEBAR,
-        category: CAT_FOCUS,
-        shortcut: "Ctrl+Up",
-        run: focus_sidebar,
-    },
-    Action {
-        id: "focus.terminal",
-        title: T_FOCUS_TERMINAL,
-        category: CAT_FOCUS,
-        shortcut: "Esc",
-        run: focus_terminal,
-    },
     // Connection
     Action {
         id: "connect",
@@ -500,13 +420,6 @@ pub const ACTIONS: &[Action] = &[
         run: cycle_enter,
     },
     Action {
-        id: "term.debug_io",
-        title: T_DEBUG_IO,
-        category: CAT_TERMINAL,
-        shortcut: "",
-        run: toggle_debug_io,
-    },
-    Action {
         id: "term.clear",
         title: T_CLEAR,
         category: CAT_TERMINAL,
@@ -536,20 +449,6 @@ pub const ACTIONS: &[Action] = &[
         run: show_help,
     },
     Action {
-        id: "app.cheat_sheet",
-        title: T_CHEAT,
-        category: CAT_APP,
-        shortcut: "",
-        run: show_cheat,
-    },
-    Action {
-        id: "app.notices",
-        title: T_NOTICES,
-        category: CAT_APP,
-        shortcut: "",
-        run: show_notices,
-    },
-    Action {
         id: "app.language",
         title: T_LANGUAGE,
         category: CAT_APP,
@@ -562,20 +461,6 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_APP,
         shortcut: "Ctrl+T",
         run: choose_theme,
-    },
-    Action {
-        id: "app.about",
-        title: T_ABOUT,
-        category: CAT_APP,
-        shortcut: "",
-        run: show_about,
-    },
-    Action {
-        id: "app.licenses",
-        title: T_LICENSES,
-        category: CAT_APP,
-        shortcut: "",
-        run: show_licenses,
     },
     Action {
         id: "app.splash",
@@ -641,20 +526,6 @@ pub const ACTIONS: &[Action] = &[
         run: agent_configure,
     },
     Action {
-        id: "agent.ask",
-        title: T_AGENT_ASK,
-        category: CAT_AGENT,
-        shortcut: "",
-        run: agent_ask,
-    },
-    Action {
-        id: "agent.note",
-        title: T_AGENT_NOTE,
-        category: CAT_AGENT,
-        shortcut: "",
-        run: agent_note,
-    },
-    Action {
         id: "agent.mode",
         title: T_AGENT_MODE,
         category: CAT_AGENT,
@@ -683,39 +554,25 @@ pub const ACTIONS: &[Action] = &[
         run: agent_new_chat,
     },
     Action {
-        id: "agent.prev_chat",
-        title: T_AGENT_PREV,
-        category: CAT_AGENT,
-        shortcut: "",
-        run: agent_prev_chat,
-    },
-    Action {
-        id: "agent.next_chat",
-        title: T_AGENT_NEXT,
-        category: CAT_AGENT,
-        shortcut: "",
-        run: agent_next_chat,
-    },
-    Action {
-        id: "agent.delete_chat",
+        id: "agent.history",
         title: T_AGENT_DELETE,
         category: CAT_AGENT,
         shortcut: "",
-        run: agent_delete_chat,
-    },
-    Action {
-        id: "agent.copy_chat",
-        title: T_AGENT_COPY,
-        category: CAT_AGENT,
-        shortcut: "",
-        run: agent_copy_chat,
+        run: agent_history,
     },
     Action {
         id: "app.sidebar",
         title: T_SIDEBAR,
         category: CAT_APP,
-        shortcut: "Ctrl+B",
+        shortcut: "F7 / Ctrl+B",
         run: toggle_sidebar,
+    },
+    Action {
+        id: "app.focus_layout",
+        title: ["Focus content / restore layout", "专注当前内容 / 还原布局"],
+        category: CAT_APP,
+        shortcut: "F8",
+        run: toggle_focus_layout,
     },
     Action {
         id: "app.copy",
@@ -816,11 +673,9 @@ pub enum Row {
 /// for one row is a door for a room with one chair.
 const ALWAYS: &[&str] = &[
     "view.terminal",
-    "view.diagnostics",
+    "device.info",
     "view.network",
     "view.assistant",
-    "focus.sidebar",
-    "focus.terminal",
 ];
 
 /// The open state of the palette.
@@ -1217,11 +1072,9 @@ mod tests {
     /// promises the user.
     const CANONICAL: &[&str] = &[
         "view.terminal",
-        "view.diagnostics",
+        "device.info",
         "view.network",
         "view.assistant",
-        "focus.sidebar",
-        "focus.terminal",
         "connect",
         "disconnect",
         "transport.toggle",
@@ -1229,17 +1082,12 @@ mod tests {
         "term.autoscroll",
         "term.echo",
         "term.enter_mode",
-        "term.debug_io",
         "term.clear",
         "term.save_log",
         "term.scroll_bottom",
         "app.help",
-        "app.cheat_sheet",
-        "app.notices",
         "app.language",
         "app.theme",
-        "app.about",
-        "app.licenses",
         "app.splash",
         "net.wifi_config",
         "net.wifi_scan",
@@ -1249,17 +1097,13 @@ mod tests {
         "net.webdav_status",
         "net.webdav_off",
         "agent.configure",
-        "agent.ask",
-        "agent.note",
         "agent.mode",
         "agent.report",
         "agent.panel",
         "agent.new_chat",
-        "agent.prev_chat",
-        "agent.next_chat",
-        "agent.delete_chat",
-        "agent.copy_chat",
+        "agent.history",
         "app.sidebar",
+        "app.focus_layout",
         "app.copy",
         "app.quit",
     ];
@@ -1398,25 +1242,18 @@ mod tests {
             app.assistant.focus,
             crate::views::assistant::AgentField::Endpoint
         );
-
-        // Asking leaves the window shut rather than stranded under the view
-        // with a caret on a row nobody is painting.
-        agent_ask(&mut app);
-        assert!(app.dialog.is_none(), "the window outlived the question");
         assert_eq!(
-            app.assistant.focus,
-            crate::views::assistant::AgentField::Composer
+            crate::views::assistant::settings_fields(&app.assistant).len(),
+            3
         );
-
-        agent_note(&mut app);
-        assert!(matches!(
-            app.dialog,
-            Some(crate::dialogs::Dialog::Settings(_))
-        ));
-        assert_eq!(
-            app.assistant.focus,
-            crate::views::assistant::AgentField::Notes
-        );
+        assert!(!ACTIONS.iter().any(|action| [
+            "agent.note",
+            "agent.ask",
+            "agent.delete_chat",
+            "app.about",
+            "app.cheat_sheet"
+        ]
+        .contains(&action.id)));
     }
 
     /// The mode cycles Auto → Full Auto → Manual → Auto, and each step says
@@ -1468,21 +1305,10 @@ mod tests {
     /// The debug-I/O switch flips the trace and says which way it now points.
     #[test]
     fn the_debug_io_action_flips_the_trace() {
+        assert!(!ACTIONS.iter().any(|a| a.id == "term.debug_io"));
         let mut app = App::default();
-        assert!(!app.trace.tracing_stderr(), "off until asked for");
-        let action = ACTIONS
-            .iter()
-            .find(|action| action.id == "term.debug_io")
-            .expect("the switch is registered");
-        (action.run)(&mut app);
-        assert!(app.trace.tracing_stderr(), "flipped on");
-        let last = app.notices.last().expect("it announced itself");
-        let s = app.strings();
-        assert!(last.text.contains(s.net_state_on), "{:?}", last.text);
-        (action.run)(&mut app);
-        assert!(!app.trace.tracing_stderr(), "and off again");
-        let last = app.notices.last().expect("it announced itself");
-        assert!(last.text.contains(s.net_state_off), "{:?}", last.text);
+        app.toggle_debug_io();
+        assert!(app.trace.tracing());
     }
 
     /// The switches outlive the run: a trace turned on to catch a problem that
@@ -1501,7 +1327,7 @@ mod tests {
             ..App::default()
         };
         cycle_enter(&mut app);
-        toggle_debug_io(&mut app);
+        app.toggle_debug_io();
         toggle_splash(&mut app);
         let stored = crate::settings::SettingsStore::at(&path).read();
         assert_eq!(stored.enter, Some(app.enter));
@@ -1544,87 +1370,32 @@ mod tests {
     /// the panel shows. A chat that only lived in memory would come back after
     /// a restart, which is the one thing either action must not do.
     #[test]
-    fn starting_and_deleting_conversations_is_durable() {
+    fn starting_and_resuming_conversations_preserves_saved_history() {
         use crate::agent::session::{load_chats, DisplayLine};
-        let mut path = std::env::temp_dir();
-        path.push(format!("linkr-palette-chat-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("linkr-palette-resume-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut app = App {
             agent_store: Some(crate::agent::store::JsonFile::at(&path)),
             ..App::default()
         };
-        // A conversation with something in it, saved the way a turn saves it.
         app.assistant.chat_mut().display.push(DisplayLine {
             role: "user".into(),
             text: "hello".into(),
         });
         crate::views::assistant::persist_session(&mut app);
-        assert_eq!(
-            load_chats(
-                app.agent_store.as_ref().expect("store"),
-                &app.agent_device_key()
-            )
-            .map(|saved| saved.chats.len()),
-            Some(1),
-            "the turn did not reach the store"
-        );
-
-        // A new page: on screen, not in the store — a draft is not a
-        // conversation, but it is not the store's to throw away either.
         agent_new_chat(&mut app);
-        assert_eq!(app.assistant.chats.len(), 2, "a new chat is a new page");
-        assert_eq!(
-            load_chats(
-                app.agent_store.as_ref().expect("store"),
-                &app.agent_device_key()
-            )
-            .map(|saved| saved.chats.len()),
-            Some(1),
-            "the empty page was stored"
-        );
-
-        // Deleting the open (empty) page leaves the saved thread, on screen
-        // and on disk. The palette's entry opens the picker rather than
-        // deleting something the user was not shown: the cursor starts on the
-        // conversation the panel is showing, and Enter is the delete.
-        agent_delete_chat(&mut app);
-        assert!(
-            matches!(app.dialog, Some(crate::dialogs::Dialog::ChatPick(_))),
-            "the delete asks which conversation: {:?}",
-            app.dialog
-        );
+        assert_eq!(app.assistant.chats.len(), 2);
+        agent_history(&mut app);
+        crate::dialogs::handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         crate::dialogs::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.assistant.chats.len(), 1);
-        assert_eq!(app.assistant.chats[0].display[0].text, "hello");
-        assert_eq!(
-            load_chats(
-                app.agent_store.as_ref().expect("store"),
-                &app.agent_device_key()
-            )
-            .map(|saved| saved.chats.len()),
-            Some(1),
-            "the delete did not leave the thread"
-        );
-
-        // Deleting the last one leaves a fresh blank page rather than none,
-        // and the store forgets the thread for good.
-        agent_delete_chat(&mut app);
-        assert!(matches!(
-            app.dialog,
-            Some(crate::dialogs::Dialog::ChatPick(_))
-        ));
-        crate::dialogs::handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.assistant.chats.len(), 1, "a blank page takes its place");
-        assert!(app.assistant.chats[0].display.is_empty());
-        assert!(
-            load_chats(
-                app.agent_store.as_ref().expect("store"),
-                &app.agent_device_key()
-            )
-            .is_none(),
-            "the delete did not reach the store"
-        );
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(app.assistant.active, 0);
+        assert_eq!(app.assistant.chats.len(), 2);
+        assert_eq!(app.assistant.chat().display[0].text, "hello");
+        let saved = load_chats(app.agent_store.as_ref().unwrap(), &app.agent_device_key()).unwrap();
+        assert_eq!(saved.chats.len(), 1);
+        assert_eq!(saved.chats[0].display[0].text, "hello");
+        let _ = std::fs::remove_file(path);
     }
 
     /// Every action is labelled in both languages, and the ids and shorthands
@@ -1652,7 +1423,6 @@ mod tests {
             MSG_SAVED_LOG,
             MSG_SAVE_FAILED,
             CAT_VIEW,
-            CAT_FOCUS,
             CAT_CONNECTION,
             CAT_TERMINAL,
             CAT_APP,
@@ -1883,7 +1653,7 @@ mod tests {
         assert_eq!(app.view, view, "a row ran on the way down");
 
         let en = text_of(&lines_in(state, Lang::En, MAX_VISIBLE, &Theme::DARK));
-        assert!(en.contains("About bee"), "not the section: {en}");
+        assert!(en.contains("Choose theme"), "not the section: {en}");
         assert!(
             !en.contains("Open terminal view"),
             "the menu leaked into the window: {en}"

@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod device;
 pub mod dialogs;
 pub mod doctor;
+pub mod editor;
 pub mod event;
 pub mod exec;
 pub mod hangup;

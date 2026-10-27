@@ -7,6 +7,78 @@ TUI over a shared core. This crate is a **from-scratch rebuild** of the TUI that
 PR #9 carried, built against the same interface design and the same web-client
 palette, but structured so that every screen is testable without a terminal.
 
+## Daily use
+
+Run `bee`, focus navigation with **Ctrl+Up**, choose **Connect**, and press
+**Enter**. A first-time BLE connection opens the device picker; later connects
+reuse the chosen board. For a device-free walkthrough, use `bee --bridge -`.
+**F1** opens help and **Ctrl+P** opens the searchable command palette.
+
+| Task | Keys / behavior |
+|---|---|
+| Switch workspaces | F2 terminal, F4 network, F5 assistant |
+| Device information | F3 or the sidebar Device information entry opens firmware, buffer/drop counters and recent events without leaving the workspace; `r` or click Refresh |
+| Left navigation | F7 or Ctrl+B, or click the F7 button; small windows open a temporary drawer |
+| Right AI panel | F6, or click the F6 button; small windows open the full assistant workspace |
+| Focus / restore | F8, or click the F8 button; maximize the content being used, then restore the previous layout and focus |
+| Move between terminal and assistant | Ctrl+Left / Ctrl+Right |
+| Navigate | Ctrl+Up, then Up/Down and Enter; Esc returns to content |
+| Work in a small window | The sidebar collapses below 78 columns; Ctrl+Up opens a temporary drawer |
+| Read a long answer | PgUp/PgDn or the mouse wheel; Ctrl+Home/End jumps to oldest/latest |
+| Keep reading while a reply arrives | Scrolling back holds the reading position; Ctrl+End resumes following |
+| Edit a question or setting | Left/Right, Home/End, Delete/Backspace; Ctrl+A/E, Ctrl+U/K/W |
+| UART baud | Click the top-bar baud value, or use Ctrl+P → UART settings; default 115200, 8N1, no flow control; Enter applies a manual change |
+| Configure the model | Ctrl+S opens Endpoint / Model / API Key from any workspace or the sidebar; F2 or click Advanced reveals protocol, headers and token limits; Ctrl+S saves |
+| Resume a conversation | Ctrl+G opens conversation history; Enter or click resumes; Esc returns |
+| Start / switch a conversation | Ctrl+N / Alt+Up or Alt+Down while the assistant has focus |
+
+The message composer remains at the bottom of the assistant. Long drafts and
+URLs scroll horizontally with the caret, including CJK and combined emoji.
+The bottom key hints follow the current view and keyboard focus. A blue
+selection identifies the focused navigation row, and it remains on screen as
+the list scrolls.
+
+Terminal input keeps its meaning: Tab completes on the target, Ctrl+C interrupts
+the target while connected, and text-editing shortcuts apply only to UI fields.
+Press Ctrl+Q to exit the application.
+
+The interaction follows the explicit panel focus and paging conventions of
+[lazygit](https://github.com/jesseduffield/lazygit/blob/master/docs/keybindings/Keybindings_en.md),
+the discoverable keyboard help of [Yazi](https://yazi-rs.github.io/docs/quick-start/),
+and the contextual command/status approach of [k9s](https://github.com/derailed/k9s).
+The colors remain Linkr Bee's existing role-based theme.
+
+Mouse input follows the visible controls: click sidebar actions or views, click
+the terminal or assistant to move keyboard focus, and click the assistant's
+message field to position its caret. The assistant footer has clickable Send,
+Settings and History controls as space permits. Dragging text still copies it.
+The bottom bar always offers clickable F7 / F6 / F8 layout controls, including
+when both side panels are hidden. Left/right visibility choices survive restart;
+temporary focus mode preserves the regular layout preferences.
+Network fields/actions, settings fields, their Save button, command-palette entries, device/theme
+choices and confirmation buttons also accept clicks; `[x]` closes an overlay.
+An open overlay consumes clicks on its background. A click on a conversation
+in history resumes it without deleting any saved thread.
+
+The everyday interface has three workspaces: terminal, network and assistant.
+The network page retains WiFi, WebDAV and Bluetooth naming. Startup splash,
+traffic waveforms and the clock remain available. The theme picker offers dark
+and light. Empty quick-send/monitor sections stay hidden, and the application
+ships no fixed shell-command presets. Existing custom sends still use their
+normal confirmation guards.
+
+AI settings default to three common fields. Folding advanced settings preserves
+their values. Device profiles, capability memory, conversations and task evidence
+remain stored; the handwritten note editor and duplicate task-list screen are
+removed from the everyday interface. About, licenses, shortcut recipes and the
+full notice-log cards remain available to static-preview/CLI compatibility code,
+but have no normal command-menu entry. `bee --licenses` still prints notices.
+
+The baud button shows `115200 default` until the bridge reports its current
+configuration; a reported rate always replaces the preset label. Opening UART
+settings reads the current configuration. Applying another rate requires Enter.
+The adjacent Follow / Paused indicator describes serial-output scrolling.
+
 ## Why a rebuild and not a patch
 
 The previous TUI grew to ~55k lines across 48 files, and its review never
@@ -32,13 +104,13 @@ three rules:
 | Module | What it holds |
 |---|---|
 | `theme.rs` | The design system: 16 tokens × two themes (the web client's `:root` and `[data-theme="light"]`, terminal pair from xterm.js), and every role-based style, block and colour helper |
-| `event.rs` | `ConnectionState`, `NoticeLevel`, `View` — and the F2–F5 rota, which is derived from the view list rather than written out twice |
+| `event.rs` | `ConnectionState`, `NoticeLevel`, `View` — and the F2/F4/F5 rota, which is derived from the view list rather than written out twice |
 | `i18n.rs` | Every user-visible string, in Chinese and English, in two `const` tables so a missing translation cannot compile |
 | `text.rs` | Display-width text: pad, clip and wrap measured in *columns*, because a CJK glyph is two of them and `{:<14}` is not |
 | `app.rs` | The state a frame needs and its transitions (view rota, theme toggle, bounded notices, clamped sidebar cursor, `ble_connected`) |
 | `ui/mod.rs` | Layout (`regions`) and composition (`draw`), plus headless rendering for tests and `--print-frame` |
 | `ui/chrome.rs` | Top bar (state dot, busy indicator, counters, speed, autoscroll, clock) and bottom bar (focus, view, state, key hints) |
-| `ui/sidebar.rs` | The four sidebar sections, the accent-chip selection, and the display-width wrap that keeps a long row inside its column |
+| `ui/sidebar.rs` | Connection/view navigation, optional custom sends and active findings, the accent-chip selection, and the display-width wrap that keeps a long row inside its column |
 | `ui/body.rs` | The centre column: which view's content goes in it, and the frame that does or does not wrap it |
 | `ui/legacy.rs` | The compatibility pass for the old Windows console: no synthetic bold, one-cell stand-ins for the ambiguous-width glyphs, and the margin the scrollbar sits over |
 | `ui/toast.rs` | The notice stack in the top-right corner |
@@ -52,8 +124,8 @@ three rules:
 | `vt/mod.rs` | The emulator over the screen: which private modes do what, the alternate screen, the title, and the few sequences a host must *answer* |
 | `views/terminal.rs` | The pane: a streaming UTF-8 decoder and a streaming parser in front of the emulator, plus the painter |
 | `palette.rs` | The `Ctrl+P` command palette: the actions, each one a function pointer so the palette runs the same code the chord does |
-| `dialogs.rs` | Help, the notice log, the guarded-command confirmation, the prompts that ask for a file, a network name, a password or an upload URL, the About card and the component page behind it |
-| `licenses.rs` | The third-party notice: the direct Rust dependencies the About window shows, the contributors, and the full generated `THIRD_PARTY_LICENSES.md` that `--licenses` prints |
+| `dialogs.rs` | Help, the notice log, the guarded-command confirmation, the prompts that ask for a file, a network name, a password or an upload URL, device information and conversation history (legacy static preview cards remain supported) |
+| `licenses.rs` | The third-party notice: the direct Rust dependencies the compatibility About preview shows, the contributors, and the full generated `THIRD_PARTY_LICENSES.md` that `--licenses` prints |
 | `protocol.rs` | The management service's framing: request and response headers, the version and capability handshake, the Reliable UART scheme, and the reassembler that puts a fragmented answer back together |
 | `device.rs` | The request/response bookkeeping over that service: one question at a time, an answer claimed only by the id that asked for it, and a timeout that reports a slow bridge as slow rather than as silent |
 | `accessory.rs` | The bridge's own settings as commands and as parsed data: `@u=…`, `@w=…`, `@d=…`, their limits, and the redaction that keeps a password off every screen but the wire |

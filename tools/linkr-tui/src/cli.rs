@@ -100,7 +100,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::with_choices("--lang", &["zh", "en"], "interface language"),
     Flag::with_choices(
         "--theme",
-        &["dark", "light", "nord", "gruvbox", "dracula", "solarized"],
+        &["dark", "light"],
         "colour theme",
     ),
     Flag::with_choices(
@@ -111,7 +111,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::with_choices(
         "--overlay",
         &[
-            "palette", "help", "notices", "confirm", "wifi", "settings", "about", "licenses",
+            "device", "palette", "help", "notices", "confirm", "wifi", "settings", "about", "licenses",
             "splash",
         ],
         "open on this modal",

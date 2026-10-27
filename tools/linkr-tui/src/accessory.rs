@@ -28,6 +28,9 @@ impl AccessoryLimits {
 
 pub const DIAGNOSTICS_COMMAND: &str = "@i?";
 pub const UART_QUERY_COMMAND: &str = "@u?";
+/// Factory preset; reported hardware settings remain authoritative.
+pub const DEFAULT_UART_BAUD: u32 = 115_200;
+pub const DEFAULT_UART_SPEC: &str = "115200,8,n,1,none";
 pub const WIFI_QUERY_COMMAND: &str = "@w?";
 /// `@n?` — the advertised name, and whether it is a custom one.
 pub const BLE_NAME_QUERY_COMMAND: &str = "@n?";

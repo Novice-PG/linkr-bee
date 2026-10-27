@@ -7,10 +7,9 @@
 //! everything under it, and looks exactly like an emulator bug.
 //!
 //! So this is a line-oriented renderer with one rule the tests enforce: nothing
-//! it returns is ever wider than the width it was given. [`clip_line`] is where
-//! that is decided, and it is column-aware rather than character-aware because a
-//! CJK glyph is two columns and cutting between its halves is the one thing a
-//! terminal cannot draw.
+//! it returns is ever wider than the width it was given. Prose wraps at word or
+//! grapheme boundaries, retaining emphasis and inline code. Literal code and
+//! headings keep their existing clipped layout.
 //!
 //! What it covers is what a model actually emits: fenced code, ATX headings,
 //! bold, emphasis, inline code, bullets and ordered lists, blockquotes and a
@@ -18,8 +17,9 @@
 //! links, HTML — is passed through as text, which is the right failure: a table
 //! read as its own pipes is ugly and correct.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::text;
@@ -93,14 +93,14 @@ pub fn render(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         if let Some((marker, rest)) = list {
             let mut spans = vec![Span::styled(marker, theme.accent())];
             spans.extend(inline(rest, theme));
-            out.push(clip_line(spans, width));
+            out.extend(wrap_line(spans, width, 4));
             continue;
         }
 
         if let Some(rest) = body.strip_prefix("> ") {
             let mut spans = vec![Span::styled("  | ", theme.muted())];
             spans.extend(inline(rest, theme));
-            out.push(clip_line(spans, width));
+            out.extend(wrap_line(spans, width, 4));
             continue;
         }
 
@@ -138,7 +138,7 @@ pub fn render(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             continue;
         }
 
-        out.push(clip_line(inline(body, theme), width));
+        out.extend(wrap_line(inline(body, theme), width, 0));
     }
 
     if out.is_empty() {
@@ -277,45 +277,90 @@ fn position(chars: &[char], needle: char) -> Option<usize> {
     chars.iter().position(|c| *c == needle)
 }
 
-/// Clip one line of spans to `width` columns.
-///
-/// The width is honoured across the *sum* of the spans, not per span: the test
-/// that guards this file joins the spans and counts columns, and two separately
-/// short-enough halves summing past the edge is exactly how a row wraps.
-fn clip_line(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
-    let mut used = 0usize;
-    let mut kept: Vec<Span<'static>> = Vec::with_capacity(spans.len());
-    for span in spans {
-        let columns = span.content.width();
-        if used + columns <= width {
-            used += columns;
-            kept.push(span);
-            continue;
-        }
-        // Cut this span where the room runs out, counting columns so a wide
-        // glyph that would straddle the edge is dropped rather than split. The
-        // running total is not updated: nothing is pushed after this one.
-        let mut taken = 0usize;
-        let mut cut = String::new();
-        for ch in span.content.chars() {
-            let cell = ch.to_string().width();
-            if used + taken + cell > width {
-                break;
+/// Wrap styled prose without losing its tail. List and quote continuations
+/// retain their hanging indent; long words and CJK text break on graphemes.
+fn wrap_line(spans: Vec<Span<'static>>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    let glyphs: Vec<_> = spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .graphemes(true)
+                .map(move |g| (g, span.style, g.width()))
+        })
+        .collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < glyphs.len() {
+        let hanging = if lines.is_empty() {
+            0
+        } else {
+            indent.min(width.saturating_sub(2))
+        };
+        let room = width.saturating_sub(hanging);
+        let mut used = 0;
+        let mut end = start;
+        let mut word_break = None;
+        while end < glyphs.len() && used + glyphs[end].2 <= room {
+            used += glyphs[end].2;
+            if glyphs[end].0.chars().all(char::is_whitespace) {
+                word_break = Some(end + 1);
             }
-            taken += cell;
-            cut.push(ch);
+            end += 1;
         }
-        if !cut.is_empty() {
-            kept.push(Span::styled(cut, span.style));
+        if end < glyphs.len() {
+            end = word_break.unwrap_or(end);
         }
-        break;
+        let mut row: Vec<Span<'static>> = Vec::new();
+        if hanging > 0 {
+            row.push(Span::styled(" ".repeat(hanging), Style::default()));
+        }
+        if end == start {
+            // A two-cell glyph cannot fit in a one-cell viewport.
+            row.push(Span::styled("?", glyphs[start].1));
+            end += 1;
+        } else {
+            for &(glyph, style, _) in &glyphs[start..end] {
+                if let Some(last) = row.last_mut().filter(|span| span.style == style) {
+                    last.content.to_mut().push_str(glyph);
+                } else {
+                    row.push(Span::styled(glyph.to_string(), style));
+                }
+            }
+        }
+        lines.push(Line::from(row));
+        start = end;
     }
-    Line::from(kept)
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_prose_keeps_its_tail_and_emphasis() {
+        let sentence = "已收到串口日志，系统进入登录 Shell。";
+        let rows = render(&format!("**{sentence}**"), 18, &Theme::DARK);
+        let all: String = rows
+            .iter()
+            .flat_map(|l| &l.spans)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(all, sentence);
+        assert!(rows.len() > 1);
+        assert!(rows
+            .iter()
+            .flat_map(|l| &l.spans)
+            .all(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+        let emoji = "👩‍💻e\u{301}中";
+        let rows = render(emoji, 2, &Theme::DARK);
+        let all: String = rows
+            .iter()
+            .flat_map(|l| &l.spans)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(all, emoji);
+    }
 
     /// Nothing comes back wider than it was given, at any width, for any input —
     /// the one rule this module exists to keep, and the one the painting tests

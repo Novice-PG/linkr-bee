@@ -10,7 +10,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
@@ -142,6 +142,90 @@ fn wanted(area: Rect, share: u16, max_height: u16) -> (u16, u16) {
     (width, height)
 }
 
+fn dialog_layout(app: &App, dialog: &dialogs::Dialog, area: Rect) -> (Rect, usize) {
+    let (width, ceiling) = wanted(area, DIALOG_WIDTH_PERCENT, area.height);
+    let body = dialogs::body_height(app, dialog, width.saturating_sub(2));
+    (centred(area, width, box_height(body, ceiling)), body)
+}
+
+fn palette_layout(state: &palette::PaletteState, area: Rect) -> (Rect, usize) {
+    const CHROME_ROWS: u16 = 6;
+    let room = area.height.saturating_sub(CHROME_ROWS) as usize;
+    let count = palette::rows_in(state.level, &state.query).len();
+    let visible = palette::MAX_VISIBLE.min(room).max(1).min(count.max(1));
+    let (width, _) = wanted(area, PALETTE_WIDTH_PERCENT, area.height);
+    (centred(area, width, visible as u16 + CHROME_ROWS), visible)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTarget {
+    Close,
+    Palette(usize),
+    SaveSettings,
+    RefreshDevice,
+    DialogBody { row: usize, column: u16, width: u16 },
+}
+
+/// Resolve a click from the same geometry and scroll window used by the painter.
+pub fn mouse_target(app: &App, screen: Rect, x: u16, y: u16) -> Option<MouseTarget> {
+    let region = super::regions_for(screen, app.sidebar_visible, app.panel_wanted()).centre;
+    if region.width < MIN_WIDTH || region.height < MIN_HEIGHT {
+        return None;
+    }
+    let (rect, visible, count) = if let Some(state) = &app.palette {
+        let (rect, visible) = palette_layout(state, region);
+        (
+            rect,
+            visible,
+            palette::rows_in(state.level, &state.query).len(),
+        )
+    } else {
+        let dialog = app.dialog.as_ref()?;
+        let (rect, count) = dialog_layout(app, dialog, region);
+        (rect, 0, count)
+    };
+    if y == rect.y && (rect.right().saturating_sub(6)..rect.right().saturating_sub(1)).contains(&x)
+    {
+        return Some(MouseTarget::Close);
+    }
+    let inner = app.theme().overlay_block("").inner(rect);
+    if !inner.contains(ratatui::layout::Position::new(x, y)) {
+        return None;
+    }
+    if let Some(state) = &app.palette {
+        let first = inner.y + 2;
+        if (first..first + visible as u16).contains(&y) && count > 0 {
+            let index = palette::window_start(state, count, visible) + (y - first) as usize;
+            return (index < count).then_some(MouseTarget::Palette(index));
+        }
+        return None;
+    }
+    let dialog = app.dialog.as_ref()?;
+    let height = inner.height.saturating_sub(1) as usize;
+    if y == inner.bottom().saturating_sub(1) {
+        if matches!(dialog, dialogs::Dialog::DeviceInfo(_)) {
+            let button = if app.lang == crate::i18n::Lang::Zh {
+                "[刷新]"
+            } else {
+                "[Refresh]"
+            };
+            return (x - inner.x < crate::text::columns(button) as u16)
+                .then_some(MouseTarget::RefreshDevice);
+        }
+        let button = dialogs::settings_save_button(app.lang);
+        return (matches!(dialog, dialogs::Dialog::Settings(_))
+            && x - inner.x < crate::text::columns(button) as u16
+            && crate::text::columns(button) <= inner.width as usize)
+            .then_some(MouseTarget::SaveSettings);
+    }
+    let row = dialog.scroll().min(count.saturating_sub(height)) + (y - inner.y) as usize;
+    (row < count).then_some(MouseTarget::DialogBody {
+        row,
+        column: x - inner.x,
+        width: inner.width,
+    })
+}
+
 /// How many rows of a dialog body a `screen`-sized frame shows.
 ///
 /// For the one caller that has to ask *between* two paints: the settings
@@ -180,14 +264,13 @@ fn paint_dialog(frame: &mut Frame, app: &App, dialog: &dialogs::Dialog, area: Re
     // As tall as its content, up to the ceiling the region allows: the body
     // scrolls, so a box that is too tall wastes the pane behind it, and a box
     // that is too short would refuse to show a long notice.
-    let (width, ceiling) = wanted(area, DIALOG_WIDTH_PERCENT, area.height);
-    let body = dialogs::body_height(app, dialog, width.saturating_sub(2));
-    let height = box_height(body, ceiling);
-    let rect = centred(area, width, height);
+    let (rect, body) = dialog_layout(app, dialog, area);
     release_left_edge(frame.buffer_mut(), rect);
     frame.render_widget(Clear, rect);
 
-    let block = theme.overlay_block(dialogs::title(dialog, app.lang));
+    let block = theme
+        .overlay_block(dialogs::title(dialog, app.lang))
+        .title_top(Line::from(Span::styled(" [x] ", theme.muted())).right_aligned());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -226,16 +309,14 @@ fn paint_palette(frame: &mut Frame, app: &App, state: &palette::PaletteState, ar
     // window is whatever is left, capped at the registry's own maximum — and
     // at the rows the level has, so the menu is a short box rather than
     // a tall one with empty air under it.
-    const CHROME_ROWS: u16 = 6;
-    let room = area.height.saturating_sub(CHROME_ROWS) as usize;
+    let (rect, visible) = palette_layout(state, area);
     let rows = palette::rows_in(state.level, &state.query);
-    let visible = palette::MAX_VISIBLE.min(room).max(1).min(rows.len().max(1));
-    let (width, _) = wanted(area, PALETTE_WIDTH_PERCENT, area.height);
-    let rect = centred(area, width, visible as u16 + CHROME_ROWS);
     release_left_edge(frame.buffer_mut(), rect);
     frame.render_widget(Clear, rect);
 
-    let block = theme.overlay_block(palette::panel_title(app.lang));
+    let block = theme
+        .overlay_block(palette::panel_title(app.lang))
+        .title_top(Line::from(Span::styled(" [x] ", theme.muted())).right_aligned());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -349,7 +430,7 @@ mod tests {
         // The window is a fixed number of rows from the highlighted one, opened
         // here at the top — so the shortcut looked for is one that window is
         // actually showing, not one further down the list.
-        assert!(with.contains("Ctrl+Up"), "and their shortcuts:\n{with}");
+        assert!(with.contains("F3"), "and their shortcuts:\n{with}");
         assert!(with.contains("run"), "the legend is there:\n{with}");
         assert!(
             with.contains('╭') && with.contains('╰'),

@@ -531,6 +531,14 @@ impl WifiOperation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelLayout {
+    pub sidebar: bool,
+    pub assistant: bool,
+    pub view: View,
+    pub focus: Focus,
+}
+
 /// Everything one frame paints.
 ///
 /// Not `Clone`: the session owns a live link, and a second copy of a session is
@@ -562,6 +570,7 @@ pub struct App {
     /// squeezing the pane, and the full-width assistant view (F5) is where a
     /// small window reads a conversation.
     pub assistant_panel: bool,
+    pub layout_restore: Option<PanelLayout>,
     /// Whether frames are painted for the legacy Windows console (conhost).
     ///
     /// Set once by the event loop before the first paint, and false everywhere
@@ -836,6 +845,7 @@ impl Default for App {
             latch: Latch::default(),
             sidebar_visible: true,
             assistant_panel: true,
+            layout_restore: None,
             legacy_console: false,
             no_splash: false,
             splash_until: None,
@@ -857,13 +867,7 @@ impl Default for App {
             // No frame has been drawn yet; the event loop fills this in on its
             // first tick, before any key can arrive.
             screen: Rect::default(),
-            quick_send: vec![
-                QuickSend::new("help"),
-                QuickSend::new("version"),
-                QuickSend::new("uname -a"),
-                QuickSend::new("df -h"),
-                QuickSend::guarded("reboot"),
-            ],
+            quick_send: Vec::new(),
             watch: Vec::new(),
             notices: Vec::new(),
             toast_until: Vec::new(),
@@ -1061,63 +1065,105 @@ impl App {
     ///
     /// Closing it while the keyboard is on a sidebar row would leave the arrows
     /// driving a rail the user cannot see, so focus follows the rail to the
-    /// terminal. Opening it leaves the focus alone: whichever pane was last used
-    /// is usually the one being returned to.
+    /// terminal. On small windows it opens a drawer and gives it the keyboard.
     pub fn toggle_sidebar(&mut self) -> Notice {
-        self.sidebar_visible = !self.sidebar_visible;
-        let s = self.strings();
-        let text = if self.sidebar_visible {
-            s.sidebar_shown.to_string()
+        crate::views::assistant::clear_selection(self);
+        self.layout_restore = None;
+        let assistant_was_visible = self.panel_wanted() && self.panel_fits();
+        let narrow = self.screen.width > 0
+            && crate::ui::regions_for(
+                crate::ui::legacy::drawing_area(self.screen, self.legacy_console),
+                true,
+                self.panel_wanted(),
+            )
+            .sidebar
+            .width
+                == 0;
+        if narrow && !(self.sidebar_visible && self.focus == Focus::Sidebar) {
+            self.sidebar_visible = true;
+            self.focus = Focus::Sidebar;
         } else {
-            s.sidebar_hidden.to_string()
-        };
-        if !self.sidebar_visible && self.focus == Focus::Sidebar {
-            self.focus = Focus::Terminal;
+            self.sidebar_visible = !self.sidebar_visible;
+            if !self.sidebar_visible && self.focus == Focus::Sidebar {
+                self.focus = Focus::Terminal;
+            }
         }
+        // Reclaiming navigation space must not resurrect an auto-collapsed AI.
+        if self.view == View::Terminal
+            && !assistant_was_visible
+            && self.assistant_panel
+            && self.panel_fits()
+        {
+            self.assistant_panel = false;
+        }
+        if self.focus == Focus::Assistant && (!self.assistant_panel || !self.panel_fits()) {
+            self.set_view(View::Assistant);
+        }
+        self.save_settings();
+        let s = self.strings();
         Notice {
-            text,
+            text: if self.sidebar_visible {
+                s.sidebar_shown
+            } else {
+                s.sidebar_hidden
+            }
+            .to_string(),
             level: NoticeLevel::Info,
         }
     }
 
-    /// Open or close the docked assistant panel.
-    ///
-    /// Closing it while the keyboard is in the panel would leave the keys
-    /// typing into a column the user cannot see, so focus follows it back to
-    /// the terminal — the same bargain [`Self::toggle_sidebar`] makes.
-    ///
-    /// Opening goes two ways beyond the plain flip. From another view it
-    /// brings the terminal back, because the column belongs to that view and
-    /// opening it anywhere else would put the screen in a state that says
-    /// nothing. On a window with no room for the column it opens nothing and
-    /// says why: the painter would drop what the key just opened, and a key
-    /// that answers with an unchanged screen looks broken. A window that *has*
-    /// the room still needs no notice — the column appears, and the screen is
-    /// the announcement.
+    /// Toggle the visible assistant. Small windows use its full-width workspace.
     pub fn toggle_assistant_panel(&mut self) {
-        // A run of text the pointer drew belongs to a paint; the panel
-        // appearing or going changes which paints are on screen, so the run
-        // goes with it.
+        self.layout_restore = None;
         crate::views::assistant::clear_selection(self);
-        if self.assistant_panel {
+        if self.view == View::Assistant {
+            self.assistant_panel = false;
+            self.set_view(View::Terminal);
+            self.focus = Focus::Terminal;
+        } else if self.view == View::Terminal && self.assistant_panel && self.panel_fits() {
             self.assistant_panel = false;
             if self.focus == Focus::Assistant {
                 self.focus = Focus::Terminal;
             }
-            return;
+        } else {
+            self.assistant_panel = true;
+            if self.panel_fits() {
+                self.set_view(View::Terminal);
+            } else {
+                self.set_view(View::Assistant);
+            }
         }
-        if !self.panel_fits() {
-            let text = self.strings().asst_panel_narrow.to_string();
-            self.push_notice(Notice {
-                text,
-                level: NoticeLevel::Info,
-            });
-            return;
+        self.save_settings();
+    }
+
+    /// Maximize the content being used, then restore the previous layout and focus.
+    pub fn toggle_focus_layout(&mut self) {
+        crate::views::assistant::clear_selection(self);
+        if let Some(previous) = self.layout_restore.take() {
+            self.sidebar_visible = previous.sidebar;
+            self.assistant_panel = previous.assistant;
+            self.set_view(previous.view);
+            self.focus = previous.focus;
+            if self.focus == Focus::Assistant && (!self.panel_fits() || !self.assistant_panel) {
+                self.set_view(View::Assistant);
+            }
+        } else {
+            let previous = PanelLayout {
+                sidebar: self.sidebar_visible,
+                assistant: self.assistant_panel,
+                view: self.view,
+                focus: self.focus,
+            };
+            let assistant_focused = self.assistant_panel_focused();
+            self.layout_restore = Some(previous);
+            self.sidebar_visible = false;
+            self.assistant_panel = false;
+            self.focus = Focus::Terminal;
+            if assistant_focused {
+                self.set_view(View::Assistant);
+            }
         }
-        if self.view != View::Terminal {
-            self.set_view(View::Terminal);
-        }
-        self.assistant_panel = true;
+        self.save_settings();
     }
 
     /// Whether the keyboard is in the docked panel.
@@ -1145,9 +1191,13 @@ impl App {
     /// the alternative is a focus moved into a column the painter then drops,
     /// which is a caret nobody can see and keys that look broken.
     pub fn panel_fits(&self) -> bool {
-        crate::ui::regions_for(self.screen, self.sidebar_visible, true)
-            .assistant
-            .width
+        crate::ui::regions_for(
+            crate::ui::legacy::drawing_area(self.screen, self.legacy_console),
+            self.sidebar_visible,
+            true,
+        )
+        .assistant
+        .width
             > 0
     }
 
@@ -1497,28 +1547,26 @@ impl App {
             lan_host: self.lan_host.clone(),
             address,
             device_name,
-            view: Some(self.view),
+            view: Some(self.layout_restore.map_or(self.view, |layout| layout.view)),
             theme: Some(self.theme),
             lang: Some(self.lang),
             enter: Some(self.enter),
             debug_io: self.trace.tracing(),
             no_splash: self.no_splash,
+            sidebar_visible: Some(
+                self.layout_restore
+                    .map_or(self.sidebar_visible, |layout| layout.sidebar),
+            ),
+            assistant_panel: Some(
+                self.layout_restore
+                    .map_or(self.assistant_panel, |layout| layout.assistant),
+            ),
         });
     }
 
-    /// How many sidebar rows the cursor can reach: the transport row, the
-    /// connect row, then either the switch-device row or the LAN host and
-    /// token rows, one per view, and one per quick send. This is the same
-    /// number [`crate::ui::sidebar::targets`] produces, and a test pins the
-    /// two together so navigation can never walk off the list.
+    /// Cursor bounds come from the same navigation plan that supplies labels.
     pub fn sidebar_rows(&self) -> usize {
-        let connection = match self.transport {
-            // The LAN block trades the switch-device row for two of its own:
-            // an address and a token are what a LAN dial is built from.
-            Transport::Lan => 4,
-            _ => 3,
-        };
-        connection + View::ALL.len() + self.quick_send.len()
+        crate::ui::sidebar::targets(self).len()
     }
 
     /// Move the sidebar cursor down one row, stopping on the last.
@@ -1830,14 +1878,15 @@ impl App {
         Ok(())
     }
 
-    /// Open the link again, or say why there is nothing to open.
-    ///
-    /// This is the palette's `connect` and the sidebar's `Connect` row. A LAN
-    /// dial is built from the rows the user is looking at; anything else
-    /// re-dials the last link rather than inventing one, so the actions can
-    /// never dial something the command line did not name. One dial at a time:
-    /// a link takes seconds to come up, and a second press while the first is
-    /// still in the air is answered with a sentence rather than a race.
+    /// Whether BLE needs a device choice before a connection can be attempted.
+    pub fn needs_device_choice(&self) -> bool {
+        self.transport == Transport::Ble
+            && !matches!(self.last_dial, Some(Dial::Ble(..)))
+            && !self.session.is_live()
+    }
+
+    /// Connect using the visible LAN settings or the last saved dial. A first
+    /// BLE connection opens discovery; an in-flight attempt is never duplicated.
     pub fn reconnect(&mut self) {
         if self.session.is_live() {
             return;
@@ -1848,6 +1897,15 @@ impl App {
                 text,
                 level: NoticeLevel::Warn,
             });
+            return;
+        }
+        if self.needs_device_choice() {
+            if let Err(why) = self.start_ble_scan() {
+                self.push_notice(Notice {
+                    text: format!("{}: {why}", self.strings().ble_scan_failed),
+                    level: NoticeLevel::Error,
+                });
+            }
             return;
         }
         let dial = match self.dial_for_connect() {
@@ -4288,17 +4346,14 @@ mod tests {
         assert!(app.notices.is_empty());
         assert!(app.watch.is_empty());
         let commands: Vec<&str> = app.quick_send.iter().map(|q| q.command.as_str()).collect();
-        assert_eq!(
-            commands,
-            vec!["help", "version", "uname -a", "df -h", "reboot"]
-        );
+        assert_eq!(commands, Vec::<&str>::new());
         let guarded: Vec<&str> = app
             .quick_send
             .iter()
             .filter(|q| q.dangerous)
             .map(|q| q.command.as_str())
             .collect();
-        assert_eq!(guarded, vec!["reboot"]);
+        assert!(guarded.is_empty());
     }
 
     /// The transport row shows the `◂▸` that says Enter flips it, and the lock
@@ -5233,6 +5288,7 @@ mod tests {
     fn reconnect_without_a_dial_says_so() {
         let mut app = App {
             lang: Lang::En,
+            transport: Transport::Stdio,
             ..App::default()
         };
         app.reconnect();

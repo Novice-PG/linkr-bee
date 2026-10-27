@@ -17,7 +17,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::widgets::{Block, BorderType, Borders, Padding};
 
 use std::borrow::Cow;
 
@@ -673,11 +673,12 @@ impl Theme {
         self.framed(
             Block::default()
                 .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
                 .border_style(self.line())
                 .style(self.panel())
                 .title(Span::styled(
                     format!(" {} ", title.into()),
-                    self.section_header(),
+                    self.text().add_modifier(Modifier::BOLD),
                 )),
         )
     }
@@ -754,14 +755,7 @@ pub enum ThemeChoice {
 
 /// Every theme the interface ships, in the order the picker lists them: the
 /// web's own pair first, then the terminal classics.
-pub const THEMES: [ThemeChoice; 6] = [
-    ThemeChoice::Dark,
-    ThemeChoice::Light,
-    ThemeChoice::Nord,
-    ThemeChoice::Gruvbox,
-    ThemeChoice::Dracula,
-    ThemeChoice::Solarized,
-];
+pub const THEMES: [ThemeChoice; 2] = [ThemeChoice::Dark, ThemeChoice::Light];
 
 impl ThemeChoice {
     /// Lowercase name, the spelling used in settings files.

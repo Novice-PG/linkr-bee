@@ -101,6 +101,7 @@ fn usage(prog: &str) -> String {
 /// layer is exactly the kind of thing that looks right until it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayPreview {
+    DeviceInfo,
     Palette,
     Help,
     Notices,
@@ -130,6 +131,7 @@ impl OverlayPreview {
     /// can report the bad value instead of quietly showing nothing.
     fn from_name(name: &str) -> Option<OverlayPreview> {
         match name.trim().to_ascii_lowercase().as_str() {
+            "device" => Some(OverlayPreview::DeviceInfo),
             "palette" => Some(OverlayPreview::Palette),
             "help" => Some(OverlayPreview::Help),
             "notices" => Some(OverlayPreview::Notices),
@@ -151,6 +153,7 @@ impl OverlayPreview {
     /// something the user will never meet.
     fn raise(self, app: &mut App) {
         match self {
+            OverlayPreview::DeviceInfo => dialogs::open_device_info(app),
             OverlayPreview::Palette => palette::open(app),
             OverlayPreview::Help => dialogs::open_help(app),
             OverlayPreview::Notices => dialogs::open_notices(app),
@@ -1491,6 +1494,8 @@ fn main() -> io::Result<()> {
         state: preview_state,
         transport_locked: args.transport.is_some(),
         transport_pinned: args.transport.is_some(),
+        sidebar_visible: stored.sidebar_visible.unwrap_or(true),
+        assistant_panel: stored.assistant_panel.unwrap_or(true),
         ..App::default()
     };
     // What this terminal can draw, read once from the environment before the
@@ -1579,6 +1584,12 @@ fn main() -> io::Result<()> {
             text: s.not_connected.to_string(),
             level: linkr_tui::event::NoticeLevel::Warn,
         });
+    }
+    if app.view == View::Diagnostics && args.print_frame.is_none() {
+        app.view = View::Terminal;
+        if args.overlay.is_none() {
+            dialogs::open_device_info(&mut app);
+        }
     }
     if let Some(overlay) = args.overlay {
         overlay.raise(&mut app);
@@ -2060,7 +2071,17 @@ fn pane_cell_at(app: &App, cols: u16, rows: u16, column: u16, row: u16) -> Optio
 /// its right margin to the scrollbar, and an emulator sized for the whole
 /// window would wrap the device's lines under it.
 fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
-    let painted = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console).width;
+    let new_screen = Rect::new(0, 0, cols, rows);
+    if app.screen != new_screen {
+        views::assistant::clear_selection(app);
+    }
+    app.screen = new_screen;
+    // Keep an in-progress AI draft on screen when the split no longer fits.
+    // Redirecting its keyboard to the serial pane could send draft text to a shell.
+    if app.assistant_panel_focused() && !app.panel_fits() {
+        app.set_view(View::Assistant);
+    }
+    let painted = ui::legacy::drawing_area(new_screen, app.legacy_console).width;
     // The *painted* centre: the rail and the assistant's panel take their
     // columns out of it, so toggling either resizes the pane. The remote tty
     // is told the same size the emulator is sized to, which is what keeps a
@@ -2068,16 +2089,6 @@ fn fit_pane_to(cols: u16, rows: u16, app: &mut App) -> Rect {
     let pane = painted_centre(app, painted, rows);
     app.terminal.set_size(pane.width, pane.height);
     app.geometry.set_size(pane.width, pane.height);
-    // A run the pointer drew names cells of the frame it was drawn on; a
-    // window that moved those cells under it is a frame the run no longer
-    // names, so the run goes with the size.
-    if app.screen != Rect::new(0, 0, cols, rows) {
-        views::assistant::clear_selection(app);
-    }
-    // The frame itself, kept where a key handler can read it: keys are handled
-    // between two paints, and the settings window keeps its caret inside a
-    // body whose height comes from these numbers.
-    app.screen = Rect::new(0, 0, cols, rows);
     pane
 }
 
@@ -2216,6 +2227,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     } else {
                         let size = terminal.size().unwrap_or_default();
                         handle_mouse(app, mouse, size.width, size.height);
+                        if app.quit {
+                            return Ok(());
+                        }
                     }
                 }
                 // A resize is picked up by the next draw; nothing to do.
@@ -2248,7 +2262,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.palette.is_some() && palette::handle_key(app, key) {
         return app.quit;
     }
-    if app.dialog.is_some() && dialogs::handle_key(app, key) {
+    if app.palette.is_none() && app.dialog.is_some() && dialogs::handle_key(app, key) {
         return app.quit;
     }
 
@@ -2354,6 +2368,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // a key that could hide the sidebar from under a user who is trying to
         // focus it is a key that fights them. It is in the palette.
         (KeyCode::Up, true) => {
+            app.sidebar_visible = true;
             app.focus = Focus::Sidebar;
             return false;
         }
@@ -2381,21 +2396,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         // --- the assistant ---------------------------------------------------
         // The composer for a question or a paste, the settings window for a
-        // setting, the mode cycle, and a new conversation — each landing where
-        // the work is, and each scoped to the assistant rather than global.
-        // That scoping is the point: every one of these is a key a shell also
-        // wants — `Ctrl+N` is the next history line, `Ctrl+S` is flow control,
-        // `Ctrl+V` is verbatim insert — and taking one away from the pane
-        // behind the panel would break the terminal to serve a column the user
-        // is not in. The Shift spellings below are kept as aliases for the
-        // terminals that report the shift flag; the Ctrl spellings are for the
-        // ones that do not, which is most of the consoles this is read on.
+        // setting, the mode cycle, and a new conversation. Settings are a
+        // global entry point, matching the visible Ctrl+S hint; an open form
+        // handles its own save first, and another overlay is left intact.
+        // Conversation and editing chords stay scoped to the assistant so
+        // Ctrl+N and Ctrl+V retain their shell meaning in the serial console.
+        // Shift spellings remain aliases for enhanced keyboard protocols.
         (KeyCode::Char('k'), true) if agent_has_the_keyboard(app) => {
             views::assistant::focus_composer(app);
             return false;
         }
-        (KeyCode::Char('s'), true) if agent_has_the_keyboard(app) => {
+        (KeyCode::Char('s'), true) if !app.overlay_open() => {
             views::assistant::open_settings(app, views::assistant::AgentField::Endpoint);
+            return false;
+        }
+        (KeyCode::F(3), _) => {
+            if !app.overlay_open() {
+                dialogs::open_device_info(app);
+            }
             return false;
         }
         (KeyCode::Char('o'), true) if agent_has_the_keyboard(app) => {
@@ -2483,8 +2501,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         // spelling into the control code — `Ctrl+Shift+B` arrives as the
         // rail's `Ctrl+B` there and would toggle the wrong column. The rail's
         // toggle announces the *state*; this column announces itself by
-        // appearing, so it only speaks when there is no room to appear at all.
+        // appearing. A narrow window opens the full assistant workspace.
+        (KeyCode::F(7), _) => {
+            if !app.overlay_open() {
+                let notice = app.toggle_sidebar();
+                app.push_notice(notice);
+            }
+            return false;
+        }
+        (KeyCode::F(8), _) => {
+            if !app.overlay_open() {
+                app.toggle_focus_layout();
+            }
+            return false;
+        }
         (KeyCode::F(6), _) => {
+            if app.overlay_open() {
+                return false;
+            }
             app.toggle_assistant_panel();
             return false;
         }
@@ -2658,14 +2692,13 @@ fn focus_pane(app: &mut App, direction: isize) {
                     return;
                 }
                 if app.panel_fits() {
-                    app.assistant_panel = true;
+                    if !app.assistant_panel {
+                        app.toggle_assistant_panel();
+                    }
                     app.focus = Focus::Assistant;
                 } else {
-                    let text = app.strings().asst_panel_narrow.to_string();
-                    app.push_notice(linkr_tui::app::Notice {
-                        text,
-                        level: linkr_tui::event::NoticeLevel::Info,
-                    });
+                    app.assistant_panel = true;
+                    app.set_view(View::Assistant);
                 }
             }
             // The panel is the rightmost stop: rightward travel ends here.
@@ -2680,6 +2713,7 @@ fn focus_pane(app: &mut App, direction: isize) {
             if app.view == View::Assistant {
                 app.set_view(View::Terminal);
             } else {
+                app.sidebar_visible = true;
                 app.focus = Focus::Sidebar;
             }
         }
@@ -2846,6 +2880,8 @@ fn local_clock() -> String {
 #[cfg(any(feature = "tui", test))]
 fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, rows: u16) {
     use crossterm::event::{MouseButton, MouseEventKind};
+    let screen = ui::legacy::drawing_area(Rect::new(0, 0, cols, rows), app.legacy_console);
+    let point = Position::new(mouse.column, mouse.row);
 
     // The modal answers the keyboard, and the wheel is a gesture the same way a
     // key is. The box's own paging keys are how it moves; a notch over it does
@@ -2853,7 +2889,182 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
     // cursor there would be half an action, since the Enter that follows would
     // go to the modal.
     if app.overlay_open() {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            use ui::overlay::MouseTarget;
+            match ui::overlay::mouse_target(app, screen, mouse.column, mouse.row) {
+                Some(MouseTarget::Close) => {
+                    if app.palette.is_some() {
+                        app.palette = None;
+                    } else {
+                        dialogs::handle_key(app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                    }
+                }
+                Some(MouseTarget::Palette(index)) => {
+                    if let Some(state) = app.palette.as_mut() {
+                        state.selected = index;
+                    }
+                    palette::handle_key(app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                Some(MouseTarget::RefreshDevice) => {
+                    dialogs::handle_key(app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+                }
+                Some(MouseTarget::SaveSettings) => {
+                    dialogs::handle_key(
+                        app,
+                        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    );
+                }
+                Some(MouseTarget::DialogBody { row, column, width }) => {
+                    dialogs::click(app, row, column, width)
+                }
+                None => {}
+            }
+            return;
+        }
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let up = mouse.kind == MouseEventKind::ScrollUp;
+            if app.palette.is_some() {
+                palette::handle_key(
+                    app,
+                    KeyEvent::new(
+                        if up { KeyCode::Up } else { KeyCode::Down },
+                        KeyModifiers::NONE,
+                    ),
+                );
+            } else {
+                use dialogs::Dialog;
+                let code = match &app.dialog {
+                    Some(
+                        Dialog::DevicePick(_)
+                        | Dialog::ThemePick(_)
+                        | Dialog::ChatPick(_)
+                        | Dialog::Cheat(_),
+                    ) => {
+                        if up {
+                            KeyCode::Up
+                        } else {
+                            KeyCode::Down
+                        }
+                    }
+                    Some(
+                        Dialog::Help(_)
+                        | Dialog::DeviceInfo(_)
+                        | Dialog::Notices(_)
+                        | Dialog::Licenses(_)
+                        | Dialog::Settings(_),
+                    ) => {
+                        if up {
+                            KeyCode::PageUp
+                        } else {
+                            KeyCode::PageDown
+                        }
+                    }
+                    _ => return,
+                };
+                dialogs::handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+            }
+        }
         return;
+    }
+
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        if ui::baud_button_rect(app, screen).is_some_and(|area| area.contains(point)) {
+            dialogs::open_uart(app);
+            return;
+        }
+        if let Some(control) = ui::layout_controls::hit(app, screen, point) {
+            match control {
+                ui::layout_controls::Control::Sidebar => {
+                    let notice = app.toggle_sidebar();
+                    app.push_notice(notice);
+                }
+                ui::layout_controls::Control::Assistant => app.toggle_assistant_panel(),
+                ui::layout_controls::Control::Focus => app.toggle_focus_layout(),
+            }
+            return;
+        }
+    }
+    if let Some(drawer) = ui::sidebar_drawer(app, screen) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.cursor_up(),
+            MouseEventKind::ScrollDown => app.cursor_down(),
+            MouseEventKind::Down(MouseButton::Left) if !drawer.contains(point) => {
+                app.focus = Focus::Terminal
+            }
+            MouseEventKind::Down(MouseButton::Left) => sidebar_click(app, drawer, point),
+            _ => {}
+        }
+        return;
+    }
+    let regions = ui::regions_for(screen, app.sidebar_visible, app.panel_wanted());
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && regions.sidebar.contains(point) {
+        sidebar_click(app, regions.sidebar, point);
+        return;
+    }
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && app.view == View::Network {
+        let body = ui::body_text_area(app, regions.centre);
+        if body.contains(point) {
+            let target = views::network::target_at(app, body.width, body.height, point.y - body.y);
+            app.focus = Focus::Terminal;
+            if let Some(target) = target {
+                app.network.focus = target;
+                views::network::handle_key(app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            return;
+        }
+    }
+    if matches!(
+        mouse.kind,
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) {
+        let regions = ui::regions_for(screen, app.sidebar_visible, app.panel_wanted());
+        if regions
+            .sidebar
+            .contains(Position::new(mouse.column, mouse.row))
+        {
+            app.focus = Focus::Sidebar;
+            if mouse.kind == MouseEventKind::ScrollUp {
+                app.cursor_up();
+            } else {
+                app.cursor_down();
+            }
+            return;
+        }
+        if app.view == View::Diagnostics {
+            if mouse.kind == MouseEventKind::ScrollUp {
+                app.scroll_diagnostics_up(3);
+            } else {
+                app.scroll_diagnostics_down(3);
+            }
+            return;
+        }
+        if app.view == View::Network {
+            app.focus = Focus::Terminal;
+            views::network::handle_key(
+                app,
+                KeyEvent::new(
+                    if mouse.kind == MouseEventKind::ScrollUp {
+                        KeyCode::Up
+                    } else {
+                        KeyCode::Down
+                    },
+                    KeyModifiers::NONE,
+                ),
+            );
+            return;
+        }
+        if let Some((_, _, area)) = assistant_cell(app, cols, rows, mouse.column, mouse.row) {
+            let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                -3
+            } else {
+                3
+            };
+            views::assistant::scroll_in(app, delta, area.width, area.height);
+            return;
+        }
     }
 
     // The assistant's text comes first: a press on the panel or on the view's
@@ -2892,6 +3103,10 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
         // guard is the *view* and not the focus: with the rail focused, the
         // pane is still text under the pointer.
         MouseEventKind::Down(MouseButton::Left) if app.view == View::Terminal => {
+            if painted_centre(app, cols, rows).contains(point) {
+                app.focus = Focus::Terminal;
+                views::assistant::clear_selection(app);
+            }
             match pane_cell_at(app, cols, rows, mouse.column, mouse.row) {
                 Some((line, col)) => app.terminal.press(line, col),
                 // Inside the pane but past its text — the blank ground under
@@ -2925,6 +3140,23 @@ fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, cols: u16, r
     }
 }
 
+#[cfg(any(feature = "tui", test))]
+fn sidebar_click(app: &mut App, area: Rect, point: Position) {
+    let text = ui::sidebar_text_area(area);
+    if !text.contains(point) {
+        return;
+    }
+    app.terminal.deselect();
+    views::assistant::clear_selection(app);
+    // Resolve before changing focus: focusing can change the rail's scroll window.
+    let Some(index) = ui::sidebar::target_at(app, text.width, text.height, point.y - text.y) else {
+        return;
+    };
+    app.sidebar_cursor = index;
+    app.focus = Focus::Sidebar;
+    ui::sidebar::activate(app);
+}
+
 /// The assistant's side of the mouse: a press on its text begins a run, a drag
 /// follows, and the release copies what the run covered — the pane's own
 /// gesture, over the rows the two assistant paints lay out.
@@ -2949,6 +3181,54 @@ fn assistant_mouse(
             else {
                 return false;
             };
+            app.focus = match region {
+                views::assistant::SelectRegion::Panel => Focus::Assistant,
+                views::assistant::SelectRegion::View => Focus::Terminal,
+            };
+            app.terminal.deselect();
+            if cell.0 == views::assistant::composer_row(area.height) {
+                views::assistant::clear_selection(app);
+                if app.assistant.awaiting.is_some() {
+                    let (yes, no) = if app.lang == Lang::Zh {
+                        ("y 执行", "n 拒绝")
+                    } else {
+                        ("y run", "n deny")
+                    };
+                    let end = linkr_tui::text::columns(yes) as u16;
+                    let code = if cell.1 < end {
+                        Some('y')
+                    } else if (end + 3..end + 3 + linkr_tui::text::columns(no) as u16)
+                        .contains(&cell.1)
+                    {
+                        Some('n')
+                    } else {
+                        None
+                    };
+                    if let Some(code) = code {
+                        handle_key(app, KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE));
+                    }
+                } else {
+                    views::assistant::click_composer(app, area.width, cell.1);
+                }
+                return true;
+            }
+            if area.height >= 5 && cell.0 == area.height - 1 {
+                views::assistant::clear_selection(app);
+                if let Some(action) = views::assistant::footer_action(app, area.width, cell.1) {
+                    use views::assistant::FooterAction;
+                    let key = match action {
+                        FooterAction::Send => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                        FooterAction::Settings => {
+                            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
+                        }
+                        FooterAction::History => {
+                            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)
+                        }
+                    };
+                    handle_key(app, key);
+                }
+                return true;
+            }
             views::assistant::begin_selection(app, region, cell, area);
             true
         }
@@ -3558,37 +3838,22 @@ mod tests {
     /// the view be; any other function key changes nothing.
     #[test]
     fn the_view_keys_select_views() {
-        let mut app = App::default();
-        assert!(!handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)
-        ));
+        let mut app = App {
+            screen: Rect::new(0, 0, 140, 30),
+            ..App::default()
+        };
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
         assert_eq!(app.view, View::Network);
-        // F5 is the last view. F6 toggles the assistant's column instead of
-        // moving the view, and F7 is still unbound and must leave it be.
         handle_key(&mut app, KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
         assert_eq!(app.view, View::Assistant);
         handle_key(&mut app, KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
-        assert_eq!(
-            app.view,
-            View::Assistant,
-            "the panel's key must not move the view"
-        );
-        assert!(!app.assistant_panel, "F6 did not toggle the panel");
+        assert_eq!(app.view, View::Terminal);
+        assert!(!app.assistant_panel);
         handle_key(&mut app, KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
-        assert_eq!(
-            app.view,
-            View::Assistant,
-            "an unbound F-key must not move the view"
-        );
-        // F1 is help, not a view: it opens the overlay and leaves the view be.
+        assert!(!app.sidebar_visible);
+        assert_eq!(app.view, View::Terminal);
         handle_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-        assert_eq!(app.view, View::Assistant, "F1 is help, not a view");
-        assert!(
-            matches!(app.dialog, Some(linkr_tui::dialogs::Dialog::Help(0))),
-            "F1 opened the help: {:?}",
-            app.dialog
-        );
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Help(0))));
     }
 
     /// The diagnostics view hears the two keys its own hint names: `r` asks
@@ -3810,7 +4075,7 @@ mod tests {
     /// A window with no room for the panel says so rather than moving the
     /// keyboard into a column that is not painted.
     #[test]
-    fn a_window_with_no_room_keeps_the_keyboard_in_the_pane() {
+    fn a_window_with_no_room_keeps_the_assistant_visible() {
         let mut app = App {
             screen: Rect::new(0, 0, 80, 24),
             ..App::default()
@@ -3819,55 +4084,43 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
         );
-        assert_eq!(app.focus, Focus::Terminal, "the keyboard left the pane");
-        assert!(!app.notices.is_empty(), "the refusal was silent");
+        assert_eq!(app.view, View::Assistant);
+        assert_eq!(app.focus, Focus::Terminal);
+        assert!(app.notices.is_empty());
     }
 
     /// F6 is the assistant column's key, and it makes the same bargain
     /// `Ctrl+B` makes for the rail: it works wherever the keyboard is,
     /// closing hands the keyboard back, opening from another view brings the
-    /// terminal with it — and a window with no room says so rather than
-    /// flipping a state nothing paints.
+    /// terminal with it. A window with no room uses the assistant workspace.
     #[test]
     fn f6_toggles_the_assistant_panel() {
         let mut app = App {
             screen: Rect::new(0, 0, 140, 30),
             ..App::default()
         };
-        assert!(app.assistant_panel, "the panel starts open");
         let chord = KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE);
-
         handle_key(&mut app, chord);
-        assert!(!app.assistant_panel, "F6 did not put it away");
-
+        assert!(!app.assistant_panel);
         handle_key(&mut app, chord);
-        assert!(app.assistant_panel, "the key did not bring it back");
-
-        // Hiding it while the keyboard is on it hands the keyboard back, the
-        // rule the rail's toggle follows too.
+        assert!(app.assistant_panel);
         app.focus = Focus::Assistant;
         handle_key(&mut app, chord);
-        assert_eq!(app.focus, Focus::Terminal, "the keys stayed in the column");
+        assert_eq!(app.focus, Focus::Terminal);
         assert!(!app.assistant_panel);
-
-        // The column belongs to the terminal view, so asking for it from the
-        // full-width view brings the terminal back rather than opening it
-        // where nothing paints it.
-        app.set_view(View::Assistant);
+        // An invisible preference on another workspace is not an open panel.
+        app.set_view(View::Network);
         handle_key(&mut app, chord);
-        assert_eq!(app.view, View::Terminal, "the view did not come back");
-        assert!(app.assistant_panel, "the panel did not open with it");
-
-        // A window with no room cannot show what was asked for: the toggle
-        // refuses and says why, the same words the focus walk uses.
-        app.screen = Rect::new(0, 0, 80, 24);
-        assert!(!app.panel_fits(), "the narrow window still fits the panel");
+        assert_eq!(app.view, View::Terminal);
+        assert!(app.assistant_panel);
+        // When the split cannot fit, the same key opens the full conversation.
+        app.screen = Rect::new(0, 0, 60, 20);
         handle_key(&mut app, chord);
-        assert!(!app.assistant_panel, "the panel closed, not opened");
-        let noticed = app.notices.len();
+        assert_eq!(app.view, View::Assistant);
+        assert!(app.assistant_panel);
         handle_key(&mut app, chord);
-        assert!(!app.assistant_panel, "a column with no room was opened");
-        assert!(app.notices.len() > noticed, "the refusal was silent");
+        assert_eq!(app.view, View::Terminal);
+        assert!(!app.assistant_panel);
     }
 
     /// The panel's keys are the panel's: a letter goes to the composer and not
@@ -4182,14 +4435,12 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
-        for _ in 0..2 {
-            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.dialog.is_none(), "Enter closed the window");
-        assert_eq!(app.theme, ThemeChoice::Nord);
+        assert_eq!(app.theme, ThemeChoice::Light);
         assert_eq!(app.notices.len(), 1);
-        assert_eq!(app.notices[0].text, "Theme: Nord");
+        assert_eq!(app.notices[0].text, "Theme: light");
     }
 
     /// The chord that opened the window closes it, and closing is *cancel*: a
@@ -4968,37 +5219,16 @@ mod tests {
             focus: Focus::Sidebar,
             ..App::default()
         };
-
-        // Row 3 is the first view, in `View::ALL` order.
-        for _ in 0..3 {
-            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        }
-        assert_eq!(app.sidebar_cursor, 3);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.view, View::ALL[0], "the row opened its view");
-
-        // Choosing a view handed the keyboard to it, so come back to the rail
-        // before walking its rows. Leaving the focus in the content is the
-        // behaviour this test's sibling asserts.
-        app.focus = Focus::Sidebar;
-
-        // Walk to the `reboot` row — the last one — and ask for it. It must not
-        // fire: it must raise a confirmation.
         let last = app.sidebar_rows() - 1;
-        while app.sidebar_cursor < last {
+        for _ in 0..last {
             handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
-        assert_eq!(
-            app.quick_send[last - (3 + View::ALL.len())].command,
-            "reboot"
-        );
+        assert_eq!(app.sidebar_cursor, last);
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.tx, 0, "reboot was not sent");
-        assert!(
-            matches!(app.dialog, Some(linkr_tui::dialogs::Dialog::Confirm(_))),
-            "reboot asked first: {:?}",
-            app.dialog
-        );
+        assert_eq!(app.view, View::Assistant);
+        assert_eq!(app.focus, Focus::Terminal);
+        assert!(app.quick_send.is_empty());
+        assert_eq!(app.tx, 0);
     }
 
     /// Enter on `Switch device` is a no-op that says so, rather than a button
@@ -5067,7 +5297,7 @@ mod tests {
                 app,
                 MouseEvent {
                     kind,
-                    column: 10,
+                    column: if app.focus == Focus::Sidebar { 10 } else { 50 },
                     row: 10,
                     modifiers: KeyModifiers::NONE,
                 },
@@ -5118,7 +5348,7 @@ mod tests {
                 app,
                 MouseEvent {
                     kind,
-                    column: 10,
+                    column: if app.focus == Focus::Sidebar { 10 } else { 50 },
                     row: 10,
                     modifiers: KeyModifiers::NONE,
                 },
@@ -5474,5 +5704,352 @@ mod tests {
             without_capability(broken),
             Err(err) if err.kind() == io::ErrorKind::BrokenPipe
         ));
+    }
+}
+
+#[cfg(test)]
+mod usability_key_layers {
+    use super::*;
+
+    #[test]
+    fn unhandled_palette_keys_do_not_edit_a_settings_form_behind_it() {
+        let mut app = App::default();
+        views::assistant::open_settings(&mut app, views::assistant::AgentField::Endpoint);
+        app.assistant.endpoint = "http://localhost/v1".into();
+        palette::open(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.endpoint, "http://localhost/v1");
+        assert!(app.palette.is_some());
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_some());
+        assert_eq!(app.assistant.endpoint, "http://localhost/v1");
+    }
+}
+
+#[cfg(test)]
+mod usability_mouse {
+    use super::*;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    fn app(view: View, width: u16, height: u16) -> App {
+        App {
+            view,
+            lang: Lang::Zh,
+            screen: Rect::new(0, 0, width, height),
+            ..App::default()
+        }
+    }
+
+    fn position(app: &App, label: &str) -> (u16, u16) {
+        let paint = ui::render_to_text(app, app.screen.width, app.screen.height);
+        for (y, line) in paint.lines().enumerate() {
+            if let Some(at) = line.find(label) {
+                return (linkr_tui::text::columns(&line[..at]) as u16, y as u16);
+            }
+        }
+        panic!("missing mouse control {label:?}:\n{paint}");
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            handle_mouse(
+                app,
+                MouseEvent {
+                    kind,
+                    column: x,
+                    row: y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                app.screen.width,
+                app.screen.height,
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_clicks_use_painted_rows_and_move_focus_to_the_view() {
+        let mut app = app(View::Terminal, 120, 30);
+        app.connect(Dial::Stdio("-".into()).open().unwrap())
+            .unwrap();
+        let (x, y) = position(&app, "F4");
+        click(&mut app, x, y);
+        assert_eq!(app.view, View::Network);
+        assert_eq!(app.focus, Focus::Terminal);
+        let (x, y) = position(&app, "F5");
+        click(&mut app, x, y);
+        assert_eq!(app.view, View::Assistant);
+    }
+
+    #[test]
+    fn assistant_clicks_place_the_caret_and_terminal_clicks_take_focus_back() {
+        let mut app = app(View::Terminal, 140, 30);
+        app.assistant_panel = true;
+        app.assistant.chat_mut().composer = "abcd".into();
+        let (x, y) = position(&app, "abcd");
+        click(&mut app, x + 2, y);
+        assert_eq!(app.focus, Focus::Assistant);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.chat().composer, "abXcd");
+        let centre = ui::regions_for(app.screen, app.sidebar_visible, app.panel_wanted()).centre;
+        click(&mut app, centre.x + 2, centre.y + 2);
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    #[test]
+    fn settings_fields_save_close_and_modal_background_are_clickable_safely() {
+        let mut app = app(View::Assistant, 120, 30);
+        let blocked = position(&app, "F2");
+        let (x, y) = position(&app, "[Ctrl+S");
+        click(&mut app, x + 1, y);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Settings(_))));
+        click(&mut app, blocked.0, blocked.1);
+        assert_eq!(app.view, View::Assistant);
+        let label = format!(
+            "{}{}",
+            views::assistant::AgentField::Model.label(app.lang),
+            app.strings().label_separator
+        );
+        let (x, y) = position(&app, &label);
+        click(&mut app, x, y);
+        assert_eq!(app.assistant.focus, views::assistant::AgentField::Model);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.model, "X");
+        app.assistant.endpoint = "http://localhost/v1".into();
+        let (x, y) = position(&app, "[保存]");
+        click(&mut app, x + 1, y);
+        assert_eq!(app.assistant.config.as_ref().unwrap().model, "X");
+        let (x, y) = position(&app, "[x]");
+        click(&mut app, x + 1, y);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn palette_clicks_act_on_filtered_rows_above_a_settings_dialog() {
+        let mut app = app(View::Assistant, 120, 30);
+        views::assistant::open_settings(&mut app, views::assistant::AgentField::Endpoint);
+        app.assistant.endpoint = "http://localhost/v1".into();
+        palette::open(&mut app);
+        palette::paste(&mut app, "键盘帮助");
+        let (x, y) = position(&app, "键盘帮助");
+        // The query also contains the label; the result is two rows below it.
+        click(&mut app, x, y + 2);
+        assert!(app.palette.is_none());
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Help(_))));
+        assert_eq!(app.assistant.endpoint, "http://localhost/v1");
+    }
+
+    #[test]
+    fn clicking_a_conversation_resumes_it_without_removing_history() {
+        let mut app = app(View::Assistant, 120, 30);
+        app.assistant.chats.push(views::assistant::ChatState {
+            id: 2,
+            title: "保留此对话".into(),
+            ..views::assistant::ChatState::default()
+        });
+        dialogs::open_chat_pick(&mut app);
+        let (x, y) = position(&app, "保留此对话");
+        click(&mut app, x, y);
+        assert_eq!(app.assistant.chats.len(), 2);
+        assert_eq!(app.assistant.active, 1);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn clicking_the_baud_preset_opens_manual_uart_settings_without_sending_to_the_target() {
+        let mut app = app(View::Terminal, 120, 30);
+        app.sidebar_visible = false;
+        app.assistant_panel = false;
+        let (x, y) = position(&app, "[115200 默认]");
+        click(&mut app, x + 1, y);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Uart(_))));
+        let painted = ui::render_to_text(&app, 120, 30);
+        assert!(painted.contains("115200,8,n,1,none"), "{painted}");
+        assert_eq!(app.baud, None);
+        assert_eq!(app.tx, 0);
+    }
+
+    #[test]
+    fn disabled_network_buttons_keep_the_ble_guard_when_clicked() {
+        let mut app = app(View::Network, 120, 30);
+        let (x, y) = position(&app, "[扫描]");
+        click(&mut app, x + 1, y);
+        assert_eq!(app.network.focus, views::network::NetworkRow::Scan);
+        assert_eq!(app.tx, 0);
+        assert!(!app.network.loading);
+    }
+
+    #[test]
+    fn scrolled_drawer_maps_reboot_to_a_confirmation_and_never_clicks_through() {
+        let mut app = app(View::Terminal, 60, 20);
+        app.connect(Dial::Stdio("-".into()).open().unwrap())
+            .unwrap();
+        let before_tx = app.tx;
+        app.quick_send
+            .push(linkr_tui::app::QuickSend::guarded("reboot"));
+        app.focus = Focus::Sidebar;
+        for _ in 0..40 {
+            app.cursor_down();
+        }
+        let (x, y) = position(&app, "reboot !");
+        click(&mut app, x + 2, y);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Confirm(_))));
+        assert_eq!(app.tx, before_tx);
+        click(&mut app, x + 2, y);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::Confirm(_))));
+        let (x, y) = position(&app, " 取消 ");
+        click(&mut app, x + 1, y);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tx, before_tx);
+    }
+}
+
+#[cfg(test)]
+mod simplified_workspace {
+    use super::*;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    #[test]
+    fn f3_opens_information_over_the_current_workspace_and_escape_returns() {
+        let mut app = App {
+            view: View::Network,
+            screen: Rect::new(0, 0, 100, 30),
+            ..App::default()
+        };
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::DeviceInfo(_))));
+        assert_eq!(app.view, View::Network);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.view, View::Network);
+    }
+    #[test]
+    fn the_refresh_button_preserves_the_connection_guard_and_workspace() {
+        let mut app = App {
+            view: View::Network,
+            screen: Rect::new(0, 0, 100, 30),
+            ..App::default()
+        };
+        dialogs::open_device_info(&mut app);
+        let target = (0..30)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .find(|(x, y)| {
+                ui::overlay::mouse_target(&app, app.screen, *x, *y)
+                    == Some(ui::overlay::MouseTarget::RefreshDevice)
+            })
+            .expect("refresh has a visible hit target");
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: target.0,
+                row: target.1,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tx, 0);
+        assert_eq!(app.view, View::Network);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::DeviceInfo(_))));
+        assert!(
+            !app.notices.is_empty(),
+            "the unavailable connection is explained"
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_settings_shortcut {
+    use super::*;
+
+    #[test]
+    fn control_s_opens_settings_from_every_workspace_and_sidebar_focus() {
+        for view in View::ALL {
+            for focus in [Focus::Terminal, Focus::Sidebar, Focus::Assistant] {
+                let mut app = App {
+                    view,
+                    focus,
+                    screen: Rect::new(0, 0, 120, 30),
+                    ..App::default()
+                };
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                );
+                assert!(
+                    matches!(app.dialog, Some(dialogs::Dialog::Settings(_))),
+                    "{view:?}/{focus:?}"
+                );
+                assert_eq!(app.view, view, "opening settings preserves the workspace");
+                assert_eq!(app.assistant.focus, views::assistant::AgentField::Endpoint);
+            }
+        }
+    }
+
+    #[test]
+    fn control_s_does_not_replace_a_network_prompt_or_command_search() {
+        let mut app = App::default();
+        dialogs::prompt_lan_host(&mut app);
+        let dialog = app.dialog.clone();
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.dialog, dialog);
+        palette::open(&mut app);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert!(app.palette.is_some());
+        assert_eq!(app.dialog, dialog);
+    }
+}
+
+#[cfg(test)]
+mod shrinking_layout {
+    use super::*;
+    #[test]
+    fn shrinking_a_focused_ai_never_redirects_its_input_to_the_serial_console() {
+        let mut app = App {
+            screen: Rect::new(0, 0, 140, 30),
+            focus: Focus::Assistant,
+            ..App::default()
+        };
+        app.connect(Dial::Stdio("-".into()).open().unwrap())
+            .unwrap();
+        for _ in 0..50 {
+            app.pump();
+            if app.connected() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.connected());
+        let sent = app.tx;
+        fit_pane_to(60, 20, &mut app);
+        assert_eq!(app.view, View::Assistant);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.assistant.chat().composer, "x");
+        assert_eq!(app.tx, sent);
     }
 }

@@ -30,6 +30,37 @@ use crate::text::{clip_to, columns};
 use crate::theme::Theme;
 use crate::views::terminal::wrap_rows;
 
+/// Visible navigation includes an information overlay between the workspaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Navigation {
+    Workspace(View),
+    DeviceInfo,
+}
+
+const NAVIGATION: [Navigation; 4] = [
+    Navigation::Workspace(View::Terminal),
+    Navigation::DeviceInfo,
+    Navigation::Workspace(View::Network),
+    Navigation::Workspace(View::Assistant),
+];
+
+impl Navigation {
+    fn label(self, app: &App) -> &'static str {
+        match self {
+            Self::Workspace(view) => app.lang.view_name(view),
+            Self::DeviceInfo if app.lang == crate::i18n::Lang::Zh => "设备信息",
+            Self::DeviceInfo => "Device information",
+        }
+    }
+
+    fn fkey(self) -> u8 {
+        match self {
+            Self::Workspace(view) => view.fkey(),
+            Self::DeviceInfo => 3,
+        }
+    }
+}
+
 /// How far a section header sits from the left edge. The hint under `Quick
 /// send` shares it: it belongs to the header, not to the list under it.
 const HEADER_INDENT: u8 = 0;
@@ -106,6 +137,7 @@ pub struct Row {
     /// continued rather than as new rows. `None` — every row but the board's
     /// name and the token — is fitted to the column and cut, as before.
     pub wrap_indent: Option<u8>,
+    target: Option<usize>,
 }
 
 impl Row {
@@ -117,7 +149,13 @@ impl Row {
             tail: None,
             marker: None,
             wrap_indent: None,
+            target: None,
         }
+    }
+
+    fn target(mut self, index: usize) -> Self {
+        self.target = Some(index);
+        self
     }
 
     /// The same, allowed to wrap at `value_column`: a row whose whole value is
@@ -198,8 +236,8 @@ pub fn targets(app: &App) -> Vec<String> {
     if !lan {
         out.push(s.switch_device.to_string());
     }
-    for view in View::ALL {
-        out.push(app.lang.view_name(view).to_string());
+    for entry in NAVIGATION {
+        out.push(entry.label(app).to_string());
     }
     for quick in &app.quick_send {
         out.push(quick.command.clone());
@@ -321,12 +359,15 @@ pub fn activate(app: &mut App) {
         }
         return;
     }
-    let views = View::ALL.len();
-    if cursor < at + views {
-        app.set_view(View::ALL[cursor - at]);
+    let navigation = NAVIGATION.len();
+    if cursor < at + navigation {
+        match NAVIGATION[cursor - at] {
+            Navigation::Workspace(view) => app.set_view(view),
+            Navigation::DeviceInfo => dialogs::open_device_info(app),
+        }
         return;
     }
-    let Some(quick) = app.quick_send.get(cursor - (at + views)).cloned() else {
+    let Some(quick) = app.quick_send.get(cursor - (at + navigation)).cloned() else {
         return;
     };
     if quick.dangerous {
@@ -370,11 +411,14 @@ pub fn rows(app: &App) -> Vec<Row> {
     ));
 
     let transport = next_cursor();
-    rows.push(Row::at(
-        labelled(s.transport_label, &app.transport_text(), s.label_separator),
-        action_style(transport),
-        ITEM_INDENT,
-    ));
+    rows.push(
+        Row::at(
+            labelled(s.transport_label, &app.transport_text(), s.label_separator),
+            action_style(transport),
+            ITEM_INDENT,
+        )
+        .target(transport),
+    );
     if app.transport == Transport::Lan {
         // What a LAN dial is built from, in two rows the keyboard owns: the
         // address and the token. While a link is up it is that link's own
@@ -386,7 +430,8 @@ pub fn rows(app: &App) -> Vec<Row> {
             labelled(s.lan_host_label, &app.lan_host_text(), s.label_separator),
             action_style(host),
             ITEM_INDENT,
-        );
+        )
+        .target(host);
         if app.session.is_live() {
             host_row = host_row.trailing(if app.session.lan_secured() {
                 s.lan_token_yes
@@ -402,6 +447,7 @@ pub fn rows(app: &App) -> Vec<Row> {
                 action_style(token),
                 ITEM_INDENT,
             )
+            .target(token)
             // The token is a value the user checks by eye — the whole mask, so
             // a paste that dropped half of it is visible — so it wraps rather
             // than being cut.
@@ -421,15 +467,18 @@ pub fn rows(app: &App) -> Vec<Row> {
         );
     }
     let connect = next_cursor();
-    rows.push(Row::at(
-        if app.session.is_live() {
-            s.disconnect
-        } else {
-            s.connect
-        },
-        action_style(connect),
-        ITEM_INDENT,
-    ));
+    rows.push(
+        Row::at(
+            if app.session.is_live() {
+                s.disconnect
+            } else {
+                s.connect
+            },
+            action_style(connect),
+            ITEM_INDENT,
+        )
+        .target(connect),
+    );
     // Switching devices is looking for a board on the radio; a LAN session has
     // no radios to look through, so the row is not there to press. Connected,
     // it goes dim instead: a session is one link, and picking another while
@@ -449,65 +498,69 @@ pub fn rows(app: &App) -> Vec<Row> {
         } else {
             action_style(index)
         };
-        rows.push(Row::at(s.switch_device, style, ITEM_INDENT));
+        rows.push(Row::at(s.switch_device, style, ITEM_INDENT).target(index));
     }
 
     // --- Views ------------------------------------------------------------
     rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
     rows.push(Row::at(s.section_views, RowStyle::Header, HEADER_INDENT));
-    for view in View::ALL {
+    for entry in NAVIGATION {
         let index = next_cursor();
         let style = if selected(index) {
             RowStyle::Selected
-        } else if view == app.view {
+        } else if matches!(entry, Navigation::Workspace(view) if view == app.view) {
             RowStyle::ActiveView
         } else {
             RowStyle::Action
         };
-        rows.push(Row::at(app.lang.view_name(view), style, ITEM_INDENT));
+        rows.push(Row::at(entry.label(app), style, ITEM_INDENT).target(index));
     }
 
-    // --- Quick send -------------------------------------------------------
-    rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
-    rows.push(Row::at(
-        s.section_quick_send,
-        RowStyle::Header,
-        HEADER_INDENT,
-    ));
-    // The hint is the interface's own line — `Enter sends · reboot asks first`
-    // — so its marks fold for a terminal whose font has no ` · `.
-    rows.push(Row::at(
-        app.theme().fold(s.quick_send_hint),
-        RowStyle::Hint,
-        HEADER_INDENT,
-    ));
-    for quick in &app.quick_send {
-        let index = next_cursor();
-        let style = if selected(index) {
-            RowStyle::Selected
-        } else if quick.dangerous {
-            RowStyle::Dangerous
-        } else {
-            RowStyle::Action
-        };
-        let row = Row::at(quick.command.clone(), style, ITEM_INDENT);
-        // The marker belongs to the command, not to the cursor: `reboot` is
-        // dangerous whether or not the keyboard happens to be sitting on it.
-        rows.push(if quick.dangerous {
-            row.marked(DANGER_MARKER)
-        } else {
-            row
-        });
+    if !app.quick_send.is_empty() {
+        // --- Quick send -------------------------------------------------------
+        rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
+        rows.push(Row::at(
+            s.section_quick_send,
+            RowStyle::Header,
+            HEADER_INDENT,
+        ));
+        // The hint is the interface's own line — `Enter sends · reboot asks first`
+        // — so its marks fold for a terminal whose font has no ` · `.
+        rows.push(Row::at(
+            app.theme().fold(s.quick_send_hint),
+            RowStyle::Hint,
+            HEADER_INDENT,
+        ));
+        for quick in &app.quick_send {
+            let index = next_cursor();
+            let style = if selected(index) {
+                RowStyle::Selected
+            } else if quick.dangerous {
+                RowStyle::Dangerous
+            } else {
+                RowStyle::Action
+            };
+            let row = Row::at(quick.command.clone(), style, ITEM_INDENT).target(index);
+            // The marker belongs to the command, not to the cursor: `reboot` is
+            // dangerous whether or not the keyboard happens to be sitting on it.
+            rows.push(if quick.dangerous {
+                row.marked(DANGER_MARKER)
+            } else {
+                row
+            });
+        }
     }
 
-    // --- Watch ------------------------------------------------------------
-    rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
-    rows.push(Row::at(s.section_watch, RowStyle::Header, HEADER_INDENT));
-    if app.watch.is_empty() {
-        rows.push(Row::at(s.watch_empty, RowStyle::Hint, WATCH_INDENT));
-    } else {
-        for finding in &app.watch {
-            rows.push(Row::at(finding.clone(), RowStyle::Action, WATCH_INDENT));
+    if !app.watch.is_empty() {
+        // --- Watch ------------------------------------------------------------
+        rows.push(Row::at("", RowStyle::Gap, HEADER_INDENT));
+        rows.push(Row::at(s.section_watch, RowStyle::Header, HEADER_INDENT));
+        if app.watch.is_empty() {
+            rows.push(Row::at(s.watch_empty, RowStyle::Hint, WATCH_INDENT));
+        } else {
+            for finding in &app.watch {
+                rows.push(Row::at(finding.clone(), RowStyle::Action, WATCH_INDENT));
+            }
         }
     }
 
@@ -517,15 +570,97 @@ pub fn rows(app: &App) -> Vec<Row> {
 /// The sidebar painted for a column `width` columns wide.
 ///
 /// Every row is fitted to that width: a row is never wrapped and never spills,
-/// because a wrapped row shifts every row below it. The selected row is an
-/// accent chip that hugs its text, as the design's does — padding it out to the
-/// full column would make it read as a bar rather than as the row it marks.
+/// because a wrapped row shifts every row below it. A highlighted band follows
+/// the current view, while the blue marker identifies
+/// the row receiving keyboard input.
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    layout_rows(app, theme, width)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+fn layout_rows(app: &App, theme: &Theme, width: u16) -> Vec<(Line<'static>, Option<usize>)> {
     let width = width as usize;
     rows(app)
         .into_iter()
-        .flat_map(|row| painted(row, app, theme, width))
+        .flat_map(|row| {
+            let target = row.target;
+            let entry = NAVIGATION.iter().find(|entry| row.text == entry.label(app));
+            let active = row.style == RowStyle::ActiveView;
+            let mut lines = painted(row, app, theme, width);
+            if let Some(entry) = entry {
+                if let Some(line) = lines.first_mut() {
+                    let key = format!("F{}", entry.fkey());
+                    if line.width() + key.len() + 2 <= width {
+                        line.spans
+                            .push(Span::raw(" ".repeat(width - line.width() - key.len() - 1)));
+                        line.spans.push(Span::styled(key, theme.muted()));
+                        line.spans.push(Span::raw(" "));
+                    }
+                    if active {
+                        line.style = theme.card();
+                    }
+                }
+            }
+            lines.into_iter().map(move |line| (line, target))
+        })
         .collect()
+}
+
+/// Keep the selected action visible even when wrapped labels add rows.
+pub fn visible_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
+    visible_rows(app, theme, width, height)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// The rendered row and the action it represents share the same wrapping and scroll.
+fn visible_rows(
+    app: &App,
+    theme: &Theme,
+    width: u16,
+    height: u16,
+) -> Vec<(Line<'static>, Option<usize>)> {
+    let all = layout_rows(app, theme, width);
+    let selected = all
+        .iter()
+        .position(|(_, target)| *target == Some(app.sidebar_cursor))
+        .unwrap_or(0);
+    let height = height as usize;
+    let start = if app.focus == crate::app::Focus::Sidebar {
+        selected
+            .saturating_sub(height.saturating_sub(3))
+            .min(all.len().saturating_sub(height))
+    } else {
+        0
+    };
+    all.into_iter().skip(start).take(height).collect()
+}
+
+pub fn target_at(app: &App, width: u16, height: u16, row: u16) -> Option<usize> {
+    visible_rows(app, &app.theme(), width, height)
+        .get(row as usize)
+        .and_then(|(_, target)| *target)
+}
+
+fn selected_line(app: &App, theme: &Theme, text: String, width: usize) -> Line<'static> {
+    if app.focus != crate::app::Focus::Sidebar {
+        return Line::from(Span::styled(text, theme.text()));
+    }
+    let (mark, label) = text
+        .strip_prefix(cursor(theme))
+        .map_or(("", text.as_str()), |label| (cursor(theme), label));
+    let ground = theme.text().bg(theme.panel_3).add_modifier(Modifier::BOLD);
+    let padding = " ".repeat(width.saturating_sub(columns(&text)));
+    Line::from(vec![
+        Span::styled(
+            mark.to_string(),
+            theme.focus().bg(theme.panel_3).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{label}{padding}"), ground),
+    ])
 }
 
 /// One row painted: the single line it has always been, or — for a wrapping
@@ -568,14 +703,14 @@ fn painted(row: Row, app: &App, theme: &Theme, width: usize) -> Vec<Line<'static
                             + columns(cursor(theme))) as u8;
                         return broken(&text, room, hang as usize)
                             .into_iter()
-                            .map(|line| Line::from(Span::styled(line, theme.selected())))
+                            .map(|line| selected_line(app, theme, line, width))
                             .collect();
                     }
                 }
             }
             let mut chip = clip_to(&text, room);
             chip.push_str(&tail);
-            vec![Line::from(Span::styled(chip, theme.selected()))]
+            vec![selected_line(app, theme, chip, width)]
         }
         other => {
             // A marker is budgeted for before the text is fitted, so a row
@@ -607,7 +742,7 @@ fn painted(row: Row, app: &App, theme: &Theme, width: usize) -> Vec<Line<'static
 /// sidebar's appearance.
 fn style_for(style: RowStyle, theme: &Theme) -> ratatui::style::Style {
     match style {
-        RowStyle::Header => theme.section_header(),
+        RowStyle::Header => theme.muted().add_modifier(Modifier::BOLD),
         RowStyle::Hint => theme.muted(),
         RowStyle::Dangerous => theme.danger(),
         RowStyle::ActiveView => theme.text().add_modifier(Modifier::BOLD),
@@ -660,14 +795,12 @@ mod tests {
     #[test]
     fn the_sections_appear_in_design_order() {
         let app = app_en();
-        let rows = rows(&app);
-        let headers: Vec<&str> = rows
-            .iter()
+        let headers: Vec<_> = rows(&app)
+            .into_iter()
             .filter(|r| r.style == RowStyle::Header)
-            .map(|r| r.text.as_str())
+            .map(|r| r.text)
             .collect();
-        assert_eq!(headers, vec!["Connection", "Views", "Quick send", "Watch"]);
-        assert_eq!(rows[0].style, RowStyle::Header);
+        assert_eq!(headers, vec!["Connection", "Views"]);
     }
 
     /// The connection block opens with the session's state, which is read
@@ -829,19 +962,25 @@ mod tests {
     #[test]
     fn the_watch_section_shows_either_findings_or_its_empty_state() {
         let mut app = app_en();
-        assert!(rows(&app)
+        assert!(!rows(&app)
             .iter()
-            .any(|r| r.text == "no findings yet" && r.style == RowStyle::Hint));
-        app.watch = vec!["panic @ 0x400d1234".to_string()];
-        let rows = rows(&app);
-        assert!(!rows.iter().any(|r| r.text == "no findings yet"));
-        assert!(rows.iter().any(|r| r.text == "panic @ 0x400d1234"));
+            .any(|r| r.text == app.strings().section_watch));
+        app.watch.push("panic evidence".into());
+        assert!(rows(&app).iter().any(|r| r.text == "panic evidence"));
     }
 
     /// The guarded shortcut is coloured as dangerous; the plain ones are not.
     #[test]
     fn only_guarded_shortcuts_are_dangerous() {
-        let app = app_en();
+        let mut app = app_en();
+        app.quick_send = vec![
+            crate::app::QuickSend::new("help"),
+            crate::app::QuickSend::guarded("reboot"),
+        ];
+        app.quick_send = vec![
+            crate::app::QuickSend::new("help"),
+            crate::app::QuickSend::guarded("reboot"),
+        ];
         let rows = rows(&app);
         let dangerous: Vec<&str> = rows
             .iter()
@@ -871,11 +1010,11 @@ mod tests {
             }
             let first = &line.spans[0];
             match row.style {
-                RowStyle::Header => assert_eq!(first.style.fg, Some(theme.accent)),
+                RowStyle::Header => assert_eq!(first.style.fg, Some(theme.muted)),
                 RowStyle::Hint => assert_eq!(first.style.fg, Some(theme.muted)),
                 RowStyle::Selected => {
-                    assert_eq!(first.style.bg, Some(theme.accent));
-                    assert_eq!(first.style.fg, Some(theme.accent_ink));
+                    assert_eq!(first.style.fg, Some(theme.text));
+                    assert_eq!(first.style.bg, None);
                 }
                 RowStyle::Dangerous => assert_eq!(first.style.fg, Some(theme.danger)),
                 RowStyle::State => {
@@ -901,8 +1040,8 @@ mod tests {
         assert_eq!(dark.len(), light.len());
         let header_dark = dark[0].spans[0].style.fg;
         let header_light = light[0].spans[0].style.fg;
-        assert_eq!(header_dark, Some(Theme::DARK.accent));
-        assert_eq!(header_light, Some(Theme::LIGHT.accent));
+        assert_eq!(header_dark, Some(Theme::DARK.muted));
+        assert_eq!(header_light, Some(Theme::LIGHT.muted));
         assert_ne!(header_dark, header_light);
     }
 
@@ -928,7 +1067,8 @@ mod tests {
     #[test]
     fn only_a_dangerous_shortcut_carries_the_warning_marker() {
         for lang in [Lang::Zh, Lang::En] {
-            let app = app_in(lang);
+            let mut app = app_in(lang);
+            app.quick_send = vec![crate::app::QuickSend::guarded("reboot")];
             let marked: Vec<Row> = rows(&app)
                 .into_iter()
                 .filter(|r| r.marker.is_some())
@@ -943,7 +1083,11 @@ mod tests {
     /// warning rather than as a label that happens to be red.
     #[test]
     fn the_warning_marker_takes_the_danger_colour() {
-        let app = app_en();
+        let mut app = app_en();
+        app.quick_send = vec![
+            crate::app::QuickSend::new("help"),
+            crate::app::QuickSend::guarded("reboot"),
+        ];
         let theme = Theme::DARK;
         let line = lines(&app, &theme, SIDEBAR_TEXT_WIDTH)
             .into_iter()
@@ -990,6 +1134,10 @@ mod tests {
     #[test]
     fn a_selected_dangerous_shortcut_keeps_its_marker_in_the_chip() {
         let mut app = app_en();
+        app.quick_send = vec![
+            crate::app::QuickSend::new("help"),
+            crate::app::QuickSend::guarded("reboot"),
+        ];
         app.sidebar_cursor = rows(&app)
             .iter()
             .filter(|r| r.selectable())
@@ -1005,7 +1153,11 @@ mod tests {
             format!("{}reboot {DANGER_MARKER}", GlyphSet::Unicode.cursor())
         );
         assert_eq!(chip.spans.len(), 1, "the chip is broken into two spans");
-        assert_eq!(chip.spans[0].style, theme.selected());
+        assert_eq!(
+            chip.spans[0].style,
+            theme.text(),
+            "an inactive rail is not keyboard focus"
+        );
     }
 
     /// And when the dangerous row is the *long* one — the row that has to be
@@ -1435,35 +1587,33 @@ mod tests {
     #[test]
     fn the_plan_matches_the_designed_rows() {
         let app = app_en();
-        let plan: Vec<(RowStyle, u8)> = rows(&app).iter().map(|r| (r.style, r.indent)).collect();
-        use RowStyle::*;
-        assert_eq!(
-            plan,
-            vec![
-                (Header, 0),
-                (State, 0),
-                (Selected, 2),
-                (Label, 2),
-                (Action, 2),
-                (Action, 2),
-                (Gap, 0),
-                (Header, 0),
-                (ActiveView, 2),
-                (Action, 2),
-                (Action, 2),
-                (Action, 2),
-                (Gap, 0),
-                (Header, 0),
-                (Hint, 0),
-                (Action, 2),
-                (Action, 2),
-                (Action, 2),
-                (Action, 2),
-                (Dangerous, 2),
-                (Gap, 0),
-                (Header, 0),
-                (Hint, 3),
-            ]
+        let plan = rows(&app);
+        assert_eq!(plan.len(), 12);
+        assert_eq!(targets(&app).len(), 7);
+        assert!(!plan
+            .iter()
+            .any(|r| r.text == app.strings().section_quick_send
+                || r.text == app.strings().section_watch));
+        assert_eq!(View::ALL.len(), 3);
+        let mut app = app;
+        app.sidebar_cursor = targets(&app)
+            .iter()
+            .position(|row| row == "Device information")
+            .unwrap();
+        let painted = lines(&app, &Theme::DARK, SIDEBAR_TEXT_WIDTH)
+            .iter()
+            .map(text_of)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            painted
+                .lines()
+                .any(|row| row.contains("Device information") && row.contains("F3")),
+            "{painted}"
         );
+        let previous = app.view;
+        activate(&mut app);
+        assert_eq!(app.view, previous);
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::DeviceInfo(_))));
     }
 }

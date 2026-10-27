@@ -28,6 +28,7 @@ pub struct Strings {
     pub tx: &'static str,
     /// The auto-scroll indicator.
     pub autoscroll: &'static str,
+    pub scroll_paused: &'static str,
     /// The unit of the signal reading beside the state (`dBm`).
     pub signal_unit: &'static str,
     /// What a slot shows before the device has reported a value.
@@ -445,7 +446,8 @@ pub struct Strings {
 const ZH: Strings = Strings {
     rx: "RX",
     tx: "TX",
-    autoscroll: "Auto",
+    autoscroll: "跟随",
+    scroll_paused: "暂停",
     signal_unit: "dBm",
     value_unknown: "─",
     label_separator: "：",
@@ -475,7 +477,7 @@ const ZH: Strings = Strings {
     term_input: "输入",
     hint_palette: "Ctrl+P 面板",
     hint_help: "F1 帮助",
-    hint_views: "F2-F5 视图",
+    hint_views: "F2/4/5 视图",
     hint_quit: "Ctrl+Q 退出",
     latch_armed: "{} 已武装：下一次按键会带上它",
     latch_disarmed: "{} 已取消武装",
@@ -631,7 +633,8 @@ const ZH: Strings = Strings {
 const EN: Strings = Strings {
     rx: "RX",
     tx: "TX",
-    autoscroll: "Auto",
+    autoscroll: "Follow",
+    scroll_paused: "Paused",
     signal_unit: "dBm",
     value_unknown: "─",
     label_separator: ": ",
@@ -665,7 +668,7 @@ const EN: Strings = Strings {
     term_input: "typing",
     hint_palette: "Ctrl+P palette",
     hint_help: "F1 help",
-    hint_views: "F2-F5 views",
+    hint_views: "F2/4/5 views",
     hint_quit: "Ctrl+Q quit",
     latch_armed: "{} armed — the next key carries it",
     latch_disarmed: "{} disarmed",
@@ -1041,6 +1044,7 @@ mod tests {
                 s.rx,
                 s.tx,
                 s.autoscroll,
+                s.scroll_paused,
                 s.signal_unit,
                 s.value_unknown,
                 s.label_separator,
@@ -1349,7 +1353,6 @@ mod tests {
         for (name, zh, en) in [
             ("rx", zh.rx, en.rx),
             ("tx", zh.tx, en.tx),
-            ("autoscroll", zh.autoscroll, en.autoscroll),
             ("signal_unit", zh.signal_unit, en.signal_unit),
             ("value_unknown", zh.value_unknown, en.value_unknown),
             (

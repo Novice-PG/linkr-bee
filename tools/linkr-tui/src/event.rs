@@ -29,9 +29,8 @@ pub enum NoticeLevel {
     Error,
 }
 
-/// The centre-column views, in sidebar order. The F-key rota (`F2`–`F5`)
-/// follows this order, so inserting a view in the middle shifts the rota with
-/// it instead of leaving a gap.
+/// The three primary workspaces. Diagnostics is retained for old configuration
+/// files and static previews; the interactive entry is the F3 information dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Terminal,
@@ -42,12 +41,7 @@ pub enum View {
 
 impl View {
     /// Every view, in the order the sidebar lists them and the F-keys walk.
-    pub const ALL: [View; 4] = [
-        View::Terminal,
-        View::Diagnostics,
-        View::Network,
-        View::Assistant,
-    ];
+    pub const ALL: [View; 3] = [View::Terminal, View::Network, View::Assistant];
 
     /// The function key that selects this view: `F2` for the serial terminal
     /// through `F5` for the assistant, matching the hint in the bottom bar.
@@ -93,7 +87,7 @@ mod tests {
     #[test]
     fn the_fkey_rota_covers_every_view_exactly_once() {
         let keys: Vec<u8> = View::ALL.iter().map(|v| v.fkey()).collect();
-        assert_eq!(keys, vec![2, 3, 4, 5]);
+        assert_eq!(keys, vec![2, 4, 5]);
         for view in View::ALL {
             assert_eq!(View::from_fkey(view.fkey()), Some(view));
         }
@@ -116,10 +110,7 @@ mod tests {
     #[test]
     fn every_view_round_trips_through_its_name() {
         let names: Vec<&str> = View::ALL.iter().map(|v| v.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["terminal", "diagnostics", "network", "assistant"]
-        );
+        assert_eq!(names, vec!["terminal", "network", "assistant"]);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

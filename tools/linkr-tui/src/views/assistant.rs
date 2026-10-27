@@ -63,10 +63,27 @@ pub struct ChatState {
     pub usage: (u64, u64),
     /// The draft.
     pub composer: String,
+    pub composer_cursor: crate::editor::Cursor,
+    pub scroll: ThreadScroll,
     /// When this conversation last changed (milliseconds). The store forgets
     /// the oldest conversation first, and this is what "oldest" means; the
     /// in-memory copy carries it so a save does not restamp every chat.
     pub updated_at: u64,
+}
+
+/// Reading position is ephemeral and belongs to each conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadScroll {
+    pub offset: usize,
+    pub follow: bool,
+}
+impl Default for ThreadScroll {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            follow: true,
+        }
+    }
 }
 
 impl ChatState {
@@ -105,6 +122,8 @@ impl From<crate::agent::session::Chat> for ChatState {
             display: chat.display,
             messages: chat.messages,
             composer: String::new(),
+            composer_cursor: crate::editor::Cursor::default(),
+            scroll: ThreadScroll::default(),
             usage: (0, 0),
             updated_at: chat.updated_at,
         }
@@ -251,6 +270,8 @@ pub struct AssistantState {
     /// because the whole view is one form with two halves and tabbing between
     /// them is how a user moves from configuring the model to talking to it.
     pub focus: AgentField,
+    pub field_cursor: crate::editor::Cursor,
+    pub settings_advanced: bool,
     /// The validated configuration, kept from the last successful save.
     ///
     /// Not re-derived per prompt: validation is what the Enter key does, and a
@@ -339,6 +360,8 @@ impl Default for AssistantState {
             notes: Vec::new(),
             awaiting: None,
             focus: AgentField::Composer,
+            field_cursor: crate::editor::Cursor::default(),
+            settings_advanced: false,
             config: None,
             endpoint: String::new(),
             model: String::new(),
@@ -434,6 +457,8 @@ impl AssistantState {
             let draft = self.chats.iter().find(|c| c.id == stored.id);
             kept.push(ChatState {
                 composer: draft.map(|c| c.composer.clone()).unwrap_or_default(),
+                composer_cursor: draft.map(|c| c.composer_cursor).unwrap_or_default(),
+                scroll: draft.map(|c| c.scroll).unwrap_or_default(),
                 usage: draft.map(|c| c.usage).unwrap_or_default(),
                 ..ChatState::from(stored)
             });
@@ -463,7 +488,10 @@ impl AssistantState {
     fn show_last_key_char(&mut self) {
         if self.focus == AgentField::ApiKey {
             self.key_reveal = Some((
-                self.api_key.chars().count().saturating_sub(1),
+                self.api_key[..self.field_cursor.position(&self.api_key)]
+                    .chars()
+                    .count()
+                    .saturating_sub(1),
                 Instant::now() + KEY_REVEAL,
             ));
         }
@@ -516,9 +544,8 @@ pub enum AgentField {
 /// trip through a caret that is not painted anywhere the user can see it.
 ///
 /// The order is the web panel's own, because the two are one feature: endpoint,
-/// model, key, headers, protocol, reasoning, window, ceiling — and then the
-/// note row, which only this interface has.
-pub const SETTINGS: [AgentField; 9] = [
+/// model, key, headers, protocol, reasoning, context window and output ceiling.
+pub const SETTINGS: [AgentField; 8] = [
     AgentField::Endpoint,
     AgentField::Model,
     AgentField::ApiKey,
@@ -527,8 +554,35 @@ pub const SETTINGS: [AgentField; 9] = [
     AgentField::Reasoning,
     AgentField::ContextWindow,
     AgentField::MaxTokens,
-    AgentField::Notes,
 ];
+
+pub const BASIC_SETTINGS: [AgentField; 3] =
+    [AgentField::Endpoint, AgentField::Model, AgentField::ApiKey];
+
+pub fn settings_fields(state: &AssistantState) -> &'static [AgentField] {
+    if state.settings_advanced {
+        &SETTINGS
+    } else {
+        &BASIC_SETTINGS
+    }
+}
+
+pub fn toggle_settings_advanced(app: &mut App) {
+    app.assistant.settings_advanced = !app.assistant.settings_advanced;
+    if !settings_fields(&app.assistant).contains(&app.assistant.focus) {
+        app.assistant.focus = AgentField::Endpoint;
+    }
+    app.assistant.field_cursor.end();
+}
+
+fn step_setting(app: &mut App, forward: bool) {
+    let fields = settings_fields(&app.assistant);
+    let at = fields
+        .iter()
+        .position(|field| *field == app.assistant.focus)
+        .unwrap_or(0);
+    app.assistant.focus = fields[(at + if forward { 1 } else { fields.len() - 1 }) % fields.len()];
+}
 
 impl AgentField {
     /// The label for this field, in the interface language.
@@ -631,16 +685,6 @@ impl AgentField {
     }
 }
 
-/// The word for a mode, in the interface language.
-fn mode_word(mode: Mode, app: &App) -> &'static str {
-    let s = app.strings();
-    match mode {
-        Mode::Auto => s.asst_mode_auto,
-        Mode::Manual => s.asst_mode_manual,
-        Mode::FullAuto => s.asst_mode_full_auto,
-    }
-}
-
 /// ` · 14:59` while the unattended window is armed, nothing otherwise.
 ///
 /// One read per frame, rounded up like the panel this comes from: the frame
@@ -665,14 +709,6 @@ fn heading(text: &str, width: u16, theme: &Theme) -> Line<'static> {
     ))
 }
 
-/// A muted note line.
-fn note(text: &str, width: u16, theme: &Theme) -> Line<'static> {
-    Line::from(Span::styled(
-        text::clip_to(text, width as usize),
-        theme.muted(),
-    ))
-}
-
 /// The key field's value as painted: one star per character, except the one
 /// that was just typed, which is still in the clear.
 ///
@@ -691,31 +727,6 @@ fn key_row(state: &AssistantState) -> String {
         .enumerate()
         .map(|(at, ch)| if revealed == Some(at) { ch } else { '*' })
         .collect()
-}
-
-/// One `label: value` body row. The label is clipped first, so a pane narrower
-/// than the label still gets a row that fits.
-fn field_row(label: &str, value: &str, width: u16, theme: &Theme) -> Line<'static> {
-    let budget = width as usize;
-    let label = text::clip_to(label, budget);
-    let label_cols = text::columns(&label);
-    let mut spans = vec![Span::styled(label, theme.focus())];
-    if label_cols < budget {
-        spans.push(Span::styled(
-            text::clip_to(value, budget - label_cols),
-            theme.text(),
-        ));
-    }
-    Line::from(spans)
-}
-
-/// A task row: `- goal — status`, goal in body text, status muted.
-fn task_row(task: &TaskRecord, width: u16, theme: &Theme) -> Line<'static> {
-    let row = format!("  {} {} {}", task.goal, theme.glyphs().dash(), task.status);
-    Line::from(Span::styled(
-        text::clip_to(&row, width as usize),
-        theme.text(),
-    ))
 }
 
 /// Handle one key press in the assistant view. Returns true when the view
@@ -750,12 +761,34 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         app.assistant.focus = AgentField::Composer;
     }
 
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Backspace => {
-            if let Some(text) = field_text_mut(app) {
-                text.pop();
-            }
+        KeyCode::PageUp => {
+            scroll_conversation(app, -10);
+            return true;
         }
+        KeyCode::PageDown => {
+            scroll_conversation(app, 10);
+            return true;
+        }
+        KeyCode::Home if ctrl => {
+            scroll_conversation(app, isize::MIN);
+            return true;
+        }
+        KeyCode::End if ctrl => {
+            scroll_conversation(app, isize::MAX);
+            return true;
+        }
+        KeyCode::Char('g') if ctrl => {
+            crate::dialogs::open_chat_pick(app);
+            return true;
+        }
+        _ => {}
+    }
+    if edit_active_field(app, key) {
+        return true;
+    }
+    match key.code {
         // Up and Down are consumed either way. The assistant is a form, and an
         // arrow it has no use for would otherwise reach the pane below this
         // dispatch and scroll — or worse, be sent on to the device as a cursor
@@ -806,8 +839,39 @@ fn field_text_mut(app: &mut App) -> Option<&mut String> {
     }
 }
 
-/// Step the focused field's choice one value, wrapping at both ends.
-///
+fn edit_active_field(app: &mut App, key: KeyEvent) -> bool {
+    let composer = app.assistant.focus == AgentField::Composer;
+    let mut cursor = if composer {
+        app.assistant.chat().composer_cursor
+    } else {
+        app.assistant.field_cursor
+    };
+    let handled = field_text_mut(app).is_some_and(|text| cursor.handle(text, key));
+    if composer {
+        app.assistant.chat_mut().composer_cursor = cursor;
+    } else {
+        app.assistant.field_cursor = cursor;
+    }
+    handled
+}
+
+fn insert_active_field(app: &mut App, value: &str) {
+    let composer = app.assistant.focus == AgentField::Composer;
+    let mut cursor = if composer {
+        app.assistant.chat().composer_cursor
+    } else {
+        app.assistant.field_cursor
+    };
+    if let Some(text) = field_text_mut(app) {
+        cursor.insert(text, value);
+    }
+    if composer {
+        app.assistant.chat_mut().composer_cursor = cursor;
+    } else {
+        app.assistant.field_cursor = cursor;
+    }
+}
+
 /// A select has no caret to type into, so the arrows and the space bar are how
 /// it is changed — which is the gesture every terminal form has used for a
 /// choice row, and the one a user whose hands are already on the arrows will
@@ -851,6 +915,8 @@ fn cycle_choice(app: &mut App, forward: bool) {
 /// window, so a caller naming it gets the first row rather than a caret on
 /// nothing — a caret on nothing is the state that eats keystrokes silently.
 pub fn open_settings(app: &mut App, field: AgentField) {
+    app.assistant.field_cursor.end();
+    app.assistant.settings_advanced = SETTINGS.contains(&field) && !BASIC_SETTINGS.contains(&field);
     app.assistant.focus = if SETTINGS.contains(&field) {
         field
     } else {
@@ -908,15 +974,34 @@ pub fn close_settings(app: &mut App) {
 /// the caret back to the composer — is the dialog's business, since the dialog
 /// is what carries the scroll offset with it.
 pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::F(2) {
+        toggle_settings_advanced(app);
+        return true;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        save_settings(app);
+        return true;
+    }
+    let previous_field = app.assistant.focus;
+    let editing = matches!(
+        key.code,
+        KeyCode::Home | KeyCode::End | KeyCode::Left | KeyCode::Right
+    ) && !app.assistant.focus.is_select()
+        || key.code == KeyCode::Delete && app.assistant.focus != AgentField::Notes
+        || key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('a' | 'e' | 'u' | 'k' | 'w'));
+    if editing {
+        edit_active_field(app, key);
+        app.assistant.hide_key_char();
+        return true;
+    }
     match key.code {
         // BackTab is its own `KeyCode` rather than a Tab with SHIFT attached,
         // so both spellings of "walk forward" land on the same next row.
-        KeyCode::BackTab => app.assistant.focus = app.assistant.focus.prev(),
-        KeyCode::Tab => app.assistant.focus = app.assistant.focus.next(),
+        KeyCode::BackTab => step_setting(app, false),
+        KeyCode::Tab => step_setting(app, true),
         KeyCode::Backspace => {
-            if let Some(text) = field_text_mut(app) {
-                text.pop();
-            }
+            edit_active_field(app, key);
             app.assistant.hide_key_char();
         }
         KeyCode::Up if app.assistant.focus == AgentField::Notes => {
@@ -926,8 +1011,8 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
             let last = app.assistant.notes.len().saturating_sub(1);
             app.assistant.note_cursor = (app.assistant.note_cursor + 1).min(last);
         }
-        KeyCode::Up => app.assistant.focus = app.assistant.focus.prev(),
-        KeyCode::Down => app.assistant.focus = app.assistant.focus.next(),
+        KeyCode::Up => step_setting(app, false),
+        KeyCode::Down => step_setting(app, true),
         KeyCode::Left if app.assistant.focus.is_select() => cycle_choice(app, false),
         KeyCode::Right if app.assistant.focus.is_select() => cycle_choice(app, true),
         // Delete removes the note under the cursor. Not a letter, which would
@@ -950,14 +1035,10 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
                 }
             } else if app.assistant.focus.is_number() {
                 if ch.is_ascii_digit() {
-                    if let Some(text) = field_text_mut(app) {
-                        text.push(ch);
-                    }
+                    edit_active_field(app, key);
                 }
             } else {
-                if let Some(text) = field_text_mut(app) {
-                    text.push(ch);
-                }
+                edit_active_field(app, key);
                 // The key field's own half of the bargain: one star per
                 // character, and the one just typed still in the clear. See
                 // [`KEY_REVEAL`].
@@ -965,6 +1046,9 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         _ => return false,
+    }
+    if previous_field != app.assistant.focus {
+        app.assistant.field_cursor.end();
     }
     true
 }
@@ -1310,6 +1394,8 @@ fn submit_prompt(app: &mut App) {
         return;
     }
     let goal = std::mem::take(&mut app.assistant.chat_mut().composer);
+    app.assistant.chat_mut().composer_cursor.end();
+    app.assistant.chat_mut().scroll = ThreadScroll::default();
     if goal.trim().is_empty() {
         return;
     }
@@ -1554,6 +1640,17 @@ fn field_from_name(name: &str) -> Option<AgentField> {
 
 /// Say which row the refusal is about, in the interface's language.
 fn refuse_setting(app: &mut App, label: &str) {
+    if let Some(field) = SETTINGS
+        .iter()
+        .copied()
+        .find(|field| field.label(app.lang) == label)
+    {
+        if !BASIC_SETTINGS.contains(&field) {
+            app.assistant.settings_advanced = true;
+        }
+        app.assistant.focus = field;
+        app.assistant.field_cursor.end();
+    }
     let text = app.strings().agent_setting_invalid.to_string();
     app.push_notice(crate::app::Notice {
         text: format!("{text}: {label}"),
@@ -1575,146 +1672,435 @@ fn refuse(app: &mut App) {
     app.assistant.awaiting = None;
 }
 
+/// Default-height rendering for callers without a viewport. Live paints pass
+/// their measured height through `full_lines` so the composer stays visible.
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    let s = app.strings();
+    full_lines(
+        app,
+        theme,
+        width,
+        app.screen.height.saturating_sub(4).max(16),
+    )
+}
+
+fn compact_mode(app: &App) -> &'static str {
+    use crate::i18n::Lang;
+    match (app.lang, app.assistant.mode.unwrap_or(Mode::Auto)) {
+        (Lang::Zh, Mode::Auto) => "自动",
+        (Lang::Zh, Mode::Manual) => "手动",
+        (Lang::Zh, Mode::FullAuto) => "全自动",
+        (Lang::En, Mode::Auto) => "auto",
+        (Lang::En, Mode::Manual) => "manual",
+        (Lang::En, Mode::FullAuto) => "full auto",
+    }
+}
+
+fn conversation_body(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let state = &app.assistant;
-    let mut lines = vec![
-        Line::from(""),
-        heading(
-            app.lang.view_name(crate::event::View::Assistant),
-            width,
-            theme,
-        ),
-        Line::from(""),
-        heading(s.asst_session_section, width, theme),
-    ];
-
-    if !state.configured {
-        lines.push(note(&format!("  {}", s.asst_not_configured), width, theme));
-    } else {
-        let mode = state
-            .mode
-            .map(|m| {
-                format!(
-                    "{}{}",
-                    mode_word(m, app),
-                    full_auto_countdown(app, theme.glyphs())
-                )
-            })
-            .unwrap_or_else(|| s.asst_mode_auto.to_string());
-        lines.push(field_row(
-            &format!("  {}{}", s.asst_mode_label, s.label_separator),
-            &mode,
-            width,
-            theme,
-        ));
-        let usage = format_tokens(state.chat().usage.0 + state.chat().usage.1);
-        lines.push(field_row(
-            &format!("  {}{}", s.asst_usage_label, s.label_separator),
-            &usage,
-            width,
-            theme,
-        ));
-        lines.push(field_row(
-            &format!("  {}{}", s.asst_chat_label, s.label_separator),
-            &chat_label(state, theme.glyphs()),
-            width,
-            theme,
-        ));
-        if let Some(goal) = &state.awaiting {
-            lines.push(Line::from(Span::styled(
-                text::clip_to(
-                    &format!(
-                        "  {}{goal} {} {}",
-                        theme.glyphs().warn_mark(),
-                        theme.glyphs().dash(),
-                        s.asst_awaiting
-                    ),
-                    width as usize,
-                ),
-                theme.warn(),
-            )));
-        }
-    }
-
-    // The composer, then the thread. The settings are not here: the fields
-    // and a note list are what this view used to show *instead of* the
-    // conversation, and they now live in their own window — `Ctrl+P`, "Configure
-    // the assistant" — where a user who came to configure opens it on purpose
-    // and one who came to talk never scrolls past them.
-    lines.push(Line::from(""));
-    lines.push(heading(s.agent_composer_section, width, theme));
-    // The prompt marker and the typed text in one span each, and the text
-    // clipped to what is left of the row after the marker — the marker is not
-    // counted twice, which is what produced a row eight columns wide in a
-    // four-column pane.
-    let marker = "  > ";
-    let room = (width as usize).saturating_sub(text::columns(marker));
-    let typed = text::clip_to(&state.chat().composer, room);
-    lines.push(Line::from(vec![
-        Span::styled(marker.to_string(), theme.accent()),
-        Span::styled(typed, theme.text()),
-    ]));
-
-    // The conversation, oldest first, and then the task history. This is the
-    // reading order of a thread — what was asked, what came back — and the task
-    // list below it is the durable record rather than the conversation itself.
-    lines.push(Line::from(""));
-    lines.push(heading(s.agent_thread_section, width, theme));
+    let mut body = Vec::new();
     if state.chat().display.is_empty() {
-        lines.push(note(&format!("  {}", s.asst_no_tasks), width, theme));
-    } else {
-        lines.extend(thread_lines(state, app, width, theme));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(heading(s.asst_tasks_section, width, theme));
-    if state.tasks.is_empty() {
-        lines.push(note(&format!("  {}", s.asst_no_tasks), width, theme));
-    } else {
-        for (index, task) in state.tasks.iter().enumerate() {
-            lines.push(task_row(task, width, theme));
-            // The newest answer is rendered as markdown; the ones before it are
-            // rows. A model's reply *is* markdown, and an answer shown as its
-            // own source is the one place a reader would rather see the text —
-            // the renderer gives it back as source when it does not understand
-            // a construct, so nothing is lost either way.
-            //
-            // Not when the thread above is already showing it: the newest task
-            // is usually the one the conversation just printed, and the same
-            // paragraph twice on one screen — at two indents — is not a longer
-            // record, it is a page to read twice.
-            if index == 0 && !task.summary.is_empty() && !the_thread_ends_with(state, task) {
-                // Two columns of indent, and the renderer is given the width
-                // that is left — so the row's total is never more than the
-                // pane's, which is the invariant the painting tests enforce.
-                let room = (width as usize).saturating_sub(2);
-                for mut line in crate::agent::markdown::render(&task.summary, room, theme) {
-                    line.spans.insert(0, Span::raw("  "));
-                    lines.push(line);
-                }
+        let copy = if app.lang == crate::i18n::Lang::Zh {
+            if state.configured {
+                [
+                    "开始新的对话",
+                    "输入问题后按 Enter 发送。",
+                    "收到的串口输出会作为设备上下文。",
+                ]
+            } else {
+                [
+                    "先配置模型，再开始对话",
+                    "Ctrl+S 打开接口与模型设置。",
+                    "串口仍可独立使用。",
+                ]
             }
+        } else if state.configured {
+            [
+                "Start a conversation",
+                "Type a question, then press Enter.",
+                "Received serial output provides device context.",
+            ]
+        } else {
+            [
+                "Set up your model to get started",
+                "Ctrl+S opens endpoint and model settings.",
+                "The serial terminal works independently.",
+            ]
+        };
+        body.push(heading(copy[0], width, theme));
+        body.extend(copy[1..].iter().flat_map(|line| {
+            text::wrap_words(line, width as usize)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, theme.muted())))
+        }));
+    } else {
+        body = thread_lines(state, app, width, theme);
+    }
+    body
+}
+
+fn editor_line(
+    text: &str,
+    cursor: crate::editor::Cursor,
+    width: usize,
+    active: bool,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let mut window = cursor.window(text, width);
+    if active && window.caret == " " && width > 0 {
+        window.caret = theme.glyphs().caret().to_string();
+    }
+    vec![
+        Span::styled(window.before, theme.text()),
+        Span::styled(
+            window.caret,
+            if active {
+                theme
+                    .focus()
+                    .add_modifier(ratatui::style::Modifier::REVERSED)
+            } else {
+                theme.text()
+            },
+        ),
+        Span::styled(window.after, theme.text()),
+    ]
+}
+
+fn composer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
+    if let Some(goal) = &app.assistant.awaiting {
+        let prefix = if app.lang == crate::i18n::Lang::Zh {
+            "y 执行 / n 拒绝 · "
+        } else {
+            "y run / n deny · "
+        };
+        return surface_line(
+            Line::from(Span::styled(
+                text::clip_to(&format!("{prefix}{goal}"), width as usize),
+                theme.warn(),
+            )),
+            theme,
+            width,
+        );
+    }
+    let marker = if width >= 3 { " > " } else { "" };
+    let mut spans = vec![Span::styled(marker, theme.focus())];
+    let room = (width as usize).saturating_sub(text::columns(marker));
+    let focused = (app.assistant_panel_focused()
+        || app.view == crate::event::View::Assistant && app.focus == crate::app::Focus::Terminal)
+        && !app.overlay_open();
+    if app.assistant.chat().composer.is_empty() && !focused {
+        let hint = if app.lang == crate::i18n::Lang::Zh {
+            "输入问题…"
+        } else {
+            "Type a question…"
+        };
+        spans.push(Span::styled(text::clip_to(hint, room), theme.muted()));
+    } else {
+        spans.extend(editor_line(
+            &app.assistant.chat().composer,
+            app.assistant.chat().composer_cursor,
+            room,
+            focused,
+            theme,
+        ));
+    }
+    surface_line(Line::from(spans), theme, width)
+}
+
+pub fn composer_row(height: u16) -> u16 {
+    if height >= 5 {
+        height - 2
+    } else {
+        height.saturating_sub(1).min(2)
+    }
+}
+
+pub fn click_composer(app: &mut App, width: u16, column: u16) {
+    let prefix = if width >= 3 { 3 } else { 0 };
+    let chat = app.assistant.chat_mut();
+    chat.composer_cursor.click(
+        &chat.composer,
+        width.saturating_sub(prefix) as usize,
+        column.saturating_sub(prefix) as usize,
+    );
+    app.assistant.select = None;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterAction {
+    Send,
+    Settings,
+    History,
+}
+
+fn footer(
+    app: &App,
+    theme: &Theme,
+    width: u16,
+) -> (Line<'static>, Vec<(usize, usize, FooterAction)>) {
+    let zh = app.lang == crate::i18n::Lang::Zh;
+    let buttons = [
+        (
+            FooterAction::Send,
+            if zh { "[Enter 发送]" } else { "[Enter send]" },
+            0,
+        ),
+        (
+            FooterAction::Settings,
+            if zh {
+                "[Ctrl+S 设置]"
+            } else {
+                "[Ctrl+S setup]"
+            },
+            38,
+        ),
+        (
+            FooterAction::History,
+            if zh {
+                "[Ctrl+G 会话]"
+            } else {
+                "[Ctrl+G chats]"
+            },
+            66,
+        ),
+    ];
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
+    let mut hits = Vec::new();
+    for (action, label, minimum) in buttons {
+        let size = text::columns(label);
+        if width >= minimum && used + size < width as usize {
+            hits.push((used, used + size, action));
+            spans.push(Span::styled(label, theme.text()));
+            spans.push(Span::raw(" "));
+            used += size + 1;
         }
     }
+    if used + 7 <= width as usize {
+        spans.push(Span::styled("PgUp/Dn", theme.muted()));
+    }
+    (surface_line(Line::from(spans), theme, width), hits)
+}
 
+pub fn footer_action(app: &App, width: u16, column: u16) -> Option<FooterAction> {
+    footer(app, &app.theme(), width)
+        .1
+        .into_iter()
+        .find(|(start, end, _)| (*start..*end).contains(&(column as usize)))
+        .map(|(_, _, action)| action)
+}
+
+/// Focus a visible model setting, then place its caret in the same painted window.
+pub fn click_setting(app: &mut App, row: usize, column: u16, width: u16) {
+    if row == 2 + settings_fields(&app.assistant).len() {
+        toggle_settings_advanced(app);
+        return;
+    }
+    let Some(field) = row
+        .checked_sub(2)
+        .and_then(|index| settings_fields(&app.assistant).get(index))
+        .copied()
+    else {
+        return;
+    };
+    if app.assistant.focus != field {
+        app.assistant.field_cursor.end();
+    }
+    app.assistant.focus = field;
+    app.assistant.hide_key_char();
+    let label = format!(
+        "  {}{}",
+        field.label(app.lang),
+        app.strings().label_separator
+    );
+    let label_width = text::columns(&label) as u16;
+    if column < label_width {
+        return;
+    }
+    if field.is_select() {
+        cycle_choice(app, true);
+        return;
+    }
+    let value = field.value(&app.assistant, app.lang);
+    let mut cursor = app.assistant.field_cursor;
+    if field.is_secret() {
+        let chars = value[..cursor.position(&value)].chars().count();
+        let mask = "*".repeat(value.chars().count());
+        cursor = crate::editor::Cursor::at(chars);
+        cursor.click(
+            &mask,
+            width.saturating_sub(label_width) as usize,
+            column.saturating_sub(label_width) as usize,
+        );
+        let at = value
+            .char_indices()
+            .nth(cursor.position(&mask))
+            .map_or(value.len(), |(at, _)| at);
+        app.assistant.field_cursor = crate::editor::Cursor::at(at);
+    } else {
+        cursor.click(
+            &value,
+            width.saturating_sub(label_width) as usize,
+            column.saturating_sub(label_width) as usize,
+        );
+        app.assistant.field_cursor = cursor;
+    }
+}
+
+/// A full-width surface band, including its otherwise unpainted trailing cells.
+fn surface_line(mut line: Line<'static>, theme: &Theme, width: u16) -> Line<'static> {
+    let padding = (width as usize).saturating_sub(line.width());
+    line.spans.push(Span::raw(" ".repeat(padding)));
+    line.style = line.style.patch(theme.card());
+    line
+}
+
+/// A fixed header and bottom composer surround a scrollable conversation.
+/// Both paints use the same window, so selecting text always copies its rows.
+pub fn full_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let state = &app.assistant;
+    let zh = app.lang == crate::i18n::Lang::Zh;
+    let section = app.lang.view_name(crate::event::View::Assistant);
+    let title = if state.chats.len() == 1 && state.chat().title.is_empty() {
+        format!(" {section}")
+    } else {
+        format!(" {section} · {}", chat_label(state, theme.glyphs()))
+    };
+    let title_line = surface_line(
+        Line::from(Span::styled(
+            text::clip_to(&title, width as usize),
+            theme.text().add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        theme,
+        width,
+    );
+    let input = composer_line(app, theme, width);
+    if height < 5 {
+        return match height {
+            1 => vec![input],
+            2 => vec![title_line, input],
+            _ => vec![title_line, Line::from(""), input],
+        };
+    }
+    let room = height.saturating_sub(5) as usize;
+    let body = conversation_body(app, theme, width);
+    let max = body.len().saturating_sub(room);
+    let offset = if state.chat().display.is_empty() {
+        0
+    } else if state.chat().scroll.follow {
+        max
+    } else {
+        state.chat().scroll.offset.min(max)
+    };
+    let position = if !state.chat().scroll.follow && offset < max {
+        if zh {
+            format!("历史 {}/{} · Ctrl+End 最新", offset + 1, body.len())
+        } else {
+            format!("History {}/{} · Ctrl+End live", offset + 1, body.len())
+        }
+    } else if zh {
+        "最新".to_string()
+    } else {
+        "Live".to_string()
+    };
+    let pending = state.tasks.iter().any(|task| {
+        ["asking", "typing"].contains(&task.status.as_str())
+            && state
+                .task_chat
+                .iter()
+                .any(|(id, chat)| id == &task.id && *chat == state.chat().id)
+    });
+    let detail = if state.configured {
+        let model = state
+            .config
+            .as_ref()
+            .map(|c| c.model.as_str())
+            .unwrap_or(&state.model);
+        let busy = if pending {
+            if zh {
+                "生成中 · "
+            } else {
+                "Responding · "
+            }
+        } else {
+            ""
+        };
+        format!(
+            "{busy}{}{} · {} · {} tokens",
+            compact_mode(app),
+            full_auto_countdown(app, theme.glyphs()),
+            model,
+            format_tokens(state.chat().usage.0 + state.chat().usage.1)
+        )
+    } else if zh {
+        "Ctrl+S 配置模型".to_string()
+    } else {
+        "Ctrl+S set up model".to_string()
+    };
+    let status = surface_line(
+        Line::from(Span::styled(
+            text::clip_to(&format!(" {position} · {detail}"), width as usize),
+            if pending {
+                theme.accent()
+            } else {
+                theme.muted()
+            },
+        )),
+        theme,
+        width,
+    );
+    let mut lines = vec![title_line, status];
+    lines.extend(body.into_iter().skip(offset).take(room));
+    while lines.len() < 2 + room {
+        lines.push(Line::from(""));
+    }
+    let message = if zh { " 消息" } else { " Message" };
+    lines.push(surface_line(
+        Line::from(Span::styled(
+            text::clip_to(message, width as usize),
+            theme.text().add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        theme,
+        width,
+    ));
+    lines.push(input);
+    lines.push(footer(app, theme, width).0);
     lines
 }
 
-/// Whether the conversation above already ends in this task's own words.
-///
-/// It does while the answer is still arriving — the thread paints the newest
-/// task's summary as it streams — and it does once the answer has landed as the
-/// conversation's last turn. The task list below is the durable record, and a
-/// record does not repeat what the page above it has just said.
-fn the_thread_ends_with(state: &AssistantState, task: &TaskRecord) -> bool {
-    if task.status == "asking" || task.status == "typing" {
-        return true;
-    }
-    state
-        .chat()
-        .display
-        .last()
-        .is_some_and(|turn| turn.role == "assistant" && turn.text.trim() == task.summary.trim())
+pub fn scroll_conversation(app: &mut App, delta: isize) {
+    let regions = crate::ui::regions_for(app.screen, app.sidebar_visible, app.panel_wanted());
+    let area = if app.assistant_panel_focused() {
+        crate::ui::panel_text_area(regions.assistant)
+    } else {
+        crate::ui::body_text_area(app, regions.centre)
+    };
+    scroll_in(app, delta, area.width, area.height);
+}
+
+pub fn scroll_in(app: &mut App, delta: isize, width: u16, height: u16) {
+    let total = conversation_body(app, &app.theme(), width).len();
+    let max = total.saturating_sub(height.saturating_sub(5) as usize);
+    let chat = app.assistant.chat_mut();
+    let at = if chat.scroll.follow {
+        max
+    } else {
+        chat.scroll.offset.min(max)
+    };
+    let offset = if delta == isize::MIN {
+        0
+    } else if delta == isize::MAX {
+        max
+    } else {
+        at.saturating_add_signed(delta).min(max)
+    };
+    chat.scroll = ThreadScroll {
+        offset,
+        follow: offset == max,
+    };
+    app.assistant.select = None;
 }
 
 /// What the header calls a conversation: its place in the list and the name
@@ -1725,6 +2111,8 @@ fn chat_label(state: &AssistantState, glyphs: crate::capability::GlyphSet) -> St
     let title = state.chat().title.trim();
     if title.is_empty() {
         format!("{}/{}", index + 1, total)
+    } else if total == 1 {
+        title.to_string()
     } else {
         format!("{}/{}{}{}", index + 1, total, glyphs.dot_sep(), title)
     }
@@ -1745,28 +2133,36 @@ fn thread_lines(
     let s = app.strings();
     let whole = |lines: &mut Vec<Line<'static>>, role: &str, body: &str| {
         let who = if role == "assistant" {
-            s.agent_who_model
+            app.lang.view_name(crate::event::View::Assistant)
         } else {
             s.agent_who_user
         };
-        let marker = if role == "assistant" { "< " } else { "> " };
         lines.push(Line::from(Span::styled(
-            text::clip_to(&format!("  {marker}{who}"), width as usize),
-            theme.muted(),
+            text::clip_to(&format!("  {who}"), width as usize),
+            theme.muted().add_modifier(ratatui::style::Modifier::BOLD),
         )));
         // An answer is markdown; a question is plain text the user typed.
         if role == "assistant" {
-            let room = (width as usize).saturating_sub(4);
+            let indent = if width >= 12 { 2 } else { 0 };
+            let room = (width as usize).saturating_sub(indent);
             for mut line in crate::agent::markdown::render(body, room, theme) {
-                line.spans.insert(0, Span::raw("    "));
+                line.spans.insert(0, Span::raw(" ".repeat(indent)));
                 lines.push(line);
             }
         } else {
-            lines.push(Line::from(Span::styled(
-                text::clip_to(&format!("    {}", body), width as usize),
-                theme.text(),
-            )));
+            let indent = if width >= 12 { 2 } else { 0 };
+            for row in text::wrap_words(body, (width as usize).saturating_sub(indent)) {
+                lines.push(surface_line(
+                    Line::from(Span::styled(
+                        format!("{}{row}", " ".repeat(indent)),
+                        theme.text(),
+                    )),
+                    theme,
+                    width,
+                ));
+            }
         }
+        lines.push(Line::from(""));
     };
 
     let mut lines = Vec::new();
@@ -1775,7 +2171,13 @@ fn thread_lines(
     }
     if let Some(task) = state.tasks.first() {
         let in_flight = task.status == "asking" || task.status == "typing";
-        if in_flight && !task.summary.is_empty() {
+        if in_flight
+            && !task.summary.is_empty()
+            && state
+                .task_chat
+                .iter()
+                .any(|(id, chat)| id == &task.id && *chat == state.chat().id)
+        {
             whole(&mut lines, "assistant", &task.summary);
         }
     }
@@ -1791,123 +2193,7 @@ fn thread_lines(
 /// oldest turns and hide the answer; this shows the answer and hides the
 /// oldest turns, which is the half a reader can scroll back for in the view.
 pub fn panel_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
-    let s = app.strings();
-    let state = &app.assistant;
-    let room = width as usize;
-
-    // The header names the thread the way the web panel does: the question's
-    // own words once there is one. `1/1` and an empty title are both noise —
-    // there is nothing to tell apart — so a lone unnamed thread gets just the
-    // view's name; more than one thread, or a title, and the label earns its
-    // place.
-    let title = state.chat().title.trim();
-    let label = if state.chats.len() > 1 {
-        chat_label(state, theme.glyphs())
-    } else {
-        title.to_string()
-    };
-    let name = app.lang.view_name(crate::event::View::Assistant);
-    // The thread mark and the ` · ` before the label are the interface's own
-    // two marks, drawn in the set the terminal has.
-    let mark = theme.fold("⌁");
-    let head = if label.is_empty() {
-        format!(" {mark} {name}")
-    } else {
-        format!(" {mark} {name}{}{label}", theme.glyphs().dot_sep())
-    };
-    let head_title = Line::from(Span::styled(text::clip_to(&head, room), theme.accent()));
-    let head_status = if state.configured {
-        let mode = state
-            .mode
-            .map(|m| {
-                format!(
-                    "{}{}",
-                    mode_word(m, app),
-                    full_auto_countdown(app, theme.glyphs())
-                )
-            })
-            .unwrap_or_else(|| s.asst_mode_auto.to_string());
-        let usage = state.chat().usage.0 + state.chat().usage.1;
-        let dot = theme.glyphs().dot_sep();
-        let text = if usage == 0 {
-            format!(" {}{dot}{mode}", s.asst_mode_label)
-        } else {
-            format!(
-                " {}{dot}{mode}{dot}{} {}",
-                s.asst_mode_label,
-                format_tokens(usage),
-                s.asst_usage_label
-            )
-        };
-        Line::from(Span::styled(text::clip_to(&text, room), theme.muted()))
-    } else {
-        Line::from(Span::styled(
-            text::clip_to(&format!(" {}", s.asst_not_configured), room),
-            theme.warn(),
-        ))
-    };
-
-    let marker = " > ";
-    let typed = text::clip_to(&state.chat().composer, room.saturating_sub(3));
-    // A caret at the end of the draft: the panel is where the keyboard is when
-    // it has focus, and a composer that cannot be told from a label is one the
-    // user wonders whether their keys are reaching. The thin bar the design
-    // uses has an ASCII stand-in of its own, so the mark folds.
-    let caret: std::borrow::Cow<'static, str> = if app.assistant_panel_focused() {
-        theme.fold("▏")
-    } else {
-        std::borrow::Cow::Borrowed("")
-    };
-    let composer = Line::from(vec![
-        Span::styled(marker.to_string(), theme.accent()),
-        Span::styled(typed, theme.text()),
-        Span::styled(caret, theme.accent()),
-    ]);
-    let hint = Line::from(Span::styled(
-        text::clip_to(&format!(" {}", theme.fold(s.asst_panel_keys)), room),
-        theme.muted(),
-    ));
-
-    // The fixed rows yield from the ends: the status first, then the blank. The
-    // title stays however short the room — a panel with no name is a panel the
-    // user cannot place — and the composer and the key hint are the two rows
-    // that must survive at the bottom.
-    let mut head = vec![head_title, head_status];
-    let mut blanks = 1usize;
-    let tail = vec![composer, hint];
-    loop {
-        let total = head.len() + blanks + tail.len();
-        if total <= height as usize || (head.len() <= 1 && blanks == 0) {
-            break;
-        }
-        if head.len() > 1 {
-            head.pop();
-        } else {
-            // All that is left to give is the blank between the title and the
-            // thread, and the guard above makes this the last round.
-            blanks = 0;
-        }
-    }
-    let body_room = (height as usize).saturating_sub(head.len() + blanks + tail.len());
-    let mut body = if state.chat().display.is_empty() {
-        vec![Line::from(Span::styled(
-            text::clip_to(&format!("  {}", s.asst_no_tasks), room),
-            theme.muted(),
-        ))]
-    } else {
-        thread_lines(state, app, width, theme)
-    };
-    if body.len() > body_room {
-        body.drain(..body.len() - body_room);
-    }
-
-    let mut lines = head;
-    for _ in 0..blanks {
-        lines.push(Line::from(""));
-    }
-    lines.extend(body);
-    lines.extend(tail);
-    lines
+    full_lines(app, theme, width, height)
 }
 
 // --- the pointer's side of the assistant --------------------------------------
@@ -1922,7 +2208,7 @@ pub fn painted_rows(app: &App, region: SelectRegion, area: Rect) -> Vec<String> 
     let theme = app.theme();
     let lines = match region {
         SelectRegion::Panel => panel_lines(app, &theme, area.width, area.height),
-        SelectRegion::View => lines(app, &theme, area.width),
+        SelectRegion::View => full_lines(app, &theme, area.width, area.height),
     };
     lines.iter().map(row_text).collect()
 }
@@ -1958,8 +2244,7 @@ pub fn clear_selection(app: &mut App) {
     app.assistant.select = None;
 }
 
-/// The settings window's body: the fields, the warning a too-small window
-/// earns, the save's answer, and the notes the last field files.
+/// Common or advanced fields, the context warning and save feedback.
 ///
 /// Painted by the dialog rather than by the view, which is the whole point of
 /// the move — but it is still *this* module's form, so the caret, the hidden key
@@ -1971,9 +2256,8 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
         Line::from(""),
         heading(s.agent_settings_section, width, theme),
     ];
-    for field in SETTINGS {
+    for &field in settings_fields(state) {
         let focused = state.focus == field;
-        let caret = if focused { theme.glyphs().caret() } else { " " };
         // The key field paints stars rather than its value — a shoulder-surfed
         // key is a rotated key — except the character that was just typed,
         // which is still in the clear so the keystroke can be seen to land.
@@ -1993,19 +2277,53 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
             }
         };
         let label = format!("  {}{}", field.label(app.lang), s.label_separator);
-        // One string, clipped once. Colouring the label separately would mean
-        // two spans and a column count that is the sum of two clipped halves,
-        // which is exactly how a row wraps.
-        let row = format!("{label}{value}{caret}");
-        lines.push(Line::from(Span::styled(
-            text::clip_to(&row, width as usize),
-            if focused {
-                theme.accent()
+        if focused && !field.is_select() {
+            let label = text::clip_to(&label, width as usize);
+            let room = (width as usize).saturating_sub(text::columns(&label));
+            let mut spans = vec![Span::styled(
+                label,
+                theme.text().add_modifier(ratatui::style::Modifier::BOLD),
+            )];
+            let value = if field.value(state, app.lang).is_empty() {
+                ""
             } else {
-                theme.text()
-            },
-        )));
+                &value
+            };
+            let cursor = if field.is_secret() {
+                let chars = state.api_key[..state.field_cursor.position(&state.api_key)]
+                    .chars()
+                    .count();
+                crate::editor::Cursor::at(value.chars().take(chars).map(char::len_utf8).sum())
+            } else {
+                state.field_cursor
+            };
+            spans.extend(editor_line(value, cursor, room, true, theme));
+            lines.push(Line::from(spans));
+        } else {
+            let suffix = if focused && field.is_select() {
+                theme.glyphs().flip()
+            } else {
+                ""
+            };
+            let row = format!("{label}{value} {suffix}");
+            lines.push(Line::from(Span::styled(
+                text::clip_to(&row, width as usize),
+                if focused { theme.focus() } else { theme.text() },
+            )));
+        }
     }
+    lines.push(Line::from(Span::styled(
+        text::clip_to(
+            match (app.lang, state.settings_advanced) {
+                (crate::i18n::Lang::Zh, true) => "  [收起高级设置 / F2]",
+                (crate::i18n::Lang::Zh, false) => "  [高级设置 / F2]",
+                (_, true) => "  [Less settings / F2]",
+                (_, false) => "  [Advanced settings / F2]",
+            },
+            width as usize,
+        ),
+        theme.focus(),
+    )));
     // A window too small for the fixed part plus an answer fails on every
     // question, which is worth saying before the question rather than after
     // the failure. It is a property of the *saved* configuration, not of the
@@ -2038,32 +2356,6 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
         )));
     }
 
-    lines.push(Line::from(""));
-    lines.push(heading(s.asst_notes_section, width, theme));
-    if state.notes.is_empty() {
-        lines.push(note(&format!("  {}", s.asst_no_notes), width, theme));
-    } else {
-        for (index, (text, evidence)) in state.notes.iter().enumerate() {
-            // The cursor is a colour, not a marker: a `>` would shift every row
-            // by a column and a list that reflows as the cursor moves is a list
-            // nobody can read.
-            let body = if evidence.is_empty() {
-                format!("  {text}")
-            } else {
-                format!("  {text} ({evidence})")
-            };
-            let style = if index == state.note_cursor {
-                theme.selected()
-            } else {
-                theme.text()
-            };
-            lines.push(Line::from(Span::styled(
-                text::clip_to(&body, width as usize),
-                style,
-            )));
-        }
-    }
-
     lines
 }
 
@@ -2073,7 +2365,7 @@ pub fn settings_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>
 /// with the same arithmetic `settings_lines` walks: a blank row and the
 /// heading above the first field, then one row per field.
 pub fn settings_caret_row(app: &App) -> usize {
-    let at = SETTINGS
+    let at = settings_fields(&app.assistant)
         .iter()
         .position(|field| *field == app.assistant.focus)
         // The composer has no row here. While the window is up the caret is on
@@ -2140,40 +2432,29 @@ mod tests {
         let theme = Theme::DARK;
         let a = app(Lang::En);
         let text = body_text(&lines(&a, &theme, 70));
-        assert!(text.contains("Session"), "{text}");
-        assert!(text.contains("No model endpoint configured"), "{text}");
-        assert!(text.contains("Tasks"), "{text}");
-        assert!(text.contains("No tasks recorded"), "{text}");
+        assert!(text.contains("Assistant"), "{text}");
+        assert!(text.contains("Set up your model"), "{text}");
+        assert!(text.contains("Ctrl+S"), "{text}");
+        assert!(
+            !text.contains("No tasks recorded"),
+            "empty conversation is not task history"
+        );
     }
 
     #[test]
     fn a_configured_agent_shows_mode_usage_and_history() {
-        let theme = Theme::DARK;
         let mut a = app(Lang::En);
         a.assistant.configured = true;
-        a.assistant.mode = Some(Mode::FullAuto);
-        a.assistant.chat_mut().usage = (1200, 3400);
-        a.assistant.tasks = vec![TaskRecord {
-            id: "t1".into(),
-            device_key: "k".into(),
-            updated_at: 0,
-            goal: "diagnose boot loop".into(),
-            summary: String::new(),
-            status: "done".into(),
-        }];
-        a.assistant.notes = vec![(
-            "curl is missing; wget is present".to_string(),
-            String::new(),
-        )];
-        let text = body_text(&lines(&a, &theme, 90));
-        assert!(text.contains("Execution mode"), "{text}");
-        assert!(text.contains("full auto"), "{text}");
-        assert!(text.contains("4,600"), "{text}");
-        assert!(text.contains("diagnose boot loop"), "{text}");
-        // The note is in the settings window now, and that is where it is
-        // looked for: the view kept the thread and gave up the filing cabinet.
-        let window = body_text(&settings_lines(&a, &theme, 90));
-        assert!(window.contains("wget is present"), "{window}");
+        a.assistant.model = "local-model".into();
+        a.assistant.chat_mut().usage = (120, 80);
+        let text = body_text(&full_lines(&a, &a.theme(), 90, 20));
+        assert!(
+            text.contains("local-model") && text.contains("200"),
+            "{text}"
+        );
+        open_settings(&mut a, AgentField::Endpoint);
+        let text = body_text(&settings_lines(&a, &a.theme(), 90));
+        assert!(!text.contains(a.strings().asst_notes_section), "{text}");
     }
 
     /// The mode row counts the unattended window down while it is armed, and
@@ -2215,30 +2496,10 @@ mod tests {
     /// form the user has to scroll past is what pushed the thread off the pane.
     #[test]
     fn the_view_leaves_the_settings_to_their_window() {
-        let theme = Theme::DARK;
-        let mut a = app(Lang::En);
-        a.assistant.endpoint = "http://localhost:8080/v1".to_string();
-        a.assistant.notes = vec![("disk".to_string(), String::new())];
-
-        let view = body_text(&lines(&a, &theme, 90));
-        assert!(view.contains("Tasks"), "{view}");
-        // The endpoint's *value*, not its word: the view still says "no model
-        // endpoint configured" when there is none, and that sentence is the
-        // pointer to the window rather than the window itself.
-        assert!(!view.contains("localhost:8080"), "{view}");
-        assert!(!view.contains(a.strings().asst_notes_section), "{view}");
-        assert!(!view.contains(a.strings().agent_settings_section), "{view}");
-
-        let window = body_text(&settings_lines(&a, &theme, 90));
-        assert!(
-            window.contains("localhost:8080"),
-            "the window lost a field's value:\n{window}"
-        );
-        assert!(
-            window.contains(a.strings().asst_notes_section),
-            "the window lost the notes:\n{window}"
-        );
-        assert!(window.contains("disk"), "{window}");
+        let a = app(Lang::En);
+        let text = body_text(&full_lines(&a, &a.theme(), 90, 20));
+        assert!(text.contains("Ctrl+S"), "{text}");
+        assert!(!text.contains("endpoint:"), "{text}");
     }
 
     /// The key field is painted as stars, never as the key — and it is painted
@@ -2384,50 +2645,19 @@ mod tests {
     fn the_caret_rows_are_the_rows_the_body_paints() {
         let theme = Theme::DARK;
         let mut a = app(Lang::En);
-        a.assistant.notes = vec![
-            ("alpha".to_string(), String::new()),
-            ("bravo".to_string(), String::new()),
-            ("charlie".to_string(), String::new()),
-        ];
-        // Every field, not just the four that were there before: a row added to
-        // the list without a row added to the paint is exactly the bug this
-        // test exists for.
         for field in SETTINGS {
-            if field == AgentField::Notes {
-                continue;
-            }
             open_settings(&mut a, field);
             let row = settings_caret_row(&a);
             let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
             assert!(
-                painted.contains("▌"),
-                "{field:?} paints no caret: {painted:?}"
+                painted.contains(if field.is_select() { "◂▸" } else { "▌" }),
+                "{field:?}: {painted}"
             );
         }
-        // The note field's own row carries the caret while the list has it...
-        open_settings(&mut a, AgentField::Notes);
-        let row = settings_caret_row(&a);
-        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
+        open_settings(&mut a, AgentField::Endpoint);
+        assert_eq!(settings_fields(&a.assistant), &BASIC_SETTINGS);
         assert!(
-            painted.contains("▌"),
-            "the note field paints no caret: {painted:?}"
-        );
-        // ...and the cursor's row carries the note under it.
-        a.assistant.note_cursor = 2;
-        let row = settings_note_row(&a);
-        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
-        assert!(
-            painted.contains("charlie"),
-            "the cursor row is not charlie: {painted:?}"
-        );
-        // An answer above the list pushes it down a row, and the row moves
-        // with it.
-        a.assistant.notice = Some("saved".to_string());
-        let row = settings_note_row(&a);
-        let painted = body_text(&settings_lines(&a, &theme, 90)[row..row + 1]);
-        assert!(
-            painted.contains("charlie"),
-            "with an answer above the list: {painted:?}"
+            !body_text(&settings_lines(&a, &theme, 90)).contains(a.strings().asst_notes_section)
         );
     }
 
@@ -2466,11 +2696,6 @@ mod tests {
                 ),
                 "the warning does not say what would fit: {painted:?}"
             );
-            assert_eq!(
-                body_text(&rows[settings_note_row(&a)..settings_note_row(&a) + 1]).trim(),
-                "alpha",
-                "the note list did not move down for the warning"
-            );
 
             // A window with room is not warned about, and the list is a row
             // higher.
@@ -2481,10 +2706,6 @@ mod tests {
             assert!(
                 !body_text(&rows).contains(&AGENT_FIXED_CONTEXT_TOKENS.to_string()),
                 "a comfortable window was warned about"
-            );
-            assert_eq!(
-                body_text(&rows[settings_note_row(&a)..settings_note_row(&a) + 1]).trim(),
-                "alpha"
             );
         }
     }
@@ -2676,30 +2897,20 @@ mod interaction {
     fn tab_walks_every_setting_and_wraps() {
         let mut a = app();
         settings(&mut a, AgentField::Endpoint);
-        let mut seen = vec![a.assistant.focus];
-        for _ in 0..SETTINGS.len() - 1 {
-            press_settings(&mut a, KeyCode::Tab);
-            assert!(
-                seen.iter().all(|f| *f != a.assistant.focus),
-                "revisit: {:?}",
-                a.assistant.focus
-            );
-            assert_ne!(
-                a.assistant.focus,
-                AgentField::Composer,
-                "the composer's row"
-            );
-            seen.push(a.assistant.focus);
+        for advanced in [false, true] {
+            assert_eq!(a.assistant.settings_advanced, advanced);
+            let fields = settings_fields(&a.assistant).to_vec();
+            for expected in fields.iter().cycle().take(fields.len() + 1) {
+                assert_eq!(a.assistant.focus, *expected);
+                assert_ne!(a.assistant.focus, AgentField::Composer);
+                press_settings(&mut a, KeyCode::Tab);
+            }
+            a.assistant.focus = AgentField::Endpoint;
+            press_settings(&mut a, KeyCode::BackTab);
+            assert_eq!(a.assistant.focus, *fields.last().unwrap());
+            a.assistant.focus = AgentField::Endpoint;
+            press_settings(&mut a, KeyCode::F(2));
         }
-        assert_eq!(seen.len(), SETTINGS.len(), "every setting, once");
-        press_settings(&mut a, KeyCode::Tab);
-        assert_eq!(a.assistant.focus, SETTINGS[0], "wraps forward");
-        press_settings(&mut a, KeyCode::BackTab);
-        assert_eq!(
-            a.assistant.focus,
-            SETTINGS[SETTINGS.len() - 1],
-            "wraps backward"
-        );
     }
 
     /// Typing goes wherever the caret is, and the two halves do not leak into
@@ -2961,41 +3172,27 @@ mod interaction {
     /// is not decoration — a note with nothing behind it is an opinion, and the
     /// field is where "the target said so" gets attached.
     #[test]
-    fn a_note_is_written_with_its_evidence() {
-        // A real store, in a temp file: `agent_store` is `None` in a default
-        // `App` on purpose, and a note written to `None` is a note written to
-        // nowhere.
-        let mut path = std::env::temp_dir();
-        path.push(format!("linkr-note-test-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+    fn saving_common_settings_preserves_advanced_values_and_device_memory() {
         let mut a = app();
-        a.agent_store = Some(crate::agent::store::JsonFile::at(&path));
-        let _ = std::fs::remove_file(&path);
-        a.assistant.configured = true;
-        a.assistant.mode = Some(crate::exec::executor::Mode::Auto);
-        a.assistant.tasks = vec![TaskRecord {
-            id: "t0".into(),
-            device_key: a.agent_device_key(),
-            updated_at: 0,
-            goal: "df -h".into(),
-            summary: "root mounted at /".into(),
-            status: "answered".into(),
-        }];
-        // The note row is in the settings window, so that is where it is
-        // written: the caret has a row there or it is not the note's caret.
-        settings(&mut a, AgentField::Notes);
-        press_settings(&mut a, KeyCode::Char('d'));
-        press_settings(&mut a, KeyCode::Char('i'));
-        press_settings(&mut a, KeyCode::Char('s'));
-        press_settings(&mut a, KeyCode::Char('k'));
-        press_settings(&mut a, KeyCode::Enter);
-        assert_eq!(a.assistant.note_input, "", "the note field kept its text");
-        assert_eq!(a.assistant.notes.len(), 1, "the note is not filed");
-        assert_eq!(a.assistant.notes[0].0, "disk");
-        assert_eq!(
-            a.assistant.notes[0].1, "root mounted at /",
-            "the evidence is what the target said"
-        );
+        a.assistant.endpoint = "http://localhost:1234/v1".into();
+        a.assistant.model = "model".into();
+        a.assistant.headers = "X-Custom: keep".into();
+        a.assistant.provider = crate::agent::config::OPENAI_COMPLETIONS.into();
+        a.assistant.reasoning = "off".into();
+        a.assistant.context_window = "32768".into();
+        a.assistant.max_tokens = "2048".into();
+        a.assistant.notes = vec![("disk".into(), "root mounted at /".into())];
+        settings(&mut a, AgentField::Endpoint);
+        save_settings(&mut a);
+        let config = a
+            .assistant
+            .config
+            .as_ref()
+            .expect("basic save must validate advanced values too");
+        assert_eq!(config.headers, vec![("X-Custom".into(), "keep".into())]);
+        assert_eq!(config.context_window, 32768);
+        assert_eq!(config.max_tokens, 2048);
+        assert_eq!(a.assistant.notes[0].1, "root mounted at /");
     }
 
     /// A markdown answer is rendered, not shown as its own source — and rendered
@@ -3004,14 +3201,13 @@ mod interaction {
     #[test]
     fn the_newest_answer_is_rendered_as_markdown() {
         let mut a = app();
-        a.assistant.tasks = vec![TaskRecord {
-            id: "t".into(),
-            device_key: "k".into(),
-            updated_at: 0,
-            goal: "explain".into(),
-            summary: "## Heading\n\nSome **bold** and `code`.".into(),
-            status: "answered".into(),
-        }];
+        a.assistant
+            .chat_mut()
+            .display
+            .push(crate::agent::session::DisplayLine {
+                role: "assistant".into(),
+                text: "## Heading\n\nSome **bold** and `code`.".into(),
+            });
         let rendered = lines(&a, &a.theme(), 60);
         let joined: String = rendered
             .iter()
@@ -3151,7 +3347,10 @@ mod interaction {
         let name = a.lang.view_name(crate::event::View::Assistant);
         assert_eq!(
             head(&a),
-            format!(" ⌁ {name}"),
+            format!(
+                " {name}{}",
+                " ".repeat(39usize.saturating_sub(text::columns(name)))
+            ),
             "a lone blank page grew a label"
         );
 
@@ -3363,9 +3562,7 @@ pub fn paste_at_caret(app: &mut App, text: &str) {
         text.replace("\r\n", " ").replace(['\r', '\n'], " ")
     };
     let count = pasted.trim().chars().count();
-    if let Some(field) = field_text_mut(app) {
-        field.push_str(&pasted);
-    }
+    insert_active_field(app, &pasted);
     // The paste lands in one of the fields the window paints, the key among
     // them: a pasted key shows its last character the way a typed one does,
     // rather than all of it.

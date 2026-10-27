@@ -35,6 +35,8 @@ const LANG: &str = "tui.lang";
 const ENTER: &str = "tui.enter";
 const DEBUG_IO: &str = "tui.debug_io";
 const NO_SPLASH: &str = "tui.no_splash";
+const SIDEBAR: &str = "tui.sidebar_visible";
+const ASSISTANT_PANEL: &str = "tui.assistant_panel";
 
 /// What the last run left behind. All optional: `None` means the user has
 /// never chosen, and the caller's own default stands.
@@ -69,6 +71,8 @@ pub struct Settings {
     /// second, unusual way round so that the default (a missing key) is the
     /// splash showing.
     pub no_splash: bool,
+    pub sidebar_visible: Option<bool>,
+    pub assistant_panel: Option<bool>,
 }
 
 /// The settings, on disk.
@@ -122,6 +126,8 @@ impl SettingsStore {
                 .and_then(EnterMode::from_name),
             debug_io: self.file.get(DEBUG_IO).as_deref() == Some("true"),
             no_splash: self.file.get(NO_SPLASH).as_deref() == Some("true"),
+            sidebar_visible: self.file.get(SIDEBAR).and_then(|s| s.parse().ok()),
+            assistant_panel: self.file.get(ASSISTANT_PANEL).and_then(|s| s.parse().ok()),
         }
     }
 
@@ -161,6 +167,19 @@ impl SettingsStore {
             // included, reads as off rather than as an error.
             put(DEBUG_IO, if settings.debug_io { "true" } else { "" });
             put(NO_SPLASH, if settings.no_splash { "true" } else { "" });
+            for (key, value) in [
+                (SIDEBAR, settings.sidebar_visible),
+                (ASSISTANT_PANEL, settings.assistant_panel),
+            ] {
+                put(
+                    key,
+                    match value {
+                        Some(true) => "true",
+                        Some(false) => "false",
+                        None => "",
+                    },
+                );
+            }
         });
     }
 }
@@ -194,6 +213,8 @@ mod tests {
             enter: Some(EnterMode::Crlf),
             debug_io: true,
             no_splash: true,
+            sidebar_visible: Some(false),
+            assistant_panel: Some(true),
         };
         store.write(&settings);
         assert_eq!(store.read(), settings);

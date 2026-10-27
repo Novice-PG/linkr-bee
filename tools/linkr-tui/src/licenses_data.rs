@@ -66,6 +66,12 @@ pub const COMPONENTS: &[Component] = &[
         url: "https://github.com/snapview/tokio-tungstenite",
     },
     Component {
+        name: "unicode-segmentation",
+        version: "1.13.3",
+        license: "MIT OR Apache-2.0",
+        url: "https://github.com/unicode-rs/unicode-segmentation",
+    },
+    Component {
         name: "unicode-width",
         version: "0.2.2",
         license: "MIT OR Apache-2.0",

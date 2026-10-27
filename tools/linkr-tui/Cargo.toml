@@ -20,6 +20,7 @@ path = "src/main.rs"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 unicode-width = "0.2.2"
+unicode-segmentation = "1.13"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # The radio. `btleplug` is the only cross-platform GATT library there is, and it

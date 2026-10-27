@@ -24,10 +24,11 @@ Project licence: https://github.com/radxa/linkr-bee/blob/main/LICENSE
 | reqwest | 0.13.5 | MIT OR Apache-2.0 | https://github.com/seanmonstar/reqwest |
 | tokio | 1.53.3 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-tungstenite | 0.30.0 | MIT | https://github.com/snapview/tokio-tungstenite |
+| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | uuid | 1.28.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
 
-## Transitive dependencies (227)
+## Transitive dependencies (226)
 
 | Component | Version | Licence | Source |
 | --- | --- | --- | --- |
@@ -218,7 +219,6 @@ Project licence: https://github.com/radxa/linkr-bee/blob/main/LICENSE
 | tungstenite | 0.30.0 | MIT OR Apache-2.0 | https://github.com/snapview/tungstenite-rs |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
-| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-truncate | 2.0.1 | MIT OR Apache-2.0 | https://github.com/Aetf/unicode-truncate |
 | untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |

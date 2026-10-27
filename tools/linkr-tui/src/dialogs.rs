@@ -154,7 +154,7 @@ const UART_SETTING: Entry = ["setting uart={}…", "正在设置 uart={}…"];
 /// the firmware's own `ERR` line spells out. Corrected by the answer the query
 /// brings, which is what makes the common case — change one number — a short
 /// edit rather than a typing exercise.
-const UART_DEFAULT: &str = "115200,8,n,1,none";
+const UART_DEFAULT: &str = crate::accessory::DEFAULT_UART_SPEC;
 
 // --- the prompts ----------------------------------------------------
 
@@ -193,12 +193,23 @@ const HELP_NOTE: Entry = [
 const HELP_ROWS: &[(&str, Entry)] = &[
     ("Ctrl+P", ["Command palette", "命令面板"]),
     ("F1", ["This help", "本帮助"]),
-    ("F2–F5", ["Switch the view", "切换视图"]),
+    (
+        "F2/F4/F5",
+        ["Terminal / network / assistant", "终端 / 网络 / 助手"],
+    ),
+    ("F3", ["Device information", "设备信息"]),
     (
         "F6",
         ["Hide or show the assistant panel", "显示或隐藏助手面板"],
     ),
-    ("Ctrl+B", ["Hide or show the sidebar", "显示或隐藏侧栏"]),
+    (
+        "F7 / Ctrl+B",
+        ["Hide or show the left sidebar", "显示或隐藏左侧栏"],
+    ),
+    (
+        "F8",
+        ["Focus content / restore layout", "专注当前内容 / 还原布局"],
+    ),
     (
         "Ctrl+←/→",
         [
@@ -231,7 +242,30 @@ const HELP_ROWS: &[(&str, Entry)] = &[
         "Ctrl+Shift+A",
         ["Arm Alt for the next key", "武装 Alt 给下一个键"],
     ),
-    ("PgUp / PgDn", ["Scroll the pane", "滚动终端"]),
+    (
+        "PgUp / PgDn",
+        ["Scroll terminal or assistant", "翻阅终端或助手"],
+    ),
+    (
+        "Ctrl+Home/End",
+        ["Assistant: oldest / latest", "助手：最早 / 最新"],
+    ),
+    ("Ctrl+G", ["Assistant conversation history", "助手会话记录"]),
+    (
+        "Ctrl+S",
+        [
+            "Open assistant settings / save form",
+            "打开助手设置 / 保存设置",
+        ],
+    ),
+    ("Home/End, ←→", ["Edit text fields", "在输入框中移动光标"]),
+    (
+        "Ctrl+A/E/U/W",
+        [
+            "Field: start/end/clear/erase word",
+            "输入框：首/尾/清空前文/删词",
+        ],
+    ),
     ("End", ["Jump to the newest line", "跳到最新一行"]),
     (
         "Ctrl+N",
@@ -272,6 +306,8 @@ const HELP_KEY_WIDTH: usize = 16;
 /// Which modal is open, and how far it has been scrolled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialog {
+    /// Bridge diagnostics and recent notices, without leaving the working view.
+    DeviceInfo(usize),
     /// The keyboard help, scrolled to a row.
     Help(usize),
     /// The notice log, scrolled to a row.
@@ -372,12 +408,11 @@ const PICK_KEYS: Entry = [
     "↑↓ move · Enter connect · Esc close",
     "↑↓ 选择 · 回车连接 · Esc 关闭",
 ];
-const CHAT_PICK_TITLE: Entry = ["Delete a conversation", "删除对话"];
-/// The picker's keys: move, delete, back out. "Delete" rather than "forget":
-/// the row goes for good, and the legend is where that is said once.
+const CHAT_PICK_TITLE: Entry = ["Conversation history", "会话记录"];
+/// Resume a selected conversation or return to the current one.
 const CHAT_PICK_KEYS: Entry = [
-    "↑↓ move · Enter delete · Esc cancel",
-    "↑↓ 选择 · 回车删除 · Esc 取消",
+    "Up/Down choose · Enter resume · Esc close",
+    "↑↓ 选择 · Enter 继续 · Esc 关闭",
 ];
 /// A conversation with no question yet has no name; the picker still has to
 /// paint a row for it.
@@ -499,14 +534,25 @@ pub struct ThemePick {
 /// deleted for good, and the palette's delete used to mean "the one on
 /// screen" — a choice nobody was shown. This is the list: a row per
 /// conversation, the one the panel is showing marked, and the cursor is where
-/// a delete lands.
+/// a resume lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatPick {
     /// Which row the keyboard is on.
     pub cursor: usize,
+    pub scroll: usize,
 }
 
 impl ChatPick {
+    fn follow(&mut self, room: usize, count: usize) {
+        let room = room.max(1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        }
+        if self.cursor >= self.scroll + room {
+            self.scroll = self.cursor + 1 - room;
+        }
+        self.scroll = self.scroll.min(count.saturating_sub(room));
+    }
     /// Move the cursor, clamped to the list.
     pub fn move_cursor(&mut self, down: bool, last: usize) {
         if down {
@@ -850,6 +896,7 @@ impl Dialog {
     pub fn scroll(&self) -> usize {
         match self {
             Dialog::Help(offset)
+            | Dialog::DeviceInfo(offset)
             | Dialog::Notices(offset)
             | Dialog::Settings(offset)
             | Dialog::Licenses(offset)
@@ -858,11 +905,11 @@ impl Dialog {
             // the scroll keeps up with it, which a dialog-wide offset has no
             // way to know.
             Dialog::DevicePick(pick) => pick.scroll(),
+            Dialog::ChatPick(pick) => pick.scroll,
             Dialog::Confirm(_)
             | Dialog::Prompt(_)
             | Dialog::Uart(_)
             | Dialog::ThemePick(_)
-            | Dialog::ChatPick(_)
             | Dialog::About => 0,
         }
     }
@@ -871,6 +918,13 @@ impl Dialog {
 /// The dialog's title, spaces included so the painter passes it on untouched.
 pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
     match dialog {
+        Dialog::DeviceInfo(_) => {
+            if lang == Lang::Zh {
+                "设备信息"
+            } else {
+                "Device information"
+            }
+        }
         Dialog::Help(_) => entry(HELP_TITLE, lang),
         Dialog::Notices(_) => entry(NOTICES_TITLE, lang),
         Dialog::Confirm(_) => entry(CONFIRM_TITLE, lang),
@@ -889,6 +943,13 @@ pub fn title(dialog: &Dialog, lang: Lang) -> &'static str {
 /// The key legend along the dialog's bottom row.
 pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
     let text = match dialog {
+        Dialog::DeviceInfo(_) => {
+            if lang == Lang::Zh {
+                "[刷新] r · ↑↓/PgUp 滚动 · Esc 关闭"
+            } else {
+                "[Refresh] r · Up/Down/PgUp scroll · Esc close"
+            }
+        }
         Dialog::Help(_) => entry(HELP_KEYS, lang),
         Dialog::Notices(_) => entry(NOTICES_KEYS, lang),
         Dialog::Confirm(_) => entry(CONFIRM_KEYS, lang),
@@ -912,7 +973,81 @@ pub fn legend(dialog: &Dialog, lang: Lang, theme: &Theme) -> Line<'static> {
     };
     // The legend is the interface's own line: ` · ` between two keys, `↑↓` in
     // one, `…` after a verb — all folded for a terminal whose font is ASCII.
-    Line::from(Span::styled(theme.fold(text), theme.muted()))
+    if matches!(dialog, Dialog::Settings(_)) {
+        Line::from(vec![
+            Span::styled(settings_save_button(lang), theme.focus()),
+            Span::styled(format!("  {}", theme.fold(text)), theme.muted()),
+        ])
+    } else {
+        Line::from(Span::styled(theme.fold(text), theme.muted()))
+    }
+}
+
+pub fn settings_save_button(lang: Lang) -> &'static str {
+    if lang == Lang::Zh {
+        "[保存]"
+    } else {
+        "[Save]"
+    }
+}
+
+/// A click selects exactly the visible item; actions reuse keyboard dispatch.
+pub fn click(app: &mut App, row: usize, column: u16, width: u16) {
+    let mut key = None;
+    let glyphs = app.glyph();
+    match app.dialog.as_mut() {
+        Some(Dialog::Settings(_)) => {
+            crate::views::assistant::click_setting(app, row, column, width)
+        }
+        Some(Dialog::DevicePick(pick)) if !pick.scanning => {
+            let spans = pick.line_spans(width as usize, glyphs);
+            let mut start = 0;
+            for (index, size) in spans.into_iter().enumerate() {
+                if (start..start + size).contains(&row) {
+                    pick.cursor = index;
+                    key = Some(KeyCode::Enter);
+                    break;
+                }
+                start += size;
+            }
+        }
+        Some(Dialog::ThemePick(pick)) if row < crate::theme::THEMES.len() => {
+            pick.cursor = row;
+            key = Some(KeyCode::Enter);
+        }
+        Some(Dialog::ChatPick(pick)) if row < app.assistant.chats.len() => {
+            // History resumes a conversation; it never deletes one.
+            pick.cursor = row;
+            key = Some(KeyCode::Enter);
+        }
+        Some(Dialog::Confirm(_)) => {
+            let count = body_height(app, app.dialog.as_ref().unwrap(), width);
+            if row + 1 == count {
+                let yes = crate::text::columns(entry(BUTTON_YES, app.lang));
+                let no = crate::text::columns(entry(BUTTON_NO, app.lang));
+                let col = column as usize;
+                if col < yes && yes <= width as usize {
+                    key = Some(KeyCode::Char('y'));
+                }
+                if (yes + 4..yes + 4 + no).contains(&col) && yes + 4 + no <= width as usize {
+                    key = Some(KeyCode::Char('n'));
+                }
+            }
+        }
+        _ => {}
+    }
+    if let Some(code) = key {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    refollow_settings(app);
+}
+
+fn refollow_settings(app: &mut App) {
+    if let Some(Dialog::Settings(offset)) = app.dialog {
+        let rows = row_count(app, &Dialog::Settings(offset));
+        let moved = followed(app, KeyCode::Tab, offset, rows);
+        app.dialog = Some(Dialog::Settings(moved.min(rows.saturating_sub(1))));
+    }
 }
 
 // --- opening -----------------------------------------------------------------
@@ -932,6 +1067,13 @@ fn raise(app: &mut App, dialog: Dialog) {
 /// Raise the keyboard help.
 pub fn open_help(app: &mut App) {
     raise(app, Dialog::Help(0));
+}
+
+pub fn open_device_info(app: &mut App) {
+    if app.ble_connected() && !app.diagnostics.loading {
+        app.refresh_diagnostics();
+    }
+    raise(app, Dialog::DeviceInfo(0));
 }
 
 /// Raise the notice log.
@@ -976,25 +1118,39 @@ pub fn open_uart(app: &mut App) {
 ///
 /// The caret is not decided here: it is the caller's field, because the window
 /// is reached from three places that mean three different rows — configure, the
-/// notice that names the endpoint, and "write a note".
+/// notice that names a field, and the configuration command.
 pub fn open_settings(app: &mut App) {
-    raise(app, Dialog::Settings(0));
+    let rows = row_count(app, &Dialog::Settings(0));
+    let offset = followed(app, KeyCode::Tab, 0, rows);
+    raise(app, Dialog::Settings(offset));
 }
 
 /// Raise the theme picker, on the theme that is live right now.
-/// Ask which conversation to forget.
+/// Resume a saved conversation.
 ///
 /// The list the panel holds, the thread it is showing marked, and Enter
-/// deletes the row under the cursor. The label the row carries is the one the
+/// resumes the row under the cursor. The label the row carries is the one the
 /// conversation earned from its first question
-/// ([`crate::views::assistant::ChatState`] names it), so a delete can say
-/// *which* thread it lands on.
+/// ([`crate::views::assistant::ChatState`] names it).
 pub fn open_chat_pick(app: &mut App) {
     let cursor = app
         .assistant
         .active
         .min(app.assistant.chats.len().saturating_sub(1));
-    raise(app, Dialog::ChatPick(ChatPick { cursor }));
+    let mut pick = ChatPick { cursor, scroll: 0 };
+    follow_chat_pick(app, &mut pick);
+    raise(app, Dialog::ChatPick(pick));
+}
+
+fn follow_chat_pick(app: &App, pick: &mut ChatPick) {
+    let count = app.assistant.chats.len();
+    let room = crate::ui::overlay::dialog_body_room(
+        app.screen,
+        app.sidebar_visible,
+        app.panel_wanted(),
+        count,
+    );
+    pick.follow(room, count);
 }
 
 pub fn open_theme_pick(app: &mut App) {
@@ -1455,6 +1611,26 @@ fn device_rows(device: &crate::cli::FoundDevice, width: usize, glyphs: GlyphSet)
 fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let lang = app.lang;
     match dialog {
+        Dialog::DeviceInfo(_) => {
+            let mut lines = crate::views::diagnostics::information_lines(app, theme, width as u16);
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                if app.lang == Lang::Zh {
+                    "最近事件"
+                } else {
+                    "Recent events"
+                },
+                theme.section_header(),
+            )));
+            let mut recent: Vec<_> = body(&Dialog::Notices(0), app, width, theme)
+                .into_iter()
+                .rev()
+                .take(8)
+                .collect();
+            recent.reverse();
+            lines.extend(recent);
+            lines
+        }
         Dialog::Help(_) => {
             // Two columns, and both of them wrap: a meaning under the key
             // column it belongs to, and the note at the box's own edge. A
@@ -1557,9 +1733,7 @@ fn body(dialog: &Dialog, app: &App, width: usize, theme: &Theme) -> Vec<Line<'st
             .enumerate()
             .map(|(index, chat)| {
                 // One row per conversation, the cursor chip on the row a
-                // delete lands on. The panel's own thread is marked, because
-                // that is the one the user may be reading — a list that could
-                // not tell them apart would make every delete a gamble.
+                // resume lands on. The currently open thread is marked too.
                 let style = if index == pick.cursor {
                     theme.selected()
                 } else {
@@ -1939,6 +2113,17 @@ fn field_key(field: &mut Field, key: KeyEvent) -> bool {
 /// `Ctrl+T` still repaint with a modal in the way, so those fall through to the
 /// global handler rather than being swallowed here.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(app.dialog, Some(Dialog::Settings(_)))
+        && matches!(
+            key.code,
+            KeyCode::Home | KeyCode::End | KeyCode::Char('a' | 'e' | 'u' | 'k' | 'w' | 's')
+        )
+    {
+        let consumed = crate::views::assistant::handle_settings_key(app, key);
+        refollow_settings(app);
+        return consumed;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         // Ctrl+R flips a secret field between stars and text, and is answered
         // before the chord bail-out below because it belongs to the field.
@@ -1958,6 +2143,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     };
     match dialog {
+        Dialog::DeviceInfo(offset) => {
+            if key.code == KeyCode::Char('r') {
+                app.refresh_diagnostics();
+                app.dialog = Some(Dialog::DeviceInfo(offset));
+            } else {
+                app.dialog = scrolled(app, Dialog::DeviceInfo(offset), offset, key);
+            }
+        }
         Dialog::DevicePick(mut pick) => match key.code {
             // Escape closes without dialling. A user who opened a scan by
             // mistake wants out, not to answer a question nobody asked.
@@ -2084,7 +2277,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             // not a choice until Enter makes it one.
             KeyCode::Esc => app.theme = pick.original,
             // Moving the cursor *is* the preview — the frame repaints in the
-            // theme under it, so the six are compared on the screen rather
+            // theme under it, so the two are compared on the screen rather
             // than from memory.
             KeyCode::Up => {
                 pick.cursor = pick.cursor.saturating_sub(1);
@@ -2112,13 +2305,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Up | KeyCode::Down => {
                 let last = app.assistant.chats.len().saturating_sub(1);
                 pick.move_cursor(key.code == KeyCode::Down, last);
+                follow_chat_pick(app, &mut pick);
                 app.dialog = Some(Dialog::ChatPick(pick));
             }
-            // Enter forgets the row under the cursor. The window closes on
-            // the way out: the notice says what happened, and a list still up
-            // would be a list one row stale.
+            // Resume the selected thread without changing its saved content.
             KeyCode::Enter => {
-                crate::views::assistant::delete_conversation_at(app, pick.cursor);
+                app.assistant.active = pick.cursor.min(app.assistant.chats.len().saturating_sub(1));
+                crate::views::assistant::focus_composer(app);
+                crate::views::assistant::persist_session(app);
             }
             _ => app.dialog = Some(Dialog::ChatPick(pick)),
         },
@@ -2135,9 +2329,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                     _ => {
                         let code = key.code;
                         let _ = crate::views::assistant::handle_settings_key(app, key);
-                        followed(app, code, offset, last + 1)
+                        let rows = row_count(app, &Dialog::Settings(offset));
+                        followed(app, code, offset, rows)
                     }
                 };
+                let last = row_count(app, &Dialog::Settings(offset)).saturating_sub(1);
                 app.dialog = Some(Dialog::Settings(moved.min(last)));
             }
         }
@@ -2267,6 +2463,7 @@ fn scrolled(app: &App, dialog: Dialog, offset: usize, key: KeyEvent) -> Option<D
     };
     let moved = moved.min(last);
     Some(match dialog {
+        Dialog::DeviceInfo(_) => Dialog::DeviceInfo(moved),
         Dialog::Notices(_) => Dialog::Notices(moved),
         Dialog::Licenses(_) => Dialog::Licenses(moved),
         _ => Dialog::Help(moved),
@@ -2624,7 +2821,8 @@ mod tests {
         for key in [
             "Ctrl+P",
             "F1",
-            "F2–F5",
+            "F2/F4/F5",
+            "F3",
             "F6",
             "Ctrl+B",
             "Ctrl+←/→",
@@ -3654,28 +3852,30 @@ mod tests {
             lang: Lang::En,
             ..App::default()
         };
-        app.assistant.notes = vec![(String::from("disk"), String::new())];
+        app.assistant.notes = vec![("disk".into(), "evidence".into())];
         crate::views::assistant::open_settings(
             &mut app,
             crate::views::assistant::AgentField::Endpoint,
         );
-        let dialog = app.dialog.clone().expect("the window was not raised");
+        let dialog = app.dialog.clone().unwrap();
         let shown = text_of(&lines(&dialog, &app, 70, 20));
-        assert!(shown.contains("endpoint"), "{shown}");
-        assert!(shown.contains("Device notes"), "{shown}");
         assert!(
-            shown.contains("disk"),
-            "the note list is not painted:\n{shown}"
+            shown.contains("endpoint") && shown.contains("model") && shown.contains("key"),
+            "{shown}"
+        );
+        assert!(shown.contains("Advanced settings"), "{shown}");
+        assert!(
+            !shown.contains("Device notes") && !shown.contains("disk"),
+            "{shown}"
         );
         assert_eq!(title(&dialog, app.lang).trim(), "Assistant settings");
-        assert!(!legend(&dialog, app.lang, &Theme::DARK).spans.is_empty());
-
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
         );
-        assert!(app.dialog.is_some(), "`q` closed a form that was typing");
+        assert!(app.dialog.is_some());
         assert_eq!(app.assistant.endpoint, "q");
+        assert_eq!(app.assistant.notes[0].1, "evidence");
     }
 
     /// The window pages with the reading keys and hands the caret back on
@@ -3716,141 +3916,59 @@ mod tests {
     #[test]
     fn the_settings_window_follows_its_caret() {
         let mut app = App {
-            // The size the event loop stores before a key can arrive.
-            screen: ratatui::layout::Rect::new(0, 0, 80, 24),
+            screen: ratatui::layout::Rect::new(0, 0, 80, 16),
             ..App::default()
         };
-        app.assistant.notes = (0..30)
-            .map(|index| (format!("note-{index:02}"), String::new()))
-            .collect();
         crate::views::assistant::open_settings(
             &mut app,
-            crate::views::assistant::AgentField::Notes,
+            crate::views::assistant::AgentField::MaxTokens,
         );
-
-        // Down the list: the cursor's note has to stay painted.
-        for _ in 0..20 {
-            handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        }
-        assert_eq!(app.assistant.note_cursor, 20);
+        assert!(app.assistant.settings_advanced);
+        assert!(app.dialog.as_ref().unwrap().scroll() > 0);
+        let shown = crate::ui::render_to_text(&app, 80, 16);
         assert!(
-            app.dialog.as_ref().unwrap().scroll() > 0,
-            "the window did not follow the cursor down"
+            shown.contains(crate::views::assistant::AgentField::MaxTokens.label(app.lang)),
+            "{shown}"
         );
-        let shown = crate::ui::render_to_text(&app, 80, 24);
-        assert!(
-            shown.contains("note-20"),
-            "the cursor's note left the window:\n{shown}"
-        );
-
-        // Tab walks back to the fields, and the window comes with it.
         handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(
-            crate::views::assistant::AgentField::Endpoint,
-            app.assistant.focus
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Endpoint
         );
-        assert_eq!(
-            app.dialog.as_ref().unwrap().scroll(),
-            2,
-            "the window stayed on the notes"
-        );
-        let shown = crate::ui::render_to_text(&app, 80, 24);
-        assert!(
-            shown.contains("▌"),
-            "the caret's row is not painted:\n{shown}"
-        );
-
-        // Paging moves the window on its own...
-        for _ in 0..3 {
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
-            );
-        }
-        assert!(
-            app.dialog.as_ref().unwrap().scroll() > 2,
-            "PgDn scrolled nothing"
-        );
-        // ...and the first typed key brings it back to the caret.
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         );
         assert_eq!(app.assistant.endpoint, "x");
-        assert_eq!(
-            app.dialog.as_ref().unwrap().scroll(),
-            2,
-            "the window did not come back to the caret"
-        );
-        let shown = crate::ui::render_to_text(&app, 80, 24);
-        assert!(
-            shown.contains("x▌"),
-            "the typed key is not painted:\n{shown}"
-        );
+        assert!(crate::ui::render_to_text(&app, 80, 16).contains("x▌"));
     }
 
     /// On the note row the arrows walk the notes; anywhere else they walk the
     /// fields. That row is where a field meets a list, and the list is the only
     /// thing that says which note Delete means.
     #[test]
-    fn the_note_row_walks_the_notes() {
-        // A real store in a temp file: both the write and the delete go through
-        // it, and a `None` store empties the list on every write — which would
-        // make this test pass for the wrong reason.
-        let mut path = std::env::temp_dir();
-        path.push(format!("linkr-dialog-note-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let mut app = App {
-            agent_store: Some(crate::agent::store::JsonFile::at(&path)),
-            ..App::default()
-        };
-
-        crate::views::assistant::open_settings(
-            &mut app,
-            crate::views::assistant::AgentField::Notes,
-        );
-        for word in ["one", "two"] {
-            for ch in word.chars() {
-                handle_key(
-                    &mut app,
-                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
-                );
-            }
-            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    fn advanced_settings_fold_without_editing_device_memory() {
+        use crate::views::assistant::{self, AgentField};
+        let mut app = App::default();
+        app.assistant.notes = vec![("disk".into(), "mounted at /".into())];
+        assistant::open_settings(&mut app, AgentField::Endpoint);
+        for _ in 0..3 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         }
-        assert_eq!(app.assistant.notes.len(), 2, "neither note was filed");
-
-        // Which row is which depends on the store's own ordering, so the test
-        // asks the list rather than assuming it: Delete means the note under the
-        // cursor, and the other one is what must survive.
-        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.assistant.focus, AgentField::Endpoint);
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(app.assistant.settings_advanced);
+        for _ in 0..7 {
+            handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert_eq!(app.assistant.focus, AgentField::MaxTokens);
+        handle_key(&mut app, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(!app.assistant.settings_advanced);
+        assert_eq!(app.assistant.focus, AgentField::Endpoint);
         assert_eq!(
-            app.assistant.note_cursor, 1,
-            "Down walked the fields, not the list"
+            app.assistant.notes,
+            vec![("disk".into(), "mounted at /".into())]
         );
-        let gone = app.assistant.notes[app.assistant.note_cursor].0.clone();
-        handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-        assert_eq!(app.assistant.notes.len(), 1, "Delete kept both notes");
-        assert_ne!(
-            app.assistant.notes[0].0, gone,
-            "Delete removed a note the cursor was not on"
-        );
-
-        // Tab leaves the row, and then the arrows are the fields' again — the
-        // note list keeps its cursor, so coming back finds it where it was.
-        handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_ne!(
-            app.assistant.focus,
-            crate::views::assistant::AgentField::Notes,
-            "Tab did not leave the note row"
-        );
-        let cursor = app.assistant.note_cursor;
-        handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(
-            app.assistant.note_cursor, cursor,
-            "the list moved while a different field had the caret"
-        );
-        let _ = std::fs::remove_file(&path);
     }
 
     // --- the LAN rows -----------------------------------------------
@@ -3991,29 +4109,22 @@ mod tests {
     /// Enter forgets the row under the cursor, and the panel keeps the thread
     /// it was showing when a row before it in the list goes.
     #[test]
-    fn the_chat_picker_deletes_the_row_under_the_cursor() {
+    fn the_chat_picker_resumes_the_row_without_deleting_history() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
         app.assistant.chats = vec![chat(1, "boot loop"), chat(2, "wifi"), chat(3, "audio")];
         app.assistant.active = 2;
-
         open_chat_pick(&mut app);
         handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.dialog.is_none(), "the window outlived the delete");
-        assert_eq!(app.assistant.chats.len(), 2);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.assistant.chats.len(), 3);
+        assert_eq!(app.assistant.chat().title, "wifi");
         assert_eq!(
-            app.assistant.chats[app.assistant.active].title, "audio",
-            "the panel moved off the thread it was showing"
-        );
-        assert!(
-            app.notices
-                .last()
-                .is_some_and(|notice| notice.text.contains("deleted")),
-            "the delete went unannounced: {:?}",
-            app.notices.last().map(|notice| &notice.text)
+            app.assistant.focus,
+            crate::views::assistant::AgentField::Composer
         );
     }
 

@@ -47,6 +47,21 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
     ])
 }
 
+pub fn baud_label(app: &App) -> String {
+    match app.baud {
+        Some(baud) => format!("[{baud}]"),
+        None => format!(
+            "[{} {}]",
+            crate::accessory::DEFAULT_UART_BAUD,
+            if app.lang == crate::i18n::Lang::Zh {
+                "默认"
+            } else {
+                "default"
+            }
+        ),
+    }
+}
+
 /// The top bar's right half: traffic counters, the link speed, autoscroll and
 /// the clock, in that order — the web client's status strip. It ends flush with
 /// the last column, so the strip's right edge does not move with the numbers.
@@ -61,9 +76,17 @@ pub fn top_right(app: &App, theme: &Theme) -> Line<'static> {
         Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(format!("{} {}", s.tx, app.tx), theme.focus()),
         Span::styled(dot(theme).to_string(), theme.muted()),
-        Span::styled(app.baud_text(), theme.muted()),
+        Span::styled(baud_label(app), theme.focus()),
         Span::styled(dot(theme).to_string(), theme.muted()),
-        Span::styled(s.autoscroll.to_string(), theme.muted()),
+        Span::styled(
+            if app.terminal.autoscroll {
+                s.autoscroll
+            } else {
+                s.scroll_paused
+            }
+            .to_string(),
+            theme.muted(),
+        ),
         Span::styled(dot(theme).to_string(), theme.muted()),
         Span::styled(app.clock.clone(), theme.muted()),
     ])
@@ -273,6 +296,72 @@ fn focus_detail(app: &App, s: &crate::i18n::Strings) -> String {
 
 /// The bottom bar's right half: the four key hints the design spells out.
 pub fn bottom_right(app: &App, theme: &Theme) -> Line<'static> {
+    bottom_right_for(app, theme, u16::MAX)
+}
+
+pub fn bottom_right_for(app: &App, theme: &Theme, width: u16) -> Line<'static> {
+    let zh = app.lang == crate::i18n::Lang::Zh;
+    let compact = if width < 48 {
+        Some(if zh {
+            "F1 帮助 · Ctrl+Q 退出"
+        } else {
+            "F1 help · Ctrl+Q quit"
+        })
+    } else if width < 78 {
+        Some(if app.focus == crate::app::Focus::Sidebar {
+            if zh {
+                "↑↓ 选择 · Enter · Esc 返回"
+            } else {
+                "↑↓ choose · Enter · Esc back"
+            }
+        } else {
+            if zh {
+                "Ctrl+↑ 导航 · F1 帮助"
+            } else {
+                "Ctrl+↑ nav · F1 help"
+            }
+        })
+    } else {
+        None
+    };
+    let contextual = compact.or_else(|| {
+        if app.focus == crate::app::Focus::Sidebar {
+            Some(if zh {
+                "↑↓ 选择 · Enter 打开 · Esc 返回 · F1 帮助"
+            } else {
+                "↑↓ choose · Enter open · Esc back · F1 help"
+            })
+        } else if app.view == crate::event::View::Assistant || app.assistant_panel_focused() {
+            Some(if zh {
+                "Ctrl+P 操作 · Ctrl+↑ 导航 · F1 帮助"
+            } else {
+                "Ctrl+P actions · Ctrl+↑ nav · F1 help"
+            })
+        } else if app.view == crate::event::View::Network {
+            Some(if zh {
+                "Tab/↑↓ 字段 · Enter 操作 · F1 帮助"
+            } else {
+                "Tab/↑↓ field · Enter act · F1 help"
+            })
+        } else if app.view == crate::event::View::Diagnostics {
+            Some(if zh {
+                "r 刷新 · PgUp/Dn 翻阅 · F1 帮助"
+            } else {
+                "r refresh · PgUp/Dn scroll · F1 help"
+            })
+        } else if width < 90 {
+            Some(if zh {
+                "Ctrl+P 操作 · Ctrl+↑ 导航 · F1 帮助"
+            } else {
+                "Ctrl+P actions · Ctrl+↑ nav · F1 help"
+            })
+        } else {
+            None
+        }
+    });
+    if let Some(copy) = contextual {
+        return Line::from(Span::styled(theme.fold(copy).into_owned(), theme.muted()));
+    }
     let s = app.strings();
     Line::from(vec![
         Span::styled(s.hint_palette.to_string(), theme.muted()),
@@ -476,8 +565,7 @@ mod tests {
     }
 
     /// The right half reads counters, speed, autoscroll and the clock, in that
-    /// order — and reads the same in both languages, because the tokens in it
-    /// are deliberately untranslated.
+    /// order, with the default UART preset distinguished from scrolling.
     #[test]
     fn the_top_bar_right_reads_the_counters_in_order() {
         for lang in [Lang::Zh, Lang::En] {
@@ -490,10 +578,22 @@ mod tests {
             app.clock = "19:52:50".to_string();
             let text = line_text(&top_right(&app, &Theme::DARK));
             assert_eq!(
-                text, "RX 12 · TX 34 · ─ · Auto · 19:52:50",
-                "{lang:?} translates a token the design keeps Latin"
+                text,
+                if lang == Lang::Zh {
+                    "RX 12 · TX 34 · [115200 默认] · 跟随 · 19:52:50"
+                } else {
+                    "RX 12 · TX 34 · [115200 default] · Follow · 19:52:50"
+                },
+                "{lang:?}"
             );
             assert!(!text.ends_with(' '), "{text:?} carries a trailing space");
+            assert_eq!(
+                app.baud, None,
+                "a displayed preset is not a hardware report"
+            );
+            app.terminal.autoscroll = false;
+            let paused = line_text(&top_right(&app, &Theme::DARK));
+            assert!(paused.contains(if lang == Lang::Zh { "暂停" } else { "Paused" }));
         }
     }
 
@@ -508,7 +608,9 @@ mod tests {
         app.baud = Some(115_200);
         app.clock = "19:52:50".to_string();
         let text = line_text(&top_right(&app, &Theme::DARK));
-        assert_eq!(text, "RX 0 · TX 0 · 115200 · Auto · 19:52:50");
+        assert_eq!(text, "RX 0 · TX 0 · [115200] · Follow · 19:52:50");
+        app.baud = Some(9600);
+        assert!(line_text(&top_right(&app, &Theme::DARK)).contains("[9600]"));
     }
 
     /// One frame names the session's state once and the same way: the top bar
@@ -672,7 +774,7 @@ mod tests {
             },
             &Theme::DARK,
         ));
-        assert_eq!(zh, "Ctrl+P 面板 · F1 帮助 · F2-F5 视图 · Ctrl+Q 退出");
+        assert_eq!(zh, "Ctrl+P 面板 · F1 帮助 · F2/4/5 视图 · Ctrl+Q 退出");
         let en = line_text(&bottom_right(
             &App {
                 lang: Lang::En,
@@ -680,7 +782,7 @@ mod tests {
             },
             &Theme::DARK,
         ));
-        assert_eq!(en, "Ctrl+P palette · F1 help · F2-F5 views · Ctrl+Q quit");
+        assert_eq!(en, "Ctrl+P palette · F1 help · F2/4/5 views · Ctrl+Q quit");
     }
 
     /// Every span in both bars takes its colour from the theme, so switching

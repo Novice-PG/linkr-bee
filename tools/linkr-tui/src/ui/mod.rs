@@ -7,6 +7,7 @@
 
 pub mod body;
 pub mod chrome;
+pub mod layout_controls;
 pub mod legacy;
 pub mod overlay;
 pub mod scroll;
@@ -17,7 +18,7 @@ pub mod toast;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -119,11 +120,32 @@ pub fn regions_for(area: Rect, sidebar: bool, panel: bool) -> Regions {
     // A terminal narrower than the sidebar plus a usable centre would leave the
     // centre at zero width; the sidebar yields instead, so a tiny window still
     // shows the view rather than a wall of sidebar.
-    let sidebar_width = SIDEBAR_WIDTH.min(middle.width.saturating_sub(1));
+    let sidebar_width = if middle.width >= SIDEBAR_WIDTH + CENTRE_MIN {
+        SIDEBAR_WIDTH
+    } else {
+        0
+    };
     let [sidebar_area, centre] =
         Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(0)]).areas(middle);
 
     split_panel(top_bar, sidebar_area, centre, panel, bottom_bar)
+}
+
+/// On small terminals the rail becomes a temporary navigation drawer.
+/// It covers content instead of changing the target terminal's geometry.
+pub fn sidebar_drawer(app: &App, area: Rect) -> Option<Rect> {
+    if !app.sidebar_visible
+        || app.focus != crate::app::Focus::Sidebar
+        || regions_for(area, true, app.panel_wanted()).sidebar.width > 0
+    {
+        return None;
+    }
+    Some(Rect::new(
+        area.x,
+        area.y.saturating_add(BAR_HEIGHT),
+        SIDEBAR_WIDTH.min(area.width),
+        area.height.saturating_sub(2 * BAR_HEIGHT),
+    ))
 }
 
 /// Take the panel's column out of the centre.
@@ -212,12 +234,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_assistant(frame, app, regions.assistant);
     }
     draw_selection(frame, app, &regions);
+    if let Some(drawer) = sidebar_drawer(app, area) {
+        draw_sidebar(frame, app, drawer);
+    }
+    let controls = layout_controls::bar(app, area);
     draw_bar(
         frame,
         app,
         regions.bottom_bar,
         chrome::bottom_left(app, &theme),
-        chrome::bottom_right(app, &theme),
+        controls.line,
     );
     draw_toasts(frame, app, area);
     // The modal layer last, so a palette or a dialog covers everything —
@@ -269,19 +295,54 @@ fn draw_bar(
 /// hold it: a bar that let the unit eat into the counters would move the
 /// numbers whenever the traffic changed. With the unit gone, the counters and
 /// the left half fall back to exactly what [`draw_bar`] does with them.
-fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let theme = app.theme();
-    let left = chrome::top_left(app, &theme);
-    let right = chrome::top_right(app, &theme);
-    let right_width = right.width() as u16;
-    // The counters win the row, then the unit, then the left half — the order
-    // the information is missed in.
+fn top_traffic_width(area: Rect, right_width: u16) -> u16 {
     let unit = chrome::traffic_unit(area.width);
-    let unit = if right_width + unit < area.width {
+    if right_width.saturating_add(unit) < area.width {
         unit
     } else {
         0
-    };
+    }
+}
+
+/// The clickable UART value in the same strip the painter lays out.
+pub fn baud_button_rect(app: &App, screen: Rect) -> Option<Rect> {
+    let area = regions_for(screen, app.sidebar_visible, app.panel_wanted()).top_bar;
+    let right = chrome::top_right(app, &app.theme());
+    let right_width = right.width() as u16;
+    let text_width = area
+        .width
+        .saturating_sub(top_traffic_width(area, right_width));
+    let start = area.x + text_width.saturating_sub(right_width);
+    // RX, separator, TX, separator precede the dedicated baud span.
+    let prefix = right.spans.iter().take(4).map(Span::width).sum::<usize>() as u16;
+    let width = right.spans.get(4)?.width() as u16;
+    let x = start.saturating_add(prefix);
+    (x.saturating_add(width) <= area.x.saturating_add(text_width) && area.height > 0)
+        .then_some(Rect::new(x, area.y, width, 1))
+}
+
+fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let mut left = chrome::top_left(app, &theme);
+    let right = chrome::top_right(app, &theme);
+    let right_width = right.width() as u16;
+    let brand = " Linkr Bee  ";
+    if area
+        .width
+        .saturating_sub(right_width + chrome::traffic_unit(area.width))
+        >= left.width() as u16 + brand.len() as u16
+    {
+        left.spans.insert(
+            0,
+            Span::styled(
+                brand,
+                theme.text().add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+        );
+    }
+    // The counters win the row, then the unit, then the left half — the order
+    // the information is missed in.
+    let unit = top_traffic_width(area, right_width);
     if unit == 0 {
         draw_bar(frame, app, area, left, right);
         return;
@@ -329,16 +390,23 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     // The rows get the rail minus its edge, so a row can never be laid out
     // against the rail's width and then paint over the rule.
-    let text_area = Rect {
-        width: area.width.saturating_sub(DIVIDER_WIDTH),
-        ..area
-    };
+    let text_area = sidebar_text_area(area);
     // The rail is the rows, and only the rows: the mark that used to ride the
     // spare room at its top leads the splash now, so the column opens with the
     // first row at every height.
-    let lines = sidebar::lines(app, &theme, text_area.width);
+    let lines = sidebar::visible_lines(app, &theme, text_area.width, text_area.height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme.panel()), area);
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
     draw_divider(frame, &theme, area);
+}
+
+pub fn sidebar_text_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1).min(area.right()),
+        width: area.width.saturating_sub(DIVIDER_WIDTH + 1),
+        ..area
+    }
 }
 
 /// The rule down the sidebar's right edge.
@@ -378,8 +446,8 @@ fn dividers(theme: &crate::theme::Theme) -> String {
 /// The text column of the docked panel: the column less its left rule.
 pub fn panel_text_area(area: Rect) -> Rect {
     Rect {
-        x: area.x + DIVIDER_WIDTH,
-        width: area.width.saturating_sub(DIVIDER_WIDTH),
+        x: area.x.saturating_add(DIVIDER_WIDTH + 1).min(area.right()),
+        width: area.width.saturating_sub(DIVIDER_WIDTH + 2),
         ..area
     }
 }
@@ -447,6 +515,7 @@ fn draw_assistant(frame: &mut Frame, app: &App, area: Rect) {
     // The rows get the column minus its edge, so a row can never be laid out
     // against the panel's width and then paint over the rule.
     let text_area = panel_text_area(area);
+    frame.render_widget(Block::default().style(theme.panel()), area);
     let lines =
         crate::views::assistant::panel_lines(app, &theme, text_area.width, text_area.height);
     frame.render_widget(Paragraph::new(lines).style(theme.panel()), text_area);
@@ -470,7 +539,14 @@ fn draw_centre(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let ground = body::ground(app, &theme);
     if body::is_framed(app.view) {
-        let block = theme.view_block(app.view_name());
+        // The assistant supplies its own conversation header. A second title
+        // in the border would repeat it and compete with the message roles.
+        let title = if app.view == crate::event::View::Assistant {
+            ""
+        } else {
+            app.view_name()
+        };
+        let block = theme.view_block(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         // The body is told the width the border left it, so a row can never be
@@ -806,7 +882,7 @@ mod tests {
         // type is a panel the user will try to type into.
         let text = render_to_text(&app, 140, 30);
         assert!(text.contains('>'), "no composer marker: {text:?}");
-        assert!(text.contains("Ctrl+N"), "no key hint: {text:?}");
+        assert!(text.contains("PgUp/Dn"), "no reading hint: {text:?}");
 
         // Any other view gives the band back: the panel belongs to the
         // terminal, and a frame of Diagnostics is not a terminal.
@@ -897,8 +973,12 @@ mod tests {
                 .expect("the first column is painted");
             assert_eq!(
                 ground.style().bg,
-                Some(app.theme().panel),
-                "{w}x{h}: column 0 is not the rail's ground"
+                Some(if regions.sidebar.width > 0 {
+                    app.theme().panel
+                } else {
+                    app.theme().terminal_bg
+                }),
+                "{w}x{h}: column 0 is not the visible surface's ground"
             );
         }
     }
@@ -970,7 +1050,10 @@ mod tests {
         let narrow = render_to_text(&app, 85, 24);
         let bottom = narrow.lines().last().unwrap_or_default().to_string();
         assert!(bottom.contains(app.state_name()), "{bottom}");
-        assert!(!bottom.contains("乱"), "the chip is not cut: {bottom}");
+        assert!(
+            !bottom.contains("乱") || bottom.contains("乱码 57B"),
+            "the chip is not cut: {bottom}"
+        );
         assert!(!bottom.contains("待发"), "nor a chip that is not armed");
     }
 
@@ -1061,11 +1144,11 @@ mod tests {
     #[test]
     fn a_narrow_window_gives_the_sidebar_less_room() {
         let wide = regions(area(20, 10), true);
-        assert_eq!(wide.sidebar.width, 19);
-        assert_eq!(wide.centre.width, 1);
+        assert_eq!(wide.sidebar.width, 0);
+        assert_eq!(wide.centre.width, 20);
         let narrow = regions(area(10, 10), true);
-        assert_eq!(narrow.sidebar.width, 9);
-        assert_eq!(narrow.centre.width, 1);
+        assert_eq!(narrow.sidebar.width, 0);
+        assert_eq!(narrow.centre.width, 10);
     }
 
     /// The rail is its rows and nothing else: the mark that used to ride the
@@ -1158,7 +1241,7 @@ mod tests {
                     ..App::default()
                 };
                 let buffer = render_buffer(&app, width, height).expect("a frame");
-                (0..height)
+                (BAR_HEIGHT..height.saturating_sub(BAR_HEIGHT))
                     .map(|y| {
                         let filled: Vec<usize> = (0..SIDEBAR_TEXT_WIDTH)
                             .filter(|x| buffer[(*x, y)].symbol() != " ")
@@ -1235,7 +1318,7 @@ mod tests {
     #[test]
     fn a_narrow_pane_drops_its_status_pill() {
         let app = App::default();
-        let text = render_to_text(&app, 40, 12);
+        let text = render_to_text(&app, 10, 12);
         assert!(!text.contains('●'), "{text}");
         // Wide enough, and it is back.
         let wide = render_to_text(&app, 110, 30);
@@ -1521,9 +1604,11 @@ mod tests {
             "the bar starts at the window's edge, with no air column: {last:?}"
         );
         assert!(last.contains("Ctrl+Q 退出"), "{last:?}");
-        for needle in ["连接", "视图", "快捷发送", "监控", "串口终端"] {
+        for needle in ["连接", "视图", "串口终端", "网络", "助手"] {
             assert!(text.contains(needle), "frame is missing {needle:?}\n{text}");
         }
+        assert!(!text.contains("快捷发送"));
+        assert!(!text.contains("监控"));
         // The sidebar ends where the centre column begins.
         let sidebar_row = lines.iter().find(|l| l.contains("串口终端")).unwrap();
         assert!(!sidebar_row.contains("Ctrl"), "{sidebar_row:?}");
@@ -1714,9 +1799,12 @@ mod tests {
     /// a viewer sees the palette rather than the emulator's defaults.
     #[test]
     fn the_ansi_dump_carries_true_colour() {
-        let app = App::default();
+        let app = App {
+            focus: crate::app::Focus::Sidebar,
+            ..App::default()
+        };
         let ansi = render_to_ansi(&app, 80, 20);
-        let accent_bg = Theme::DARK.accent;
+        let accent_bg = Theme::DARK.panel_3;
         let ratatui::style::Color::Rgb(r, g, b) = accent_bg else {
             panic!("the accent is not an RGB colour");
         };

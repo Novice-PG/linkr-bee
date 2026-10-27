@@ -388,18 +388,28 @@ fn uart_buffer_row(label: &str, groups: &InfoGroups, width: u16, theme: &Theme) 
 /// The whole body: heading, the read's freshness, the six-row grid (or the
 /// reason there is none), then the keys this view answers to.
 pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    document(app, theme, width, false)
+}
+
+/// Device facts for a dialog that supplies its own title and controls.
+pub fn information_lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    document(app, theme, width, true)
+}
+
+fn document(app: &App, theme: &Theme, width: u16, compact: bool) -> Vec<Line<'static>> {
     let s = app.strings();
     let state = &app.diagnostics;
     let mut lines = vec![
         message(
-            app.lang.view_name(View::Diagnostics),
-            theme.section_header(),
-            width,
-        ),
-        message(
             theme
                 .fold(&match &state.updated {
                     Some(at) => format!("{} {at}", s.diag_updated),
+                    None if compact => if app.lang == Lang::Zh {
+                        "尚未读取"
+                    } else {
+                        "Not read yet"
+                    }
+                    .to_string(),
                     None => s.diag_not_read.to_string(),
                 })
                 .as_ref(),
@@ -409,8 +419,27 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         Line::from(""),
     ];
 
+    if !compact {
+        lines.insert(
+            0,
+            message(
+                app.lang.view_name(View::Diagnostics),
+                theme.section_header(),
+                width,
+            ),
+        );
+    }
     if !app.ble_connected() {
-        lines.push(message(s.diag_no_ble, theme.warn(), width));
+        let no_ble = if compact {
+            if app.lang == Lang::Zh {
+                "请先通过 BLE 连接 Bee。"
+            } else {
+                "Connect Bee over BLE to read device information."
+            }
+        } else {
+            s.diag_no_ble
+        };
+        lines.push(message(no_ble, theme.warn(), width));
         lines.push(Line::from(""));
     }
     if let Some(error) = &state.error {
@@ -446,12 +475,14 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(message(s.diag_empty, theme.muted(), width));
     }
 
-    lines.push(Line::from(""));
-    lines.push(message(
-        theme.fold(s.diag_keys_hint).as_ref(),
-        theme.muted(),
-        width,
-    ));
+    if !compact {
+        lines.push(Line::from(""));
+        lines.push(message(
+            theme.fold(s.diag_keys_hint).as_ref(),
+            theme.muted(),
+            width,
+        ));
+    }
     lines
 }
 

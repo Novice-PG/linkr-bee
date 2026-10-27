@@ -378,7 +378,7 @@ pub fn lines(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
 
 /// Keep the selected control visible even after a long WiFi scan.
 pub fn visible_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<Line<'static>> {
-    let (lines, focused_line) = document(app, theme, width);
+    let (lines, focused_line, _) = document(app, theme, width);
     let height = usize::from(height);
     let offset = (focused_line + 1)
         .saturating_sub(height)
@@ -388,10 +388,15 @@ pub fn visible_lines(app: &App, theme: &Theme, width: u16, height: u16) -> Vec<L
 
 /// Build the rows and their focus position together, so status/error rows
 /// cannot make scrolling point at a different control.
-fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize) {
+fn document(
+    app: &App,
+    theme: &Theme,
+    width: u16,
+) -> (Vec<Line<'static>>, usize, Vec<(NetworkRow, usize)>) {
     let s = app.strings();
     let state = &app.network;
     let mut focused_line = 0;
+    let mut targets = Vec::new();
     let mut lines = vec![
         Line::from(""),
         heading(
@@ -439,6 +444,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
     } else {
         state.ssid_input.as_str()
     };
+    targets.push((NetworkRow::Ssid, lines.len()));
     if on(NetworkRow::Ssid) {
         focused_line = lines.len();
     }
@@ -455,6 +461,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
         (NetworkRow::WifiOff, s.net_wifi_off),
         (NetworkRow::WifiStatus, s.net_status),
     ] {
+        targets.push((row, lines.len()));
         if on(row) {
             focused_line = lines.len();
         }
@@ -485,6 +492,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
     } else {
         for (index, result) in state.scan_results.iter().enumerate() {
             let row = scan_row(result, theme.glyphs());
+            targets.push((NetworkRow::ScanResult(index), lines.len()));
             if on(NetworkRow::ScanResult(index)) {
                 focused_line = lines.len();
                 // The chip, as the form's fields wear it: the keyboard is
@@ -532,6 +540,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
         .map(|d| d.url.as_str())
         .filter(|u| !u.is_empty())
         .unwrap_or(empty);
+    targets.push((NetworkRow::Url, lines.len()));
     if on(NetworkRow::Url) {
         focused_line = lines.len();
     }
@@ -547,6 +556,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
         (NetworkRow::WebdavOff, s.net_disable),
         (NetworkRow::WebdavStatus, s.net_webdav_status),
     ] {
+        targets.push((row, lines.len()));
         if on(row) {
             focused_line = lines.len();
         }
@@ -570,6 +580,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
         .map(|name| name.name.as_str())
         .filter(|name| !name.is_empty())
         .unwrap_or(empty);
+    targets.push((NetworkRow::BleName, lines.len()));
     if on(NetworkRow::BleName) {
         focused_line = lines.len();
     }
@@ -585,6 +596,7 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
         (NetworkRow::BleNameDefault, s.net_ble_name_default_action),
         (NetworkRow::BleNameStatus, s.net_ble_name_status_action),
     ] {
+        targets.push((row, lines.len()));
         if on(row) {
             focused_line = lines.len();
         }
@@ -609,7 +621,25 @@ fn document(app: &App, theme: &Theme, width: u16) -> (Vec<Line<'static>>, usize)
 
     lines.push(Line::from(""));
     lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
-    (lines, focused_line)
+    (lines, focused_line, targets)
+}
+
+pub fn target_at(app: &App, width: u16, height: u16, row: u16) -> Option<NetworkRow> {
+    if row >= height {
+        return None;
+    }
+    let (lines, focus, targets) = document(app, &app.theme(), width);
+    let height = height as usize;
+    let offset = (focus + 1)
+        .saturating_sub(height)
+        .min(lines.len().saturating_sub(height));
+    targets
+        .into_iter()
+        .find(|(target, index)| {
+            *index == offset + row as usize
+                && target.reachable(app.network.wifi_connected(), app.network.scan_results.len())
+        })
+        .map(|(target, _)| target)
 }
 
 /// Handle one key press while the network view has the keyboard.
