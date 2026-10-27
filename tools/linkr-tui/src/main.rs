@@ -68,12 +68,9 @@ use linkr_tui::{dialogs, palette};
 #[cfg(feature = "tui")]
 mod console;
 
-/// How often a frame is repainted with no input: the clock and the busy
-/// indicator move on this beat, and it is slow enough to cost nothing.
-/// The interface's beat. Only the build with a renderer pings it: the CLI half
-/// ends without a loop, so a tick constant there is a constant nobody reads.
-#[cfg(feature = "tui")]
-const TICK: Duration = Duration::from_millis(250);
+// Keep the idle animation beat independent from the short interactive poll.
+#[cfg(any(feature = "tui", test))]
+mod input_cadence;
 
 /// What the tool is and does, in the first line of the help.
 ///
@@ -2131,6 +2128,7 @@ fn run(app: &mut App) -> io::Result<()> {
 /// The loop that drains the keyboard, on the same runtime the transport built.
 #[cfg(feature = "tui")]
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
+    let mut cadence = input_cadence::InputCadence::new(std::time::Instant::now());
     loop {
         // Resize before the pump: the bytes about to arrive are painted at the
         // size the pane is now, not the size it was when the user dragged the
@@ -2138,10 +2136,19 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
         fit_pane(terminal, app)?;
         app.pump();
         app.clock = local_clock();
+        if cadence.tick(std::time::Instant::now()) {
+            app.tick = app.tick.wrapping_add(1);
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if event::poll(TICK)? {
-            match event::read()? {
+        // Incoming transport data cannot wake crossterm's keyboard poll. After
+        // input, revisit the transport within 20 ms rather than up to 250 ms.
+        if event::poll(cadence.wait(std::time::Instant::now()))? {
+            let event = event::read()?;
+            if matches!(&event, Event::Key(_) | Event::Paste(_)) {
+                cadence.input(std::time::Instant::now());
+            }
+            match event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     // The splash is a screen, not a modal: any key puts it
                     // away and is spent doing that, so the key that dismissed
@@ -2215,9 +2222,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 Event::Resize(_, _) => {}
                 _ => {}
             }
-        } else {
-            // The beat that moves the busy indicator and the clock.
-            app.tick = app.tick.wrapping_add(1);
         }
     }
 }

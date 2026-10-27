@@ -1424,6 +1424,11 @@ function initTerminal() {
 const WRITE_BACKLOG_LIMIT = 512 * 1024;
 const WRITE_FALLBACK_MS = 50;
 
+// xterm already schedules rendering. During typing, hand it small echoes
+// immediately instead of making them wait for two successive animation frames.
+// Bound this shortcut to once per frame so sustained output still batches.
+let terminalInputUntil = 0;
+let lastImmediateWriteAt = -Infinity;
 let writeRaf = 0;
 let writeFallbackTimer = 0;
 let pendingWrites = [];
@@ -1431,6 +1436,7 @@ let pendingWriteBytes = 0;
 let droppedWriteBytes = 0;
 
 function flushTerminalWrites() {
+  if (writeRaf) cancelAnimationFrame(writeRaf);
   writeRaf = 0;
   if (writeFallbackTimer) {
     clearTimeout(writeFallbackTimer);
@@ -1494,6 +1500,13 @@ function appendOutput(data) {
       (total, chunk) => total + chunk.length,
       0,
     );
+  }
+  const now = performance.now();
+  if (!document.hidden && now < terminalInputUntil && bytes.length <= 256 &&
+      pendingWriteBytes <= 4096 && now - lastImmediateWriteAt >= 16) {
+    lastImmediateWriteAt = now;
+    flushTerminalWrites();
+    return;
   }
   if (!writeRaf) {
     writeRaf = requestAnimationFrame(flushTerminalWrites);
@@ -3414,6 +3427,7 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
     writeText(data, { trackPending: false }).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
+  terminalInputUntil = performance.now() + 1000;
   markTerminalBusy();
   // Typing is an explicit end to the selection: do not keep stale handles or a
   // stale copy snapshot around.
