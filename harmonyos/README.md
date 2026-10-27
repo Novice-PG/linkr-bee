@@ -66,6 +66,15 @@ After signing is configured, use DevEco Studio's **Run** action for a simulator
 or device. The command-line build continues to produce an unsigned HAP unless
 the generated `signingConfigs` entry is available to hvigor.
 
+BLE pairing uses `ohos.permission.ACCESS_BLUETOOTH`. The app does not use the
+persistent device-address APIs, so it does not declare
+`ohos.permission.PERSISTENT_BLUETOOTH_PEERS_MAC`. That permission is intended for
+persistent device identifiers, requires an authorized ACL in the signing
+profile, and does not replace the Bluetooth runtime permission. Only add it
+alongside an implementation of that feature and the corresponding signing
+instructions; declaring it for ordinary pairing can prevent installation with a
+profile that lacks the ACL.
+
 ## Host-side verification
 
 The JavaScript bridge can be exercised without a phone or simulator:
