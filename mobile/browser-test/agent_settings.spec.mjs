@@ -126,14 +126,14 @@ for (const inAgent of [false, true]) {
   });
 }
 
-test("tablet drawer exposes a translated AI tab alongside connection, serial and network", async ({ page }) => {
+test("tablet drawer exposes a translated AI tab alongside connection, serial, board and network", async ({ page }) => {
   await page.setViewportSize({ width: 802, height: 867 });
   await openSettings(page);
   await page.locator("#drawerLangButton").tap();
   await expect(page.locator("#agentSettingsTitle")).toHaveText("AI 配置");
-  await expect(page.locator("#agentSettingsSave")).toHaveText("保存配置");
-  // Connection, serial, network, AI and About share the strip on touch devices.
-  await expect(page.locator(".settings-tab:visible")).toHaveCount(5);
+  await expect(page.locator("#agentSettingsSave")).toHaveText("立即保存");
+  // Connection, serial, network, board, AI and About share the strip on touch devices.
+  await expect(page.locator(".settings-tab:visible")).toHaveCount(6);
   await expect(page.locator('[data-settings-target="about"]')).toHaveText("关于");
   const drawer = await page.locator("#controlsPanel").boundingBox();
   expect(drawer.width).toBeLessThan(802);

@@ -1191,6 +1191,7 @@ for (const desktop of [false,true]) test.describe(desktop?'desktop target bindin
   await expect.poll(() => page.evaluate(() =>
     window.__test.agentJournal.read({ limit: 4000 }).text.includes("root@board:~#"))).toBe(true);
   await page.evaluate(()=>window.bindingPasswordPrompt=true);
+  await page.locator('#agentBindingCard > summary').click();
   await page.locator('#targetBind').click();
   await expect(page.locator('#targetBindingStatus')).toContainText('Enter the target sudo password');
   expect(await page.evaluate(()=>window.bindingWrites)).toEqual([]);

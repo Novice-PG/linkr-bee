@@ -21,9 +21,26 @@ import {
   validateAgentConfig,
 } from "./agent_config.js";
 import { loadPricing, savePricing } from "./agent_usage.js";
+import {
+  AICONF_BEGIN_COMMAND,
+  AICONF_CLEAR_COMMAND,
+  AICONF_END_COMMAND,
+  AICONF_MAX_BYTES,
+  AICONF_QUERY_COMMAND,
+  aiconfGetCommand,
+  aiconfHexChunks,
+  aiconfPutCommand,
+  assembleAiconf,
+  parseAiconfChunk,
+  parseAiconfPayload,
+  parseAiconfStatus,
+  serializeAiconf,
+} from "./board_aiconf.js";
 
 const labels = {
-  advanced: ["高级设置", "Advanced settings"],
+  advanced: ["高级选项：协议、Token 与价格", "Advanced: protocol, tokens and pricing"],
+  importTitle: ["从 CLIProxyAPI 导入", "Import from CLIProxyAPI"],
+  privacyTitle: ["存储与隐私", "Storage and privacy"],
   bindingUuid:["Bee 保存的目标机 UUID", "Bound target UUID"], observedUuid:["本次读取的目标机 UUID", "Observed target UUID"],
   bindingTitle:["目标机绑定", "Target identity binding"],
   bindingHint:["优先使用已有的系统 ID，其次是用户 ID。首次绑定优先写入 /var/lib/linkr/device-id，需要权限时尝试 sudo；请在串口输入密码。sudo 不可用或失败时改用 ~/.local/share/linkr/device-id（随登录用户变化）。输入密码后请再次点击绑定，核实后才保存到 Bee Flash。", "Existing system IDs take priority, then existing user IDs. New IDs prefer /var/lib/linkr/device-id using sudo when needed; enter the password in the terminal. If sudo is unavailable or fails, use ~/.local/share/linkr/device-id (per user). After entering a password, click Bind again to verify before saving to Bee Flash."],
@@ -41,11 +58,11 @@ const labels = {
   bindingUnknown:["本次连接尚未核实绑定", "Binding not verified in this connection"],
   title: ["AI 配置", "AI configuration"],
   endpoint: ["API 地址", "API base URL"],
-  endpointHint: ["兼容 Chat Completions，例如 https://api.example.com/v1", "Chat Completions compatible, e.g. https://api.example.com/v1"],
+  endpointHint: ["兼容 Chat Completions 的服务地址。", "A Chat Completions compatible base URL."],
   model: ["模型名称", "Model ID"], key: ["API Key", "API key"],
   /* The preset model ids go stale, so the form can ask the service what it
    * offers right now once the address and key are in. */
-  modelHint: ["可手动填写；填好地址和 API Key 后，可点击下方“获取模型列表”从服务端读取当前可用的模型。", "Type it, or fill in the address and API key and use Fetch model list below to read the models the service currently offers."],
+  modelHint: ["可手动填写，或从服务端读取。", "Type it, or read the list from the service."],
   fetchModels: ["获取模型列表", "Fetch model list"],
   fetchBusy: ["正在获取模型列表…", "Fetching the model list…"],
   fetchDone: ["已获取 {count} 个模型，从模型名称输入框的下拉中选择，也可继续手动输入。", "Found {count} models. Open the model field and pick one, or keep typing."],
@@ -54,18 +71,18 @@ const labels = {
   fetchNetwork: ["无法获取模型列表：请求被浏览器跨域或网络拦截，或不支持该接口。可继续手动填写模型名。", "Could not read the model list: the request was blocked (CORS or network) or the endpoint does not support it. Type the model ID instead."],
   fetchHttp: ["模型列表接口返回 HTTP {status}。可继续手动填写模型名。", "The model list endpoint returned HTTP {status}. Type the model ID instead."],
   fetchEmpty: ["该服务没有返回可用的模型，请手动填写模型名。", "The service returned no usable models; type the model ID instead."],
-  keyHint: ["无需密钥的本地服务可留空。", "Leave blank for a local service that does not require a key."],
+  keyHint: ["本地服务可留空。", "Optional for local services."],
   headers: ["附加请求头", "Extra request headers"],
-  headersHint: ["每行一个 `名称: 值`。部分端点需要特定请求头才接受浏览器请求，例如 Anthropic 需要 anthropic-dangerous-direct-browser-access: true。", "One `Name: value` per line. Some endpoints only accept a browser request with a specific header, for example Anthropic needs anthropic-dangerous-direct-browser-access: true."],
+  headersHint: ["每行一个 Name: value；部分服务需要专属请求头。", "One Name: value per line; some services require a specific header."],
   vendor: ["AI 接入商", "AI provider"],
   /* A preset only fills the fields; it never locks them, and the model id is the
    * part most likely to go stale, so the hint says so instead of pretending. */
-  vendorHint: ["选择后自动填入 API 地址、接口协议和模型名，三个字段都可以再改；模型名以你的账号可用的为准。", "Choosing a provider fills the API base URL, protocol and model. All three stay editable; use a model your account can actually call."],
-  keyStorage: ["API Key 只保存在这台设备（本浏览器 / 应用的本地存储，键名 linkr-agent-model，明文）。不会上传到 Linkr Bee、本网站或任何服务器，应用也没有云端账号。提问时由本机直接发往你选择的接入商；清除配置或站点数据即可删除。", "The API key stays on this device (this browser/app's local storage, key linkr-agent-model, plaintext). It is not uploaded to Linkr Bee, this site or any server, and the app has no cloud account. A question carries it from this device straight to the provider you chose; clear the configuration or site data to remove it."],
+  vendorHint: ["选择后填入地址、协议和模型，可再修改。", "Fills URL, protocol and model; still editable."],
+  keyStorage: ["Key 仅存本机（linkr-agent-model），不会自动上传到服务器；只有保存到板载时才写入板子 NVS。", "Key stays on this device (linkr-agent-model) and is not uploaded to any server automatically; it reaches the board's NVS only on Save to board."],
   provider: ["接口协议", "API protocol"],
-  providerHint: ["必须与 API 地址匹配，协议不同请求格式也不同。", "Must match the API base URL; each protocol uses a different request format."],
+  providerHint: ["必须与地址匹配。", "Must match the base URL."],
   reasoning: ["推理强度", "Reasoning effort"],
-  reasoningHint: ["仅部分模型支持；关闭可减少等待和 token 消耗。", "Only some models support this; off avoids the extra latency and tokens."],
+  reasoningHint: ["部分模型支持；关闭可省 token。", "Some models support it; off saves tokens."],
   reasoningOff: ["关闭", "Off"], reasoningLow: ["低", "Low"], reasoningMedium: ["中", "Medium"], reasoningHigh: ["高", "High"],
   contextWindow: ["上下文窗口（token，可留空）", "Context window in tokens (optional)"],
   maxTokens: ["最大输出（token，可留空）", "Max output tokens (optional)"],
@@ -73,19 +90,33 @@ const labels = {
   /* The window is not only the conversation: the system prompt and every tool
    * description are paid first, on every request. Saying so here is the
    * difference between "the model refused" and "this field is too small". */
-  contextWindowHint: ["留空或填 0 表示使用内置默认值。系统提示词、工具说明和参数结构每次请求都占用窗口，还需为回复留出空间，其余才是对话历史。", "Leave blank or 0 to keep the built-in default. The system prompt, tool descriptions and parameter schemas consume part of each request's window. Room is also reserved for the reply; the rest is conversation history."],
+  contextWindowHint: ["0 为内置默认；提示词和工具会先占用窗口。", "0 keeps the default; the prompt and tools consume part of the window."],
   contextWindowTight: ["窗口可能不足：提示词和工具（含参数结构）按约 {fixed} token 预留，加上最大输出建议至少 {min}。请增大窗口或降低最大输出；实际用量随模型和启用的工具变化。", "The window may be too small: about {fixed} tokens are reserved for the prompt and tools, including schemas. With max output, at least {min} is recommended. Increase the window or reduce max output; actual usage varies by model and enabled tools."],
   providerError: ["请选择接口协议。", "Choose an API protocol."],
   reasoningError: ["请选择推理强度。", "Choose a reasoning effort."],
   contextWindowError: ["上下文窗口必须是 0，或 1000 到 2000000 之间的整数。", "Context window must be 0, or an integer between 1000 and 2000000."],
   maxTokensError: ["最大输出必须是 0，或 1 到 100000 之间的整数。", "Max output tokens must be 0, or an integer between 1 and 100000."],
   pricing: ["Token 单价（每 100 万，可选）", "Token prices per 1M (optional)"],
-  pricingHint: ["填了就按它估算本轮费用，只用于显示，留空则只显示 token 数。", "When set, the conversation shows an estimated cost; leave blank to show token counts only."],
+  pricingHint: ["只用于估算费用，可留空。", "Used only for the cost estimate; optional."],
   pricingError: ["单价必须是 0 到 100000 之间的数字。", "Prices must be numbers between 0 and 100000."],
   headersError: ["请求头格式无效：每行一个 `名称: 值`，名称只能包含字母、数字和连字符。", "Invalid headers: use one `Name: value` per line, with names limited to letters, digits and hyphens."],
-  save: ["保存配置", "Save configuration"], clear: ["清除配置", "Clear configuration"],
-  storage: ["其余配置同样保存在本机，刷新或重启后保留；清除配置或清除站点数据后删除。", "The rest of the configuration is stored on this device too, across reloads and restarts; clear the configuration or the site data to remove it."],
-  notice: ["提问后，助手会把所需串口日志发送到你配置的模型服务。", "When you ask a question, the assistant sends the requested serial logs to your configured model service."],
+  save: ["立即保存", "Save now"], clear: ["清除", "Clear"],
+  boardConfigTitle: ["板载配置", "On-board configuration"],
+  boardConfigHint: ["把当前配置存到板子 NVS，换设备可载入；默认不含 Key 与请求头。", "Keep this configuration in the board's NVS for another device; keys and headers are excluded by default."],
+  boardConfigSecrets: ["包含 API Key 与附加请求头", "Include API key and extra headers"],
+  boardConfigSave: ["存到板载", "Save"],
+  boardConfigLoad: ["从板载载入", "Load"],
+  boardConfigClear: ["清除", "Clear"],
+  boardConfigSaved: ["已保存到板载（{bytes} 字节）。", "Saved to the board ({bytes} bytes)."],
+  boardConfigEmpty: ["板载还没有 AI 配置。", "The board has no AI configuration yet."],
+  boardConfigLoaded: ["已载入并保存到当前设备。", "Loaded and saved on this device."],
+  boardConfigCleared: ["已清除板载 AI 配置。", "Board AI configuration cleared."],
+  boardConfigInvalid: ["当前表单配置无效，请先修正后再保存到板载。", "The form configuration is invalid; fix it before saving to the board."],
+  boardConfigTooLarge: ["配置超过板载容量，请去掉过长的请求头后重试。", "The configuration exceeds the board capacity; shorten the headers and retry."],
+  boardConfigUnavailable: ["需要连接 Linkr Bee 的管理通道才能读写板载配置。", "Connect to the Linkr Bee management channel to read or write the board configuration."],
+  boardConfigError: ["板载配置操作失败：{message}", "Board configuration failed: {message}"],
+  storage: ["配置保存在本机，刷新或重启后保留。", "Configuration stays on this device across reloads and restarts."],
+  notice: ["提问时，所需串口日志会发送到你配置的模型服务。", "When you ask, the needed serial logs go to your model service."],
   saved: ["配置已保存到当前设备。", "Configuration saved on this device."],
   cleared: ["已清除当前设备上的 AI 配置。", "AI configuration cleared from this device."],
   dirty: ["修改尚未保存。", "Changes have not been saved."],
@@ -100,7 +131,7 @@ const labels = {
   busy: ["Agent 正在运行，请先返回对话并停止，再修改配置。", "Agent is running. Return to the conversation and stop it before editing configuration."],
 };
 
-export function createAgentSettings({ section, tab, getLang, onChange, bindingAction }) {
+export function createAgentSettings({ section, tab, getLang, onChange, bindingAction, control = null }) {
   if (!available) return null;
   section.hidden = tab.hidden = false;
   section.closest(".controls").classList.add("has-agent-settings");
@@ -113,8 +144,6 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   };
   const headersInput = $("agentHeaders");
   const advanced = $("agentAdvancedSettings");
-  // Keep the compact form simple, while leaving desktop editors expanded.
-  advanced.open = !window.matchMedia("(pointer: coarse), (max-width: 900px)").matches;
   function focusField(input) {
     if (advanced.contains(input)) advanced.open = true;
     input.focus();
@@ -262,24 +291,68 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   try { config = loadAgentConfig(localStorage); } catch { showStatus("readError", true); }
   fillOptions();
   fill();
+  function readDraft() {
+    const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
+    delete draft.vendor;
+    for (const name of ["contextWindow", "maxTokens"]) {
+      draft[name] = String(draft[name] ?? "").trim() ? Number(draft[name]) : 0;
+    }
+    draft.provider ||= AGENT_PROVIDERS[0].id;
+    draft.reasoning ||= AGENT_REASONING_LEVELS[0];
+    draft.headers = parseAgentHeaders(headersInput.value);
+    return validateAgentConfig(draft);
+  }
+
+  /* Saving is automatic: losing focus commits when the form is valid. The
+   * explicit button remains a fallback for a deliberate retry. */
+  let autosaveTimer = null;
+  function cancelAutosave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  function scheduleAutosave() {
+    if (busy || importing) return;
+    cancelAutosave();
+    autosaveTimer = setTimeout(autosave, 200);
+  }
+  function autosave() {
+    autosaveTimer = null;
+    if (busy || importing) return;
+    let draft;
+    try {
+      draft = readDraft();
+    } catch {
+      return;
+    }
+    if (config && JSON.stringify(draft) === JSON.stringify(config)) return;
+    // A plaintext remote credential still needs the explicit confirmation.
+    if (endpointSecurity(draft.endpoint).exposesKey && draft.apiKey) return;
+    const previous = config;
+    try {
+      savePricing(localStorage, { input: priceInputs.input.value, output: priceInputs.output.value });
+    } catch {
+      return;
+    }
+    try {
+      config = saveAgentConfig(localStorage, draft);
+    } catch {
+      showStatus("saveError", true);
+      return;
+    }
+    fill();
+    showStatus("saved");
+    if (!previous || Object.keys(inputs).some((name) => previous[name] !== config[name])) onChange?.();
+  }
+
   $("agentSettingsForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (busy || importing) return;
     resetErrors();
-    const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
-    delete draft.vendor;
+    cancelAutosave();
     // A cleared number input reports an empty string and an empty select reports
     // no choice at all. Both mean "keep the schema default", not invalid input.
-    for (const name of ["contextWindow", "maxTokens"]) draft[name] = draft[name].trim() ? Number(draft[name]) : 0;
-    draft.provider ||= AGENT_PROVIDERS[0].id;
-    draft.reasoning ||= AGENT_REASONING_LEVELS[0];
-    try { draft.headers = parseAgentHeaders(headersInput.value); } catch {
-      headersInput.setAttribute("aria-invalid", "true");
-      showStatus("headersError", true);
-      focusField(headersInput);
-      return;
-    }
-    try { validateAgentConfig(draft); } catch (error) {
+    let draft;
+    try { draft = readDraft(); } catch (error) {
       if (error.message === "headers") {
         headersInput.setAttribute("aria-invalid", "true");
         showStatus("headersError", true);
@@ -322,6 +395,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   });
   $("agentSettingsClear").addEventListener("click", () => {
     if (busy || importing) return;
+    cancelAutosave();
     try { clearAgentConfig(localStorage); } catch { showStatus("clearError", true); return; }
     config = null;
     fill();
@@ -356,6 +430,10 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     showStatus("dirty");
   });
   $("agentModelFetch").addEventListener("click", fetchModels);
+  for (const field of [...Object.values(inputs), headersInput, ...Object.values(priceInputs)]) {
+    field.addEventListener("focusout", scheduleAutosave);
+    field.addEventListener("change", scheduleAutosave);
+  }
   for (const [name, input] of Object.entries(inputs)) input.addEventListener("input", () => {
     resetErrors();
     // A list fetched for a previous address or key is no longer evidence.
@@ -379,10 +457,126 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     });
   }
   $("targetRegenerateConfirm").addEventListener("change", () => { $("targetRegenerate").disabled = !$("targetRegenerateConfirm").checked; });
+
+  /* ---- Board-stored AI configuration ---- */
+  const boardStatus = () => $("agentBoardConfigStatus");
+  function setBoardStatus(key, replacements = {}, tone = "") {
+    let message = text(key);
+    for (const [name, value] of Object.entries(replacements)) {
+      message = message.replace(`{${name}}`, String(value));
+    }
+    boardStatus().textContent = message;
+    boardStatus().classList.toggle("is-error", tone === "error");
+  }
+  const replyOk = (reply) => /^OK\b/m.test(String(reply ?? ""));
+  function collectBoardDraft() {
+    const draft = Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value]));
+    delete draft.vendor;
+    for (const name of ["contextWindow", "maxTokens"]) {
+      draft[name] = String(draft[name] ?? "").trim() ? Number(draft[name]) : 0;
+    }
+    draft.provider ||= AGENT_PROVIDERS[0].id;
+    draft.reasoning ||= AGENT_REASONING_LEVELS[0];
+    draft.headers = parseAgentHeaders(headersInput.value);
+    return validateAgentConfig(draft);
+  }
+  async function saveBoardConfig() {
+    if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
+    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    let draft;
+    try {
+      draft = collectBoardDraft();
+    } catch {
+      setBoardStatus("boardConfigInvalid", {}, "error");
+      return;
+    }
+    const includeSecrets = $("agentBoardConfigSecrets").checked;
+    if (includeSecrets && draft.apiKey) {
+      const security = endpointSecurity(draft.endpoint);
+      if (security.exposesKey && !window.confirm(text("plaintextKeyConfirm"))) {
+        setBoardStatus("plaintextKeyBlocked", {}, "error");
+        return;
+      }
+    }
+    const payload = serializeAiconf(draft, { includeSecrets });
+    const bytes = new TextEncoder().encode(payload).length;
+    if (bytes > AICONF_MAX_BYTES) { setBoardStatus("boardConfigTooLarge", {}, "error"); return; }
+    try {
+      const begin = await control(AICONF_BEGIN_COMMAND);
+      if (!replyOk(begin)) throw new Error(String(begin).trim() || "begin");
+      for (const hex of aiconfHexChunks(payload)) {
+        const reply = await control(aiconfPutCommand(hex));
+        if (!replyOk(reply)) throw new Error(String(reply).trim() || "put");
+      }
+      const end = await control(AICONF_END_COMMAND);
+      if (!replyOk(end)) throw new Error(String(end).trim() || "end");
+      setBoardStatus("boardConfigSaved", { bytes });
+    } catch (error) {
+      setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    }
+  }
+  async function loadBoardConfig() {
+    if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
+    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    try {
+      const statusReply = await control(AICONF_QUERY_COMMAND);
+      const status = parseAiconfStatus(statusReply);
+      if (!status) throw new Error(String(statusReply).trim() || "status");
+      if (status.bytes === 0) { setBoardStatus("boardConfigEmpty"); return; }
+      const chunks = [];
+      let offset = 0;
+      let total = status.bytes;
+      for (let guard = 0; guard < 64; guard += 1) {
+        const reply = await control(aiconfGetCommand({ offset }));
+        const chunk = parseAiconfChunk(reply);
+        if (!chunk) throw new Error(String(reply).trim() || "get");
+        chunks.push(chunk);
+        total = chunk.total || total;
+        offset += chunk.hex.length / 2;
+        if (chunk.done) break;
+      }
+      const record = parseAiconfPayload(assembleAiconf(chunks, total));
+      validateAgentConfig(record);
+      inputs.endpoint.value = record.endpoint;
+      inputs.model.value = record.model;
+      inputs.provider.value = record.provider;
+      inputs.reasoning.value = record.reasoning;
+      inputs.contextWindow.value = record.contextWindow ? String(record.contextWindow) : "";
+      inputs.maxTokens.value = record.maxTokens ? String(record.maxTokens) : "";
+      inputs.vendor.value = vendorForEndpoint(record.endpoint);
+      headersInput.value = formatAgentHeaders(record.headers);
+      inputs.apiKey.value = record.apiKey;
+      resetErrors();
+      showModelStatus("");
+      setBoardStatus("boardConfigLoaded");
+      scheduleAutosave();
+    } catch (error) {
+      setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    }
+  }
+  async function clearBoardConfig() {
+    if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
+    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    try {
+      const reply = await control(AICONF_CLEAR_COMMAND);
+      if (!replyOk(reply)) throw new Error(String(reply).trim() || "clear");
+      setBoardStatus("boardConfigCleared");
+    } catch (error) {
+      setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    }
+  }
+  $("agentBoardConfigSave").addEventListener("click", saveBoardConfig);
+  $("agentBoardConfigLoad").addEventListener("click", loadBoardConfig);
+  $("agentBoardConfigClear").addEventListener("click", clearBoardConfig);
+
   function updateConfigControls() {
+    if (busy || importing) cancelAutosave();
     $("agentSettingsFields").disabled = busy || importing;
     $("agentSettingsSave").disabled = busy || importing;
     $("agentSettingsClear").disabled = busy || importing;
+    $("agentBoardConfigSave").disabled = busy || importing;
+    $("agentBoardConfigLoad").disabled = busy || importing;
+    $("agentBoardConfigClear").disabled = busy || importing;
   }
   const importer = createCLIProxySettings({ section, getLang,
     onPending(value) { importing = value; updateConfigControls(); },
@@ -400,6 +594,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     importer.refreshLang();
     // The status was written in the previous language; the fetched options stay.
     showModelStatus("");
+    $("agentBoardConfigStatus").textContent = "";
     renderStatus();
   }
   refreshLang();

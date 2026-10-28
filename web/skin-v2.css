@@ -514,9 +514,11 @@ h1 {
  * the title on it — at card scale: full bleed inside the card, the accent dot,
  * and a hairline under it. The negative margins cancel .card's 16 px padding;
  * the card clips the band with its own radius. */
+/* Follow the card's own padding: the phone layout uses 13 px, so the
+ * hard-coded -16px band stuck 3 px out of the rounded card and clipped. */
 .controls .card > .card-title {
-  margin: -16px -16px 14px;
-  padding: 11px 16px;
+  margin: calc(-1 * var(--card-pad, 16px)) calc(-1 * var(--card-pad, 16px)) 14px;
+  padding: 11px var(--card-pad, 16px);
   min-height: 44px;
   align-items: center;
   border-bottom: 1px solid var(--line-soft);
@@ -573,6 +575,342 @@ h1 {
   height: 6px;
 }
 
+/* AI settings: board-stored configuration mirrors the target-binding section
+ * next to it: a divider, a small heading, then a quiet action row. */
+/* The AI page is a stack of cards, not one long card. Keep this on the class,
+ * not the id: the rail's page filter hides [data-settings-page] with a
+ * class-level selector, and an id rule would override it and spill every AI
+ * card under every section. */
+.agent-settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The AI page owns its scroll: the footer stays put while the cards scroll, so
+ * it can never cover the last field or drift below the drawer. */
+.controls[data-settings-active="ai"] {
+  overflow: hidden;
+}
+
+#agentSettingsForm {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent-settings-scroll {
+  display: grid;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: auto;
+  /* Cards size to their content; without this, a definite grid height makes
+   * the overflowing cards shrink to their min-content and clip. */
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: max-content;
+  padding-right: 2px;
+  padding-bottom: 4px;
+}
+
+.agent-settings .field {
+  margin-bottom: 12px;
+}
+
+.agent-settings .field-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-settings .field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.agent-settings .key-note {
+  margin: 0 0 12px;
+}
+
+/* Tertiary disclosures inside the model card keep verbose settings out of the
+ * default view without spending a whole card on a toggle. */
+.agent-inline-disclosure {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.agent-inline-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 11px 2px;
+  box-sizing: border-box;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+
+.agent-inline-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-inline-disclosure > summary::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.18s ease;
+}
+
+.agent-inline-disclosure[open] > summary {
+  color: var(--text);
+}
+
+.agent-inline-disclosure[open] > summary::after {
+  transform: rotate(-135deg);
+}
+
+.agent-inline-disclosure > summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.agent-inline-disclosure .agent-advanced-fields {
+  padding-bottom: 4px;
+}
+
+.agent-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 0 12px;
+}
+
+.agent-model-actions .btn {
+  flex: 0 0 auto;
+}
+
+.agent-model-actions .field-hint {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-inline-disclosure > summary::after {
+    transition: none;
+  }
+}
+
+.agent-settings[hidden],
+#agentSettings[hidden] {
+  display: none !important;
+}
+
+#agentSettingsFields {
+  display: grid;
+  gap: 10px;
+}
+
+/* Auto-save makes the old save card redundant: a slim footer keeps the status
+ * and a fallback action within thumb reach without covering the fields. */
+.agent-config-footer {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 8px;
+  padding: 10px 2px 2px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.agent-config-footer .field-hint {
+  margin: 0;
+  font-size: 11.5px;
+}
+
+.agent-config-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-config-footer-actions .btn {
+  min-height: 36px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+/* The board configuration and binding blocks became cards, so their old
+ * section dividers are gone. */
+.agent-board-config {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-board-config[hidden] {
+  display: none !important;
+}
+
+#agentBindingCard .target-binding {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+}
+
+/* A card that is itself a <details>: the summary is its header band and the
+ * browser's disclosure triangle is replaced by a quiet chevron. */
+details.card > summary.card-title {
+  cursor: pointer;
+  list-style: none;
+}
+
+details.card > summary.card-title::-webkit-details-marker {
+  display: none;
+}
+
+details.card > summary.card-title::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  margin-right: 3px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 0.18s ease;
+}
+
+details.card[open] > summary.card-title::after {
+  transform: rotate(-135deg);
+}
+
+/* A closed card is just its header band, not a band plus empty padding. */
+details.card:not([open]) {
+  padding-bottom: 0;
+}
+
+details.card:not([open]) > summary.card-title {
+  margin-bottom: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  details.card > summary.card-title::after {
+    transition: none;
+  }
+}
+
+.agent-board-config h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-board-config .field-hint {
+  margin: 0;
+}
+
+.agent-board-config .field-hint.is-error {
+  color: var(--danger);
+}
+
+.agent-board-config .check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.agent-board-config .btn-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .agent-board-config .btn-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .agent-board-config .btn {
+    padding-inline: 6px;
+    font-size: 12px;
+  }
+}
+
+/* A phone held sideways with the keyboard open leaves very little height; the
+ * footer drops its status line so the fields above keep a usable scroll area. */
+@media (max-height: 520px) {
+  .agent-config-footer .field-hint {
+    display: none;
+  }
+
+  .agent-config-footer {
+    padding-block: 4px;
+  }
+}
+
+/* Collapsible cards: the header band keeps its shape and gains a quiet
+ * chevron; the content disappears without re-flowing the pages above. */
+.card-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.card-toggle:hover {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.card-toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.18s ease;
+}
+
+.card.is-collapsed {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.card.is-collapsed > .card-title {
+  margin-bottom: 0;
+}
+
+.card.is-collapsed > :not(.card-title) {
+  display: none !important;
+}
+
+.card.is-collapsed .card-toggle svg {
+  transform: rotate(-90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-toggle svg {
+    transition: none;
+  }
+}
+
 .settings-tabs {
   display: grid;
   grid-auto-flow: column;
@@ -610,6 +948,19 @@ h1 {
   .controls[data-settings-active="ai"] [data-settings-page]:not([data-settings-page="ai"]) {
     display: none;
   }
+}
+
+/* Hiding a section is a capability decision: the tab and its rail button must
+ * disappear even though their layout rules set display. */
+/* A [hidden] section must win over the layout rules that give cards and
+ * subsections `display: grid`. */
+.card[hidden],
+.board-card[hidden],
+.board-subsection[hidden],
+.board-empty[hidden],
+.settings-tab[hidden],
+.rail-btn[hidden] {
+  display: none !important;
 }
 
 .settings-tab {
@@ -1688,4 +2039,352 @@ button,
 
 .about-page .about-links a:hover {
   text-decoration: underline;
+}
+
+/* ---------- Board I/O (Linkr Bee X1.0) ---------- */
+
+/* One section at a time, in every layout. The older sheets encode this rule
+ * per layout (rail, drawer, agent mode) and every one of them predates the
+ * Board section, so a board card would stay visible under every rail entry.
+ * This list is layout-independent and later in the cascade. */
+.controls[data-settings-active="connection"] [data-settings-page]:not([data-settings-page="connection"]),
+.controls[data-settings-active="terminal"] [data-settings-page]:not([data-settings-page="terminal"]),
+.controls[data-settings-active="network"] [data-settings-page]:not([data-settings-page="network"]),
+.controls[data-settings-active="board"] [data-settings-page]:not([data-settings-page="board"]),
+.controls[data-settings-active="ai"] [data-settings-page]:not([data-settings-page="ai"]),
+.controls[data-settings-active="about"] [data-settings-page]:not([data-settings-page="about"]) {
+  display: none;
+}
+
+/* Cards are tool trays, not marketing cards: tighter than the settings form,
+ * same workbench grid, one quiet status line per action group. */
+.board-card {
+  display: grid;
+  gap: 12px;
+}
+
+/* The global `.field` margin is for stacked forms; inside the board rows it
+ * pushes a select above the button baseline and adds phantom gaps. */
+.board-card .field {
+  margin-bottom: 0;
+}
+
+.board-card input,
+.board-card select,
+.board-card textarea {
+  min-width: 0;
+}
+
+.board-card textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
+.board-banner {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* One quiet status line with a semantic dot; numbers stay tabular. */
+.board-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-height: 18px;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.board-status::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.board-status.is-ok::before {
+  background: var(--accent);
+}
+
+.board-status.is-ok {
+  color: var(--muted);
+}
+
+.board-status.is-error {
+  color: var(--danger);
+}
+
+.board-status.is-error::before {
+  background: var(--danger);
+}
+
+/* LED colour chips: a current-state ring instead of a heavier border. */
+.board-swatches {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.board-swatch {
+  width: 100%;
+  min-width: 28px;
+  aspect-ratio: 1;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 80%, transparent);
+  background: var(--board-swatch, #000);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.board-swatch:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.board-swatch.is-current {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 2px var(--panel),
+    0 0 0 3px var(--accent),
+    inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+
+.board-swatch[data-off="1"] {
+  background:
+    linear-gradient(135deg, transparent 45%, var(--danger) 46%, var(--danger) 54%, transparent 55%),
+    var(--input-bg);
+}
+
+.board-swatch:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.board-swatch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.board-color-row,
+.board-pulse-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-color-row input[type="color"] {
+  width: 40px;
+  height: 36px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--input-bg);
+  cursor: pointer;
+}
+
+.board-ir-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.board-learn-row {
+  display: grid;
+  gap: 8px;
+}
+
+.board-learn-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.board-subsection {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.board-subsection:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.board-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+/* Board prompt: one field, one primary action, a quiet byte budget. */
+.board-prompt-meta {
+  display: flex;
+  justify-content: flex-end;
+  margin: -6px 0 -2px;
+}
+
+.board-count {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-count.is-over {
+  color: var(--danger);
+}
+
+.board-prompt-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Saved signals: a quiet table of callable rows. Empty slots recede so the
+ * learned keys are what the eye lands on. */
+.board-empty[hidden] {
+  display: none;
+}
+
+.board-empty {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.board-slots {
+  display: grid;
+  gap: 6px;
+  min-height: 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.board-slot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.board-slot-row.is-empty {
+  opacity: 0.5;
+}
+
+/* Empty slots are placeholders, not controls: keep the name, drop the actions
+ * so the learned keys stay the only clickable rows in the list. */
+.board-slot-row.is-empty .board-slot-actions {
+  display: none;
+}
+
+.board-slot-row.is-editing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+.board-slot-row.is-editing .board-slot-copy {
+  display: none;
+}
+
+.board-slot-copy {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.board-slot-name,
+.board-slot-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-slot-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.board-slot-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.board-slot-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.board-slot-action {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.board-slot-input {
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+@media (max-width: 380px) {
+  .board-prompt-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  #boardPromptSave {
+    grid-column: 1 / -1;
+  }
+
+  .board-slot-action {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+
+  .board-ir-form {
+    gap: 8px;
+  }
 }

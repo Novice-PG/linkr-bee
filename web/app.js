@@ -3,6 +3,45 @@
 import { MGMT_CAP_MULTI_SESSION, parseSerialControl, isReadonlyManagementCommand } from "./serial_control.js";
 import { createLanTokenStore } from "./lan_token_store.js";
 import {
+  BOARD_SWATCHES,
+  IR_LEARN_STOP_COMMAND,
+  IR_QUERY_COMMAND,
+  IR_SLOTS_COMMAND,
+  LED_OFF_COMMAND,
+  LED_QUERY_COMMAND,
+  OPTO_QUERY_COMMAND,
+  boardReply,
+  irDeleteCommand,
+  irLearnCommand,
+  irNameQueryCommand,
+  irNameSetCommand,
+  irPlayCommand,
+  irSendCommand,
+  isBoardReplyLine,
+  isUnsupportedReply,
+  ledHex,
+  ledCommand,
+  optoCommand,
+  parseIrName,
+  parseIrSlots,
+  parseIrStatus,
+  parseLearnStarted,
+  parseLedStatus,
+  parseOptoStatus,
+  rgbFromHex,
+  sanitizeSlotName,
+} from "./board_io.js";
+import {
+  PROMPT_CLEAR_COMMAND,
+  PROMPT_QUERY_COMMAND,
+  assemblePrompt,
+  parsePromptChunk,
+  parsePromptStatus,
+  promptGetCommand,
+  promptSetCommand,
+} from "./prompt_store.js";
+import { demoModeRequested, installDemoMode } from "./demo_mode.js";
+import {
   BLE_NAME_QUERY_COMMAND,
   DIAGNOSTICS_COMMAND,
   LAN_BRIDGE_QUERY_COMMAND,
@@ -236,6 +275,39 @@ const state = {
   bleName: null,
   bleNameCustom: null,
   bleNameSupported: null,
+  /* Linkr Bee X1.0 board I/O: RGB LED, optocoupler contact, IR remote and its
+   * learned-slot table. `supported` stays null until the first reply says
+   * whether this firmware exposes the @l/@o/@r group at all. */
+  features: {
+    led: null,
+    opto: null,
+    ir: null,
+    irLearn: null,
+    irName: null,
+    prompt: null,
+    wifi: null,
+    webdav: null,
+    bleName: null,
+  },
+  board: {
+    canControl: false,
+    slots: 8,
+    slotEdges: [],
+    learning: false,
+    polling: false,
+    pollTimer: null,
+    learnDeadline: 0,
+    lastIr: null,
+    lastLed: null,
+    lastOptoClosed: null,
+    lastSlots: null,
+    /* Slot names live in the board's NVS; this is the last copy read from it.
+     * `namesSupported` stays null until the firmware proves it has @r name. */
+    slotNames: {},
+    namesSupported: null,
+    editingSlot: null,
+  },
+  boardPromptBytes: 0,
   diagnostics: {},
   logSize: 0,
   terminalGeometry: null,
@@ -312,6 +384,50 @@ const elements = {
   webdavSetButton: $("webdavSetButton"),
   webdavOffButton: $("webdavOffButton"),
   webdavQueryButton: $("webdavQueryButton"),
+  boardIoBanner: $("boardIoBanner"),
+  bleNameCard: $("bleNameCard"),
+  wifiWebdavCard: $("wifiWebdavCard"),
+  wifiWebdavTitle: $("wifiWebdavTitle"),
+  wifiBlock: $("wifiBlock"),
+  webdavBlock: $("webdavBlock"),
+  boardLedCard: $("boardLedCard"),
+  boardOptoCard: $("boardOptoCard"),
+  boardIrCard: $("boardIrCard"),
+  boardPromptCard: $("boardPromptCard"),
+  boardLearnBlock: $("boardLearnBlock"),
+  boardSavedBlock: $("boardSavedBlock"),
+  boardIoHint: $("boardIoHint"),
+  boardLedSwatches: $("boardLedSwatches"),
+  boardLedColor: $("boardLedColor"),
+  boardLedApply: $("boardLedApply"),
+  boardLedOff: $("boardLedOff"),
+  boardLedQuery: $("boardLedQuery"),
+  boardLedStatus: $("boardLedStatus"),
+  boardOptoClose: $("boardOptoClose"),
+  boardOptoOpen: $("boardOptoOpen"),
+  boardOptoQuery: $("boardOptoQuery"),
+  boardOptoPulse: $("boardOptoPulse"),
+  boardOptoPulseMs: $("boardOptoPulseMs"),
+  boardOptoStatus: $("boardOptoStatus"),
+  boardIrAddress: $("boardIrAddress"),
+  boardIrCommand: $("boardIrCommand"),
+  boardIrRepeats: $("boardIrRepeats"),
+  boardIrSend: $("boardIrSend"),
+  boardIrQuery: $("boardIrQuery"),
+  boardIrStatus: $("boardIrStatus"),
+  boardLearnSlot: $("boardLearnSlot"),
+  boardLearnStart: $("boardLearnStart"),
+  boardLearnStop: $("boardLearnStop"),
+  boardLearnStatus: $("boardLearnStatus"),
+  boardSlotList: $("boardSlotList"),
+  boardPromptClear: $("boardPromptClear"),
+  boardPromptLoad: $("boardPromptLoad"),
+  boardPromptText: $("boardPromptText"),
+  boardPromptSave: $("boardPromptSave"),
+
+  boardPromptStatus: $("boardPromptStatus"),
+  boardPromptCount: $("boardPromptCount"),
+  boardSlotEmptyHint: $("boardSlotEmptyHint"),
   presetChips: $("presetChips"),
   zoomInBtn: $("zoomInBtn"),
   zoomOutBtn: $("zoomOutBtn"),
@@ -550,6 +666,80 @@ const I18N = {
     awaitingIp: "Obtaining address…",
     webdav: "WebDAV",
     webdavStatus: "WebDAV status",
+    settingsBoard: "Board",
+    boardLed: "Status LED",
+    boardLedAria: "Status LED",
+    boardLedColors: "Status LED colours",
+    boardLedCustom: "Custom colour",
+    boardApply: "Apply",
+    refresh: "Refresh",
+    boardIoHint: "Available on the Linkr Bee X1.0. Commands use the encrypted management channel, not the target UART.",
+    boardUnsupported: "This firmware does not expose the RGB LED, optocoupler or IR controls.",
+    boardColorOff: "Off",
+    boardColorRed: "Red",
+    boardColorGreen: "Green",
+    boardColorBlue: "Blue",
+    boardColorWhite: "White",
+    boardColorAmber: "Amber",
+    boardColorCyan: "Cyan",
+    boardColorViolet: "Violet",
+    boardOpto: "Isolated contact (J5)",
+    boardOptoAria: "Optocoupler contact",
+    boardOptoClose: "Close",
+    boardOptoOpen: "Open",
+    boardOptoPulse: "Pulse",
+    boardOptoPulseMs: "Pulse length (ms)",
+    boardOptoClosed: "Contact closed",
+    boardOptoOpenState: "Contact open",
+    boardIr: "Infrared remote & learning",
+    boardIrLearnHint: "Send a NEC frame, or learn any remote's signal and keep it on the board.",
+    boardIrSendTitle: "Send NEC frame",
+    boardLearn: "Learn a signal",
+    boardSavedSignals: "Saved signals",
+    boardSavedHint: "The signal and its name are both kept in the board's NVS, so they survive reboots. Play sends one directly.",
+    boardSlotsEmpty: "No signals learned yet — press Learn, then a remote key.",
+    boardPrompt: "On-board AI prompt",
+    boardPromptAria: "On-board AI prompt",
+    boardPromptHint: "Stored in the board's NVS; the assistant reads it when a conversation starts.",
+    boardPromptText: "Custom instructions",
+    boardPromptPlaceholder: "For example: give the conclusion first and explain commands in Chinese.",
+    boardPromptLoad: "Load",
+    boardPromptSave: "Save to board",
+    boardPromptClear: "Clear",
+    boardPromptStored: "Stored",
+    boardPromptEmpty: "Empty",
+    boardPromptBytes: "bytes",
+    boardPromptSaved: "Saved",
+    collapseCard: "Collapse card",
+    expandCard: "Expand card",
+    boardSlotRename: "Rename",
+    boardSlotNamePlaceholder: "Name this signal",
+    boardSlotNameSave: "Save",
+    boardSlotNameCancel: "Cancel",
+    boardIrAria: "Infrared remote",
+    boardIrAddress: "Address",
+    boardIrCommand: "Command",
+    boardIrRepeats: "Repeats",
+    boardIrSend: "Send NEC",
+    boardIrReceiver: "Receiver status",
+    boardIrNone: "No frame received yet",
+    boardIrLast: "Last frame",
+    boardIrCounters: "frames / repeats / glitches",
+    boardIrBusy: "IR transmitter busy; try again",
+    boardLearnHint: "Point a remote at the receiver and press a key; the frame is saved about 60 ms after the key is released.",
+    boardLearnSlot: "Slot",
+    boardLearnStart: "Learn",
+    boardLearnStop: "Stop & save",
+    boardLearnPlay: "Play",
+    boardLearnDelete: "Delete",
+    boardLearnActive: "Learning — press a remote key",
+    boardLearnIdle: "Not learning",
+    boardLearnSaved: "Saved to slot",
+    boardLearnEmpty: "Slot is empty",
+    boardLearnFailed: "Capture failed or timed out",
+    boardSlotUsed: "used",
+    boardSlotEmpty: "empty",
+    boardCmdError: "Board command failed",
     serialOutput: "Serial Terminal",
     terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
@@ -762,6 +952,80 @@ const I18N = {
     awaitingIp: "正在获取地址…",
     webdav: "WebDAV",
     webdavStatus: "WebDAV 状态",
+    settingsBoard: "板载",
+    boardLed: "状态灯",
+    boardLedAria: "状态灯",
+    boardLedColors: "状态灯颜色",
+    boardLedCustom: "自定义颜色",
+    boardApply: "应用",
+    refresh: "刷新",
+    boardIoHint: "仅 Linkr Bee X1.0 支持。命令走加密的管理通道，不会写进目标串口。",
+    boardUnsupported: "当前固件没有 RGB 灯、光耦或红外控制。",
+    boardColorOff: "关闭",
+    boardColorRed: "红",
+    boardColorGreen: "绿",
+    boardColorBlue: "蓝",
+    boardColorWhite: "白",
+    boardColorAmber: "琥珀",
+    boardColorCyan: "青",
+    boardColorViolet: "紫",
+    boardOpto: "隔离干接点（J5）",
+    boardOptoAria: "光耦干接点",
+    boardOptoClose: "闭合",
+    boardOptoOpen: "断开",
+    boardOptoPulse: "脉冲",
+    boardOptoPulseMs: "脉冲时长（毫秒）",
+    boardOptoClosed: "触点已闭合",
+    boardOptoOpenState: "触点已断开",
+    boardIr: "红外遥控与学习",
+    boardIrLearnHint: "可以发送 NEC 帧，也可以学习任意遥控器的信号并保存在板子上。",
+    boardIrSendTitle: "发送 NEC 帧",
+    boardLearn: "学习信号",
+    boardSavedSignals: "已保存的信号",
+    boardSavedHint: "信号和名字都保存在板子的 NVS 里，掉电不丢；点「回放」即可直接发送。",
+    boardSlotsEmpty: "还没有学习的信号——点「学习」，再按一下遥控器。",
+    boardPrompt: "板载 AI 提示词",
+    boardPromptAria: "板载 AI 提示词",
+    boardPromptHint: "存在板子 NVS，新对话开始时读取。",
+    boardPromptText: "自定义指令",
+    boardPromptPlaceholder: "例如：先给结论，再用中文解释命令。",
+    boardPromptLoad: "读取",
+    boardPromptSave: "保存到板子",
+    boardPromptClear: "清除",
+    boardPromptStored: "已存储",
+    boardPromptEmpty: "空",
+    boardPromptBytes: "字节",
+    boardPromptSaved: "已保存",
+    collapseCard: "折叠卡片",
+    expandCard: "展开卡片",
+    boardSlotRename: "改名",
+    boardSlotNamePlaceholder: "给这个信号起个名字",
+    boardSlotNameSave: "保存",
+    boardSlotNameCancel: "取消",
+    boardIrAria: "红外遥控",
+    boardIrAddress: "地址",
+    boardIrCommand: "命令",
+    boardIrRepeats: "重复帧",
+    boardIrSend: "发送 NEC",
+    boardIrReceiver: "接收状态",
+    boardIrNone: "还没有收到红外帧",
+    boardIrLast: "最近一帧",
+    boardIrCounters: "帧 / 重复 / 错误",
+    boardIrBusy: "红外发送忙，请稍后重试",
+    boardLearnHint: "把遥控器对准接收头按一下；松手约 60 ms 后自动保存。",
+    boardLearnSlot: "槽位",
+    boardLearnStart: "学习",
+    boardLearnStop: "停止并保存",
+    boardLearnPlay: "回放",
+    boardLearnDelete: "删除",
+    boardLearnActive: "学习中——请按遥控器按键",
+    boardLearnIdle: "未在学习",
+    boardLearnSaved: "已保存到槽位",
+    boardLearnEmpty: "槽位为空",
+    boardLearnFailed: "没有抓到完整帧或已超时",
+    boardSlotUsed: "已用",
+    boardSlotEmpty: "空",
+    boardCmdError: "板载命令失败",
     serialOutput: "串口终端",
     terminalAria: "交互式串口终端",
     xterm: "xterm.js",
@@ -1190,6 +1454,8 @@ function applyLang() {
   renderRefLists();
   refreshDynamicTexts();
   renderDiagnostics();
+  refreshCardToggleLabels();
+  refreshBoardLabels();
   renderBleNameStatus();
   updateWifiConnectionView();
   updateFullscreenButton();
@@ -2034,6 +2300,7 @@ function applyBleName(parsed, { custom = null } = {}) {
     state.bleNameCustom = parsed.custom;
   }
   state.bleNameSupported = true;
+  setFeature("bleName", true);
   elements.bleNameInput.value = parsed.name;
   // The board's own name is the name everything else shows. The name the
   // picker carried is a snapshot the owner can change from another client, so
@@ -2067,6 +2334,7 @@ async function readBleName({ quiet = false } = {}) {
       state.bleName = null;
       state.bleNameCustom = null;
       state.bleNameSupported = false;
+      setFeature("bleName", false);
       updateBleNameControls();
       renderBleNameStatus();
       if (!quiet) toast(t("bleNameUnsupported"), "error");
@@ -2081,6 +2349,7 @@ async function readBleName({ quiet = false } = {}) {
       state.bleName = null;
       state.bleNameCustom = null;
       state.bleNameSupported = false;
+      setFeature("bleName", false);
       updateBleNameControls();
       renderBleNameStatus();
       return null;
@@ -3196,6 +3465,937 @@ function setConnecting(connecting) {
   renderAutoReconnectStatus();
 }
 
+
+/* -------------------------------------------------------------------------
+ * Board I/O: RGB status LED, optocoupler contact, NEC remote and IR learning
+ * -------------------------------------------------------------------------
+ *
+ * Everything here is optional hardware that only the Linkr Bee X1.0 carries.
+ * The first `ERR ... unsupported` reply from a board disables the whole group
+ * instead of leaving buttons that can never work. Status lines are written
+ * from the parsed replies, so the panel always shows what the board said.
+ */
+
+let boardSwatchButtons = [];
+
+function boardUsable() {
+  return state.connected && state.mode !== "ws" && state.mgmtReady;
+}
+
+/* Feature flags drive which panels a board exposes. null means "not probed
+ * yet": keep the panel visible until the board answers, false hides it. */
+function setFeature(key, supported) {
+  const next = supported === null ? null : Boolean(supported);
+  if (state.features[key] === next) {
+    applyFeatureVisibility();
+    return;
+  }
+  state.features[key] = next;
+  applyFeatureVisibility();
+}
+
+function setTabHidden(name, hidden) {
+  const tab = document.querySelector(`.settings-tab[data-settings-target="${name}"]`);
+  if (tab) tab.hidden = Boolean(hidden);
+  const rail = document.querySelector(`[data-rail-target="${name}"]`);
+  if (rail) rail.hidden = Boolean(hidden);
+}
+
+function updateNetworkCardTitle() {
+  const title = elements.wifiWebdavTitle;
+  if (!title) return;
+  const wifi = state.features.wifi;
+  const webdav = state.features.webdav;
+  const key = wifi === false ? "webdav" : webdav === false ? "wifi" : "wifiWebdav";
+  title.dataset.i18n = key;
+  title.textContent = t(key);
+  elements.wifiWebdavCard?.setAttribute("aria-label", t(key));
+}
+
+function applyFeatureVisibility() {
+  const features = state.features;
+  const cards = [
+    [elements.boardLedCard, features.led],
+    [elements.boardOptoCard, features.opto],
+    [elements.boardIrCard, features.ir],
+  ];
+  let boardCards = 0;
+  for (const [card, supported] of cards) {
+    if (!card) continue;
+    card.hidden = supported === false;
+    if (!card.hidden) boardCards += 1;
+  }
+  const learningHidden = features.ir === false || features.irLearn === false;
+  if (elements.boardLearnBlock) elements.boardLearnBlock.hidden = learningHidden;
+  if (elements.boardSavedBlock) elements.boardSavedBlock.hidden = learningHidden;
+
+  /* Prompts live on the AI page now, so the Board section only depends on the
+   * three board devices. */
+  const boardUnsupported = features.led === false && features.opto === false &&
+    features.ir === false;
+  setTabHidden("board", boardUnsupported);
+
+  if (elements.wifiBlock) elements.wifiBlock.hidden = features.wifi === false;
+  if (elements.webdavBlock) elements.webdavBlock.hidden = features.webdav === false;
+  const networkUnsupported = features.wifi === false && features.webdav === false;
+  if (elements.wifiWebdavCard) elements.wifiWebdavCard.hidden = networkUnsupported;
+  setTabHidden("network", networkUnsupported);
+  updateNetworkCardTitle();
+
+  if (elements.bleNameCard) elements.bleNameCard.hidden = features.bleName === false;
+  if (elements.boardPromptCard) elements.boardPromptCard.hidden = features.prompt === false;
+
+  /* Never leave the drawer on a section that just disappeared. */
+  const active = elements.controls?.dataset.settingsActive;
+  if (active) {
+    const tab = document.querySelector(`.settings-tab[data-settings-target="${active}"]`);
+    if (tab && tab.hidden) setSettingsPage("connection");
+  }
+}
+
+function boardStatus(element, text, tone = "") {
+  if (!element) return;
+  element.textContent = text;
+  element.classList.toggle("is-error", tone === "error");
+  element.classList.toggle("is-ok", tone === "ok");
+}
+
+function boardFailureText(text) {
+  const reply = boardReply(text);
+  return reply.ok ? "" : (reply.error || t("boardCmdError"));
+}
+
+async function boardSend(command, { quiet = false } = {}) {
+  const text = await sendControl(command, { returnResponse: true, quiet });
+  return String(text ?? "");
+}
+
+/* A group that answers "unsupported" is a board variant, not an error: hide
+ * its card and stop asking. */
+function hideUnsupportedFeature(key, text) {
+  if (!isUnsupportedReply(text)) return false;
+  setFeature(key, false);
+  return true;
+}
+
+function refreshBoardLabels() {
+  for (const button of boardSwatchButtons) {
+    if (!button.dataset.labelKey) continue;
+    const label = t(button.dataset.labelKey);
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  }
+  if (state.board.lastLed) {
+    renderBoardLed({ r: state.board.lastLed.r, g: state.board.lastLed.g, b: state.board.lastLed.b },
+      { off: state.board.lastLed.off });
+  }
+  if (state.board.lastOptoClosed !== null) {
+    renderBoardOptoStatus(state.board.lastOptoClosed);
+  }
+  if (state.board.lastIr) renderBoardIrStatus(state.board.lastIr);
+  if (!state.board.learning && state.board.lastSlots) {
+    renderBoardSlots(state.board.lastSlots);
+  }
+  boardPromptStatusText(state.boardPromptBytes);
+}
+
+function updateBoardIoControls() {
+  state.board.canControl = state.connected && state.mode !== "ws" && state.mgmtReady;
+  const enabled = state.board.canControl;
+  const actions = [
+    elements.boardLedApply, elements.boardLedOff, elements.boardLedQuery,
+    elements.boardOptoClose, elements.boardOptoOpen, elements.boardOptoQuery,
+    elements.boardOptoPulse, elements.boardIrSend, elements.boardIrQuery,
+    elements.boardLearnStart, elements.boardLearnStop,
+    elements.boardPromptLoad, elements.boardPromptSave, elements.boardPromptClear,
+  ];
+  for (const button of actions) {
+    if (button) button.disabled = !enabled;
+  }
+  for (const button of boardSwatchButtons) button.disabled = !enabled;
+  const inputs = [
+    elements.boardLedColor, elements.boardOptoPulseMs,
+    elements.boardIrAddress, elements.boardIrCommand, elements.boardIrRepeats,
+    elements.boardLearnSlot, elements.boardPromptText,
+  ];
+  for (const input of inputs) {
+    if (input) input.disabled = !enabled;
+  }
+  applyBoardSlotButtonState();
+}
+
+function renderBoardLed(color, { off = false } = {}) {
+  if (!color) return;
+  state.board.lastLed = { ...color, off };
+  const hex = ledHex(color);
+  elements.boardLedColor.value = `#${hex}`;
+  for (const button of boardSwatchButtons) {
+    const current = button.dataset.hex === hex;
+    button.classList.toggle("is-current", current);
+    button.setAttribute("aria-pressed", String(current));
+  }
+  boardStatus(elements.boardLedStatus,
+    off ? `${t("boardLed")}: ${t("boardColorOff")}`
+        : `${t("boardLed")} ${ledHex(color).toUpperCase()}`,
+    "ok");
+}
+
+function renderBoardOptoStatus(closed) {
+  state.board.lastOptoClosed = Boolean(closed);
+  boardStatus(elements.boardOptoStatus,
+    closed ? t("boardOptoClosed") : t("boardOptoOpenState"), "ok");
+}
+
+async function refreshBoardLed({ quiet = true } = {}) {
+  if (!boardUsable() || state.features.led === false) return null;
+  try {
+    const text = await boardSend(LED_QUERY_COMMAND, { quiet });
+    if (hideUnsupportedFeature("led", text)) return null;
+    const color = parseLedStatus(text);
+    if (color) setFeature("led", true);
+    if (color) renderBoardLed(color);
+    else boardStatus(elements.boardLedStatus, boardFailureText(text) || text.trim(), "error");
+    return color;
+  } catch (error) {
+    boardStatus(elements.boardLedStatus, error.message, "error");
+    return null;
+  }
+}
+
+async function refreshBoardOpto({ quiet = true } = {}) {
+  if (!boardUsable() || state.features.opto === false) return null;
+  try {
+    const text = await boardSend(OPTO_QUERY_COMMAND, { quiet });
+    if (hideUnsupportedFeature("opto", text)) return null;
+    const status = parseOptoStatus(text);
+    if (status) setFeature("opto", true);
+    if (status) renderBoardOptoStatus(status.closed);
+    else boardStatus(elements.boardOptoStatus, boardFailureText(text) || text.trim(), "error");
+    return status;
+  } catch (error) {
+    boardStatus(elements.boardOptoStatus, error.message, "error");
+    return null;
+  }
+}
+
+function renderBoardIrStatus(status) {
+  state.board.lastIr = status;
+  if (!status) return;
+  const parts = [`${t("boardIrReceiver")}: ${status.rxOn ? "on" : "off"}`];
+  if (status.last) {
+    parts.push(`${t("boardIrLast")} 0x${status.last.address.toString(16).padStart(4, "0")}` +
+      ` / 0x${status.last.command.toString(16).padStart(2, "0")}` +
+      (status.last.extended ? " (ext)" : ""));
+  } else {
+    parts.push(t("boardIrNone"));
+  }
+  if (status.frames !== null) {
+    parts.push(`frames=${status.frames} repeats=${status.repeats} glitches=${status.glitches}`);
+  }
+  boardStatus(elements.boardIrStatus, parts.join(" · "));
+  if (status.learning.active) {
+    boardStatus(elements.boardLearnStatus,
+      `${t("boardLearnActive")} (${status.learning.edges})`);
+  } else {
+    boardStatus(elements.boardLearnStatus,
+      `${t("boardLearnIdle")} · ${t("boardSlotUsed")} ${status.slotsUsed ?? 0}/${status.slotsTotal ?? state.board.slots}`);
+  }
+}
+
+async function refreshBoardIr({ quiet = true } = {}) {
+  if (!boardUsable() || state.features.ir === false) return null;
+  try {
+    const text = await boardSend(IR_QUERY_COMMAND, { quiet });
+    if (hideUnsupportedFeature("ir", text)) {
+      setFeature("irLearn", false);
+      return null;
+    }
+    const status = parseIrStatus(text);
+    if (status) {
+      setFeature("ir", true);
+      setFeature("irLearn", status.learnSupported !== false);
+      renderBoardIrStatus(status);
+    } else {
+      boardStatus(elements.boardIrStatus, boardFailureText(text) || text.trim(), "error");
+    }
+    return status;
+  } catch (error) {
+    boardStatus(elements.boardIrStatus, error.message, "error");
+    return null;
+  }
+}
+
+async function refreshBoardSlotNames(slots) {
+  if (state.board.namesSupported === false) return;
+  const names = {};
+  let answered = false;
+  for (const entry of slots) {
+    if (entry.edges === 0) continue;
+    try {
+      const text = await boardSend(irNameQueryCommand({ slot: entry.slot }), { quiet: true });
+      const parsed = parseIrName(text);
+      const reply = boardReply(text);
+      if (!reply.ok) {
+        /* Firmware without @r name: keep the panel usable and stop asking. */
+        state.board.namesSupported = false;
+        state.board.slotNames = {};
+        setFeature("irName", false);
+        renderBoardSlots(state.board.lastSlots);
+        return;
+      }
+      if (!parsed) continue;
+      answered = true;
+      if (parsed.name) names[String(entry.slot)] = parsed.name;
+    } catch {
+      return;
+    }
+  }
+  if (answered) {
+    state.board.namesSupported = true;
+  }
+  state.board.slotNames = names;
+}
+
+function boardSlotName(entry) {
+  const custom = state.board.slotNames[String(entry.slot)];
+  return custom || `${t("boardLearnSlot")} ${entry.slot}`;
+}
+
+function boardSlotMeta(entry) {
+  return entry.edges > 0
+    ? `${entry.edges} ${t("boardSlotUsed")}`
+    : t("boardSlotEmpty");
+}
+
+function focusBoardSlotEditor() {
+  const input = elements.boardSlotList?.querySelector(".board-slot-input");
+  input?.focus();
+  input?.select();
+}
+
+async function saveBoardSlotName(slot, value) {
+  const name = sanitizeSlotName(value);
+  try {
+    const text = await boardSend(irNameSetCommand({ slot, name }));
+    const reply = boardReply(text);
+    if (!reply.ok) {
+      boardStatus(elements.boardLearnStatus,
+        reply.error || t("boardCmdError"), "error");
+      return;
+    }
+    state.board.namesSupported = true;
+    const names = { ...state.board.slotNames };
+    if (name) names[String(slot)] = name;
+    else delete names[String(slot)];
+    state.board.slotNames = names;
+    state.board.editingSlot = null;
+    renderBoardSlots(state.board.lastSlots);
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+  }
+}
+
+function boardSlotLabel(entry) {
+  return entry.edges > 0
+    ? `${entry.slot} · ${entry.edges} ${t("boardSlotUsed")}`
+    : `${entry.slot} · ${t("boardSlotEmpty")}`;
+}
+
+function boardSlotButton(action) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn btn-soft board-slot-action";
+  button.dataset.boardAction = action;
+  button.textContent = t(action === "play" ? "boardLearnPlay" : "boardLearnDelete");
+  return button;
+}
+
+function applyBoardSlotButtonState() {
+  if (!elements.boardSlotList) return;
+  const enabled = state.board.canControl;
+  for (const button of elements.boardSlotList.querySelectorAll("[data-board-action]")) {
+    button.disabled = !enabled || button.dataset.empty === "1" ||
+      (button.dataset.boardAction === "rename" &&
+        state.board.namesSupported === false);
+  }
+}
+
+function renderBoardSlots(parsed) {
+  if (!parsed || !parsed.slots.length) return;
+  state.board.lastSlots = parsed;
+  state.board.slots = parsed.slots.length;
+  state.board.slotEdges = parsed.slots.map((entry) => entry.edges);
+  if (state.board.editingSlot !== null &&
+      !parsed.slots.some((entry) => entry.slot === state.board.editingSlot)) {
+    state.board.editingSlot = null;
+  }
+
+  const select = elements.boardLearnSlot;
+  const previous = Number(select.value || 0);
+  select.textContent = "";
+  for (const entry of parsed.slots) {
+    const option = document.createElement("option");
+    option.value = String(entry.slot);
+    option.textContent = state.board.slotNames[String(entry.slot)]
+      ? `${entry.slot} · ${state.board.slotNames[String(entry.slot)]}`
+      : boardSlotLabel(entry);
+    select.append(option);
+  }
+  if (parsed.slots.some((entry) => entry.slot === previous)) {
+    select.value = String(previous);
+  }
+
+  /* Saved signals are first-class rows: a learned key can be replayed without
+   * touching the slot picker, and the owner can name it in any language so a
+   * remote with many keys stays recognisable. Empty slots stay visible but
+   * disabled, so the table does not jump around as captures change. */
+  if (elements.boardSlotList) {
+    elements.boardSlotList.textContent = "";
+    for (const entry of parsed.slots) {
+      const row = document.createElement("div");
+      row.className = entry.edges > 0 ? "board-slot-row" : "board-slot-row is-empty";
+      row.dataset.slot = String(entry.slot);
+      row.dataset.edges = String(entry.edges);
+      row.setAttribute("role", "listitem");
+
+      const copy = document.createElement("div");
+      copy.className = "board-slot-copy";
+      const name = document.createElement("span");
+      name.className = "board-slot-name";
+      name.textContent = boardSlotName(entry);
+      const meta = document.createElement("span");
+      meta.className = "board-slot-meta";
+      meta.textContent = boardSlotMeta(entry);
+      copy.append(name, meta);
+
+      const actions = document.createElement("div");
+      actions.className = "board-slot-actions";
+      if (state.board.editingSlot === entry.slot) {
+        row.classList.add("is-editing");
+        const input = document.createElement("input");
+        input.className = "board-slot-input";
+        input.type = "text";
+        input.value = state.board.slotNames[String(entry.slot)] || "";
+        input.placeholder = t("boardSlotNamePlaceholder");
+        input.setAttribute("aria-label", t("boardSlotNamePlaceholder"));
+        input.dataset.slot = String(entry.slot);
+        const save = boardSlotButton("save-name");
+        save.textContent = t("boardSlotNameSave");
+        const cancel = boardSlotButton("cancel-name");
+        cancel.textContent = t("boardSlotNameCancel");
+        actions.append(input, save, cancel);
+      } else {
+        const play = boardSlotButton("play");
+        play.dataset.empty = entry.edges > 0 ? "0" : "1";
+        const remove = boardSlotButton("delete");
+        remove.dataset.empty = entry.edges > 0 ? "0" : "1";
+        const rename = boardSlotButton("rename");
+        rename.dataset.empty = entry.edges > 0 ? "0" : "1";
+        rename.textContent = t("boardSlotRename");
+        actions.append(play, remove);
+        if (state.board.namesSupported !== false) actions.append(rename);
+      }
+
+      row.append(copy, actions);
+      elements.boardSlotList.append(row);
+    }
+    applyBoardSlotButtonState();
+    if (state.board.editingSlot !== null) focusBoardSlotEditor();
+  }
+
+  if (elements.boardSlotEmptyHint) {
+    elements.boardSlotEmptyHint.hidden = parsed.used > 0;
+  }
+  boardStatus(elements.boardLearnStatus,
+    `${t("boardLearnIdle")} · ${t("boardSlotUsed")} ${parsed.used}/${parsed.slots.length}`);
+}
+
+async function refreshBoardSlots({ quiet = true } = {}) {
+  if (!boardUsable() || state.features.ir === false ||
+      state.features.irLearn === false) return null;
+  try {
+    const text = await boardSend(IR_SLOTS_COMMAND, { quiet });
+    if (hideUnsupportedFeature("irLearn", text)) return null;
+    const parsed = parseIrSlots(text);
+    if (parsed) {
+      setFeature("irLearn", true);
+      await refreshBoardSlotNames(parsed.slots);
+      renderBoardSlots(parsed);
+    } else {
+      boardStatus(elements.boardLearnStatus, boardFailureText(text) || text.trim(), "error");
+    }
+    return parsed;
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+    return null;
+  }
+}
+
+function stopBoardLearnPolling() {
+  if (state.board.pollTimer) {
+    clearInterval(state.board.pollTimer);
+    state.board.pollTimer = null;
+  }
+  state.board.polling = false;
+  state.board.learning = false;
+}
+
+function startBoardLearnPolling() {
+  stopBoardLearnPolling();
+  state.board.polling = true;
+  state.board.pollTimer = setInterval(pollBoardLearn, 500);
+  pollBoardLearn();
+}
+
+async function pollBoardLearn() {
+  if (!state.board.polling) return;
+  if (!boardUsable()) {
+    stopBoardLearnPolling();
+    boardStatus(elements.boardLearnStatus, t("boardLearnFailed"), "error");
+    return;
+  }
+  if (performance.now() > state.board.learnDeadline) {
+    stopBoardLearnPolling();
+    boardStatus(elements.boardLearnStatus, t("boardLearnFailed"), "error");
+    await refreshBoardSlots();
+    return;
+  }
+  const status = await refreshBoardIr();
+  if (!status) return;
+  if (!status.learning.active) {
+    stopBoardLearnPolling();
+    await refreshBoardSlots();
+    const slot = Number(elements.boardLearnSlot.value || 0);
+    const saved = (state.board.slotEdges[slot] || 0) > 0;
+    boardStatus(elements.boardLearnStatus,
+      saved ? `${t("boardLearnSaved")} ${slot}` : t("boardLearnFailed"),
+      saved ? "ok" : "error");
+  }
+}
+
+async function startBoardLearn() {
+  if (!boardUsable()) return;
+  const slot = Number(elements.boardLearnSlot.value || 0);
+  try {
+    const text = await boardSend(irLearnCommand({ slot }));
+    const started = parseLearnStarted(text);
+    if (!started) {
+      boardStatus(elements.boardLearnStatus, boardFailureText(text) || text.trim(), "error");
+      return;
+    }
+    state.board.learnDeadline = performance.now() + started.timeoutMs + 3000;
+    boardStatus(elements.boardLearnStatus, t("boardLearnActive"));
+    startBoardLearnPolling();
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+  }
+}
+
+async function stopBoardLearn() {
+  if (!boardUsable()) return;
+  stopBoardLearnPolling();
+  try {
+    const text = await boardSend(IR_LEARN_STOP_COMMAND);
+    const reply = boardReply(text);
+    boardStatus(elements.boardLearnStatus,
+      reply.ok ? reply.line : (reply.error || t("boardCmdError")),
+      reply.ok ? "ok" : "error");
+    await refreshBoardSlots();
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+  }
+}
+
+async function playBoardSlot(slot) {
+  if (!boardUsable()) return;
+  if ((state.board.slotEdges[slot] || 0) === 0) {
+    boardStatus(elements.boardLearnStatus, t("boardLearnEmpty"), "error");
+    return;
+  }
+  try {
+    const text = await boardSend(irPlayCommand({ slot }));
+    const reply = boardReply(text);
+    boardStatus(elements.boardLearnStatus,
+      reply.ok ? reply.line : (reply.error || t("boardCmdError")),
+      reply.ok ? "ok" : "error");
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+  }
+}
+
+async function deleteBoardSlot(slot) {
+  if (!boardUsable()) return;
+  try {
+    const text = await boardSend(irDeleteCommand({ slot }));
+    const reply = boardReply(text);
+    boardStatus(elements.boardLearnStatus,
+      reply.ok ? reply.line : (reply.error || t("boardCmdError")),
+      reply.ok ? "ok" : "error");
+    await refreshBoardSlots();
+  } catch (error) {
+    boardStatus(elements.boardLearnStatus, error.message, "error");
+  }
+}
+
+async function sendBoardIrFrame() {
+  if (!boardUsable()) return;
+  let command;
+  try {
+    command = irSendCommand({
+      address: elements.boardIrAddress.value,
+      command: elements.boardIrCommand.value,
+      repeats: elements.boardIrRepeats.value,
+    });
+  } catch (error) {
+    boardStatus(elements.boardIrStatus, error.message, "error");
+    return;
+  }
+  try {
+    const text = await boardSend(command);
+    const reply = boardReply(text);
+    boardStatus(elements.boardIrStatus,
+      reply.ok ? reply.line : (reply.error || t("boardCmdError")),
+      reply.ok ? "ok" : "error");
+  } catch (error) {
+    boardStatus(elements.boardIrStatus, error.message, "error");
+  }
+}
+
+async function boardOptoAction(action) {
+  if (!boardUsable()) return;
+  let command;
+  try {
+    command = optoCommand(action);
+  } catch (error) {
+    boardStatus(elements.boardOptoStatus, error.message, "error");
+    return;
+  }
+  try {
+    const text = await boardSend(command);
+    const reply = boardReply(text);
+    const status = parseOptoStatus(text);
+    if (status) {
+      renderBoardOptoStatus(status.closed);
+    } else {
+      boardStatus(elements.boardOptoStatus,
+        reply.ok ? reply.line : (reply.error || t("boardCmdError")),
+        reply.ok ? "ok" : "error");
+    }
+  } catch (error) {
+    boardStatus(elements.boardOptoStatus, error.message, "error");
+  }
+}
+
+async function applyBoardLedColor() {
+  if (!boardUsable()) return;
+  let color;
+  try {
+    color = rgbFromHex(elements.boardLedColor.value);
+  } catch (error) {
+    boardStatus(elements.boardLedStatus, error.message, "error");
+    return;
+  }
+  try {
+    const text = await boardSend(ledCommand(color));
+    const reply = boardReply(text);
+    if (!reply.ok) {
+      boardStatus(elements.boardLedStatus, reply.error || t("boardCmdError"), "error");
+      return;
+    }
+    renderBoardLed(parseLedStatus(text) || color);
+  } catch (error) {
+    boardStatus(elements.boardLedStatus, error.message, "error");
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Board-stored AI prompt
+ * ------------------------------------------------------------------------- */
+
+async function readBoardPrompt() {
+  const chunks = [];
+  let offset = 0;
+  for (let guard = 0; guard < 32; guard += 1) {
+    const text = await boardSend(promptGetCommand({ offset }), { quiet: true });
+    const chunk = parsePromptChunk(text);
+    if (!chunk) {
+      throw new Error(boardReply(text).error || t("boardCmdError"));
+    }
+    chunks.push(chunk);
+    offset += chunk.hex.length / 2;
+    if (chunk.done) break;
+  }
+  if (!chunks.length) return "";
+  return assemblePrompt(chunks, chunks[chunks.length - 1].total);
+}
+
+function updateBoardPromptCount() {
+  if (!elements.boardPromptCount || !elements.boardPromptText) return;
+  const bytes = new TextEncoder().encode(elements.boardPromptText.value).length;
+  elements.boardPromptCount.textContent = `${bytes} / 240`;
+  elements.boardPromptCount.classList.toggle("is-over", bytes > 240);
+}
+
+function boardPromptStatusText(bytes, tone = "") {
+  boardStatus(elements.boardPromptStatus,
+    bytes > 0 ? `${t("boardPromptStored")} ${bytes} ${t("boardPromptBytes")}` : t("boardPromptEmpty"),
+    tone);
+}
+
+async function refreshBoardPromptStatus({ quiet = true } = {}) {
+  if (!boardUsable() || state.features.prompt === false) return null;
+  try {
+    const text = await boardSend(PROMPT_QUERY_COMMAND, { quiet });
+    if (hideUnsupportedFeature("prompt", text)) return null;
+    const status = parsePromptStatus(text);
+    if (status) setFeature("prompt", true);
+    if (!status) {
+      boardStatus(elements.boardPromptStatus,
+        boardFailureText(text) || text.trim(), "error");
+      return null;
+    }
+    state.boardPromptBytes = status.bytes;
+    boardPromptStatusText(status.bytes);
+    return status;
+  } catch (error) {
+    boardStatus(elements.boardPromptStatus, error.message, "error");
+    return null;
+  }
+}
+
+async function loadBoardPrompt() {
+  if (!boardUsable()) return;
+  try {
+    const text = await readBoardPrompt();
+    elements.boardPromptText.value = text;
+    updateBoardPromptCount();
+    boardPromptStatusText(new TextEncoder().encode(text).length);
+  } catch (error) {
+    boardStatus(elements.boardPromptStatus, error.message, "error");
+  }
+}
+
+async function saveBoardPrompt() {
+  if (!boardUsable()) return;
+  let command;
+  try {
+    command = promptSetCommand({ text: elements.boardPromptText.value });
+  } catch (error) {
+    boardStatus(elements.boardPromptStatus, error.message, "error");
+    return;
+  }
+  try {
+    const text = await boardSend(command);
+    const reply = boardReply(text);
+    if (!reply.ok) {
+      boardStatus(elements.boardPromptStatus, reply.error || t("boardCmdError"), "error");
+      return;
+    }
+    await refreshBoardPromptStatus({ quiet: false });
+    boardStatus(elements.boardPromptStatus,
+      `${t("boardPromptSaved")} · ${state.boardPromptBytes} ${t("boardPromptBytes")}`, "ok");
+  } catch (error) {
+    boardStatus(elements.boardPromptStatus, error.message, "error");
+  }
+}
+
+async function clearBoardPrompt() {
+  if (!boardUsable()) return;
+  try {
+    const text = await boardSend(PROMPT_CLEAR_COMMAND);
+    const reply = boardReply(text);
+    if (!reply.ok) {
+      boardStatus(elements.boardPromptStatus, reply.error || t("boardCmdError"), "error");
+      return;
+    }
+    elements.boardPromptText.value = "";
+    updateBoardPromptCount();
+    boardPromptStatusText(0);
+  } catch (error) {
+    boardStatus(elements.boardPromptStatus, error.message, "error");
+  }
+}
+
+/* The assistant runtime asks for the instructions when a conversation starts;
+ * a missing or unsupported board prompt must never block the assistant. */
+async function readBoardPromptForAgent() {
+  if (!boardUsable()) return "";
+  try {
+    return await readBoardPrompt();
+  } catch {
+    return "";
+  }
+}
+
+function wireBoardPromptControls() {
+  elements.boardPromptText?.addEventListener("input", updateBoardPromptCount);
+  elements.boardPromptLoad?.addEventListener("click", loadBoardPrompt);
+  elements.boardPromptSave?.addEventListener("click", saveBoardPrompt);
+  elements.boardPromptClear?.addEventListener("click", clearBoardPrompt);
+  updateBoardPromptCount();
+}
+
+async function refreshBoardIo() {
+  if (!state.board.canControl) return;
+  await refreshBoardLed();
+  await refreshBoardOpto();
+  await refreshBoardIr();
+  await refreshBoardSlots();
+}
+
+function wireBoardIoControls() {
+  if (!elements.boardLedSwatches) return;
+  boardSwatchButtons = BOARD_SWATCHES.map((swatch) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "board-swatch";
+    button.dataset.hex = swatch.hex;
+    button.style.setProperty("--board-swatch", `#${swatch.hex}`);
+    button.dataset.labelKey = swatch.label;
+    button.title = t(swatch.label);
+    button.setAttribute("aria-label", t(swatch.label));
+    button.setAttribute("aria-pressed", "false");
+    if (swatch.hex === "000000") button.dataset.off = "1";
+    button.addEventListener("click", () => {
+      elements.boardLedColor.value = `#${swatch.hex}`;
+      applyBoardLedColor();
+    });
+    elements.boardLedSwatches.append(button);
+    return button;
+  });
+
+  elements.boardLedApply?.addEventListener("click", applyBoardLedColor);
+  elements.boardLedOff?.addEventListener("click", async () => {
+    if (!boardUsable()) return;
+    try {
+      const text = await boardSend(LED_OFF_COMMAND);
+      const reply = boardReply(text);
+      if (reply.ok) renderBoardLed({ r: 0, g: 0, b: 0 }, { off: true });
+      else boardStatus(elements.boardLedStatus, reply.error || t("boardCmdError"), "error");
+    } catch (error) {
+      boardStatus(elements.boardLedStatus, error.message, "error");
+    }
+  });
+  elements.boardLedQuery?.addEventListener("click", () => refreshBoardLed({ quiet: false }));
+
+  elements.boardOptoClose?.addEventListener("click", () => boardOptoAction({ action: "on" }));
+  elements.boardOptoOpen?.addEventListener("click", () => boardOptoAction({ action: "off" }));
+  elements.boardOptoQuery?.addEventListener("click", () => refreshBoardOpto({ quiet: false }));
+  elements.boardOptoPulse?.addEventListener("click", () =>
+    boardOptoAction({ action: "pulse", ms: Number(elements.boardOptoPulseMs?.value) }));
+
+  elements.boardIrSend?.addEventListener("click", sendBoardIrFrame);
+  elements.boardIrQuery?.addEventListener("click", () => refreshBoardIr({ quiet: false }));
+
+  elements.boardLearnStart?.addEventListener("click", startBoardLearn);
+  elements.boardLearnStop?.addEventListener("click", stopBoardLearn);
+  elements.boardSlotList?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-board-action]");
+    const row = button?.closest(".board-slot-row");
+    if (!button || !row) return;
+    const slot = Number(row.dataset.slot);
+    const action = button.dataset.boardAction;
+    if (action === "play") playBoardSlot(slot);
+    else if (action === "delete") deleteBoardSlot(slot);
+    else if (action === "rename") {
+      state.board.editingSlot = slot;
+      renderBoardSlots(state.board.lastSlots);
+    } else if (action === "save-name") {
+      saveBoardSlotName(slot, row.querySelector(".board-slot-input")?.value);
+    } else if (action === "cancel-name") {
+      state.board.editingSlot = null;
+      renderBoardSlots(state.board.lastSlots);
+    }
+  });
+  elements.boardSlotList?.addEventListener("keydown", (event) => {
+    const input = event.target.closest(".board-slot-input");
+    if (!input) return;
+    const row = input.closest(".board-slot-row");
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveBoardSlotName(Number(row.dataset.slot), input.value);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      state.board.editingSlot = null;
+      renderBoardSlots(state.board.lastSlots);
+    }
+  });
+
+  updateBoardIoControls();
+}
+
+/* -------------------------------------------------------------------------
+ * Collapsible settings cards
+ * ------------------------------------------------------------------------- */
+
+const COLLAPSED_CARDS_KEY = "linkr-collapsed-cards";
+let cardToggles = [];
+
+function cardKey(card) {
+  return card.id ||
+    card.dataset.i18nAria ||
+    card.getAttribute("aria-label") ||
+    card.dataset.settingsPage ||
+    "card";
+}
+
+function loadCollapsedCards() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSED_CARDS_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedCards() {
+  const keys = cardToggles
+    .filter((entry) => entry.card.classList.contains("is-collapsed"))
+    .map((entry) => entry.key);
+  saveSetting(COLLAPSED_CARDS_KEY, JSON.stringify(keys));
+}
+
+function updateCardToggle(entry) {
+  const collapsed = entry.card.classList.contains("is-collapsed");
+  entry.toggle.setAttribute("aria-expanded", String(!collapsed));
+  const label = t(collapsed ? "expandCard" : "collapseCard");
+  entry.toggle.title = label;
+  entry.toggle.setAttribute("aria-label", label);
+}
+
+function setCardCollapsed(card, collapsed, { persist = true } = {}) {
+  card.classList.toggle("is-collapsed", collapsed);
+  const entry = cardToggles.find((candidate) => candidate.card === card);
+  if (entry) updateCardToggle(entry);
+  if (persist) saveCollapsedCards();
+}
+
+function refreshCardToggleLabels() {
+  for (const entry of cardToggles) updateCardToggle(entry);
+}
+
+function initCollapsibleCards() {
+  const collapsed = loadCollapsedCards();
+  const cards = Array.from(document.querySelectorAll("#controlsPanel section.card"))
+    .filter((card) => !card.matches("#agentSettings, #aboutPage"))
+    .filter((card) => card.querySelector(":scope > .card-title"));
+  for (const card of cards) {
+    const title = card.querySelector(":scope > .card-title");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "card-toggle";
+    toggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>';
+    title.append(toggle);
+    const entry = { card, toggle, key: cardKey(card) };
+    cardToggles.push(entry);
+    toggle.addEventListener("click", () =>
+      setCardCollapsed(card, !card.classList.contains("is-collapsed")));
+    const isCollapsed = collapsed.has(entry.key);
+    card.classList.toggle("is-collapsed", isCollapsed);
+    updateCardToggle(entry);
+  }
+}
+
 function setConnected(connected, { preserveJournal = false } = {}) {
   const isWs = state.mode === "ws";
   const canConnect =
@@ -3208,6 +4408,16 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   const connectionChanged = state.connected !== connected;
+  if (connectionChanged) {
+    for (const key of ["led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
+      state.features[key] = null;
+    }
+    state.features.wifi = connected && !isWs && state.mgmtReady
+      ? hasManagementCapability(MGMT_CAP_WIFI) : null;
+    state.features.webdav = connected && !isWs && state.mgmtReady
+      ? hasManagementCapability(MGMT_CAP_WEBDAV) : null;
+    applyFeatureVisibility();
+  }
   if (!connected) {
     clearInterval(serialControlTimer);
     serialControlTimer = null;
@@ -3222,6 +4432,13 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   serialInputRevision++;
   serialInputPending = false;
   state.connected = connected;
+  if (connected) {
+    state.board.slotNames = {};
+    state.board.namesSupported = null;
+    state.board.lastSlots = null;
+    state.board.editingSlot = null;
+    state.boardPromptBytes = 0;
+  }
   if (connected && !isWs) state.bleReselectId = null;
   if (connected && !preserveJournal) agentJournal.reset();
   agentPanel?.connectionChanged(connected);
@@ -3281,6 +4498,16 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   elements.webdavSetButton.disabled = !canControlWebdav;
   elements.webdavOffButton.disabled = !canControlWebdav;
   elements.webdavQueryButton.disabled = !canControlWebdav;
+  updateBoardIoControls();
+  if (connectionChanged) {
+    stopBoardLearnPolling();
+    /* Only read the board's own hardware when its panel is on screen: a user
+     * who never opens the Board section should not pay four management
+     * round-trips on every connect. */
+    if (connected && elements.controls.dataset.settingsActive === "board") {
+      refreshBoardIo();
+    }
+  }
   if (elements.presetChips) {
     elements.presetChips
       .querySelectorAll(".preset-chip")
@@ -4963,10 +6190,16 @@ function closeSidebar({ restoreFocus = true } = {}) {
 }
 
 function setSettingsPage(page) {
-  const next = ["connection", "terminal", "network", "about", ...(agentSettings ? ["ai"] : [])].includes(page)
-    ? page
-    : "connection";
+  const wanted = ["connection", "terminal", "network", "board", "about",
+    ...(agentSettings ? ["ai"] : [])].includes(page) ? page : "connection";
+  const wantedTab = document.querySelector(`.settings-tab[data-settings-target="${wanted}"]`);
+  const next = wantedTab && !wantedTab.hidden ? wanted : "connection";
   elements.controls.dataset.settingsActive = next;
+  if (next === "board" && state.board.canControl) {
+    refreshBoardIo();
+  } else if (next === "ai" && state.board.canControl) {
+    refreshBoardPromptStatus();
+  }
   elements.settingsTabs.forEach((tab) => {
     const selected = tab.dataset.settingsTarget === next;
     tab.classList.toggle("active", selected);
@@ -5305,6 +6538,9 @@ function bind() {
   elements.webdavQueryButton.addEventListener("click", () => {
     sendControl("@d?").catch((error) => appendLine(`[error] ${error.message}`));
   });
+
+  wireBoardIoControls();
+  wireBoardPromptControls();
 
   if (elements.presetChips) {
     elements.presetChips.querySelectorAll(".preset-chip").forEach((chip) => {
@@ -5755,6 +6991,7 @@ function initMcp() {
     /* The accessory helpers are the app's own management-channel functions, so
      * an MCP change goes through the same read-back and redaction every other
      * host client uses. */
+    readBoardPrompt: readBoardPromptForAgent,
     accessory: {
       capability: accessoryCapability,
       command: accessoryCommand,
@@ -5799,6 +7036,7 @@ function init() {
     section: $("agentSettings"), tab: document.querySelector('[data-settings-target="ai"]'),
     getLang: () => lang, onChange: () => agentPanel?.settingsChanged(),
     bindingAction: (action) => agentPanel.targetBinding(action),
+    control: (command) => sendControl(command, { returnResponse: true, quiet: true }),
   });
   setSettingsPage(localStorage.getItem("linkr-settings-page") || "connection");
   initTerminal();
@@ -5810,6 +7048,7 @@ function init() {
   }
   setConnected(false);
   bind();
+  initCollapsibleCards();
   // Keep the same buttons and UART listeners when changing their visual order.
   // Storage denial must not prevent the terminal itself from starting.
   let keyStorage;
@@ -5839,6 +7078,7 @@ function init() {
     onLayout: scheduleFit,
     focusTerminal: () => state.term?.focus(),
     onOpen: async () => {
+      refreshBoardPromptStatus().catch(() => {});
       // Entering Agent changes only the workspace on desktop. Keep the docked
       // settings panel and its saved visibility; touch layouts close the sheet.
       if (usesSettingsDrawer()) setMobileSidebarOpen(false, { restoreFocus: false });
@@ -5884,3 +7124,27 @@ function init() {
 }
 
 init();
+
+/* `?demo=board` opens the terminal against a mock X1.0 so the board panel can
+ * be looked at (and screenshotted) without hardware. The module does nothing
+ * without the query parameter. */
+function startDemoModeIfRequested() {
+  if (!demoModeRequested()) {
+    return;
+  }
+  if (!state.term) {
+    window.setTimeout(startDemoModeIfRequested, 60);
+    return;
+  }
+  installDemoMode({
+    state,
+    setConnected,
+    setControl: (fn) => { sendControl = fn; },
+    setPage: setSettingsPage,
+    appendLine,
+    panelToggle: elements.panelToggle,
+    appShell: elements.appShell,
+  });
+}
+
+startDemoModeIfRequested();

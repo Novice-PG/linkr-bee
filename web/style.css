@@ -415,6 +415,7 @@ h1 {
 }
 
 .card {
+  --card-pad: 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
@@ -881,7 +882,8 @@ input[aria-invalid="true"] {
 }
 
 input,
-select {
+select,
+textarea {
   height: 36px;
   width: 100%;
   border: 1px solid var(--line);
@@ -889,11 +891,21 @@ select {
   background: var(--input-bg);
   color: var(--text);
   padding: 0 12px;
+  font: inherit;
   transition: border-color 0.15s ease, box-shadow 0.15s ease,
     background-color 0.25s ease;
 }
 
-input::placeholder {
+textarea {
+  height: auto;
+  min-height: 84px;
+  padding: 10px 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+input::placeholder,
+textarea::placeholder {
   color: var(--placeholder);
 }
 
@@ -904,12 +916,14 @@ input::placeholder {
 }
 
 input:hover,
-select:hover {
+select:hover,
+textarea:hover {
   border-color: var(--line-strong);
 }
 
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible {
   outline: none;
   border-color: var(--focus);
@@ -2281,7 +2295,8 @@ body,
   }
 
   .controls .card {
-    padding: 13px;
+    --card-pad: 13px;
+    padding: var(--card-pad);
     border-radius: 8px;
     box-shadow: none;
   }

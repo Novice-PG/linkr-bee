@@ -260,8 +260,9 @@ test("an endpoint no preset owns is Custom, including empty and invalid ones", (
 });
 
 /* The disclosure is the feature, not decoration: it must name the storage key
- * the app actually writes and say the key is not uploaded. A label that drifts
- * from AGENT_CONFIG_KEY or drops the promise would still render. */
+ * the app actually writes, say the key stays local by default, and name the one
+ * explicit way it can leave the device (an opt-in board save). A label that
+ * drifts from AGENT_CONFIG_KEY or drops either promise would still render. */
 test("the form offers a provider list and states where the key is stored", () => {
   const settings = readFileSync(new URL("../../web/agent_settings.js", import.meta.url), "utf8");
   for (const key of ["vendor", "vendorHint", "keyStorage"]) {
@@ -273,8 +274,10 @@ test("the form offers a provider list and states where the key is stored", () =>
   const disclosure = settings.match(/keyStorage:\s*\[\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\]/);
   for (const [lang, label] of [["zh", disclosure[1]], ["en", disclosure[2]]]) {
     assert.ok(label.includes(AGENT_CONFIG_KEY), `${lang} names the storage key it writes`);
-    assert.match(label, /不会上传|not uploaded/, `${lang} says the key is not uploaded`);
+    assert.match(label, /不会自动上传|automatically/, `${lang} says the key is not uploaded automatically`);
     assert.match(label, /服务器|server/, `${lang} names the server it does not reach`);
+    assert.match(label, /保存到板载|Save to board/, `${lang} names the opt-in board save`);
+    assert.match(label, /NVS/, `${lang} names the board storage it can opt into`);
   }
   const html = readFileSync(new URL("../../web/index.html", import.meta.url), "utf8");
   assert.match(html, /id="agentVendorHint"[^>]*data-ai-setting="vendorHint"/, "the provider hint has its own label");

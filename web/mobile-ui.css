@@ -67,17 +67,12 @@
   #agentSettingsForm {
     display: flex;
     flex-direction: column;
-    max-height: calc(var(--terminal-viewport-height, 100vh) - 190px);
+    flex: 1 1 auto;
     min-height: 0;
+    max-height: none;
   }
-  /* When the inner form scroll reaches its end the swipe must continue to the
-   * drawer, otherwise the pinned Save/Clear row stays below the drawer viewport
-   * and cannot be reached (it is only reachable by scrolling the drawer). */
   .agent-settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior-y: auto; padding-right: 3px; }
-  .agent-settings-actions { flex: 0 0 auto; position: relative; padding-bottom: 6px; }
-  html.soft-keyboard-open #agentSettings > .card-title { display: none; }
   html.soft-keyboard-open .app-shell.sidebar-open .controls .settings-tabs { display: none; }
-  html.soft-keyboard-open #agentSettingsForm { max-height: calc(var(--terminal-viewport-height, 100vh) - 90px); }
   .terminal-card .terminal-input-bar { flex-direction: column; align-items: stretch; gap: 0; }
   .terminal-card .terminal-input-actions { align-items: flex-start; gap: 5px; }
   .terminal-key-scroll { gap: 5px; padding-bottom: 2px; }

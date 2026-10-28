@@ -56,7 +56,7 @@ test("the About page is reachable from both navigation surfaces", () => {
     assert.match(html, new RegExp(`id="${id}"`), `${id} is missing`);
   }
   const app = readFileSync(`${ROOT}web/app.js`, "utf8");
-  assert.match(app, /\["connection", "terminal", "network", "about"/, "setSettingsPage must accept the page");
+  assert.match(app, /\["connection", "terminal", "network",(?: "board",)? "about"/, "setSettingsPage must accept the page");
   assert.match(app, /aboutPage\?\.refreshLang\(\)/, "the page must re-render on a language switch");
   // Both language tables carry the heading, or the tab falls back to its key.
   const keys = app.match(/aboutNav: "[^"]+"/g) || [];
