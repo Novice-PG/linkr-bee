@@ -96,7 +96,7 @@ static struct net_if *wifi_iface;
  * and only the context that clears a non-NULL scan_conn may unref it. It also
  * pins scan_conn for the responders, which take their own reference while the
  * lock is held so a concurrent release cannot free the connection first. */
-#define WIFI_SCAN_TIMEOUT_MS 15000
+#define WIFI_SCAN_TIMEOUT_MS CONFIG_LINKR_BLE_BRIDGE_WIFI_SCAN_TIMEOUT_MS
 static linkr_wifi_respond_fn scan_respond;
 static struct bt_conn *scan_conn;
 static atomic_t scan_in_progress;

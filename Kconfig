@@ -462,6 +462,21 @@ config LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS
 	  deadline expires, the pending operation fails, the interface is reset,
 	  and the normal reconnect policy is resumed.
 
+config LINKR_BLE_BRIDGE_WIFI_SCAN_TIMEOUT_MS
+	int "WiFi scan timeout in milliseconds"
+	default 15000
+	range 5000 120000
+	depends on LINKR_BLE_BRIDGE_WIFI
+	help
+	  Bound a single scan sweep. When the driver has not reported completion
+	  by this deadline the watchdog releases the scan state, so the value has
+	  to exceed how long one sweep actually takes on the board.
+
+	  ESP32-C5 is dual-band and its WiFi driver ignores the requested band
+	  bitmap, so a sweep there measures about 20 s even when only 2.4 GHz and
+	  a short per-channel dwell are requested. ESP32-C3 sweeps faster and
+	  keeps the default.
+
 config LINKR_BLE_BRIDGE_WEBDAV
 	bool "Enable WebDAV serial log upload"
 	default y

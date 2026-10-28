@@ -252,6 +252,16 @@ ESP32-C3 SoC WiFi 驱动是 `CONFIG_WIFI_ESP32`（定义于 `drivers/wifi/esp32/
 
 `src/wifi.c` 中的应用代码使用标准 `net_mgmt` / `wifi_mgmt` API（`NET_REQUEST_WIFI_CONNECT`、`NET_EVENT_WIFI_CONNECT_RESULT`），并在连接成功时自行启动 DHCPv4，因此无需 `CONFIG_NET_CONFIG_AUTO_INIT`。
 
+`@w scan` 的看门狗时限由 `CONFIG_LINKR_BLE_BRIDGE_WIFI_SCAN_TIMEOUT_MS` 决定。
+ESP32-C5 是双频芯片，其 WiFi 驱动会忽略请求里的频段位图，因此一次完整扫描
+（实测 16–18 个 AP，含 5 GHz 信道）稳定耗时约 19.7 秒；把扫描限制到 2.4 GHz、
+把每信道驻留时间压到 60–100 ms 都不会缩短它，断开 BLE 也不影响，所以这不是
+共存调度问题。C5 板级配置把该时限提到 30 秒（默认 15 秒会让每次扫描都在驱动
+回报完成前 4–5 秒被看门狗释放，表现为 `@scan error`）；C3 扫描更快，保留默认值。
+Python CLI 的 `WIFI_SCAN_TIMEOUT` 和 Rust CLI/TUI 的 `device::SCAN_TIMEOUT` 均为 35 秒，
+为 C5 的 30 秒扫描看门狗及结果发送留出余量。Rust 的原 20 秒上限已同步调整；
+若定制固件进一步增大扫描时限，需同步调整客户端等待时间。
+
 ### UART over WebSocket(局域网桥)
 
 WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,局域网客户端可完全绕过 BLE 的距离与 MTU 限制:
@@ -427,8 +437,8 @@ ERR format: @u=115200,8,n,1,n
 
 诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
 访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态、WebSocket 客户端
-与丢弃计数，以及 WebDAV 队列、丢弃、HTTP、失败和成功计数。queue 和 rel
-分组分别提供 UART 发送队列丢弃和 BLE indication 耗时：
+与丢弃计数，以及 WebDAV 队列、丢弃、HTTP、失败和成功计数。queue、peer 和
+rel 分组分别提供 UART 发送队列丢弃、BLE 输出队列丢弃和 BLE indication 耗时：
 
 ```text
 @info fw version=0.1.2 zephyr=4.4.1
@@ -438,6 +448,7 @@ ERR format: @u=115200,8,n,1,n
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
 @info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0
 @info queue dropped=0
+@info peer dropped=0
 @info rel ind=0 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=0
 @info done
 ```

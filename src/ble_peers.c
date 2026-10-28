@@ -4,6 +4,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 #include "ble_nus.h"
 #include "ble_mgmt.h"
@@ -11,6 +12,8 @@
 #include "ble_uart_reliable.h"
 #include "serial_session.h"
 #include "watchdog.h"
+
+LOG_MODULE_REGISTER(linkr_ble_peers, LOG_LEVEL_INF);
 
 #define QUEUE_DEPTH CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH
 #define PAYLOAD_SIZE LINKR_UART_RELIABLE_MAX_PAYLOAD
@@ -25,6 +28,19 @@ static struct {
 } peers[CONFIG_BT_MAX_CONN];
 K_MUTEX_DEFINE(peers_lock);
 K_THREAD_STACK_ARRAY_DEFINE(peer_stacks, CONFIG_BT_MAX_CONN, 2048);
+
+/* Bytes the peer output queues refused because a host was slower than the
+ * bridge UART. A burst larger than QUEUE_DEPTH * PAYLOAD_SIZE used to tear the
+ * connection down instead, which turned `ls` on the far side into a dropped
+ * terminal; the UART RX ring has always dropped-and-counted on overflow, so the
+ * BLE output path now behaves the same way and reports through `@i?`. */
+static atomic_t peer_tx_dropped;
+static int64_t peer_drop_logged_at;
+
+uint32_t linkr_ble_peer_dropped(void)
+{
+	return (uint32_t)atomic_get(&peer_tx_dropped);
+}
 
 static void peer_tx(void *arg, void *unused1, void *unused2)
 {
@@ -64,8 +80,12 @@ static void peer_tx(void *arg, void *unused1, void *unused2)
 				sent += count;
 			}
 		}
-		/* Close slow peers instead of silently corrupting their stream. */
-		if (err && err != -ENOTCONN) bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		/* A failed write means the link is gone or refused the payload; the
+		 * dropped-queue path below is the one that must not close. */
+		if (err && err != -ENOTCONN) {
+			LOG_WRN("BLE peer TX failed (%d); closing the peer", err);
+			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
 		bt_conn_unref(conn);
 	}
 }
@@ -114,6 +134,7 @@ bool linkr_ble_peer_disconnected(struct bt_conn *conn)
 int linkr_ble_feed(const uint8_t *data, size_t len)
 {
 	int result = -ENOTCONN;
+	bool dropped = false;
 	while (len) {
 		struct peer_packet packet = { .len = MIN(len, PAYLOAD_SIZE) };
 		memcpy(packet.data, data, packet.len);
@@ -124,14 +145,26 @@ int linkr_ble_feed(const uint8_t *data, size_t len)
 			    (!linkr_uart_reliable_mode(conn) && !linkr_nus_subscribed(conn))) continue;
 			packet.generation = peers[i].generation;
 			if (k_msgq_put(&peers[i].queue, &packet, K_NO_WAIT)) {
+				/* Drop this chunk for this peer and keep the link. A host
+				 * that cannot keep up loses bytes, exactly like the UART
+				 * ring on the other side; disconnecting it turns a burst of
+				 * shell output into a dead terminal. */
+				atomic_add(&peer_tx_dropped, packet.len);
+				dropped = true;
 				if (result) result = -ENOMEM;
-				peers[i].closing = true;
-				bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			} else result = 0;
 		}
 		k_mutex_unlock(&peers_lock);
 		data += packet.len;
 		len -= packet.len;
+	}
+	if (dropped) {
+		int64_t now = k_uptime_get();
+		if (now - peer_drop_logged_at >= 1000) {
+			peer_drop_logged_at = now;
+			LOG_WRN("Dropped %u BLE TX bytes to slow peers; link kept",
+				linkr_ble_peer_dropped());
+		}
 	}
 	return result;
 }

@@ -1549,6 +1549,11 @@ static void diagnostics_response(struct bt_conn *conn)
 	 * and the web parser, both key on the group name). */
 	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
 				    (unsigned int)atomic_get(&uart_queue_dropped));
+	/* Fourth drop point: UART -> BLE output queues. Counted instead of
+	 * closing the peer, so a host slower than the SBC loses bytes and keeps
+	 * its terminal. */
+	(void)send_control_response(conn, "@info peer dropped=%u\r\n",
+				    linkr_ble_peer_dropped());
 	{
 		/* Whether the 40-92 ms handoff stalls come from the -EBUSY/-ENOMEM
 		 * retry backoff (slept_ms) or from waiting on the peer (wait_max_ms).
@@ -1631,6 +1636,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		!strcmp(body, "n?") || !strcmp(body, "name?") ||
 		!strcmp(body, "a?") || !strcmp(body, "autobaud?") ||
 		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
+		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
+		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
 		!strcmp(body, "target?");
 	if (!readonly) {
 		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {

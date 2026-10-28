@@ -309,6 +309,19 @@ The application code in `src/wifi.c` uses the standard `net_mgmt` /
 and starts DHCPv4 itself on connect, so no `CONFIG_NET_CONFIG_AUTO_INIT` is
 needed.
 
+The `@w scan` watchdog bound is `CONFIG_LINKR_BLE_BRIDGE_WIFI_SCAN_TIMEOUT_MS`.
+ESP32-C5 is dual-band and its WiFi driver ignores the band bitmap in the
+request, so a full sweep (measured: 16–18 APs, 5 GHz channels included) takes a
+steady ~19.7 s. Asking for 2.4 GHz only and a 60–100 ms per-channel dwell does
+not shorten it, and neither does dropping the BLE link, so this is not
+coexistence scheduling. The C5 board configuration raises the bound to 30 s; the
+15 s default released every scan 4–5 s before the driver reported completion,
+which surfaced as `@scan error`. ESP32-C3 sweeps faster and keeps the default.
+Both the Python CLI (`WIFI_SCAN_TIMEOUT`) and Rust CLI/TUI
+(`device::SCAN_TIMEOUT`) wait 35 s, allowing the 30 s firmware watchdog plus
+queued results to arrive. The Rust limit was previously 20 s. Custom firmware
+with a longer scan watchdog must also increase the client wait.
+
 ### UART over WebSocket (LAN bridge)
 
 When WiFi holds an IP address, the firmware also serves the bridge UART over a
@@ -546,8 +559,9 @@ ERR format: @u=115200,8,n,1,n
 The diagnostic command is read-only. It reports the application and Zephyr
 versions, uptime, the open BLE access/security state, UART buffer usage and
 dropped-byte count, WiFi/IP state, WebSocket clients and drops, and WebDAV
-queue, drop, HTTP, failure, and success counters. The queue and Reliable UART
-groups expose UART TX drops and BLE indication timing:
+queue, drop, HTTP, failure, and success counters. The queue, peer and Reliable
+UART groups expose UART TX drops, BLE output-queue drops, and BLE indication
+timing:
 
 ```text
 @info fw version=0.1.2 zephyr=4.4.1
@@ -557,6 +571,7 @@ groups expose UART TX drops and BLE indication timing:
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
 @info ws state=up port=80 clients=1 tx=1234 rx=5678 dropped=0
 @info queue dropped=0
+@info peer dropped=0
 @info rel ind=0 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=0
 @info done
 ```

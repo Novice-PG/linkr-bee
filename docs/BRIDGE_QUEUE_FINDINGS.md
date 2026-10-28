@@ -1,8 +1,9 @@
 # 桥接队列丢包排查记录（固件侧）
 
-> 最后更新: 2026-10-11
+> 最后更新: 2026-10-27
 > 行号基准: 本文 `文件:行` 引用已按本 PR 的 HEAD 逐条重定位（以符号/字面量为锚点核对），不是写作当时的行号。
-> 范围: 本文只记录 **固件（板子）侧** 三处缓冲的丢包条件与影响，供上游与后续排障参考。
+> 范围: 本文记录 **固件（板子）侧** 四处缓冲的丢包条件与影响（第 ④ 处见文末
+> 2026-10-27 一节），供上游与后续排障参考。
 > 客户端侧的三个问题（LAN 重连、上行限流、粘贴卡住）不在此列，见代码提交与本次 PR。
 
 ## 2026-10-04 三处缓冲的丢包条件与影响
@@ -164,3 +165,113 @@ WS 发送侧停顿 ≥ 2048 ÷ 11520 ≈ 178 ms，且 SBC 在满速打印
   > 自适应到高波特率时缓冲等于变相缩小，再减半会直接开始丢数据。
   > 结论：**本板不靠改缓冲大小换吞吐**；要提速走 BLE 侧（写请求 → 免回复写），
   > 而且客户端写入速率必须始终 ≤ 最慢档的排空速率 11520 B/s。
+
+## 2026-10-27 第四处缓冲：BLE 输出队列（ESP32-C5 上会踢掉连接）
+
+上游多客户端共享（`feat(bridge): share serial output across clients with
+single-writer control`）新增了 `src/ble_peers.c`：每个 BLE 连接一个
+`k_msgq` 输出队列，`uart_to_ble_thread` 通过 `linkr_ble_feed()` 把 UART 数据
+按 232 B 一片入队，再由每连接一个 `ble_peer_tx` 线程发出去。这成为**第 ④ 处
+缓冲**，链路如下：
+
+```
+SBC 控制台 ──115200──▶ [① uart_rx_ring] ──232 B─▶ uart_forward_chunk()
+                                                    └─▶ linkr_ble_feed()
+                                                          └─▶ [④ 每 peer msgq]
+                                                                └─▶ linkr_nus_send() 232 B/包
+```
+
+| # | 缓冲 | 位置 | 大小 | 旧行为（≤ `fa407be`） | 现行为 |
+|---|---|---|---|---|---|
+| ④ | 每 peer `msgq` | `src/ble_peers.c`（`QUEUE_DEPTH` × `PAYLOAD_SIZE`） | Kconfig 默认 8 × 232 B = 1856 B；C5 板曾配成 **4 = 928 B** | 队列满 → 立刻 `bt_conn_disconnect(REMOTE_USER_TERM)`，**无任何日志** | 计数丢弃 + 限速 `LOG_WRN`，连接保留；`@i?` → `@info peer dropped=` |
+
+### 现象
+
+ESP32-C5 DevKitC 上，SBC（`radxa-cubie-a5e`）登录后只要输出稍微多一点的命令就会
+掉线。最小复现是 `ls -l /usr/bin | head -40`（约 3 KB、16 个 notification）：命令
+发出后链路断开，终端报废。固件日志只有 `BLE disconnected: 0x13`，**没有任何**警告
+说明是谁、为什么断的。
+
+`@i?` 当时没有任何 UART→BLE 方向的丢弃计数，因此第 ④ 处丢包/断连完全不可观测。
+`docs/` 的其余排障记录（`uart dropped`、`ws dropped`、`queue dropped`）也都看不到它。
+
+### 历史实测（C5 DevKitC，2026-10-27，扩大缓冲的实验镜像）
+
+下表来自缓冲扩大阶段（BLE 队列 8 个分片）的实验镜像，不是最终
+`6301066` 配置的验收结果。该阶段构建使用过本地修改的 Zephyr 内存边界；
+最后一次板级修正已恢复官方 ROM 保留区，并缩减缓冲以适配未修改的 Zephyr v4.4.1。
+因此下表用于保留问题定位经过，不能据此承诺最终镜像的零丢包或吞吐。
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| `ls -l /usr/bin \| head -40`（约 3 KB） | **断连** | 保持连接，`peer dropped=0` |
+| `ls -l /usr/bin \| head -400`（约 24 KB） | **断连** | 保持连接，收到 18361 B，丢 6960 B |
+| 20 条命令 / 72 s（约 56 KB 输出，混合 `ls`、`dmesg`、`/proc/interrupts`） | 断连 | 保持连接，收到 56482 B，丢 13828 B |
+
+上述实验镜像 BLE 下行有效吞吐约 **780 B/s**（72 s 内送出 56 KB），仍明显低于 UART 的
+11520 B/s，因此突发时丢字节是预期结果——与 ① ② ③ 的取舍一致：**丢字节，不踢人**。
+
+### 改动
+
+- `src/ble_peers.c`：队列满时 `atomic_add(&peer_tx_dropped, len)` 并继续，
+  不再 `closing = true` + `bt_conn_disconnect()`；丢弃日志按 1 s 限速，避免日志
+  自身在丢包时刷屏。`peer_tx` 发送失败（`err && err != -ENOTCONN`）仍然断开，
+  但先打一条 `LOG_WRN`，不再静默。
+- `src/main.c`：`@i?` 增加 `@info peer dropped=`；TUI（`DESIGNED_GROUPS` 之外的
+  组会追加显示）与 web 解析器都按组名取行，未知组被容忍，因此不需要客户端改动。
+- 最终 `boards/esp32c5_devkitc_esp32c5_hpcore.conf` 的 BLE 队列仍为 4 个分片
+  （928 B 有效载荷），WS 每客户端缓冲仍为 1024 B、客户端数为 1；
+  UART RX 和 WebDAV 日志缓冲由 2048 B 缩为 1024 B。此前 8 分片 / 2048 B WS
+  的实验配置及其 SRAM 百分比不代表最终镜像。
+- `6301066` 的记录是：在未修改的 Zephyr v4.4.1 上链接占用
+  374816 / 378384 B，实机 WiFi 关联和 DHCP 成功。本次未补做最终缓冲配置下的
+  BLE/WS 突发吞吐复测；合入后的性能验收应使用该配置重新运行上表命令。
+
+> 取舍说明：上游原注释是 *Close slow peers instead of silently corrupting their
+> stream*。实测表明在 C5 上这条策略把「一次 `ls` 输出」直接变成「终端断开」，
+> 而断连后用户必须重新配对/重连才能继续，代价远大于丢几行输出。丢包策略与
+> ① ② 以及 `UART_RX_DROP_NO_CONN` 的既有取舍保持一致。
+
+### LAN（WebSocket）侧同一天的历史实验
+
+同一台 C5 通过 LAN 连接时，第 ② 处（每客户端 `tx_ring`）暴露出同类问题，但性质
+不同——它**不会断连**，只是把输出丢光：
+
+| 场景（LAN，单客户端） | 1024 B（改前） | 说明 |
+|---|---|---|
+| `echo lan-claim-ok`（约 120 B） | 完整收到 | 小突发无压力 |
+| `ls -l /usr/bin \| head -200`（约 24 KB） | 收到 **37 B**，`@info ws … tx=1316 rx=47 dropped=10333` | ring 一直被覆盖，客户端几乎什么都看不到 |
+
+实验中曾把 `WS_BRIDGE_CLIENT_BUFFER_SIZE` 从 1024 改为默认的 2048；
+最终因 ROM 保留区约束回到 1024。下文的双客户端 / SRAM 测量同样属于实验配置，
+不是最终镜像的容量或稳定性保证。
+
+`WS_BRIDGE_MAX_CLIENTS` 停在 1，原因是第二个客户端根本连不上，不是稳定性问题：
+历史记录声称配成 2 的镜像连续跑了 25 分钟，但所列 uptime
+`1473624 → 1503959 ms` 只覆盖约 30 秒，不能单独证明整个 25 分钟窗口。该片段内
+`Booting Zephyr`／`Reset cause` 计数为 0；记录中的单客户端连接、串行重连 ×3、
+`@control claim` + `echo` 往返全部通过。而这个槽位要多占一个 2048 B ring **和**一个
+3072 B 线程栈，SRAM 从 96.34% 涨到 98.86%（只剩 4.4 KB）。
+
+即使配成 2，第二个 `ws://` 连接也**在 TCP 层就被拒**（客户端 `ConnectionRefused`，
+固件里连 `linkr_ws_setup()` 都没进，没有 `[1] WS client connected`，也没有
+`Rejecting WS client; all %d slots busy`）。Zephyr 的
+`subsys/net/lib/http/http_server_core.c:653` 在 `service->data->num_clients >=
+concurrent` 时把监听 socket 的 `events` 置 0，等于停止 accept；`@s off` + `@s on`
+也救不回来（该路径只在服务首次初始化时把 `num_clients` 清零）。把
+`NET_MAX_CONTEXTS` 提到 8、`NET_MAX_CONN` 提到 6 均无效，排除 socket 耗尽。
+
+想开 `CONFIG_NET_LOG` + `NET_HTTP_SERVER_LOG_LEVEL_DBG` 抓 accept 细节时，SRAM 走到
+98.92%，固件**卡在启动**：串口停在 `net80211 rom version`，进不到
+`*** Booting Zephyr OS ***`，`libc heap size` 从 13 kB 掉到 4 kB。C5 的内存余量已经
+不够再做这层诊断。因此最终保留 `MAX_CLIENTS=1`，避免额外的客户端缓冲和线程栈；
+第二个客户端的根因仍需在独立、可复现的配置上继续核实。
+
+WebDAV、握手与令牌轮换实测正常（见对话记录）：错误令牌与 3 s 内不发令牌都会被断开、
+`@s token` 轮换后旧令牌失效、`@s token off` 后握手变成 `auth=none`、
+`@d=http://<host>/` 能在对端收到 `log-<boot>-<seq>-<uptime>.txt`（201）。
+
+同日还修掉一个与缓冲无关的会话缺陷：`@s?` / `@d?` 没有被算进 `src/main.c` 的只读
+命令表，因此一次**查询**就会通过 `linkr_session_command_begin()` 抢占串口写权，把
+另一条通道（例如 LAN 客户端）锁成 `mode=readonly` 并拒绝其写入（`ERR control=readonly`）。
+只读表已补上 `d?`/`webdav?` 与 `s?`/`socket?`。

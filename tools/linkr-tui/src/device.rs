@@ -35,10 +35,10 @@ pub const INFO_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a scan has to say something before it is given up on.
 ///
 /// Longer than [`REPLY_TIMEOUT`] because a scan is the radio walking channels,
-/// not the management task answering: the bridge's own watchdog releases a
-/// wedged scan at fifteen seconds and says `@scan error` then, so anything
-/// slower than this is a bridge that is not going to speak at all.
-pub const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+/// not the management task answering. C5 allows a sweep to run for thirty
+/// seconds before its watchdog emits `@scan error`. Keep five seconds for the
+/// queued scan results and terminator to arrive, matching the Python client.
+pub const SCAN_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// A question the host asks the bridge about itself.
 ///
@@ -549,6 +549,52 @@ mod tests {
             "still scanning, and not yet a silent bridge"
         );
         assert_eq!(talk.abandon(start + SCAN_TIMEOUT), Some(Query::WifiScan));
+    }
+
+    #[test]
+    fn c5_scan_can_finish_after_the_old_twenty_second_deadline() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let (id, _) = talk.ask(Query::WifiScan, start);
+        let (accepted, body) = response(id, "OK accepted\r\n", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&accepted, &body));
+        assert!(talk.take_reply().is_none());
+        assert_eq!(talk.abandon(start + Duration::from_secs(20)), None);
+        assert_eq!(talk.abandon(start + Duration::from_secs(29)), None);
+        let (result, body) = response(id, "@scan result C5Net wpa2 ch=6 -54dBm\r\n", 0);
+        assert!(talk.offer(&result, &body));
+        assert!(talk.take_reply().is_none());
+        // The controller may finish before 30 s, with queued GATT results
+        // taking another second to reach the client.
+        assert_eq!(talk.abandon(start + Duration::from_secs(31)), None);
+        let (done, body) = response(id, "@scan done\r\n", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&done, &body));
+        let reply = talk
+            .take_reply()
+            .expect("late scan completion remains usable");
+        assert_eq!(reply.query, Query::WifiScan);
+        assert!(reply.lines.iter().any(|line| line.contains("C5Net")));
+    }
+
+    #[test]
+    fn c5_scan_watchdog_reply_is_received_before_the_host_deadline() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let (id, _) = talk.ask(Query::WifiScan, start);
+        assert_eq!(talk.abandon(start + Duration::from_secs(31)), None);
+        let (error, body) = response(id, "@scan error\r\n", MGMT_FLAG_FINAL);
+        assert!(talk.offer(&error, &body));
+        assert!(
+            talk.take_reply().is_some(),
+            "report the firmware's ending, not a host timeout"
+        );
+
+        talk.ask(Query::WifiScan, start);
+        assert_eq!(talk.abandon(start + Duration::from_secs(34)), None);
+        assert_eq!(
+            talk.abandon(start + Duration::from_secs(35)),
+            Some(Query::WifiScan)
+        );
     }
 
     #[test]
