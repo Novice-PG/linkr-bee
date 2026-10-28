@@ -1,0 +1,37 @@
+/*
+ * Linkr Bee X1.0 (MV013) pin multiplexing.
+ *
+ * J7 is the target-side UART header: pin 1 = target TX -> UART0 RX (GPIO20),
+ * pin 2 = bridge TX -> UART0 TX (GPIO21). The console is USB Serial/JTAG, so
+ * UART0 is free to be the bridge port.
+ *
+ * GPIO0 drives the IR transmitter: LEDC channel 0 generates the 38 kHz
+ * carrier that gates Q2 and therefore the IR LED D7.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/esp-pinctrl-common.h>
+#include <zephyr/dt-bindings/pinctrl/esp32c3-pinctrl.h>
+#include <zephyr/dt-bindings/pinctrl/esp32c3-gpio-sigmap.h>
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_GPIO21>;
+			output-high;
+		};
+
+		group2 {
+			pinmux = <UART0_RX_GPIO20>;
+			bias-pull-up;
+		};
+	};
+
+	ledc0_default: ledc0_default {
+		group1 {
+			pinmux = <LEDC_CH0_GPIO0>;
+			output-enable;
+		};
+	};
+};

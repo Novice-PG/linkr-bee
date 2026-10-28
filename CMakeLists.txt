@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.20.0)
 
+# The Linkr Bee X1.0 board definition lives in boards/radxa/linkr_bee_x1_0, so
+# the application root has to be searched as a board root for
+# `west build -b linkr_bee_x1_0`. This has to happen before find_package(),
+# which is where Zephyr resolves the board.
+list(APPEND BOARD_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # The module runs after the SoC is configured, before Zephyr collects its
 # post-build commands. Keep the pinned Zephyr checkout unmodified.
 list(APPEND EXTRA_ZEPHYR_MODULES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/esp_simpleboot")
@@ -29,6 +35,19 @@ target_sources(app PRIVATE
   src/uart_bulk_tx.c
   src/wifi.c
   src/ws_bridge.c
+  # Board status LED, optocoupler switch and IR remote. Every file compiles to
+  # stubs on boards whose devicetree does not describe the hardware, so the
+  # command group exists everywhere and reports "unsupported" instead of the
+  # firmware silently dropping the feature.
+  src/ir_learn.c
+  src/ir_nec.c
+  src/linkr_aux.c
+  src/linkr_ir.c
+  src/linkr_opto.c
+  src/linkr_prompt.c
+  src/linkr_aiconf.c
+  src/linkr_status_led.c
+  src/linkr_ws2812.c
 )
 target_sources_ifdef(CONFIG_LINKR_BLE_BRIDGE_WATCHDOG app PRIVATE src/watchdog.c)
 

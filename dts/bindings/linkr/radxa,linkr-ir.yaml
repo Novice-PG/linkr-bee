@@ -1,0 +1,29 @@
+description: |
+  Radxa Linkr Bee X1.0 infrared transceiver (38 kHz modulated, NEC use case).
+
+  The board has two independent pins:
+    - TX: a 38 kHz carrier gated by Q2 into the IR LED D7. The carrier comes
+      from an LEDC PWM channel on the same GPIO, so the firmware only switches
+      the carrier on and off; it never bit-bangs the carrier itself.
+    - RX: the demodulated output of an IRM_V538M3 module. It idles high and is
+      pulled low for the duration of every received mark, so the firmware
+      decodes the mark/space train with a GPIO edge interrupt.
+
+compatible: "radxa,linkr-ir"
+
+include: [base.yaml]
+
+properties:
+  pwms:
+    type: phandle-array
+    description: |
+      PWM channel that produces the 38 kHz carrier on the IR LED gate. The
+      period cell must be the carrier period (PWM_HZ(38000)). Omit it for a
+      receive-only build.
+
+  rx-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Demodulated receiver output. Declare it GPIO_ACTIVE_LOW with a pull-up:
+      the line idles high and drops for each received mark.

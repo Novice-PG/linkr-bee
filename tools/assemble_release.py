@@ -39,6 +39,7 @@ FIRMWARE_BOARDS = {
     "esp32c3-supermini": ("esp32c3_supermini", "esp32c3"),
     "esp32c3-devkitm": ("esp32c3_devkitm", "esp32c3"),
     "esp32c3-devkitc": ("esp32c3_devkitc", "esp32c3"),
+    "linkr-bee-x1-0": ("linkr_bee_x1_0", "esp32c3"),
     "esp32c5-devkitc": ("esp32c5_devkitc/esp32c5/hpcore", "esp32c5"),
     "esp32-wroom-32": ("esp32_devkitc/esp32/procpu", "esp32"),
 }
@@ -317,7 +318,7 @@ def main() -> int:
     if web_staging.exists():
         shutil.rmtree(web_staging)
 
-    expected_counts = {"desktop": 28, "firmware": 5, "web": 1, "apk": 1}
+    expected_counts = {"desktop": 28, "firmware": 6, "web": 1, "apk": 1}
     counts = {key: 0 for key in expected_counts}
     for path in assets:
         if DESKTOP_RE.match(path.name) or DEB_RE.match(path.name):

@@ -1,0 +1,8 @@
+# Linkr Bee X1.0 (MV013) board configuration
+#
+# The board carries a bare ESP32-C3FH4: the 4 MB flash is inside the package
+# and the 40 MHz crystal is wired to XTAL_P/XTAL_N on the module-less part.
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_LINKR_BEE_X1_0
+	select SOC_ESP32C3_FH4

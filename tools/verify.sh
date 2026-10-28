@@ -3,7 +3,7 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore"}
+boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore linkr_bee_x1_0"}
 
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
@@ -43,6 +43,18 @@ for board in $boards; do
   fi
   if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
     grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
+  fi
+  if [ "$board" = "linkr_bee_x1_0" ]; then
+    # The board support has to describe the bare ESP32-C3FH4 and enable the
+    # auxiliary hardware the firmware drives on this PCB.
+    grep -qx 'CONFIG_SOC_ESP32C3_FH4=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_IR=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_IR_TX=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_IR_RX=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_IR_LEARN=y' "$config"
+    grep -qx 'CONFIG_PWM=y' "$config"
   fi
   # The newer Espressif controller (C5 here) declares its own security symbols;
   # every Linkr GATT attribute is encryption-only, so all of them are required.

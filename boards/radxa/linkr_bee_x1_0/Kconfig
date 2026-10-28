@@ -1,0 +1,12 @@
+# Linkr Bee X1.0 (MV013) board configuration
+#
+# The USB Serial/JTAG controller is the console (the board's USB-C port is the
+# only console path: UART0 goes to the target board through J7). It allocates
+# its buffers from the system heap, and the application runs BLE + WiFi +
+# WebDAV + WebSocket from the same heap, so reserve the same extra board pool
+# the other ESP32-C3FH4 reference board uses.
+# SPDX-License-Identifier: Apache-2.0
+
+config HEAP_MEM_POOL_ADD_SIZE_BOARD
+	int
+	default 4096

@@ -220,6 +220,13 @@ jobs:
             toolchain: riscv64-zephyr-elf
             flash_address: "0x0"
             factory_reset: GPIO0 to GND for two seconds during boot
+          - name: Linkr Bee X1.0 (MV013)
+            board: linkr_bee_x1_0
+            slug: linkr-bee-x1-0
+            chip: esp32c3
+            toolchain: riscv64-zephyr-elf
+            flash_address: "0x0"
+            factory_reset: USER_KEY (GPIO3) to GND for two seconds during boot
           - name: ESP32-C5 DevKitC
             board: esp32c5_devkitc/esp32c5/hpcore
             slug: esp32c5-devkitc

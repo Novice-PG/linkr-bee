@@ -1,0 +1,6 @@
+board:
+  name: linkr_bee_x1_0
+  full_name: Linkr Bee X1.0 (MV013)
+  vendor: radxa
+  socs:
+  - name: esp32c3

@@ -1,0 +1,37 @@
+/*
+ * Linkr Bee X1.0 application wiring.
+ *
+ * The board definition (boards/radxa/linkr_bee_x1_0) describes the hardware;
+ * this file adds the contract the firmware expects from every board plus the
+ * firmware-test partition layout used by the other C3 targets.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart0;
+	};
+
+	aliases {
+		/* SW1 (GPIO3) is the only general-purpose key: hold it low at
+		 * reset to clear settings, and hold it low while an unbonded
+		 * host requests pairing to authorize that host. */
+		linkr-pairing = &user_button;
+		linkr-factory-reset = &user_button;
+	};
+};
+
+/* Keep the test markers out of the default coredump sector. */
+&storage_partition {
+	reg = <0x3b0000 0x2f000>;
+};
+
+&flash0 {
+	partitions {
+		linkr_test_marker_partition: partition@3df000 {
+			label = "linkr-test-marker";
+			reg = <0x3df000 0x1000>;
+		};
+	};
+};

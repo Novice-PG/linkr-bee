@@ -1,0 +1,142 @@
+/*
+ * Linkr Bee X1.0 (MV013) — ESP32-C3FH4 + USB-C + target UART header.
+ *
+ * Hardware facts taken from the MV013 "Linkr Bee X1.0" schematic (radxa,
+ * rev X1.00). Only the pins the firmware drives are described here; see
+ * docs/BEE_X1.0_HARDWARE.md for the full board map.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <espressif/esp32c3/esp32c3_fx4.dtsi>
+#include "linkr_bee_x1_0-pinctrl.dtsi"
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <espressif/partitions_0x0_default.dtsi>
+
+/ {
+	model = "Radxa Linkr Bee X1.0 (MV013)";
+	compatible = "radxa,linkr-bee-x1-0", "espressif,esp32c3";
+
+	chosen {
+		zephyr,sram = &sram1;
+		/* USB-C is the only console path: J7 pin 1/2 are the bridge UART. */
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,bt-hci = &esp32_bt_hci;
+	};
+
+	aliases {
+		watchdog0 = &wdt0;
+		linkr-rgb = &linkr_rgb;
+		linkr-opto = &linkr_opto;
+		linkr-ir = &linkr_ir;
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		/* S1 on GPIO9 is the ROM download strap. It has no external
+		 * pull-up (R3 is not fitted); the internal one is applied by
+		 * the bootloader, so never tie this pin low at reset. */
+		boot_button: button_boot {
+			label = "BOOT (GPIO9, ROM download strap)";
+			gpios = <&gpio0 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+
+		/* SW1 on GPIO3: the only general-purpose key on the board. */
+		user_button: button_user {
+			label = "USER_KEY (GPIO3)";
+			gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_1>;
+		};
+	};
+
+	/* U1 EY-PB1615RGBIC-010F: single-wire addressable RGB status LED.
+	 *
+	 * Board caveat: C31 (100 nF) is drawn across this data line, which is
+	 * far too much capacitance for the ~800 kHz waveform. The schematic
+	 * has to drop or not fit C31 for the LED to work; the driver cannot
+	 * compensate for it.
+	 */
+	linkr_rgb: linkr-rgb {
+		compatible = "radxa,linkr-ws2812";
+		data-gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+		chain-length = <1>;
+		/* Everlight RGBIC parts use the WS2812 GRB ordering. */
+		color-order = "GRB";
+		status = "okay";
+	};
+
+	/* Q1 HT_354_ATP1 optocoupler: the LED (anode to +3V3 via R13) is driven
+	 * by GPIO10 low, and its output transistor is wired straight across J5
+	 * pins 1-2. So GPIO10 low closes an isolated dry contact. */
+	linkr_opto: linkr-opto {
+		compatible = "radxa,linkr-opto-switch";
+		gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+
+	/* D7 IR LED (IR19-315C/TR8) via Q2 on GPIO0; IRM_V538M3 38 kHz
+	 * demodulator output on GPIO1 (idle high, low while a mark is
+	 * received). The IR carrier is LEDC channel 0 on the same GPIO0. */
+	linkr_ir: linkr-ir {
+		compatible = "radxa,linkr-ir";
+		pwms = <&ledc0 0 PWM_HZ(38000) PWM_POLARITY_NORMAL>;
+		rx-gpios = <&gpio0 1 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		status = "okay";
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+&ledc0 {
+	status = "okay";
+	pinctrl-0 = <&ledc0_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel0@0 {
+		reg = <0x0>;
+		timer = <0>;
+	};
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+&timer0 {
+	status = "disabled";
+};
+
+&timer1 {
+	status = "disabled";
+};
+
+&esp32_bt_hci {
+	status = "okay";
+};
+
+&wifi {
+	status = "okay";
+};

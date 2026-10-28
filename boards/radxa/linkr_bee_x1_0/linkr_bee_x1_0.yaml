@@ -1,0 +1,13 @@
+identifier: linkr_bee_x1_0
+name: Linkr Bee X1.0 (MV013)
+type: mcu
+arch: riscv
+toolchain:
+  - zephyr
+supported:
+  - gpio
+  - pwm
+  - uart
+  - watchdog
+  - netif:wifi
+vendor: radxa

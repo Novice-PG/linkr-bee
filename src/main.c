@@ -44,6 +44,8 @@
 #include "uart_bulk_tx.h"
 #include "ws_bridge.h"
 #include "watchdog.h"
+#include "linkr_aux.h"
+#include "linkr_status_led.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
@@ -65,9 +67,6 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define CONTROL_CMD_MAX_LEN 416
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
-#if DT_NODE_HAS_STATUS(DT_ALIAS(led0), okay)
-#define ACTIVITY_LED_NODE DT_ALIAS(led0)
-#endif
 
 #if DT_HAS_ALIAS(linkr_factory_reset)
 #define FACTORY_RESET_NODE DT_ALIAS(linkr_factory_reset)
@@ -119,11 +118,6 @@ struct bridge_packet {
 #endif
 
 static const struct device *const bridge_uart = DEVICE_DT_GET(LINKR_UART_NODE);
-#if DT_NODE_HAS_STATUS(ACTIVITY_LED_NODE, okay)
-static const struct gpio_dt_spec activity_led =
-	GPIO_DT_SPEC_GET(ACTIVITY_LED_NODE, gpios);
-static struct k_work_delayable led_off_work;
-#endif
 #if defined(FACTORY_RESET_NODE)
 static const struct gpio_dt_spec factory_reset_gpio =
 	GPIO_DT_SPEC_GET(FACTORY_RESET_NODE, gpios);
@@ -778,28 +772,16 @@ static int linkr_ble_name_init(void)
 }
 #endif
 
-#if DT_NODE_HAS_STATUS(ACTIVITY_LED_NODE, okay)
-static void led_off(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	gpio_pin_set_dt(&activity_led, 0);
-}
-
+/*
+ * The status LED moved into linkr_status_led.c so that boards with an
+ * addressable RGB LED (Linkr Bee X1.0) and boards with a plain GPIO LED share
+ * one call site. Activity stays a short flash; the RGB backend decides what
+ * colour the flash uses.
+ */
 static void signal_uart_activity(void)
 {
-	if (!device_is_ready(activity_led.port)) {
-		return;
-	}
-
-	gpio_pin_set_dt(&activity_led, 1);
-	k_work_reschedule(&led_off_work, K_MSEC(40));
+	linkr_status_led_activity();
 }
-#else
-static void signal_uart_activity(void)
-{
-}
-#endif
 
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static void uart_rx_irq_callback(const struct device *dev, void *user_data)
@@ -839,23 +821,6 @@ static void uart_rx_irq_enable(void)
 #endif
 }
 
-#if DT_NODE_HAS_STATUS(ACTIVITY_LED_NODE, okay) && \
-	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
-static void blink_activity_led(int count, int delay_ms)
-{
-	if (!device_is_ready(activity_led.port)) {
-		return;
-	}
-
-	for (int i = 0; i < count; i++) {
-		gpio_pin_set_dt(&activity_led, 1);
-		k_sleep(K_MSEC(delay_ms));
-		gpio_pin_set_dt(&activity_led, 0);
-		k_sleep(K_MSEC(delay_ms));
-	}
-}
-#endif
-
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static void indicate_loopback_result(bool ok)
 {
@@ -864,9 +829,7 @@ static void indicate_loopback_result(bool ok)
 		return;
 	}
 
-#if DT_NODE_HAS_STATUS(ACTIVITY_LED_NODE, okay)
-	blink_activity_led(3, 80);
-#endif
+	linkr_status_led_blink(3, 80);
 }
 #endif
 
@@ -1603,7 +1566,9 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		} else if (len >= 2 && data[0] == '@' &&
 			   (data[1] == 'c' || data[1] == 'i' || data[1] == 'u' || data[1] == 'w' ||
 			    data[1] == 'd' || data[1] == 's' ||
-			    data[1] == 'a' || data[1] == 'n') &&
+			    data[1] == 'a' || data[1] == 'n' ||
+			    data[1] == 'l' || data[1] == 'o' || data[1] == 'r' ||
+			    data[1] == 'p' || data[1] == 'y') &&
 			   (len == 2 || data[2] == '?' ||
 			    data[2] == '=' || data[2] == ' ')) {
 			short_ch = data[1];
@@ -1630,6 +1595,17 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		(void)send_control_response(conn, "%s", session_response);
 		return true;
 	}
+
+	/* ---- Auxiliary board I/O (@l / @o / @r) ---- */
+	{
+		char aux_response[192];
+
+		if (linkr_aux_command(body, aux_response, sizeof(aux_response))) {
+			(void)send_control_response(conn, "%s", aux_response);
+			return true;
+		}
+	}
+
 	bool readonly = !strcmp(body, "h") || !strcmp(body, "help") ||
 		!strcmp(body, "i?") || !strcmp(body, "info?") ||
 		!strcmp(body, "u?") || !strcmp(body, "uart?") ||
@@ -1655,6 +1631,9 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
+		char aux_help_text[LINKR_AUX_HELP_MAX];
+
+		linkr_aux_help(aux_help_text, sizeof(aux_help_text));
 		(void)send_control_response(conn,
 					     "OK cmds: @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
@@ -1673,7 +1652,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    "@s?|@s on|@s off|"
 					    "@s token[=<32 hex>]|@s token off"
 #endif
-					    "\r\n");
+					    "%s\r\n", aux_help_text);
 		return true;
 	}
 
@@ -2542,15 +2521,15 @@ int main(void)
 	}
 #endif
 
-#if DT_NODE_HAS_STATUS(ACTIVITY_LED_NODE, okay)
-	if (!device_is_ready(activity_led.port)) {
-		LOG_ERR("Activity LED device is not ready");
-		return -ENODEV;
+	/*
+	 * Status LED, optocoupler contact and IR transceiver. Each is optional
+	 * per board; the helper initializes whatever the devicetree describes
+	 * and reports the first failure without blocking the others.
+	 */
+	err = linkr_aux_init();
+	if (err) {
+		LOG_WRN("Auxiliary board I/O incomplete: %d", err);
 	}
-
-	gpio_pin_configure_dt(&activity_led, GPIO_OUTPUT_INACTIVE);
-	k_work_init_delayable(&led_off_work, led_off);
-#endif
 
 #if defined(FACTORY_RESET_NODE)
 	if (factory_reset_requested()) {

@@ -26,7 +26,7 @@ class BleSecurityTests(unittest.TestCase):
 
     def test_c3_c5_production_configs_require_gpio_authorization(self):
         for board in ["esp32c3_supermini", "esp32c3_devkitm", "esp32c3_devkitc",
-                      "esp32c5_devkitc_esp32c5_hpcore"]:
+                      "esp32c5_devkitc_esp32c5_hpcore", "linkr_bee_x1_0"]:
             with self.subTest(board=board):
                 config = (ROOT / "boards" / f"{board}.conf").read_text()
                 self.assertIn("CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y", config.splitlines())

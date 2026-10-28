@@ -1,0 +1,20 @@
+description: |
+  Radxa Linkr Bee X1.0 optocoupler dry-contact switch.
+
+  The board wires a Q1 HT_354_ATP1 optocoupler across J5 pins 1-2: driving the
+  input LED closes an isolated contact that the application can use as a
+  remote button (for example a target board's reset or power key). GPIO10
+  drives the LED, and the board wires the LED anode to +3V3 through R13 510R,
+  so the contact closes when the pin is driven low.
+
+compatible: "radxa,linkr-opto-switch"
+
+include: [base.yaml]
+
+properties:
+  gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Control GPIO for the optocoupler LED. Declare it GPIO_ACTIVE_LOW so the
+      logical "switch closed" state is the state that lights the LED.
