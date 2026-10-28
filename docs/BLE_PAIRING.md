@@ -9,6 +9,7 @@
 |------|-----------|-----------------|
 | ESP32-C3 DevKitC / DevKitM / Super Mini | GPIO1 | `PAIRING_GPIO_AUTH=y` |
 | ESP32-C5 DevKitC | GPIO1 | `PAIRING_GPIO_AUTH=y` |
+| **Linkr Bee X1.0（MV013）** | **GPIO3**（USER_KEY） | `PAIRING_GPIO_AUTH=y` |
 | ESP32-WROOM-32 DevKitC | GPIO4（可选） | `PAIRING_GPIO_AUTH=n` |
 
 C5 DevKitC 正式固件仍需在 GPIO1 外接按钮或跳线。受控台架测试可显式加载
@@ -16,7 +17,8 @@ C5 DevKitC 正式固件仍需在 GPIO1 外接按钮或跳线。受控台架测�
 构建命令和风险说明见[开发文档](DEVELOPMENT.zh-CN.md#配对-gpio持久化与恢复出厂)。
 
 配对 GPIO 不被默认 UART、LED 或恢复出厂功能占用（WROOM 的 GPIO13 仅在启用
-autobaud 时作按键，GPIO2 为活动 LED）。用按钮或跳线将配对 GPIO 接到 Bee 的 GND。
+autobaud 时作按键，GPIO2 为活动 LED）。Linkr Bee X1.0 上 GPIO3 同时是恢复出厂
+输入：上电时按住 ≥2 秒清设置，正常运行时按住则作为配对授权。用按钮或跳线将配对 GPIO 接到 Bee 的 GND。
 
 以下步骤适用于启用授权检查的板型（C3/C5；WROOM 需先设置
 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`）：
@@ -43,7 +45,8 @@ autobaud 时作按键，GPIO2 为活动 LED）。用按钮或跳线将配对 GPI
   断开连接，不继续读写串口或管理特征。
 - Python CLI：`--pair` 在 Linux 等支持的平台主动调用系统配对；macOS 在读取
   加密特征时弹出系统配对。首次操作时，启用授权检查的板型先拉低配对 GPIO
-  （C3/C5 为 GPIO1；WROOM 默认跳过），必要时增加 `--timeout`。
+  （C3/C5 为 GPIO1，Linkr Bee X1.0 为 GPIO3/USER_KEY；WROOM 默认跳过），
+  必要时增加 `--timeout`。
   连接或配对失败以退出码 `1` 结束（终端会话中设备断开是 `3`）；先 `--scan`
   可以确认设备是否在场（它会列出全部附近设备，包括未广播名字的）。
 - Linux C CLI：`--pair` 调用 BlueZ `Device1.Pair`。系统需有可用的 Bluetooth

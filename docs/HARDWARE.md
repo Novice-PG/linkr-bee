@@ -64,7 +64,8 @@ ESP32-C5 DevKitC 差异：
 
 ## 5.1 恢复出厂输入
 
-- C3 使用 GPIO0；C5 DevKitC 使用 GPIO28（BOOT）。两者均启用内部上拉
+- C3 使用 GPIO0；C5 DevKitC 使用 GPIO28（BOOT）；Linkr Bee X1.0 使用 GPIO3
+  （USER_KEY，板上 10K 上拉）。三者均启用内部上拉
 - 在设备复位/上电时将对应输入短接至 GND，并保持 **2 秒**，固件才执行恢复出厂，避免启动瞬态误触发
 - 固件在 Bluetooth 与 settings 初始化前擦除 `storage_partition`（NVS），清除 Bluetooth identity、WiFi/WebDAV 配置和上传 boot 计数器
 - 不会擦除固件、`linkr-test-marker` 或 coredump 分区；BLE identity 会重新生成，原中心设备应删除旧设备记录后重新连接
@@ -118,6 +119,8 @@ ESP32-C5 DevKitC 差异：
 
 - **esp32c3_supermini**（主目标，已验证）
 - esp32c3_devkitm / esp32c3_devkitc（overlay 已提供，引脚同上）
+- **linkr_bee_x1_0**（自研 Linkr Bee X1.0 / MV013 板，板级定义在
+  `boards/radxa/linkr_bee_x1_0`，见下方小节）
 - esp32c5_devkitc/esp32c5/hpcore（UART1 GPIO11/12，USB Serial/JTAG console，GPIO28 恢复出厂）
 - **esp32_devkitc/esp32/procpu**（ESP32-WROOM-32，Xtensa 双核，已验证）
 
@@ -198,6 +201,31 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
 - 双 CH340 USB：两个口都插入时会出现两个 `ttyUSB`，编号随插拔顺序变化，不能按固定编号判断；当前单口实测 `ttyUSB0` 可烧录并输出 UART0 console，桥接 UART2 口未插入时不会出现对应设备。用 `esptool read-mac` 或 console 输出确认端口。
 - WiFi/BLE 共存时功耗较高（power save 已禁用以降低延迟）
 
+### Linkr Bee X1.0（MV013）
+
+自研量产板：ESP32-C3FH4（封装内 4 MB flash）+ USB-C + 目标板 4 pin 接口，
+另有 RGB 状态灯、光耦干接点、红外收发和 4 线 GPIO 扩展口。完整说明见
+[Linkr Bee X1.0 硬件说明](BEE_X1.0_HARDWARE.md)，这里只列固件用到的引脚：
+
+| 功能 | GPIO | 说明 |
+|------|------|------|
+| 桥接 UART0 RX | 20 | J7.1（目标 TX），串 1K + 4.7K 上拉 + TVS |
+| 桥接 UART0 TX | 21 | J7.2（目标 RX），串 499R + TVS |
+| Console / 烧录 | USB | 原生 USB Serial/JTAG（USB-C） |
+| 状态灯 | 8 | U1 WS2812 兼容 RGBIC，单线协议由固件产生 |
+| 配对 + 恢复出厂 | 3 | SW1（USER_KEY），内部/板上 10K 上拉，低有效 |
+| 光耦干接点 | 10 | 拉低点亮 Q1，闭合 J5 的 1-2 脚 |
+| 红外发送 | 0 | LEDC CH0 产生 38 kHz 载波，门控 Q2 |
+| 红外接收 | 1 | IRM_V538M3 解调输出，NEC 解码 |
+| BOOT（下载模式） | 9 | ROM strapping；固件不作为普通按键 |
+| 扩展口 J6 | 4/5/6/7 | 板上 100R + 1 µF RC 与 ESD，当前固件未使用 |
+
+注意与 DevKit 系列的差异：配对/恢复出厂是 **GPIO3**（不是 GPIO1/GPIO0），
+状态灯是单线 RGB（不是普通 GPIO LED），并且板上**没有** EN/RST 按键、
+没有 RTS/CTS。`docs/BEE_X1.0_HARDWARE.md` 第 7 节列出了 C31 电容、GPIO9
+上拉、GPIO12–17 被封装内 flash 占用等硬件注意事项。
+
+
 ## 12. 固件对外接口（供硬件/集成联调）
 
 - BLE 广播名：所有板型默认 `Linkr Bee XXXX`，`XXXX` 为硬件 MAC 最后四位
@@ -240,6 +268,10 @@ west flash --esp-device /dev/cu.usbmodemXXXX
 west build -b esp32c5_devkitc/esp32c5/hpcore /path/to/linkr-bee
 tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c5
 
+# Linkr Bee X1.0（板级定义在仓库内，无需 -DBOARD_ROOT）
+west build -b linkr_bee_x1_0 /path/to/linkr-bee
+tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c3
+
 # ESP32-WROOM-32 (Xtensa 双核)
 west build -b esp32_devkitc/esp32/procpu /path/to/linkr-bee
 west flash --runner esp32
@@ -254,3 +286,4 @@ west flash --runner esp32
 | 2026-07-07 | v1.0 | 初版，对应已验证固件（含 WiFi/WebDAV） |
 | 2026-09-16 | v1.1 | 新增 ESP32-WROOM-32 (Xtensa) 支持 |
 | 2026-10-21 | v1.2 | WROOM 增加按需自动波特率（默认关闭，可选 `@a`/GPIO13 按键）、默认关闭 GPIO4 配对授权、恢复 GPIO2 活动 LED；所有板型默认广播 `Linkr Bee XXXX`（硬件 MAC 后四位），支持 `@n` 自定义名 |
+| 2026-10-28 | v1.3 | 新增 Linkr Bee X1.0（MV013）板级支持：ESP32-C3FH4、USB Serial/JTAG console、GPIO3 配对/恢复出厂、GPIO8 单线 RGB 状态灯、GPIO10 光耦干接点、GPIO0/1 红外 NEC 收发（`@l`/`@o`/`@r` 命令） |

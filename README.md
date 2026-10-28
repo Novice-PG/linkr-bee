@@ -34,6 +34,11 @@ target's own UART bytes and does not replace the target shell.
 
 - Terminal in the browser, in the phone apps, or on the command line, with ANSI and
   256-color output.
+- Board panel on the Linkr Bee X1.0: RGB status LED, isolated optocoupler
+  contact, NEC remote send/receive, IR learning with slots and names stored
+  on the board, a board-stored AI prompt, and an optional board-stored AI
+  configuration (endpoint, model, limits; the key stays on the host unless
+  explicitly saved).
 - Change baud rate, data bits, parity, stop bits, and flow control while connected.
   Default is `115200,8,n,1,n`.
 - Send Enter as raw, CR, LF, or CRLF for bootloaders and different shells.
@@ -84,8 +89,8 @@ Browser / desktop / mobile / Linkr
         SBC or embedded target
 ```
 
-- A Linkr Bee accessory: ESP32-C3 Super Mini, ESP32-C3 DevKitM, ESP32-C3 DevKitC,
-  or ESP32-C5 DevKitC.
+- A Linkr Bee accessory: Linkr Bee X1.0 (MV013), ESP32-C3 Super Mini,
+  ESP32-C3 DevKitM, ESP32-C3 DevKitC, or ESP32-C5 DevKitC.
 - A target with a UART console, and three wires: target TX to accessory RX, target RX
   to accessory TX, and a shared ground.
 - A host running a compatible browser, a desktop terminal client, or a phone app
@@ -111,15 +116,20 @@ The UART side is 3.3 V logic, not RS-232. See the
 
 2. Wire it to the target, crossing TX and RX and connecting ground. On an ESP32-C3
    Super Mini the bridge uses GPIO20 (RX) and GPIO21 (TX); other boards are in the
-   [hardware requirements](docs/HARDWARE.md#3-引脚分配).
+   [hardware requirements](docs/HARDWARE.md#3-引脚分配). On the Linkr Bee X1.0 the
+   target plugs into J7: pin 1 RX, pin 2 TX, pin 3 GND, pin 4 optional 5 V in.
 
-3. Power both sides. The blue activity LED flashes while bytes cross the bridge
-   on every board (WROOM: GPIO2). On WROOM the optional autobaud key is GPIO13;
+3. Power both sides. The activity LED flashes while bytes cross the bridge on
+   every board (WROOM: GPIO2; Linkr Bee X1.0: the single-wire RGB LED on GPIO8).
+   On the X1.0, `@l`, `@o` and `@r` also expose that LED, an isolated dry
+   contact, and an NEC IR remote; see the
+   [X1.0 hardware notes](docs/BEE_X1.0_HARDWARE.md#5-板载外设与固件命令). On WROOM the optional autobaud key is GPIO13;
    it is used only when `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y` (off in the
    default build).
 
 4. Authorize this host if the board requires it: hold the pairing GPIO to GND
-   (**GPIO1** on C3/C5), connect, and accept the pairing prompt. WROOM ships
+   (**GPIO1** on C3/C5, **USER_KEY/GPIO3** on the Linkr Bee X1.0), connect, and
+   accept the pairing prompt. WROOM ships
    with pairing authorization disabled, so no GPIO4 press is needed; enable
    `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` to require it.
 
@@ -199,7 +209,8 @@ network. Use LAN mode on a network you trust.
 ## Pairing and security
 
 - The Bluetooth LE link is encrypted and bonded. On C3/C5 each new host is
-  authorized once by holding **GPIO1** to GND during pairing. WROOM disables the
+  authorized once by holding **GPIO1** to GND during pairing
+  (**GPIO3/USER_KEY** on the Linkr Bee X1.0). WROOM disables the
   physical pairing check by default; GPIO4 is optional when
   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` is enabled.
 - Eight hosts are remembered across reboots and are not evicted automatically, so
@@ -220,7 +231,7 @@ network. Use LAN mode on a network you trust.
 | No output | Target TX to accessory RX, target is printing, baud rate matches |
 | Output but no input | Target RX to accessory TX; hardware flow control off unless CTS and RTS are both wired |
 | Garbled output | UART format matches the target: baud rate, data bits, parity, stop bits |
-| No pairing prompt | On C3/C5, ground GPIO1 before connecting; WROOM needs no GPIO press unless its optional pairing check is enabled |
+| No pairing prompt | On C3/C5, ground GPIO1 before connecting (Linkr Bee X1.0: GPIO3/USER_KEY); WROOM needs no GPIO press unless its optional pairing check is enabled |
 | LAN mode fails | Accessory on 2.4 GHz, host on the same network, token matches the one reported over Bluetooth LE |
 
 ## Limits

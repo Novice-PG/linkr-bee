@@ -108,10 +108,18 @@ ESP32-C5 DevKitC：
 west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ```
 
+Linkr Bee X1.0（MV013）量产板：板级定义在本仓库
+`boards/radxa/linkr_bee_x1_0`，`CMakeLists.txt` 已把应用根目录登记为
+`BOARD_ROOT`，不需要额外的 CMake 参数：
+
+```sh
+west build -b linkr_bee_x1_0 linkr-bee
+```
+
 ### GitHub Actions 构建与刷写
 
 `.github/workflows/build.yml` 使用矩阵构建五块板的默认 WiFi + BLE 配置：
-`esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、
+`esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、`linkr_bee_x1_0`、
 `esp32c5_devkitc/esp32c5/hpcore` 与 `esp32_devkitc/esp32/procpu`
 （ESP32-WROOM-32）。它会在 `main` push、pull request 和手动触发时运行，
 使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1；每个 job 只安装该板需要的工具链
@@ -157,6 +165,38 @@ GPIO11/12 上的 `uart1`。若不存在桥专用 chosen 节点，应用回退到
 - TX：GPIO21
 - 活动 LED：GPIO8 蓝色 LED，在 UART 收发活动时闪烁
 - 恢复出厂：GPIO0，固件启用内部上拉；启动时可与 GND 短接
+
+### Linkr Bee X1.0 板级支持与板载外设
+
+`boards/radxa/linkr_bee_x1_0/` 是完整的 out-of-tree Zephyr 板级定义
+（board.yml、Kconfig、defconfig、pinctrl、DTS）：裸 ESP32-C3FH4、USB
+Serial/JTAG console、UART0（GPIO20/21）作桥接口、SW1（GPIO3）作配对/恢复
+出厂键，另外描述了三块仅本板有的外设：
+
+| devicetree 节点 / alias | binding | 硬件 | 固件 |
+| --- | --- | --- | --- |
+| `linkr-rgb` | `radxa,linkr-ws2812` | GPIO8 上的 U1 WS2812 兼容 RGBIC | `src/linkr_ws2812.c`、`src/linkr_status_led.c` |
+| `linkr-opto` | `radxa,linkr-opto-switch` | GPIO10 控制的 Q1 光耦干接点 | `src/linkr_opto.c` |
+| `linkr-ir` | `radxa,linkr-ir` | GPIO0 红外发射（LEDC 38 kHz 载波）+ GPIO1 接收 | `src/linkr_ir.c`、`src/ir_nec.c`、`src/ir_learn.c` |
+
+binding 在 `dts/bindings/linkr/`。没有对应节点的板子上这些源文件编译成桩，
+`@l`/`@o`/`@r` 命令返回 `ERR ... unsupported`，同一份固件树仍服务全部板型。
+
+Kconfig：`CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`、
+`CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`、
+`CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH`、`CONFIG_LINKR_BLE_BRIDGE_IR`、
+`CONFIG_LINKR_BLE_BRIDGE_IR_TX`、`CONFIG_LINKR_BLE_BRIDGE_IR_RX`，以及
+`CONFIG_LINKR_BLE_BRIDGE_IR_LEARN*`（原始波形学习/回放，存 NVS，槽位数、
+最大段数、静默时间与超时都可配）。
+
+没有板子时可以用 `/?demo=board` 预览：`web/demo_mode.js` 用与固件一致的回复
+模拟管理通道（包括一次红外学习过程），`mobile/browser-test/demo_mode.spec.mjs`
+保证模拟数据和面板解析同步。
+
+硬件细节、引脚表与必须在量产前修的 PCB 问题见
+[Linkr Bee X1.0 硬件说明](BEE_X1.0_HARDWARE.md)（最要紧的两条：GPIO8 上的
+C31 100 nF 必须去掉；GPIO12–17 被 FH4 封装内 flash 占用）。
+`tools/verify.sh` 会构建该板并断言 FH4 与 RGB/光耦/IR 配置。
 
 ## SBC UART 设置
 
@@ -828,6 +868,15 @@ source <(./linkr_ble_terminal_c --print-completion zsh)
 要用补全就把客户端装成命令——PyInstaller 产物 `linkr-ble-terminal`、自己包一层 wrapper，
 或把脚本放到 `PATH`。fish 尤其严格：命令不在 `PATH` 上时它根本不加载对应的补全文件。
 
+## 前端 UI 复核
+
+前端改动完成前必须做视觉复核：起 demo（`sh tools/serve_web.sh 8090`，打开
+`/?demo=board`），运行 `cd mobile && node ui-review.mjs` 生成手机/平板/桌面、
+明暗两套主题、中英两种语言的截图（在 `build-demo/ui-review/`），对照
+[DESIGN.md](../DESIGN.md) 检查裁切、对齐、字体/颜色/间距漂移和缺失状态，并在
+提交说明里记录复核范围。完整清单见 [AGENTS.md](../AGENTS.md)。前端模块按能力显示：当前板子不支持的功能要
+隐藏整张卡片（必要时连同分区），不要留下被禁用的空控件。
+
 ## Web Bluetooth 终端
 
 浏览器终端是额外选项，不替代 Python 终端。控制走 Management Service v1，
@@ -1013,7 +1062,7 @@ C3、C5 已验证启动和故障恢复时无此告警；其他支持板型目前
 
 | 层次 | 本仓库已验证 | 仍需硬件验证 |
 | --- | --- | --- |
-| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | — |
+| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、`linkr_bee_x1_0` 与 `esp32c5_devkitc/esp32c5/hpcore` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | — |
 | 协议主机测试 | `tests/` 编译并驱动生产代码中的管理协议、安全配对门禁、目标绑定、WebDAV 与 HCI 顺序逻辑，含 C3/C5 构建约束 | 真实 SMP 配对、NVS 持久化、射频行为 |
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |

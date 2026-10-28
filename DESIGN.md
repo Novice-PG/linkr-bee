@@ -198,6 +198,14 @@ components:
 - **Focus:** 边框转焦点蓝 + 3px 蓝色外发光，无 outline
 - **Disabled:** 不单独置灰输入框；依赖所属按钮组的禁用态表达
 
+### Inline disclosures
+- **Usage:** 低频但相关的设置（高级参数、CLIProxy 导入）收进主卡片底部的
+  `.agent-inline-disclosure`：1px 分隔线 + 12.5px 次要色摘要 + 右侧小箭头，默认收起。
+- **Cards that are disclosures:** 整张卡片折叠时用 `<details class="card">` 和
+  `summary.card-title`；关闭态只保留标题带，不留空白 padding。
+- **AI settings scroll:** AI 页独占一个滚动区（`.agent-settings-scroll`），底部状态/兜底
+  操作是固定 footer。一个页面只有一个滚动条，footer 不覆盖内容。
+
 ### Navigation
 - 本系统无传统导航。顶栏 = 品牌区 + 状态药丸 + 全局动作（主题/语言/面板开关）；移动端侧栏降级为左滑抽屉（transform 滑入 + 半透明背板）。
 

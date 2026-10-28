@@ -32,6 +32,8 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 ## 能做什么
 
 - 浏览器、手机 App、命令行三种终端，支持 ANSI 彩色与 256 色。
+- Linkr Bee X1.0 的板载面板：RGB 状态灯、隔离光耦接点、NEC 红外收发，
+  槽位/名字都存储在板上的红外学习，板载 AI 提示词，以及可选的板载 AI 配置（地址、模型、上限；API Key 默认仍只留在主机）。
 - 连接状态下改波特率、数据位、校验位、停止位和流控，默认 `115200,8,n,1,n`。
 - 回车可按 raw、CR、LF、CRLF 发送，适配 Bootloader 和不同 Shell。
 - 日志导出、WebDAV 上传，诊断面板可查固件、UART 缓冲、WiFi 和收发计数。
@@ -75,7 +77,7 @@ RISC-V 64 位和 LoongArch64 Linux 的 CLI/TUI 移植具备基础条件，尚未
         SBC 或嵌入式设备
 ```
 
-- 一台 Linkr Bee 配件：ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC
+- 一台 Linkr Bee 配件：Linkr Bee X1.0（MV013）、ESP32-C3 Super Mini、ESP32-C3 DevKitM、ESP32-C3 DevKitC
   或 ESP32-C5 DevKitC。
 - 一台带 UART 控制台的目标设备，三根线：目标 TX 接配件 RX、目标 RX 接配件 TX、共地。
 - 一台运行兼容浏览器、桌面终端客户端或手机 App 的主机，按上表选择。
@@ -98,14 +100,18 @@ UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
    [开发指南](docs/DEVELOPMENT.zh-CN.md#构建)。
 
 2. 接线：交叉连接 TX/RX，并连接 GND。ESP32-C3 Super Mini 上桥接 UART 为 GPIO20 (RX)
-   和 GPIO21 (TX)，其他板子见[硬件需求](docs/HARDWARE.md#3-引脚分配)。
+   和 GPIO21 (TX)，其他板子见[硬件需求](docs/HARDWARE.md#3-引脚分配)。Linkr Bee X1.0
+   用 J7 接目标板：1=RX、2=TX、3=GND、4=可选 5 V 输入。
 
-3. 给两侧上电。所有板子在串口收发数据时都会让板载蓝灯闪烁（WROOM 为 GPIO2）。
+3. 给两侧上电。所有板子在串口收发数据时都会让活动灯闪烁（WROOM 为 GPIO2；
+   Linkr Bee X1.0 为 GPIO8 上的单线 RGB 灯）。X1.0 上还可以用 `@l`、`@o`、`@r`
+   控制这盏灯、一个隔离干接点和 NEC 红外遥控，见
+   [X1.0 硬件说明](docs/BEE_X1.0_HARDWARE.md#5-板载外设与固件命令)。
    WROOM 的自动波特率按键为 GPIO13，只在
    `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y` 时使用（默认构建关闭）。
 
-4. 需要物理授权的板型，把配对 GPIO 接地（C3/C5 为 **GPIO1**），连接并接受系统
-   配对提示，完成后释放。WROOM 默认关闭配对授权，不需要按 GPIO4；如需启用，
+4. 需要物理授权的板型，把配对 GPIO 接地（C3/C5 为 **GPIO1**，Linkr Bee X1.0
+   为 **USER_KEY/GPIO3**），连接并接受系统配对提示，完成后释放。WROOM 默认关闭配对授权，不需要按 GPIO4；如需启用，
    打开 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`。这台主机会被记住。
 
 5. 打开客户端。Web 终端：
@@ -170,7 +176,8 @@ Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
 
 ## 配对与安全
 
-- 蓝牙链路要求加密和绑定。C3/C5 每台新主机配对时把 **GPIO1** 接地授权一次；
+- 蓝牙链路要求加密和绑定。C3/C5 每台新主机配对时把 **GPIO1** 接地授权一次
+  （Linkr Bee X1.0 为 **GPIO3/USER_KEY**）；
   WROOM 默认关闭物理授权，不需要按 GPIO4，启用
   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` 后才要求拉低 GPIO4。
 - 最多记住八台主机，重启后保留，不会自动淘汰旧主机；要加第九台，先删掉不用的或恢复
@@ -191,7 +198,7 @@ Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
 | 没有输出 | 目标 TX 接了配件 RX、目标确实在输出、波特率一致 |
 | 有输出但输入没反应 | 目标 RX 接了配件 TX；除非 CTS 和 RTS 都接了，否则关掉硬件流控 |
 | 输出乱码 | UART 格式与目标一致：波特率、数据位、校验位、停止位 |
-| 没有配对提示 | C3/C5 在连接前把 GPIO1 接地；WROOM 默认不需要按 GPIO，除非启用了可选的配对授权 |
+| 没有配对提示 | C3/C5 在连接前把 GPIO1 接地（Linkr Bee X1.0 为 GPIO3/USER_KEY）；WROOM 默认不需要按 GPIO，除非启用了可选的配对授权 |
 | 局域网模式连不上 | 配件在 2.4 GHz 网络上、主机同网段、令牌与蓝牙通道读到的一致 |
 
 ## 已知限制

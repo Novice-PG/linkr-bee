@@ -121,11 +121,20 @@ For ESP32-C5 DevKitC:
 west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ```
 
+For the Linkr Bee X1.0 production board (MV013). The board definition lives in
+this repository under `boards/radxa/linkr_bee_x1_0`, and `CMakeLists.txt`
+registers the application root as a `BOARD_ROOT`, so no extra CMake argument is
+needed:
+
+```sh
+west build -b linkr_bee_x1_0 linkr-bee
+```
+
 ### GitHub Actions build
 
 The workflow in `.github/workflows/build.yml` builds each board's default
 WiFi + BLE configuration for `esp32c3_supermini`, `esp32c3_devkitm`,
-`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, and
+`esp32c3_devkitc`, `linkr_bee_x1_0`, `esp32c5_devkitc/esp32c5/hpcore`, and
 `esp32_devkitc/esp32/procpu` (ESP32-WROOM-32). It runs on pushes to `main`,
 pull requests, and manual dispatches using Zephyr v4.4.1 with Zephyr SDK
 1.0.1. To keep runner disk usage bounded, each job installs only the
@@ -147,6 +156,7 @@ run. The flashable images are:
 linkr-bee-esp32c3-supermini.bin
 linkr-bee-esp32c3-devkitm.bin
 linkr-bee-esp32c3-devkitc.bin
+linkr-bee-linkr-bee-x1-0.bin
 linkr-bee-esp32c5-devkitc.bin
 linkr-bee-esp32-wroom-32.bin
 ```
@@ -188,6 +198,60 @@ On `esp32c3_supermini`, `uart0` is enabled for bridge traffic:
 - TX: GPIO21
 - Activity LED: GPIO8 blue LED, flashed on UART RX and TX activity
 - Factory reset: GPIO0, internally pulled up; short it to GND during boot
+
+### Linkr Bee X1.0 board support and auxiliary hardware
+
+`boards/radxa/linkr_bee_x1_0/` is a full out-of-tree Zephyr board (board.yml,
+Kconfig, defconfig, pinctrl and DTS). It describes a bare ESP32-C3FH4 with the
+USB Serial/JTAG console, UART0 on GPIO20/21 as the bridge port, SW1 (GPIO3) as
+the pairing / factory-reset key, and three auxiliary devices that only this PCB
+has:
+
+| Devicetree node / alias | Binding | Hardware | App code |
+| --- | --- | --- | --- |
+| `linkr-rgb` | `radxa,linkr-ws2812` | U1 WS2812-compatible RGBIC on GPIO8 | `src/linkr_ws2812.c`, `src/linkr_status_led.c` |
+| `linkr-opto` | `radxa,linkr-opto-switch` | Q1 optocoupler dry contact on GPIO10 | `src/linkr_opto.c` |
+| `linkr-ir` | `radxa,linkr-ir` | IR LED on GPIO0 (LEDC 38 kHz carrier), IRM_V538M3 on GPIO1 | `src/linkr_ir.c`, `src/ir_nec.c`, `src/ir_learn.c` |
+
+The bindings live in `dts/bindings/linkr/`. Every auxiliary source compiles to
+stubs when the devicetree has no matching node, so one firmware tree still
+serves the dev boards and every command below answers `ERR ... unsupported`
+instead of disappearing:
+
+| Command | Purpose |
+| --- | --- |
+| `@l?`, `@l=<r>,<g>,<b>`, `@l off` | status LED query / colour / off |
+| `@o?`, `@o on`, `@o off`, `@o pulse <ms>` | optocoupler contact |
+| `@r?`, `@r tx <addr>,<cmd>[,<repeats>]`, `@r rx on\|off`, `@r clear` | NEC IR receiver / transmitter |
+| `@r learn [<slot>]`, `@r learn stop`, `@r play [<slot>]`, `@r slots`, `@r delete <slot>` | raw IR learning, stored in NVS |
+
+Kconfig options (all default `y` only where the devicetree node exists):
+`CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`,
+`CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`,
+`CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH`, `CONFIG_LINKR_BLE_BRIDGE_IR`,
+`CONFIG_LINKR_BLE_BRIDGE_IR_TX`, `CONFIG_LINKR_BLE_BRIDGE_IR_RX`, and the
+`CONFIG_LINKR_BLE_BRIDGE_IR_LEARN*` family (raw capture/replay of any remote,
+persisted in NVS; sizes and timeouts are tunable there).
+
+The IR transmitter is a cooperative thread that busy-waits a whole NEC frame
+(~68 ms); the 38 kHz carrier itself comes from LEDC, so only interrupts can
+stretch a mark. The RGB driver bit-bangs the WS2812 waveform under an
+interrupt lock (30 µs per pixel) because no in-tree LED-strip driver targets
+the ESP32-C3.
+
+Without a board, `/?demo=board` runs the same page against a mock accessory:
+`web/demo_mode.js` answers the management channel with firmware-shaped replies
+(including a simulated learning capture) and the browser spec
+`mobile/browser-test/demo_mode.spec.mjs` keeps it in step with the panel.
+
+Hardware facts that constrain the firmware, and the schematic issues to fix
+before a production run, are in
+[Linkr Bee X1.0 hardware](BEE_X1.0_HARDWARE.md). The two that bite first:
+C31 (100 nF) must be removed from the GPIO8 data line, and GPIO12-17 belong to
+the ESP32-C3FH4's in-package flash.
+
+`tools/verify.sh` builds this board and asserts the FH4 SoC selection plus the
+RGB/opto/IR Kconfig options.
 
 ## SBC UART settings
 
@@ -1004,6 +1068,18 @@ command instead -- the PyInstaller build `linkr-ble-terminal`, a wrapper, or the
 script on `PATH`. fish is the strictest of the three: it does not read the
 completion file at all while the command is missing from `PATH`.
 
+## Frontend UI review
+
+Every frontend change is reviewed visually before it is finished: render the
+demo (`sh tools/serve_web.sh 8090`, open `/?demo=board`) and capture
+`cd mobile && node ui-review.mjs`, which writes phone/tablet/desktop screenshots
+in both themes and both languages under `build-demo/ui-review/`. Compare them
+with [DESIGN.md](../DESIGN.md), fix clipping/alignment/type/colour drift and
+missing states, and record what was reviewed in the commit message. See
+[AGENTS.md](../AGENTS.md) for the full checklist. UI modules are
+capability-driven: when the connected board does not support a feature, hide
+its card and, if needed, its section instead of leaving disabled controls.
+
 ## Web Bluetooth terminal
 
 The browser terminal is an additional option, not a replacement for the Python
@@ -1261,7 +1337,7 @@ hardware.
 
 | Layer | Verified in this repository | Still requires hardware |
 | --- | --- | --- |
-| Firmware builds | `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and `esp32c5_devkitc/esp32c5/hpcore` build in CI under Zephyr v4.4.1, with the per-generation controller security symbols asserted | — |
+| Firmware builds | `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, `linkr_bee_x1_0`, and `esp32c5_devkitc/esp32c5/hpcore` build in CI under Zephyr v4.4.1, with the per-generation controller security symbols asserted | — |
 | Host protocol tests | `tests/` compiles and drives the production management, security, target-binding, WebDAV, and HCI-order code paths, including the C3/C5 build guards | Real SMP pairing, NVS persistence, radio behaviour |
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
