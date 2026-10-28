@@ -23,6 +23,9 @@ input or command is replayed. A deliberate **Disconnect** (and quit, a transport
 change, or a new scan) cancels the redial. Pass `--no-auto-reconnect` to leave a
 dropped link down; `--auto-reconnect` is accepted too and is the default. The
 `--bridge` child process and a failed startup dial are never retried.
+BLE retries use the actual device ID resolved by the successful connection,
+even when the first dial searched by name. Cancelling an in-flight dial rejects
+and closes its eventual result; a new dial waits for that cleanup to finish.
 
 | Task | Keys / behavior |
 |---|---|

@@ -34,6 +34,17 @@ reconnect**; a successful redial keeps the transcript and appends a
 `[reconnect]` line, and no input or command is replayed. A deliberate disconnect
 is never retried. After six failures the client stops and asks you to press
 Reconnect; the TUI has `--no-auto-reconnect` for the opposite behaviour.
+TUI BLE retries use the actual connected device ID, not a fresh name search.
+Cancellation also applies during dialing: if the system Bluetooth call is still
+pending, the client waits for it and closes its result without restoring the session.
+
+If the browser reports that the Bee is no longer in range, it first tries to
+watch that device's advertisements for up to 8 seconds. If watching is unsupported
+or discovery still fails, automatic retries stop and the button becomes
+**Reselect device**. Keep the Bee powered on and select the original device.
+Its browser device ID is checked, so a different Bee with the same name is not
+adopted; use **Switch device** to change devices intentionally. Existing pairing
+is preserved, and background retries never open the device chooser.
 
 ## Interface tour
 

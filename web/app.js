@@ -222,6 +222,7 @@ const state = {
   shiftPending: false,
   altPending: false,
   deviceRestored: false,
+  bleReselectId: null,
   sidebarCollapsed: true,
   scanning: false,
   scanResults: [],
@@ -499,6 +500,9 @@ const I18N = {
     wifiWebdav: "WiFi & WebDAV",
     connect: "Connect",
     disconnect: "Disconnect",
+    reselectDevice: "Reselect device",
+    bleReselectHint: "Browser cannot rediscover this Bee. Keep it powered on, then click Reselect device and choose the same Bee. Existing pairing is kept.",
+    bleReselectMismatch: "That is a different Bee. Select the previous device, or use Switch device to change devices.",
     reconnect: "Reconnect",
     switchDevice: "Switch device",
     queryUart: "Query UART",
@@ -708,6 +712,9 @@ const I18N = {
     wifiWebdav: "WiFi 与 WebDAV",
     connect: "连接",
     disconnect: "断开",
+    reselectDevice: "重新选择设备",
+    bleReselectHint: "浏览器暂时无法重新发现这台 Bee。请保持供电，点击「重新选择设备」并选择原来的 Bee；无需删除配对记录。",
+    bleReselectMismatch: "选择的不是原来的 Bee。请选择原设备；如需更换，请使用「切换设备」。",
     reconnect: "重新连接",
     switchDevice: "切换设备",
     queryUart: "查询 UART",
@@ -1037,6 +1044,7 @@ function setTransportMode(mode) {
 }
 
 function connectionActionKey() {
+  if (state.mode === "ble" && state.bleReselectId) return "reselectDevice";
   return state.mode === "ble" && state.device ? "reconnect" : "connect";
 }
 
@@ -3146,6 +3154,7 @@ const autoReconnect = {
   timer: null,
   ticker: null,
   nextAt: 0,
+  controller: null,
 };
 /* Set by a user-initiated disconnect so the teardown it causes is not treated
  * as a lost link. onDisconnected() consumes it. */
@@ -3184,6 +3193,7 @@ function setConnecting(connecting) {
         : t(state.connected ? "disconnect" : connectionActionKey());
     }
   }
+  renderAutoReconnectStatus();
 }
 
 function setConnected(connected, { preserveJournal = false } = {}) {
@@ -3212,6 +3222,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   serialInputRevision++;
   serialInputPending = false;
   state.connected = connected;
+  if (connected && !isWs) state.bleReselectId = null;
   if (connected && !preserveJournal) agentJournal.reset();
   agentPanel?.connectionChanged(connected);
   agentSettings?.connectionChanged();
@@ -3286,6 +3297,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     state.term?.focus();
   }
   renderSerialControl();
+  renderAutoReconnectStatus();
 }
 
 function rememberDevice(device, restored = false) {
@@ -3294,6 +3306,7 @@ function rememberDevice(device, restored = false) {
   }
   state.device = device;
   state.deviceRestored = restored;
+  state.bleReselectId = null;
   saveSetting(LAST_DEVICE_ID_KEY, device.id);
   /* The name belongs to the board that was there: an input still holding
    * the last board's name would write it onto this one. */
@@ -3940,6 +3953,12 @@ function cancelAutoReconnect(reason, { silent = false, refresh = true } = {}) {
   stopAutoReconnectTimer();
   stopAutoReconnectTicker();
   autoReconnect.active = false;
+  const controller = autoReconnect.controller;
+  autoReconnect.controller = null;
+  controller?.abort();
+  // Retire partial subscriptions, pending management requests and input now,
+  // even if a native connect call must finish before its transport can close.
+  if (controller) onDisconnected();
   autoReconnect.attempts = 0;
   autoReconnect.nextAt = 0;
   if (!silent) appendLine(`[reconnect] ${reason || t("reconnectCancelled")}`);
@@ -3979,12 +3998,21 @@ async function attemptAutoReconnect(index) {
     autoReconnectGaveUp();
     return;
   }
+  const controller = new AbortController();
+  autoReconnect.controller = controller;
   try {
-    await connect();
+    await connect({ signal: controller.signal });
   } catch (error) {
-    appendLine(`[reconnect] ${error.message}`);
+    if (!controller.signal.aborted) appendLine(`[reconnect] ${error.message}`);
   }
-  if (!autoReconnect.active) return;
+  if (autoReconnect.controller !== controller || !autoReconnect.active) return;
+  autoReconnect.controller = null;
+  if (state.mode === "ble" && state.bleReselectId) {
+    autoReconnect.active = false;
+    setConnecting(false);
+    refreshDynamicTexts();
+    return;
+  }
   if (state.connected) {
     autoReconnect.active = false;
     autoReconnect.attempts = 0;
@@ -3992,6 +4020,7 @@ async function attemptAutoReconnect(index) {
     stopAutoReconnectTicker();
     appendLine(`[reconnect] ${t("reconnectRestored")}`);
     toast(t("reconnectRestored"));
+    setConnecting(false);
     refreshDynamicTexts();
     return;
   }
@@ -4035,7 +4064,7 @@ function scheduleAutoReconnect() {
   scheduleNextAutoReconnect(0);
 }
 
-function connectWs() {
+function connectWs(signal) {
   return new Promise((resolve, reject) => {
     const host = elements.wsHostInput.value.trim();
     if (!host) {
@@ -4058,6 +4087,7 @@ function connectWs() {
     let sentToken = false;
 
     const clearTimers = () => {
+      signal?.removeEventListener("abort", abortConnect);
       clearTimeout(connectTimer);
       clearTimeout(handshakeTimer);
     };
@@ -4077,6 +4107,14 @@ function connectWs() {
       }
       reject(new Error(message));
     };
+    const abortConnect = () => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      if (state.ws === ws) state.ws = null;
+      ws.close();
+      reject(signal.reason || new DOMException("Connection cancelled", "AbortError"));
+    };
     const connectTimer = setTimeout(() => {
       failConnect(t("wsTimeout"), { i18nKey: "wsTimeout" });
       ws.close();
@@ -4087,6 +4125,8 @@ function connectWs() {
     state.wsHost = url;
     ws.binaryType = "arraybuffer";
     appendLine(`[connect] ${url}`);
+    signal?.addEventListener("abort", abortConnect, { once: true });
+    if (signal?.aborted) { abortConnect(); return; }
 
     const succeed = () => {
       if (settled) {
@@ -4170,12 +4210,18 @@ function connectWs() {
   });
 }
 
-async function connect({ chooseDevice = false } = {}) {
+function connectManually() {
+  // Only a fresh user click may open the chooser. Background retries never do.
+  return connect({ reselectId: state.mode === "ble" ? state.bleReselectId : null });
+}
+
+async function connect({ chooseDevice = false, reselectId = null, signal } = {}) {
+  signal?.throwIfAborted();
   if (connectionInFlight || state.connected) return;
   userInitiatedDisconnect = false;
   connectionInFlight = true;
   try {
-    await connectOnce({ chooseDevice });
+    await connectOnce({ chooseDevice, reselectId, signal });
   } finally {
     connectionInFlight = false;
     setConnecting(false);
@@ -4186,7 +4232,8 @@ async function connect({ chooseDevice = false } = {}) {
  * Subscribe to its notify characteristic and mark the session terminal-only:
  * every accessory control is gated on `state.mgmtReady`, so none of them will
  * try to send a management frame the old firmware cannot answer. */
-async function adoptLegacyNus(device) {
+async function adoptLegacyNus(device, signal) {
+  signal?.throwIfAborted();
   const notificationSession = {};
   bleNotificationSession = notificationSession;
   state.writeGeneration += 1;
@@ -4197,7 +4244,7 @@ async function adoptLegacyNus(device) {
     NUS_SERVICE,
     NUS_TX,
     (value) => {
-      if (bleNotificationSession !== notificationSession) return;
+      if (signal?.aborted || bleNotificationSession !== notificationSession) return;
       const bytes = new Uint8Array(
         value.buffer.slice(
           value.byteOffset,
@@ -4207,6 +4254,7 @@ async function adoptLegacyNus(device) {
       handleIncomingBytes(bytes);
     },
   );
+  signal?.throwIfAborted();
   state.legacy = true;
   state.mgmtReady = false;
   state.reliableReady = false;
@@ -4220,12 +4268,14 @@ async function adoptLegacyNus(device) {
   appendLine(t("legacyHint"));
 }
 
-async function connectOnce({ chooseDevice = false } = {}) {
+async function connectOnce({ chooseDevice = false, reselectId = null, signal } = {}) {
+  signal?.throwIfAborted();
   if (state.mode === "ws") {
     setConnecting(true);
     try {
-      await connectWs();
+      await connectWs(signal);
     } catch (error) {
+      if (signal?.aborted) return;
       // connectWs() already routed the message to the offending field.
       if (elements.wsHostError.hidden && elements.wsTokenError.hidden) {
         setWsHostError(error.message, true);
@@ -4244,26 +4294,35 @@ async function connectOnce({ chooseDevice = false } = {}) {
   }
 
   setConnecting(true);
-  const restoredAttempt = Boolean(!chooseDevice && state.device && state.deviceRestored);
-  let device = chooseDevice ? null : state.device;
+  const restoredAttempt = Boolean(!chooseDevice && !reselectId && state.device && state.deviceRestored);
+  let device = chooseDevice || reselectId ? null : state.device;
   let transportConnected = false;
   let pairingAttempted = false;
   try {
     await bleTransport.initialize();
+    signal?.throwIfAborted();
     if (!device) {
       appendLine(`[scan] requesting a Linkr Bee device`);
-      device = await bleTransport.requestDevice({
+      const selectedDevice = await bleTransport.requestDevice({
         filters: BLE_REQUEST_FILTERS,
         optionalServices: [MGMT_SERVICE, NUS_SERVICE, RELIABLE_UART_SERVICE],
       });
+      signal?.throwIfAborted();
+      if (reselectId && selectedDevice.id !== reselectId) {
+        throw new Error(t("bleReselectMismatch"));
+      }
+      device = selectedDevice;
       rememberDevice(device);
     }
 
     appendLine(`[pairing] ${t("pairingHint")}`);
     appendLine(`[connect] ${printableDeviceName(device.name, device.id)}`);
     pairingAttempted = true;
-    await bleTransport.connect(device.id, () => onDisconnected({ unexpected: true }));
+    await bleTransport.connect(device.id, () => {
+      if (!signal?.aborted) onDisconnected({ unexpected: true });
+    }, { signal });
     transportConnected = true;
+    signal?.throwIfAborted();
     state.nusReady = true;
     state.legacy = false;
     let protocolValue;
@@ -4281,9 +4340,10 @@ async function connectOnce({ chooseDevice = false } = {}) {
        * promised the service. The name says neither - the owner chooses
        * it, and can choose it for a current board too. */
       if (!isMissingService(error)) throw error;
-      await adoptLegacyNus(device);
+      await adoptLegacyNus(device, signal);
       return;
     }
+    signal?.throwIfAborted();
     if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
       throw new Error("Unsupported Linkr Management API version");
     }
@@ -4304,6 +4364,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
       MGMT_SERVICE,
       MGMT_DEVICE_ID,
     );
+    signal?.throwIfAborted();
     if (deviceIdValue.byteLength !== 16) {
       throw new Error("Invalid Linkr Device ID length");
     }
@@ -4337,9 +4398,10 @@ async function connectOnce({ chooseDevice = false } = {}) {
       MGMT_SERVICE,
       MGMT_RESPONSE,
       (value) => {
-        if (bleNotificationSession === notificationSession) onManagementIndication(value);
+        if (!signal?.aborted && bleNotificationSession === notificationSession) onManagementIndication(value);
       },
     );
+    signal?.throwIfAborted();
     state.mgmtReady = true;
     /* Two transports are supported. Mainline boards keep the reliable UART
      * channel; a board that advertises PREFER_NUS (the ESP32-CAM) uses the raw
@@ -4355,6 +4417,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
           RELIABLE_UART_SERVICE,
           RELIABLE_UART_STATE,
         );
+        signal?.throwIfAborted();
         if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
           throw new Error("Unsupported Reliable UART version");
         }
@@ -4384,12 +4447,14 @@ async function connectOnce({ chooseDevice = false } = {}) {
           RELIABLE_UART_SERVICE,
           RELIABLE_UART_TX,
           (value) => {
-            if (bleNotificationSession === notificationSession) onReliableUartIndication(value);
+            if (!signal?.aborted && bleNotificationSession === notificationSession) onReliableUartIndication(value);
           },
         );
+        signal?.throwIfAborted();
         state.reliableReady = true;
         state.nusReady = false;
       } catch (error) {
+        if (signal?.aborted) throw error;
         useNus = true;
         state.reliableReady = false;
         appendLine(`[warn] Reliable UART unavailable (${error.message}); using NUS`);
@@ -4405,13 +4470,14 @@ async function connectOnce({ chooseDevice = false } = {}) {
       }
     }
 
+    signal?.throwIfAborted();
     if (useNus) {
       await bleTransport.startNotifications(
         device.id,
         NUS_SERVICE,
         NUS_TX,
         (value) => {
-          if (bleNotificationSession !== notificationSession) return;
+          if (signal?.aborted || bleNotificationSession !== notificationSession) return;
           const bytes = new Uint8Array(
             value.buffer.slice(
               value.byteOffset,
@@ -4421,6 +4487,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
           handleIncomingBytes(bytes);
         },
       );
+      signal?.throwIfAborted();
       state.nusReady = true;
       state.reliableReady = false;
     }
@@ -4432,7 +4499,9 @@ async function connectOnce({ chooseDevice = false } = {}) {
     setConnected(true, { preserveJournal: true });
     if (state.serialControl) {
       await requestSerialControl();
+      signal?.throwIfAborted();
       if (state.serialControl.mode === "available") await requestSerialControl("claim");
+      signal?.throwIfAborted();
       startSerialControlPoll();
     }
     appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId} transport=${state.reliableReady ? "RELIABLE" : "NUS"} build=${APP_BUILD}`);
@@ -4441,8 +4510,14 @@ async function connectOnce({ chooseDevice = false } = {}) {
     );
     readBleName({ quiet: true });
   } catch (error) {
-    appendLine(`[error] ${error.message}`);
-    if (pairingAttempted) {
+    if (!signal?.aborted) appendLine(`[error] ${error.message}`);
+    const needsReselect = error.code === "BLE_RESELECT_REQUIRED";
+    if (needsReselect && device && !signal?.aborted) {
+      state.bleReselectId = device.id;
+      appendLine(`[reconnect] ${t("bleReselectHint")}`);
+      toast(t("bleReselectHint"), "error");
+    }
+    if (pairingAttempted && !signal?.aborted && !needsReselect) {
       appendLine(`[pairing] ${t("pairingFailed")}`);
       toast(t("pairingFailed"), "error");
     }
@@ -4459,7 +4534,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
         onDisconnected();
       }
     }
-    if (restoredAttempt) {
+    if (restoredAttempt && !signal?.aborted && !needsReselect) {
       localStorage.removeItem(LAST_DEVICE_ID_KEY);
       state.device = null;
       state.deviceRestored = false;
@@ -4934,7 +5009,7 @@ function bind() {
       toast(t("reconnectCancelled"));
       return;
     }
-    connect().catch((error) => appendLine(`[error] ${error.message}`));
+    connectManually().catch((error) => appendLine(`[error] ${error.message}`));
   });
 
   if (elements.mobileConnectBtn) {
@@ -4944,7 +5019,7 @@ function bind() {
         toast(t("reconnectCancelled"));
         return;
       }
-      const action = state.connected ? disconnect() : connect();
+      const action = state.connected ? disconnect() : connectManually();
       action.catch((error) => appendLine(`[error] ${error.message}`));
     });
   }
@@ -5591,6 +5666,7 @@ async function disconnectBee({ forget = false, signal } = {}) {
     localStorage.removeItem(LAST_DEVICE_ID_KEY);
     state.device = null;
     state.deviceRestored = false;
+    state.bleReselectId = null;
   }
   return beeStatus({ signal });
 }

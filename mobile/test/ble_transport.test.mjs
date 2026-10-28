@@ -13,6 +13,9 @@ function installTransport(window = {}) {
   window.navigator ??= {};
   const context = vm.createContext({
     window,
+    AbortController,
+    setTimeout,
+    clearTimeout,
     ArrayBuffer,
     DataView,
     Map,
@@ -97,4 +100,111 @@ test("pending native backend keeps BLE available before bootstrap resolves", asy
   resolveReady();
   await transport.initialize();
   assert.equal(transport.platform(), "harmonyos");
+});
+
+function browserFixture({ watching = "ok", connectError = "Bluetooth Device is no longer in range." } = {}) {
+  const listeners = new Map();
+  const calls = { connects: 0, watches: 0, requests: 0, watchSignal: null };
+  const device = {
+    id: "original-bee", name: "Linkr Bee",
+    addEventListener: (type, callback) => listeners.set(type, callback),
+    removeEventListener: (type, callback) => {
+      if (listeners.get(type) === callback) listeners.delete(type);
+    },
+    gatt: {
+      connected: false,
+      async connect() {
+        calls.connects++;
+        if (calls.connects === 1) throw new Error(connectError);
+        this.connected = true;
+        return this;
+      },
+      disconnect() { this.connected = false; },
+    },
+  };
+  if (watching !== "missing") device.watchAdvertisements = async ({ signal }) => {
+    calls.watches++;
+    calls.watchSignal = signal;
+    if (watching === "reject") throw new Error("Not supported");
+  };
+  const { transport } = installTransport({ navigator: { bluetooth: {
+    async requestDevice() { calls.requests++; return device; },
+  } } });
+  return { transport, device, calls, listeners };
+}
+
+async function waitForWatch(fixture) {
+  for (let i = 0; i < 20 && !fixture.calls.watches; i++) await Promise.resolve();
+  assert.equal(fixture.calls.watches, 1);
+}
+
+test("browser rediscovers only the original Bee before retrying GATT", async () => {
+  const f = browserFixture();
+  await f.transport.requestDevice({});
+  const connecting = f.transport.connect(f.device.id);
+  await waitForWatch(f);
+  f.listeners.get("advertisementreceived")({ device: { id: "other-bee" } });
+  assert.equal(f.calls.connects, 1);
+  f.listeners.get("advertisementreceived")({ device: f.device });
+  await connecting;
+  assert.equal(f.calls.connects, 2);
+  assert.equal(f.calls.requests, 1);
+  assert.equal(f.calls.watchSignal.aborted, true);
+  assert.equal(f.listeners.has("advertisementreceived"), false);
+  assert.equal(await f.transport.isConnected(), true);
+});
+
+for (const watching of ["missing", "reject"]) {
+  test(`browser asks for reselection when advertisement watching is ${watching}`, async () => {
+    const f = browserFixture({ watching });
+    await f.transport.requestDevice({});
+    await assert.rejects(f.transport.connect(f.device.id), { code: "BLE_RESELECT_REQUIRED" });
+    assert.equal(f.calls.connects, 1);
+    assert.equal(f.calls.requests, 1);
+    assert.equal(f.listeners.has("advertisementreceived"), false);
+    if (f.calls.watchSignal) assert.equal(f.calls.watchSignal.aborted, true);
+  });
+}
+
+test("cancelling rediscovery releases the watcher and ignores late advertisements", async () => {
+  const f = browserFixture();
+  await f.transport.requestDevice({});
+  const controller = new AbortController();
+  const connecting = f.transport.connect(f.device.id, () => {}, { signal: controller.signal });
+  await waitForWatch(f);
+  const late = f.listeners.get("advertisementreceived");
+  controller.abort();
+  await assert.rejects(connecting, { name: "AbortError" });
+  late({ device: f.device });
+  assert.equal(f.calls.connects, 1);
+  assert.equal(f.calls.watchSignal.aborted, true);
+  assert.equal(f.listeners.has("advertisementreceived"), false);
+});
+
+test("authentication failures do not trigger rediscovery", async () => {
+  const f = browserFixture({ connectError: "Authentication failed." });
+  await f.transport.requestDevice({});
+  await assert.rejects(f.transport.connect(f.device.id), /Authentication failed/);
+  assert.equal(f.calls.watches, 0);
+  assert.equal(f.calls.connects, 1);
+});
+
+test("a forgotten browser object requests reselection without dialing", async () => {
+  const f = browserFixture();
+  await assert.rejects(f.transport.connect("unknown"), { code: "BLE_RESELECT_REQUIRED" });
+  assert.equal(f.calls.connects, 0);
+});
+
+test("rediscovery timeout is bounded and stops scanning", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = browserFixture();
+  await f.transport.requestDevice({});
+  const connecting = f.transport.connect(f.device.id);
+  const rejected = assert.rejects(connecting, { code: "BLE_RESELECT_REQUIRED" });
+  await waitForWatch(f);
+  t.mock.timers.tick(8000);
+  await rejected;
+  assert.equal(f.calls.connects, 1);
+  assert.equal(f.calls.watchSignal.aborted, true);
+  assert.equal(f.listeners.has("advertisementreceived"), false);
 });

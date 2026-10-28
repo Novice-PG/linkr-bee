@@ -11,14 +11,17 @@ test.beforeEach(async ({ page }) => {
       response,
       body: await response.text() +
         "\nwindow.__test = { state, connect, disconnect, onDisconnected, setConnected, " +
-        "cancelAutoReconnect, autoReconnect, elements, renderAutoReconnectStatus };" ,
+        "cancelAutoReconnect, autoReconnect, elements, renderAutoReconnectStatus, setBleTransport: value => Object.assign(bleTransport, value) };" ,
     });
   });
   await page.addInitScript(() => {
     /* A WebSocket the spec can fail or drop, standing in for the bridge. */
     window.__ws = { instances: [], mode: "ok" };
+    const RealWebSocket = window.WebSocket;
     class FakeWebSocket {
-      constructor(url) {
+      constructor(url, protocols) {
+        // Vite uses WebSocket for HMR too; only mock the bridge under test.
+        if (!String(url).includes("127.0.0.1:9999")) return new RealWebSocket(url, protocols);
         this.url = url;
         this.readyState = 0;
         this.closed = false;
@@ -90,6 +93,7 @@ test("an unexpected LAN drop reconnects automatically and keeps the log", async 
   const text = await page.locator("#terminalOutput").innerText();
   expect(text).toContain("[reconnect]");
   expect(text).toContain("restored");
+  await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Disconnect");
   /* The journal is not cleared by the reconnect. */
   expect(text).toContain("[connect]");
 });
@@ -114,6 +118,7 @@ test("auto-reconnect gives up after the configured attempts and offers the manua
 
 test("clicking the button while reconnecting cancels the schedule", async ({ page }) => {
   await connectLan(page);
+  await page.evaluate(() => { window.__linkrReconnectDelays = [5000]; });
   const before = await page.evaluate(() => window.__ws.instances.length);
   await dropLan(page);
   await page.evaluate(() => {
@@ -173,4 +178,146 @@ test("BLE uses the restored device as the reconnect target and shows a cancel bu
     window.__test.cancelAutoReconnect("cancelled by test");
   });
   expect(await page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
+});
+
+
+test("cancel stays available while the automatic LAN handshake is pending", async ({ page }) => {
+  await connectLan(page);
+  await page.evaluate(() => { window.__ws.mode = "hold"; });
+  await dropLan(page);
+  await expect.poll(() => page.evaluate(() => window.__ws.instances.length)).toBe(2);
+  for (const id of ["connectButton", "mobileConnectBtn"]) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+    await expect(page.locator(`#${id} .btn-label`)).toHaveText(/Cancel reconnect/i);
+  }
+  await page.evaluate(() => document.querySelector("#connectButton").click());
+  await expect.poll(() => page.evaluate(() => window.__ws.instances.at(-1).closed)).toBe(true);
+  await page.evaluate(() => window.__ws.instances.at(-1).onmessage?.({data: "@ws auth=none"}));
+  expect(await page.evaluate(() => window.__test.state.connected)).toBe(false);
+  expect(await page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
+  await expect(page.locator("#connectButton")).toBeEnabled();
+  // A new manual connection can succeed; callbacks from the retired socket cannot affect it.
+  await page.evaluate(() => { window.__ws.mode = "ok"; });
+  await connectLan(page);
+  await page.evaluate(() => {
+    window.__ws.instances[1].onclose?.();
+    window.__ws.instances[1].onmessage?.({data: "@ws auth=ok"});
+  });
+  expect(await page.evaluate(() => window.__test.state.connected)).toBe(true);
+});
+
+for (const phase of ["connect", "subscribe"]) {
+  test(`cancel discards a late native BLE ${phase} result`, async ({ page }) => {
+    await page.evaluate((phase) => {
+      const { state, setConnected, onDisconnected, setBleTransport } = window.__test;
+      window.__ble = { disconnects: 0, connects: 0, entered: false };
+      setBleTransport({
+        isAvailable: () => true,
+        initialize: async () => {},
+        connect: async (_id, onDisconnect) => {
+          window.__ble.connects++;
+          window.__ble.onDisconnect = onDisconnect;
+          if (phase === "connect") await new Promise(resolve => {
+            window.__ble.entered = true; window.__ble.finish = resolve;
+          });
+        },
+        // Exercise the legacy NUS path after discovery.
+        read: async () => { throw new Error("No Services matching UUID"); },
+        startNotifications: async (_id, _service, _characteristic, callback) => {
+          window.__ble.notify = callback;
+          await new Promise(resolve => {
+            window.__ble.entered = true; window.__ble.finish = resolve;
+          });
+        },
+        disconnect: async () => { window.__ble.disconnects++; window.__ble.onDisconnect?.(); },
+      });
+      state.mode = "ble";
+      state.device = { id: "saved-bee", name: "Linkr Bee" };
+      setConnected(true);
+      onDisconnected({unexpected: true});
+    }, phase);
+    await page.waitForFunction(() => window.__ble.entered);
+    await expect(page.locator("#connectButton")).toBeEnabled();
+    await page.evaluate(() => document.querySelector("#mobileConnectBtn").click());
+    expect(await page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
+    await page.evaluate(() => {
+      window.__ble.notify?.(new DataView(new TextEncoder().encode("STALE_NOTIFICATION").buffer));
+      window.__ble.finish();
+    });
+    await expect.poll(() => page.evaluate(() => window.__ble.disconnects)).toBe(1);
+    await expect(page.locator("#connectButton")).toBeEnabled();
+    expect(await page.evaluate(() => window.__test.state.connected)).toBe(false);
+    expect(await page.evaluate(() => window.__ble.connects)).toBe(1);
+    expect(await page.locator("#terminalOutput").innerText()).not.toContain("STALE_NOTIFICATION");
+  });
+}
+
+async function installUnavailableBee(page) {
+  await page.evaluate(() => {
+    const { state, setBleTransport } = window.__test;
+    state.mode = "ble";
+    state.device = { id: "original-bee", name: "Linkr Bee" };
+    state.deviceRestored = true;
+    window.__reselect = { requests: 0, connects: [], selection: "original-bee", failing: true };
+    setBleTransport({
+      isAvailable: () => true,
+      initialize: async () => {},
+      requestDevice: async () => {
+        window.__reselect.requests++;
+        if (window.__reselect.selection === "cancel") throw new DOMException("User cancelled the requestDevice() chooser.", "NotFoundError");
+        return { id: window.__reselect.selection, name: "Linkr Bee" };
+      },
+      connect: async (id) => {
+        window.__reselect.connects.push(id);
+        if (window.__reselect.failing) {
+          const error = new Error("Bluetooth Device is no longer in range.");
+          error.code = "BLE_RESELECT_REQUIRED";
+          throw error;
+        }
+      },
+      read: async () => { throw new Error("No Services matching UUID"); },
+      startNotifications: async () => {},
+      disconnect: async () => {},
+    });
+  });
+}
+
+test("unavailable BLE offers same-device reselection without a pairing warning", async ({ page }) => {
+  await installUnavailableBee(page);
+  await page.evaluate(() => window.__test.connect());
+  await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Reselect device");
+  await expect(page.locator("#connectButton .btn-label")).toHaveText("Reselect device");
+  expect(await page.evaluate(() => window.__test.state.device.id)).toBe("original-bee");
+  expect(await page.locator("#terminalOutput").innerText()).not.toContain("If pairing failed");
+  await page.evaluate(() => { window.__reselect.failing = false; });
+  await page.locator("#mobileConnectBtn").click();
+  await expect.poll(() => page.evaluate(() => window.__test.state.connected)).toBe(true);
+  expect(await page.evaluate(() => window.__reselect.requests)).toBe(1);
+  expect(await page.evaluate(() => window.__reselect.connects)).toEqual(["original-bee", "original-bee"]);
+});
+
+test("reselection cancellation or another Bee never changes the pinned target", async ({ page }) => {
+  await installUnavailableBee(page);
+  await page.evaluate(() => window.__test.connect());
+  for (const selection of ["cancel", "other-bee"]) {
+    await page.evaluate(selection => { window.__reselect.selection = selection; }, selection);
+    await page.locator("#mobileConnectBtn").click();
+    await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Reselect device");
+    expect(await page.evaluate(() => window.__test.state.device.id)).toBe("original-bee");
+    expect(await page.evaluate(() => window.__reselect.connects)).toEqual(["original-bee"]);
+    expect(await page.evaluate(() => window.__test.state.connected)).toBe(false);
+  }
+  await expect(page.locator("#terminalOutput")).toContainText("That is a different Bee");
+});
+
+test("background rediscovery failure stops retries without opening a chooser", async ({ page }) => {
+  await installUnavailableBee(page);
+  await page.evaluate(() => {
+    window.__test.setConnected(true);
+    window.__test.onDisconnected({ unexpected: true });
+  });
+  await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Reselect device");
+  expect(await page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
+  expect(await page.evaluate(() => window.__reselect.requests)).toBe(0);
+  expect(await page.evaluate(() => window.__reselect.connects)).toEqual(["original-bee"]);
 });

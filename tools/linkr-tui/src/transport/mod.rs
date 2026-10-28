@@ -87,6 +87,11 @@ impl LinkKind {
 
 /// The receiving half of a link.
 pub trait LinkReader: Send {
+    /// The actual BLE peer resolved by discovery, using the platform's stable ID.
+    fn ble_device_id(&self) -> Option<String> {
+        None
+    }
+
     /// Read into `buf`. `Ok(0)` means the far end closed cleanly.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
@@ -227,6 +232,7 @@ pub struct OpenedLink {
     pub kind: LinkKind,
     /// How the sidebar and the notices name it, e.g. `ble:EE:C7:42:34:48:CF`.
     pub description: String,
+    pub ble_device_id: Option<String>,
     /// The LAN address this link talks to, empty for links that are not LAN.
     pub lan_host: String,
     /// Whether this LAN link went out with a token.
@@ -236,6 +242,11 @@ pub struct OpenedLink {
 }
 
 impl OpenedLink {
+    /// Release a completed dial that the caller no longer wants to adopt.
+    pub fn hang_up(mut self) -> io::Result<()> {
+        self.writer.hangup()
+    }
+
     /// Open `link`, here, on the calling thread. Everything this costs is paid
     /// before it returns.
     pub fn open(link: Box<dyn Link>) -> io::Result<OpenedLink> {
@@ -245,9 +256,15 @@ impl OpenedLink {
         // a token went out is the link itself.
         let (lan_host, lan_secured) = link.lan_details().unwrap_or_default();
         let (reader, writer) = link.open()?;
+        let ble_device_id = reader.ble_device_id();
+        let description = ble_device_id
+            .as_ref()
+            .map(|id| format!("ble:{id}"))
+            .unwrap_or(description);
         Ok(OpenedLink {
             kind,
             description,
+            ble_device_id,
             lan_host,
             lan_secured,
             reader,

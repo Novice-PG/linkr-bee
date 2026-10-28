@@ -40,6 +40,43 @@
     return { id: device.id, name: device.name || "" };
   }
 
+  function needsRediscovery(error) {
+    return /Bluetooth Device is no longer in range|Bluetooth device authorization is unavailable/i.test(error?.message || "");
+  }
+
+  // Refresh the OS discovery entry for this authorized device only. Watching
+  // advertisements is optional in browsers, so keep a bounded chooser fallback.
+  function rediscover(device, signal) {
+    signal?.throwIfAborted();
+    if (typeof device.watchAdvertisements !== "function") {
+      return Promise.reject(new Error("Advertisement watching unavailable"));
+    }
+    return new Promise((resolve, reject) => {
+      const watcher = new AbortController();
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        device.removeEventListener("advertisementreceived", onAdvertisement);
+        signal?.removeEventListener("abort", onAbort);
+        watcher.abort();
+        if (error) reject(error);
+        else resolve();
+      };
+      const onAdvertisement = (event) => {
+        if (event.device?.id === device.id) finish();
+      };
+      const onAbort = () => finish(signal.reason);
+      const timer = setTimeout(() => finish(new Error("Advertisement discovery timed out")), 8000);
+      device.addEventListener("advertisementreceived", onAdvertisement);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve().then(() => {
+        if (!settled) return device.watchAdvertisements({ signal: watcher.signal });
+      }).catch(finish);
+    });
+  }
+
   function characteristicKey(serviceUuid, characteristicUuid) {
     return `${serviceUuid.toLowerCase()}/${characteristicUuid.toLowerCase()}`;
   }
@@ -93,10 +130,13 @@
       throw new Error("BLE scanning is not available on this platform");
     },
 
-    async connect(deviceId, onDisconnect) {
+    async connect(deviceId, onDisconnect, { signal } = {}) {
+      signal?.throwIfAborted();
       const device = browserDevices.get(deviceId);
       if (!device) {
-        throw new Error("Bluetooth device authorization is unavailable");
+        const error = new Error("Bluetooth device authorization is unavailable");
+        error.code = "BLE_RESELECT_REQUIRED";
+        throw error;
       }
       if (browserDevice && browserDisconnectHandler) {
         browserDevice.removeEventListener(
@@ -122,7 +162,30 @@
        * management and NUS characteristics both come from this server. */
       browserCharacteristics.clear();
       browserSubscriptions.clear();
-      browserServer = await device.gatt.connect();
+      try {
+        browserServer = await device.gatt.connect();
+      } catch (error) {
+        if (signal?.aborted || !needsRediscovery(error)) throw error;
+        try {
+          await rediscover(device, signal);
+          signal?.throwIfAborted();
+        } catch (discoveryError) {
+          if (signal?.aborted) throw signal.reason;
+          const unavailable = new Error(error.message);
+          unavailable.code = "BLE_RESELECT_REQUIRED";
+          throw unavailable;
+        }
+        try {
+          browserServer = await device.gatt.connect();
+        } catch (retryError) {
+          if (needsRediscovery(retryError)) {
+            const unavailable = new Error(retryError.message);
+            unavailable.code = "BLE_RESELECT_REQUIRED";
+            throw unavailable;
+          }
+          throw retryError;
+        }
+      }
     },
 
     async disconnect() {
@@ -246,8 +309,8 @@
       return (await backend()).scanDevices(options);
     },
 
-    async connect(deviceId, onDisconnect) {
-      return (await backend()).connect(deviceId, onDisconnect);
+    async connect(deviceId, onDisconnect, options) {
+      return (await backend()).connect(deviceId, onDisconnect, options);
     },
 
     async disconnect(deviceId) {

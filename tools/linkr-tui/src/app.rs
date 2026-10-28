@@ -201,8 +201,34 @@ pub struct DialJob {
     /// Whether this dial was the startup scan's own; its arrival is not
     /// announced. See [`App::quiet_connect`].
     pub quiet: bool,
+    cancelled: bool,
     /// Where the thread posts the opened link, or why it could not.
     rx: std::sync::mpsc::Receiver<io::Result<OpenedLink>>,
+}
+
+// A quit can drop the app before poll_dial sees a queued or pending result.
+// Release that result off the UI thread as well; dropping the receiver alone
+// would abandon a successfully opened BLE connection.
+impl Drop for DialJob {
+    fn drop(&mut self) {
+        let (_, empty) = std::sync::mpsc::channel();
+        let rx = std::mem::replace(&mut self.rx, empty);
+        match rx.try_recv() {
+            Ok(Ok(opened)) => {
+                std::thread::spawn(move || {
+                    let _ = opened.hang_up();
+                });
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                std::thread::spawn(move || {
+                    if let Ok(Ok(opened)) = rx.recv() {
+                        let _ = opened.hang_up();
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 impl std::fmt::Debug for DialJob {
@@ -1715,6 +1741,12 @@ impl App {
     /// opened, and the state says `connecting` until the link's threads report
     /// it — the same beat-by-beat arrival a synchronous open gets.
     fn adopt(&mut self, opened: OpenedLink) {
+        if let (Some(id), Some(Dial::Ble(_, within))) = (&opened.ble_device_id, &self.last_dial) {
+            self.last_dial = Some(Dial::Ble(
+                crate::transport::ble::Selection::Address(id.clone()),
+                *within,
+            ));
+        }
         crate::views::assistant::switch_device(self, &opened.description);
         self.agent_serial =
             crate::serial::journal::SerialJournal::new(crate::serial::journal::DEFAULT_CAPACITY);
@@ -2021,19 +2053,14 @@ impl App {
         self.dial_async(&dial, false);
     }
 
-    /// Stop waiting for a lost link to come back.
-    ///
-    /// Every hand on the wheel goes through here: Disconnect, Connect, a
-    /// transport change, a scan, a quit. An attempt already on the wire is not
-    /// killed — a dial owns its own thread — but it stops being the automatic
-    /// redial: it is the last thing the user asked for, so the link it brings
-    /// up is announced the ordinary way rather than as a restoration. See
-    /// [`App::poll_dial`].
+    /// Invalidate an automatic dial even when the OS is still connecting.
+    /// Keep the job until its result is released, avoiding overlapping BLE dials.
     pub fn cancel_reconnect(&mut self) {
         if let Some(state) = self.reconnecting.take() {
             if state.in_flight {
                 if let Some(job) = self.dialing.as_mut() {
-                    job.quiet = false;
+                    job.cancelled = true;
+                    self.state = ConnectionState::Disconnected;
                 }
             }
         }
@@ -2058,7 +2085,15 @@ impl App {
         let Some(dial) = self.last_dial.clone() else {
             return false;
         };
-        if matches!(dial, Dial::Stdio(_)) {
+        if matches!(
+            dial,
+            Dial::Stdio(_)
+                | Dial::Ble(
+                    crate::transport::ble::Selection::Any
+                        | crate::transport::ble::Selection::Name(_),
+                    _
+                )
+        ) {
             return false;
         }
         let Some(delay) = auto_reconnect_delay(0) else {
@@ -2402,7 +2437,11 @@ impl App {
         // seconds to come up, and the open is the seconds. All the frame sees
         // of it is `connecting` in the state row.
         std::thread::spawn(move || {
-            let _ = tx.send(opening.opened());
+            if let Err(error) = tx.send(opening.opened()) {
+                if let Ok(opened) = error.0 {
+                    let _ = opened.hang_up();
+                }
+            }
         });
         // The lock goes on at the *press*, not at the catch: what it protects
         // is the choice the dial was built from, and a transport switched
@@ -2417,6 +2456,7 @@ impl App {
         self.dialing = Some(DialJob {
             dial: dial.clone(),
             quiet,
+            cancelled: false,
             rx,
         });
         true
@@ -2438,6 +2478,16 @@ impl App {
             }
         };
         let job = self.dialing.take().expect("checked just above");
+        if job.cancelled {
+            if let Ok(opened) = outcome {
+                let _ = opened.hang_up();
+            }
+            if !self.session.is_live() {
+                self.state = ConnectionState::Disconnected;
+                self.transport_locked = self.transport_pinned;
+            }
+            return;
+        }
         match outcome {
             Ok(opened) => {
                 // A landing that belongs to the automatic redial says so
@@ -2448,10 +2498,10 @@ impl App {
                 // Remembered only once the link opened: a dial that failed is
                 // not something `reconnect` should try again behind the user's
                 // back.
-                self.last_dial = Some(job.dial);
-                self.save_settings();
+                self.last_dial = Some(job.dial.clone());
                 self.quiet_connect = job.quiet;
                 self.adopt(opened);
+                self.save_settings();
             }
             Err(why) => {
                 // The lock went on at the press; a dial that failed gives it
@@ -2899,7 +2949,9 @@ impl App {
         // are answers a program is blocked on and this is housekeeping.
         self.sync_terminal_geometry();
         let now_live = self.session.is_live();
-        if self.dialing.is_some() {
+        if self.dialing.as_ref().is_some_and(|job| job.cancelled) {
+            self.state = ConnectionState::Disconnected;
+        } else if self.dialing.is_some() {
             // A dial in flight is what the screen is about to be: the open
             // waits on a radio, and the state the session last knew — the link
             // before this one, or nothing at all — would paint a calm
@@ -8383,5 +8435,125 @@ mod tests {
         let mut app = armed_after_a_loss(Lang::En);
         app.request_quit();
         assert!(app.reconnecting.is_none());
+    }
+
+    #[test]
+    fn disconnect_during_auto_dial_releases_late_connection() {
+        let mut app = armed_after_a_loss(Lang::En);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.reconnecting.as_mut().unwrap().in_flight = true;
+        app.dialing = Some(DialJob {
+            dial: app.last_dial.clone().unwrap(),
+            quiet: true,
+            cancelled: false,
+            rx,
+        });
+        app.disconnect();
+        app.pump();
+        assert_eq!(app.state, ConnectionState::Disconnected);
+        assert!(app.reconnecting.is_none());
+        let wire = crate::transport::testing::MemoryLink::ble_addressed("NONSENSE");
+        assert!(tx.send(OpenedLink::open(wire.link())).is_ok());
+        app.poll_dial();
+        assert!(
+            !app.session.is_live(),
+            "late results must not restore the session"
+        );
+        assert!(wire.hung_up(), "the unwanted transport must be released");
+        assert!(app.dialing.is_none());
+        assert!(!app.transport_locked);
+    }
+
+    #[test]
+    fn cancelled_auto_dial_failure_stays_disconnected() {
+        let mut app = armed_after_a_loss(Lang::En);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.reconnecting.as_mut().unwrap().in_flight = true;
+        app.dialing = Some(DialJob {
+            dial: app.last_dial.clone().unwrap(),
+            quiet: true,
+            cancelled: false,
+            rx,
+        });
+        app.disconnect();
+        tx.send(Err(io::Error::other("late dial error"))).ok();
+        app.pump();
+        assert_eq!(app.state, ConnectionState::Disconnected);
+        assert!(app.reconnecting.is_none());
+        assert!(!app
+            .log
+            .iter()
+            .any(|item| item.text.contains("late dial error")));
+    }
+
+    #[test]
+    fn automatic_retry_pins_resolved_mac_or_uuid_and_preserves_timeout() {
+        use crate::transport::ble::Selection;
+        for selection in [Selection::Any, Selection::Name("Linkr".into())] {
+            for id in ["EE:C7:42:34:48:CF", "68998BA3-6A68-4B05-981E-3544CFD046CD"] {
+                let mut app = App {
+                    lang: Lang::En,
+                    ..App::default()
+                };
+                let timeout = Some(Duration::from_secs(8));
+                app.last_dial = Some(Dial::Ble(selection.clone(), timeout));
+                let wire = crate::transport::testing::MemoryLink::ble_addressed(id);
+                let mut opened = OpenedLink::open(wire.link()).unwrap();
+                opened.ble_device_id = Some(id.into());
+                app.adopt(opened);
+                assert!(pump_until(&mut app, |app| app.state == ConnectionState::Connected));
+                wire.close();
+                assert!(pump_until(&mut app, |app| app.reconnecting.is_some()));
+                assert_eq!(
+                    app.reconnecting.as_ref().unwrap().dial(),
+                    &Dial::Ble(Selection::Address(id.into()), timeout)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_retry_never_reuses_an_unresolved_discovery_filter() {
+        use crate::transport::ble::Selection;
+        for selection in [Selection::Any, Selection::Name("Linkr".into())] {
+            let mut app = App {
+                last_dial: Some(Dial::Ble(selection, None)),
+                ..App::default()
+            };
+            assert!(!app.begin_auto_reconnect("unknown"));
+            assert!(app.reconnecting.is_none());
+        }
+    }
+
+    #[test]
+    fn exiting_releases_queued_and_pending_auto_dials() {
+        for queued in [true, false] {
+            let mut app = armed_after_a_loss(Lang::En);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.reconnecting.as_mut().unwrap().in_flight = true;
+            app.dialing = Some(DialJob {
+                dial: app.last_dial.clone().unwrap(),
+                quiet: true,
+                cancelled: false,
+                rx,
+            });
+            let wire = crate::transport::testing::MemoryLink::ble_addressed("NONSENSE");
+            if queued {
+                assert!(tx.send(OpenedLink::open(wire.link())).is_ok());
+            }
+            app.request_quit();
+            drop(app);
+            if !queued {
+                assert!(tx.send(OpenedLink::open(wire.link())).is_ok());
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !wire.hung_up() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                wire.hung_up(),
+                "exiting must close even an uncollected dial"
+            );
+        }
     }
 }

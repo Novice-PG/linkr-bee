@@ -531,7 +531,7 @@ impl Link for BleLink {
         // interface can hand them to the pump as management and not as target
         // output. Their own channel, like their own characteristic.
         let (management_tx, management_rx) = mpsc::channel::<Vec<u8>>();
-        let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<io::Result<String>>();
         let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Frame>(WRITE_BACKLOG);
         // What the board carries, shared between the reactor that finds out
         // and the writer that has to answer for it. See [`BleWriter`].
@@ -580,8 +580,9 @@ impl Link for BleLink {
                 ),
             )),
             Ok(Err(why)) => Err(why),
-            Ok(Ok(())) => Ok((
+            Ok(Ok(device_id)) => Ok((
                 Box::new(BleReader {
+                    device_id,
                     inbound: inbound_rx,
                     management: Some(management_rx),
                     leftover: VecDeque::new(),
@@ -618,7 +619,7 @@ impl Link for BleLink {
 fn radio(
     selection: &Selection,
     window: Duration,
-    ready: Sender<io::Result<()>>,
+    ready: Sender<io::Result<String>>,
     inbound: Sender<Option<Vec<u8>>>,
     outbound: tokio::sync::mpsc::Receiver<Frame>,
     management: Sender<Vec<u8>>,
@@ -728,7 +729,15 @@ fn radio(
         // Reported only once the subscription is live. A read that succeeds
         // and a notify that never arrives looks exactly like a dead target,
         // so "connected" means bytes can already flow both ways.
-        if ready.send(Ok(())).is_err() {
+        let address = peripheral
+            .properties()
+            .await
+            .ok()
+            .flatten()
+            .map(|properties| properties.address.to_string())
+            .unwrap_or_default();
+        let device_id = connection_identifier(&peripheral.id().to_string(), &address);
+        if ready.send(Ok(device_id)).is_err() {
             // The caller gave up (or went away) while this dial was still
             // working, so there is no reader for the bytes below and a link
             // left open is a radio the next dial has to fight for. Hanging it
@@ -1367,6 +1376,25 @@ fn keep_once(last: &mut Option<Vec<u8>>, value: Vec<u8>) -> Option<Vec<u8>> {
     Some(value)
 }
 
+// CoreBluetooth can keep the notification stream open after a physical link
+// loss. Check OS connection state independently of serial traffic, without
+// blocking the data loop or sending probe bytes to the target.
+async fn wait_for_disconnect<F, Fut>(mut connected: F, interval: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    loop {
+        tokio::time::sleep(interval).await;
+        if !tokio::time::timeout(Duration::from_secs(2), connected())
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
+}
+
 /// Move bytes in both directions until one of them stops.
 async fn carry(
     peripheral: &Peripheral,
@@ -1386,9 +1414,12 @@ async fn carry(
     // The last management notification, so its repeats can be told apart.
     // See `keep_once`.
     let mut last_response: Option<Vec<u8>> = None;
+    let disconnected = wait_for_disconnect(|| is_up(peripheral), Duration::from_millis(500));
+    tokio::pin!(disconnected);
 
     loop {
         tokio::select! {
+            _ = &mut disconnected => return,
             notification = notifications.next() => {
                 match notification {
                     Some(notification) => {
@@ -1477,6 +1508,7 @@ async fn carry(
 
 /// Bytes from the device, in order.
 struct BleReader {
+    device_id: String,
     inbound: Receiver<Option<Vec<u8>>>,
     /// Responses from the bridge's management channel, until [`Self::
     /// side_channel`] takes them over. `Option` because that happens exactly
@@ -1488,6 +1520,10 @@ struct BleReader {
 }
 
 impl LinkReader for BleReader {
+    fn ble_device_id(&self) -> Option<String> {
+        Some(self.device_id.clone())
+    }
+
     /// Management responses are not target output, so they leave by the side
     /// channel rather than by [`Self::read`].
     ///
@@ -1925,11 +1961,13 @@ mod tests {
     fn a_reader_with_no_radio_behind_it_reads_end_of_stream() {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
+            device_id: "EE:C7:42:34:48:CF".into(),
             inbound: rx,
             management: None,
             leftover: VecDeque::new(),
             done: false,
         };
+        assert_eq!(reader.ble_device_id().as_deref(), Some("EE:C7:42:34:48:CF"));
         let _ = tx.send(Some(vec![1, 2, 3]));
         let mut buf = [0u8; 8];
         assert_eq!(reader.read(&mut buf).unwrap(), 3);
@@ -1948,6 +1986,7 @@ mod tests {
     fn bytes_that_do_not_fit_wait_for_the_next_read() {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
+            device_id: "EE:C7:42:34:48:CF".into(),
             inbound: rx,
             management: None,
             leftover: VecDeque::new(),
@@ -2161,5 +2200,34 @@ mod tests {
         let expired = dial_error("br-connection-timeout");
         assert!(expired.contains("dropped mid-dial"), "{expired}");
         assert!(!expired.contains("did not answer in time"), "{expired}");
+    }
+
+    #[tokio::test]
+    async fn idle_disconnect_is_detected_without_notification_or_write() {
+        let connected = Arc::new(AtomicBool::new(true));
+        let state = Arc::clone(&connected);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            state.store(false, Ordering::Release);
+        });
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_for_disconnect(
+                || async { connected.load(Ordering::Acquire) },
+                Duration::from_millis(5),
+            ),
+        )
+        .await
+        .expect("idle link loss must end the reader");
+    }
+
+    #[tokio::test]
+    async fn an_idle_connected_peer_is_not_disconnected() {
+        assert!(tokio::time::timeout(
+            Duration::from_millis(30),
+            wait_for_disconnect(|| async { true }, Duration::from_millis(5))
+        )
+        .await
+        .is_err());
     }
 }
