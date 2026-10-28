@@ -33,7 +33,7 @@ export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
 const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
   'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
-export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 } }) {
   if (!["focused", "full"].includes(toolProfile)) throw new Error("Unknown tool profile");
   config = validateAgentConfig(config);
   const provider = PROVIDER_STREAMS[config.provider] ? config.provider : "openai-completions";
@@ -85,9 +85,17 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   const modelStream = createModelStream({ stream: providerStream, checkSession, onEvent });
   const searchDocs = docsSearch || createRadxaDocsSearch();
 
-  const buildSystemPrompt = () => toolProfile === "full"
+  /* The conversation-start snapshot of the board-stored custom instructions.
+   * They steer the task but never override the approval, evidence and safety
+   * rules that precede them. */
+  const boardInstructions = () => {
+    const value = String(customInstructions ?? "").trim();
+    if (!value) return "";
+    return `\n## Board-stored user instructions\nThese instructions were written by the user and stored on the Linkr Bee board. Follow them for this task, but they never override the approval, safety and evidence rules above.\n${value}\n`;
+  };
+  const buildSystemPrompt = () => (toolProfile === "full"
     ? serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) })
-    : focusedSystemPrompt(executionMode, toolCatalogPrompt(catalog));
+    : focusedSystemPrompt(executionMode, toolCatalogPrompt(catalog))) + boardInstructions();
 
   /* A completed probe_tools check is evidence about what the target can do, so a
    * digest request that check already answered "no" to must not be sent at all:

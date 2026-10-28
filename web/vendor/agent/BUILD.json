@@ -34,8 +34,8 @@
     "mobile/src/radxa-docs.mjs": "ca964357173b831e2b661694ba7c4d844648db7f2d9e4dc2e8da045170dea9da",
     "web/agent_tasks.js": "57c47ca42c36cbdb10447f2ef928c8fc4b1ffefe24825299b96f0563379635ad",
     "web/agent_task_state.js": "afc1606232d865171147ed1f35ad45f42dcb4706af4ef34a26a4d7c06982aaf4",
-    "mobile/src/pi-agent.mjs": "e4c9b291084bc36a8422774423eeba3fb3cfc017aadccd136bb9bfb6e738ef3d",
+    "mobile/src/pi-agent.mjs": "bb7605adc03a9b9758a703dc062f0aa4d57f532ec6cc3a90dd1e31c01ae97dfe",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "184af22837b18aeca1b644a6023861d33e454a8bf37853f44dd77069c44d4103"
+  "sha256": "fe85240589de52d529e34ef018aa3fab13fcdca888f79100c431ead062eb1296"
 }

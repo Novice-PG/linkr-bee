@@ -142,7 +142,7 @@ const labels = {
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -834,7 +834,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       // Only explicitly saved configuration is used for model requests.
       const nextFingerprint = JSON.stringify(config);
       if (!runner || fingerprint !== nextFingerprint) {
-        runner = await createSerialAgent({ config, device,
+        /* A new conversation starts here: read the board-stored instructions
+         * once and keep them for the whole conversation. */
+        const customInstructions = readBoardPrompt
+          ? await readBoardPrompt().catch(() => "")
+          : "";
+        runner = await createSerialAgent({ config, device, customInstructions,
           /* Accessory changes go through the same tool row: the card asks for
            * one explicit approval and the executed command is then shown as
            * evidence by the generic tool-result path. */
