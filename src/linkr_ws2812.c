@@ -28,6 +28,7 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 
 #if DT_HAS_ALIAS(linkr_rgb)
 
+#include <esp_cpu.h>
 #include <soc/gpio_struct.h>
 
 #define LINKR_RGB_NODE DT_ALIAS(linkr_rgb)
@@ -40,8 +41,9 @@ static const size_t ws_chain_length = (size_t)DT_PROP(LINKR_RGB_NODE, chain_leng
 
 /*
  * The core clock is fixed by CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ (160 MHz on this
- * board); mcycle counts core cycles. The Zephyr system clock (16 MHz) is not
- * what mcycle counts, so it must not be used here.
+ * board). Use the Espressif CPU API for the core cycle counter: ESP32-C3
+ * needs its chip-specific counter CSR; a direct `mcycle` read traps.
+ * The Zephyr system clock (16 MHz) does not count CPU cycles.
  */
 #define WS_CORE_HZ ((uint64_t)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000ull)
 #define WS_NS_TO_CYCLES(ns) ((uint32_t)((WS_CORE_HZ * (ns)) / 1000000000ull))
@@ -55,14 +57,7 @@ static uint8_t ws_byte_order[3] = {1, 0, 2}; /* GRB, the WS2812 default */
 
 static inline uint32_t ws_cycles(void)
 {
-#if defined(__riscv)
-	uint32_t value;
-
-	__asm__ volatile("csrr %0, mcycle" : "=r"(value));
-	return value;
-#else
-	return k_cycle_get_32();
-#endif
+	return esp_cpu_get_cycle_count();
 }
 
 static inline void ws_pin_high(void)
