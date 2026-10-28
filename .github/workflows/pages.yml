@@ -1,30 +1,18 @@
-name: Deploy the web terminal to GitHub Pages
+name: Deploy the firmware flasher to GitHub Pages
 
-# The plain web terminal (web/) is a self-contained static site: no backend, no
-# build step, all asset references relative. Publishing it is therefore a copy,
-# and the vendored assistant bundle committed under web/vendor/agent is the
-# artifact -- it is not rebuilt here, so what is published is exactly what the
-# regression suite ran against.
+# Fork-only deployment.
 #
-# BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
-# WebSocket bridge works from here too, but with a warning: an https page that
-# opens ws:// is mixed content, and Chromium allows it while marking it
-# deprecated ("Insecure access to this endpoint is deprecated"). Measured on
-# 2026-09-29 against a ws:// endpoint on a 192.168 address from this exact
-# origin: the connection opened, only the warning was printed. The bridge is
-# therefore left available; a locally served copy (tools/serve_web.sh) remains
-# the way to run it without the warning, and to reach a device when a browser
-# does enforce the deprecation.
+# The published site is the browser flasher, which lives on the long-lived
+# fork/web-flasher branch. This workflow checks that branch out explicitly so a
+# push to main (upstream's plain web terminal) can never replace the flasher,
+# and a release publication still refreshes the staged firmware automatically.
 #
 # Requires Settings -> Pages -> Source: "GitHub Actions" once.
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "web/**"
-      - ".github/workflows/pages.yml"
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
@@ -32,23 +20,48 @@ permissions:
   pages: write
   id-token: write
 
-# Pages deployments are not worth racing: a cancelled deploy can leave the site
-# half-updated, and the site changes at most a few times a day.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Publish the plain web terminal
+    name: Publish the firmware flasher
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out repository
+      - name: Check out the flasher branch
         uses: actions/checkout@v4
+        with:
+          ref: fork/web-flasher
+
+      # Publish the newest released firmware beside the page. The flasher
+      # fetches these same-origin files rather than cross-origin release
+      # assets. Without a release the page still deploys and its runtime
+      # fallback reads the latest release from the API.
+      - name: Stage the latest released firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .firmware-release
+          if gh release download \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern '*firmware-*.zip' \
+              --dir .firmware-release; then
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)"
+            python3 tools/build_firmware_manifest.py \
+              --source .firmware-release \
+              --output web/firmware \
+              --tag "${tag}" \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            echo "No released firmware yet; publishing without a staged manifest."
+            rm -rf .firmware-release
+          fi
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.
