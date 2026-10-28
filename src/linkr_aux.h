@@ -35,6 +35,9 @@ int linkr_aux_init(void);
 /* Handle one control command (the body after '@', already trimmed).
  * Returns true when the command belongs to this group and `response` holds the
  * line to send back (with CRLF). */
+/* Exact read-only commands; all other auxiliary requests require ownership. */
+bool linkr_aux_is_readonly(const char *body);
+
 bool linkr_aux_command(const char *body, char *response, size_t response_size);
 
 /* Largest help fragment this module can produce. */

@@ -560,3 +560,42 @@ test("the AI configuration saves itself when a field loses focus", async ({ page
   expect(stored.model).toBe("auto-model");
   expect(stored.apiKey).toBe("sk-auto");
 });
+
+
+test("board configuration operations stay exclusive and recover after failure", async ({ page }) => {
+  await openApp(page);
+  await mockBoard(page);
+  await page.locator("#panelToggle").tap();
+  await page.locator('[data-settings-target="ai"]').tap();
+  await page.locator("#agentEndpoint").fill("https://api.example.com/v1");
+  await page.locator("#agentModel").fill("demo-model");
+  await page.evaluate(() => {
+    window.boardScript["@y begin"] = () => {
+      window.boardAiconfStage = "";
+      return new Promise(resolve => { window.releaseBoardSave = () => resolve("OK aiconf begin"); });
+    };
+  });
+  await page.locator("#agentBoardConfigSave").tap();
+  for (const id of ["agentBoardConfigSave", "agentBoardConfigLoad", "agentBoardConfigClear"]) {
+    await expect(page.locator(`#${id}`)).toBeDisabled();
+  }
+  await page.evaluate(() => {
+    for (const id of ["agentBoardConfigSave", "agentBoardConfigLoad", "agentBoardConfigClear"]) {
+      document.getElementById(id).dispatchEvent(new Event("click"));
+    }
+    window.releaseBoardSave();
+  });
+  await expect(page.locator("#agentBoardConfigSave")).toBeEnabled();
+  expect(await page.evaluate(() => window.boardCommands.filter(c => c === "@y begin").length)).toBe(1);
+  expect(await page.evaluate(() => window.boardCommands.includes("@y clear"))).toBe(false);
+  expect(JSON.parse(await page.evaluate(() => window.boardAiconf)).model).toBe("demo-model");
+  await page.evaluate(() => { window.boardScript["@y begin"] = "ERR storage"; });
+  await page.locator("#agentBoardConfigSave").tap();
+  await expect(page.locator("#agentBoardConfigStatus")).toContainText("ERR storage");
+  for (const id of ["agentBoardConfigSave", "agentBoardConfigLoad", "agentBoardConfigClear"]) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+  }
+  await page.evaluate(() => { delete window.boardScript["@y begin"]; });
+  await page.locator("#agentBoardConfigSave").tap();
+  await expect(page.locator("#agentBoardConfigStatus")).toContainText(/Saved to the board|已保存到板载/);
+});

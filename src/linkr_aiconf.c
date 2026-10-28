@@ -40,7 +40,7 @@ int linkr_aiconf_len(void)
 	aiconf_cached_len = (size_t)length > LINKR_AICONF_MAX
 				    ? LINKR_AICONF_MAX
 				    : (size_t)length;
-	aiconf_cache_valid = true;
+	/* Only a successful read or commit populates the byte cache. */
 	return (int)aiconf_cached_len;
 }
 

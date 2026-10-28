@@ -932,6 +932,43 @@ static bool ir_command(const char *body, char *response, size_t size)
 	return true;
 }
 
+bool linkr_aux_is_readonly(const char *body)
+{
+	const char *rest = NULL;
+	uint32_t offset;
+
+	if (body == NULL) {
+		return false;
+	}
+	if (!strcmp(body, "l?") || !strcmp(body, "led?") ||
+	    !strcmp(body, "o?") || !strcmp(body, "opto?") ||
+	    !strcmp(body, "r?") || !strcmp(body, "ir?") ||
+	    !strcmp(body, "r slots") || !strcmp(body, "ir slots") ||
+	    !strcmp(body, "p?") || !strcmp(body, "prompt?") ||
+	    !strcmp(body, "y?") || !strcmp(body, "aiconf?")) {
+		return true;
+	}
+	if (!strncmp(body, "p get", 5)) {
+		rest = body + 5;
+	} else if (!strncmp(body, "prompt get", 10)) {
+		rest = body + 10;
+	} else if (!strncmp(body, "y get", 5)) {
+		rest = body + 5;
+	} else if (!strncmp(body, "aiconf get", 10)) {
+		rest = body + 10;
+	}
+	if (rest == NULL) {
+		return false;
+	}
+	if (*rest == '\0') {
+		return true;
+	}
+	if (*rest != ' ' && *rest != '\t') {
+		return false;
+	}
+	return parse_uint(&rest, UINT16_MAX, &offset) && at_end(rest);
+}
+
 bool linkr_aux_command(const char *body, char *response, size_t response_size)
 {
 	if (body == NULL || response == NULL || response_size == 0) {

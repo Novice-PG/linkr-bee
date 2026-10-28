@@ -20,6 +20,8 @@ static unsigned int id(const void *peer)
 	assert(sscanf(response, "OK control self=%u", &result) == 1);
 	return result;
 }
+#include "control_dispatch.inc"
+
 static atomic_int start;
 static void *claim(void *peer)
 {
@@ -103,6 +105,22 @@ int main(int argc, char **argv)
 		linkr_session_status(&c, response, sizeof(response));
 		assert(linkr_session_ticket(&c, true));
 		assert(!linkr_session_ticket(&a, true));
+	} else if (!strcmp(argv[1], "aux_permissions")) {
+		command(&a, "c claim");
+		uint32_t current = linkr_session_epoch(&a);
+		const char *mutations[] = {"o on", "r tx 1,2", "p clear", "y begin"};
+		for (size_t i = 0; i < sizeof(mutations)/sizeof(mutations[0]); i++) {
+			int before = aux_calls;
+			assert(dispatch_aux(&b, mutations[i], current));
+			assert(aux_calls == before);
+			assert(dispatch_aux(&a, mutations[i], current));
+			assert(aux_calls == before + 1);
+		}
+		assert(dispatch_aux(&b, "p get", current));
+		int before = aux_calls;
+		command(&a, "c release");
+		assert(dispatch_aux(&a, "o on", current));
+		assert(aux_calls == before);
 	} else abort();
 	puts("ok");
 	return 0;

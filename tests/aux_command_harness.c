@@ -407,6 +407,7 @@ int linkr_aiconf_read(uint16_t offset, uint8_t *out, size_t out_len)
 
 /* ---- Production code, with only its Zephyr includes removed ------------- */
 #include "aux_production.inc"
+#include "control_limit.inc"
 
 /* ---- Checks ------------------------------------------------------------- */
 
@@ -670,6 +671,17 @@ static void test_prompt_commands(void)
 	expect_starts("p set 00", "ERR prompt=hex\r\n");
 	expect_starts("p bogus", "ERR prompt=expected set|get|clear\r\n");
 
+	/* A full prompt passes the actual main.c command-length gate. */
+	char max_hex[2 * LINKR_PROMPT_MAX + 1];
+	for (int i = 0; i < LINKR_PROMPT_MAX; i++) {
+		snprintf(&max_hex[i * 2], 3, "61");
+	}
+	snprintf(command, sizeof(command), "@p set %s", max_hex);
+	assert(!command_rejected((uint16_t)strlen(command)));
+	expect_starts(command + 1, "OK prompt len=240\r\n");
+	assert(!command_rejected(LINKR_MGMT_MAX_PAYLOAD));
+	assert(command_rejected(LINKR_MGMT_MAX_PAYLOAD + 1));
+
 	/* More than 240 bytes no longer fits the hex decoder. */
 	char long_hex[2 * 241 + 1];
 	for (int i = 0; i < 241; i++) {
@@ -755,6 +767,15 @@ static void test_dispatch_and_help(void)
 
 int main(void)
 {
+	assert(linkr_aux_is_readonly("p get"));
+	assert(linkr_aux_is_readonly("prompt get 48"));
+	assert(linkr_aux_is_readonly("y get 0"));
+	assert(!linkr_aux_is_readonly("p getclear"));
+	assert(!linkr_aux_is_readonly("p get 0 clear"));
+	assert(!linkr_aux_is_readonly("o on"));
+	assert(!linkr_aux_is_readonly("r tx 1,2"));
+	assert(!linkr_aux_is_readonly("y begin"));
+
 	test_led_commands();
 	test_opto_commands();
 	test_ir_commands();

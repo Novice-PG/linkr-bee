@@ -64,7 +64,7 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define UART_RX_BUFFER_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 
 #define CONTROL_CMD_PREFIX "@linkr "
-#define CONTROL_CMD_MAX_LEN 416
+#define CONTROL_CMD_MAX_LEN (LINKR_MGMT_MAX_PAYLOAD + 1)
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
 
@@ -1596,6 +1596,24 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		return true;
 	}
 
+	bool readonly = !strcmp(body, "h") || !strcmp(body, "help") ||
+		!strcmp(body, "i?") || !strcmp(body, "info?") ||
+		!strcmp(body, "u?") || !strcmp(body, "uart?") ||
+		!strcmp(body, "n?") || !strcmp(body, "name?") ||
+		!strcmp(body, "a?") || !strcmp(body, "autobaud?") ||
+		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
+		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
+		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
+		!strcmp(body, "target?") || linkr_aux_is_readonly(body);
+	if (!readonly) {
+		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {
+			(void)send_control_response(conn, "ERR control=readonly\r\n");
+			return true;
+		}
+		/* Accepted operations may finish after a handover. Never hold the
+		 * ownership mutex while a device/network operation can block. */
+		linkr_session_end();
+	}
 	/* ---- Auxiliary board I/O (@l / @o / @r) ---- */
 	{
 		char aux_response[192];
@@ -1606,24 +1624,6 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		}
 	}
 
-	bool readonly = !strcmp(body, "h") || !strcmp(body, "help") ||
-		!strcmp(body, "i?") || !strcmp(body, "info?") ||
-		!strcmp(body, "u?") || !strcmp(body, "uart?") ||
-		!strcmp(body, "n?") || !strcmp(body, "name?") ||
-		!strcmp(body, "a?") || !strcmp(body, "autobaud?") ||
-		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
-		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
-		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
-		!strcmp(body, "target?");
-	if (!readonly) {
-		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {
-			(void)send_control_response(conn, "ERR control=readonly\r\n");
-			return true;
-		}
-		/* Accepted operations may finish after a handover. Never hold the
-		 * ownership mutex while a device/network operation can block. */
-		linkr_session_end();
-	}
 	char target_response[80];
 	if (linkr_target_command(body, target_response, sizeof(target_response))) {
 		(void)send_control_response(conn, "%s", target_response);

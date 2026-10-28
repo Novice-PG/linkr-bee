@@ -82,17 +82,17 @@ export function parsePromptChunk(text) {
 /* Assemble the chunks of one prompt, refusing a short or out-of-order read. */
 export function assemblePrompt(chunks, total = 0) {
   const ordered = [...chunks].sort((a, b) => a.offset - b.offset);
-  let text = "";
+  let hex = "";
   let expected = 0;
   for (const chunk of ordered) {
     if (chunk.offset !== expected) {
       throw new Error("prompt chunks are out of order");
     }
-    text += chunk.chunk;
+    hex += chunk.hex;
     expected += chunk.hex.length / 2;
   }
   if (total && expected !== total) {
     throw new Error("prompt read is incomplete");
   }
-  return text;
+  return hexToUtf8(hex);
 }

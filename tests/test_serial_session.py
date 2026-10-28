@@ -32,6 +32,24 @@ static inline void k_mutex_lock(struct k_mutex *m, int timeout) {
 static inline void k_mutex_unlock(struct k_mutex *m) { pthread_mutex_unlock(&m->native); }
 ''')
         (path / "zephyr/sys/printk.h").write_text("#include <stdio.h>\n#define snprintk snprintf\n")
+        main = (ROOT / "src/main.c").read_text()
+        start = main.index('\n\tLOG_INF("Control command received");')
+        end = main.index('\n\tchar target_response[80];', start)
+        dispatch = main[start:end]
+        (path / "control_dispatch.inc").write_text("""
+#define LOG_INF(...)
+static struct { uint32_t epoch; } mgmt_capture;
+static int aux_calls;
+static int send_control_response(const void *peer, const char *format, ...) {
+ (void)peer; (void)format; return 0;
+}
+static bool linkr_aux_is_readonly(const char *body) { return !strcmp(body, "p get"); }
+static bool linkr_aux_command(const char *body, char *out, size_t n) {
+ (void)body; (void)out; (void)n; aux_calls++; return true;
+}
+static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
+ mgmt_capture.epoch = queued;
+""" + dispatch + "\n return false;\n}\n")
         cls.binary = path / "session-test"
         subprocess.run([
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-D_GNU_SOURCE",
@@ -43,7 +61,7 @@ static inline void k_mutex_unlock(struct k_mutex *m) { pthread_mutex_unlock(&m->
     def test_real_arbiter_scenarios(self):
         for scenario in ["single_writer", "managed_release", "handover", "reconnect",
                          "queued_command", "concurrent_claims", "disconnected",
-                         "bad_handover", "legacy_lan"]:
+                         "bad_handover", "legacy_lan", "aux_permissions"]:
             with self.subTest(scenario=scenario):
                 result = subprocess.run([str(self.binary), scenario], capture_output=True,
                                         text=True, check=True, timeout=10)

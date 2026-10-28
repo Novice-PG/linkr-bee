@@ -459,6 +459,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   $("targetRegenerateConfirm").addEventListener("change", () => { $("targetRegenerate").disabled = !$("targetRegenerateConfirm").checked; });
 
   /* ---- Board-stored AI configuration ---- */
+  let boardBusy = false;
   const boardStatus = () => $("agentBoardConfigStatus");
   function setBoardStatus(key, replacements = {}, tone = "") {
     let message = text(key);
@@ -482,7 +483,7 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
   }
   async function saveBoardConfig() {
     if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
-    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    if (busy || importing || boardBusy) { setBoardStatus("busy", {}, "error"); return; }
     let draft;
     try {
       draft = collectBoardDraft();
@@ -501,6 +502,8 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     const payload = serializeAiconf(draft, { includeSecrets });
     const bytes = new TextEncoder().encode(payload).length;
     if (bytes > AICONF_MAX_BYTES) { setBoardStatus("boardConfigTooLarge", {}, "error"); return; }
+    boardBusy = true;
+    updateConfigControls();
     try {
       const begin = await control(AICONF_BEGIN_COMMAND);
       if (!replyOk(begin)) throw new Error(String(begin).trim() || "begin");
@@ -513,11 +516,16 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
       setBoardStatus("boardConfigSaved", { bytes });
     } catch (error) {
       setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    } finally {
+      boardBusy = false;
+      updateConfigControls();
     }
   }
   async function loadBoardConfig() {
     if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
-    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    if (busy || importing || boardBusy) { setBoardStatus("busy", {}, "error"); return; }
+    boardBusy = true;
+    updateConfigControls();
     try {
       const statusReply = await control(AICONF_QUERY_COMMAND);
       const status = parseAiconfStatus(statusReply);
@@ -552,17 +560,25 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
       scheduleAutosave();
     } catch (error) {
       setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    } finally {
+      boardBusy = false;
+      updateConfigControls();
     }
   }
   async function clearBoardConfig() {
     if (!control) { setBoardStatus("boardConfigUnavailable", {}, "error"); return; }
-    if (busy || importing) { setBoardStatus("busy", {}, "error"); return; }
+    if (busy || importing || boardBusy) { setBoardStatus("busy", {}, "error"); return; }
+    boardBusy = true;
+    updateConfigControls();
     try {
       const reply = await control(AICONF_CLEAR_COMMAND);
       if (!replyOk(reply)) throw new Error(String(reply).trim() || "clear");
       setBoardStatus("boardConfigCleared");
     } catch (error) {
       setBoardStatus("boardConfigError", { message: error?.message || error }, "error");
+    } finally {
+      boardBusy = false;
+      updateConfigControls();
     }
   }
   $("agentBoardConfigSave").addEventListener("click", saveBoardConfig);
@@ -574,9 +590,9 @@ export function createAgentSettings({ section, tab, getLang, onChange, bindingAc
     $("agentSettingsFields").disabled = busy || importing;
     $("agentSettingsSave").disabled = busy || importing;
     $("agentSettingsClear").disabled = busy || importing;
-    $("agentBoardConfigSave").disabled = busy || importing;
-    $("agentBoardConfigLoad").disabled = busy || importing;
-    $("agentBoardConfigClear").disabled = busy || importing;
+    $("agentBoardConfigSave").disabled = busy || importing || boardBusy;
+    $("agentBoardConfigLoad").disabled = busy || importing || boardBusy;
+    $("agentBoardConfigClear").disabled = busy || importing || boardBusy;
   }
   const importer = createCLIProxySettings({ section, getLang,
     onPending(value) { importing = value; updateConfigControls(); },

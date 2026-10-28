@@ -28,3 +28,13 @@ test("readonly clients can query and negotiate but cannot mutate device settings
     assert.equal(isReadonlyManagementCommand(command), false, command);
   }
 });
+
+
+test("board prompt reads with implicit and explicit offsets are read-only", () => {
+  for (const command of ["@p get", "@p get 0", "@p get 48", "@linkr prompt get", "@linkr prompt get 48"]) {
+    assert.equal(isReadonlyManagementCommand(command), true, command);
+  }
+  for (const command of ["@p set 6162", "@p clear", "@p get -1", "@p get 0 clear"]) {
+    assert.equal(isReadonlyManagementCommand(command), false, command);
+  }
+});

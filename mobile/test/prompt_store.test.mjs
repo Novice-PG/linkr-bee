@@ -54,3 +54,16 @@ test("chunks assemble in order and refuse incomplete reads", () => {
   assert.throws(() => assemblePrompt([chunks[1]], 11), /out of order/);
   assert.throws(() => assemblePrompt(chunks, 20), /incomplete/);
 });
+
+
+test("UTF-8 is decoded after all byte chunks arrive", () => {
+  for (const text of ["a" + "中".repeat(20), "x".repeat(47) + "🙂中文", "中文🙂".repeat(20)]) {
+    const bytes = new TextEncoder().encode(text);
+    const chunks = [];
+    for (let offset = 0; offset < bytes.length; offset += 48) {
+      const hex = Buffer.from(bytes.slice(offset, offset + 48)).toString("hex");
+      chunks.push(parsePromptChunk(`OK p off=${offset} hex=${hex} total=${bytes.length} done=${offset + 48 >= bytes.length ? "yes" : "no"}`));
+    }
+    assert.equal(assemblePrompt(chunks, bytes.length), text);
+  }
+});

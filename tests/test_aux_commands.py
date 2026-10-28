@@ -25,6 +25,19 @@ class AuxCommandTests(unittest.TestCase):
         # those headers would have provided.
         production = re.sub(r"^#include <zephyr/.*\n", "", production, flags=re.M)
         (directory / "aux_production.inc").write_text(production)
+        main = (ROOT / "src/main.c").read_text()
+        defines = re.search(r"^#define CONTROL_CMD_MAX_LEN .*", main, re.M).group(0)
+        defines += "\n" + re.search(r"^#define LINKR_MGMT_MAX_PAYLOAD .*", (ROOT / "src/ble_mgmt.h").read_text(), re.M).group(0)
+        start = main.index('\tif (len >= sizeof(control_command_data))')
+        end = main.index('\n\tis_long =', start)
+        (directory / "control_limit.inc").write_text(defines + """
+static char control_command_data[CONTROL_CMD_MAX_LEN];
+static int send_control_response(const void *conn, const char *format, ...) {
+ (void)conn; (void)format; return 0;
+}
+static bool command_rejected(uint16_t len) {
+ const void *conn = NULL;
+""" + main[start:end] + "\n return false;\n}\n")
         cls.binary = directory / "aux-command-test"
         subprocess.run([
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall",
