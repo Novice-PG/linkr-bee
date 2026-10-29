@@ -41,9 +41,10 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 浏览器和手机 App 内置助手：检索串口日志，按所选审批策略执行目标命令；修改桥接器
   自身的 UART、WiFi 和日志上传设置前需确认。它会记住每台目标设备的事实、统计
   本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
-- Android App 可在局域网内充当 MCP 服务器，Claude Desktop、Cursor 等 AI 客户端能
-  读取控制台，并按所选访问权限（只读、每条命令需授权、仅高危命令需授权、完全授权）
-  发送输入、修改设置。见 [MCP 服务器指南](docs/MCP.zh-CN.md)。
+- Android App 可在局域网内充当 MCP 服务器与 A2A agent，Claude Desktop、Cursor 等 AI
+  客户端能读取控制台，并按所选访问权限（只读、每条命令需授权、仅高危命令需授权、
+  完全授权）发送输入、修改设置，或把任务委派给 App 内的常驻助手。见
+  [MCP 服务器指南](docs/MCP.zh-CN.md) 与 [A2A 指南](docs/A2A.zh-CN.md)。
 
 ## 选择客户端
 

@@ -339,24 +339,34 @@ endpoint.
   a client configuration snippet, and the most recent calls. A foreground-service
   notification keeps the process alive while the app is backgrounded and can
   stop the listener.
-- Tools cover the target console (status, journal, search, input) and Linkr Bee
-  itself: `get_bee_status`, `scan_bee_devices`, `connect_bee`, `disconnect_bee`,
-  `set_bee_name` and `set_lan_bridge` drive or configure the app's own BLE/LAN
-  connection through the same helper paths the UI uses.
+- Tools cover the target console (status, journal, search, input), Linkr Bee
+  itself (`get_bee_status`, `scan_bee_devices`, `connect_bee`, `disconnect_bee`,
+  `set_bee_name`, `set_lan_bridge`), execution tracking
+  (`get_execution_status`) and the resident assistant (`get_agent_status`,
+  `start_agent_task`, `get_agent_task`, `list_agent_tasks`, `cancel_agent_task`).
+  Starting a resident task is approved once on the phone; inside that task the
+  assistant's serial writes and accessory changes run without further prompts.
+- The same listener also exposes the resident agent over A2A: a public agent card
+  at `/.well-known/agent-card.json` and JSON-RPC tasks at `/a2a`, using the same
+  bearer token. Streaming is not supported; clients poll `GetTask`. Start with
+  `TASK_STATE`/`SendMessage`/`GetTask`/`CancelTask`; the task semantics match the
+  MCP tools. See the [A2A guide](../docs/A2A.md).
 - Caveats: Android only; the bearer token travels over plain HTTP on the LAN
-  (trusted networks only); by default writes need approval on the phone and are
-  refused while the app is backgrounded (the no-confirmation mode removes that
-  prompt, including in the background); read-only mode rejects device-changing
-  tools;
-  there are no SSE or server-initiated messages; the server stops when the app
-  process is destroyed; accessory tools need the BLE management channel; and
-  serial output is untrusted device data where a successful send is delivery,
+  (trusted networks only); by default writes need approval on the phone (in the
+  background that approval becomes a notification when notifications are
+  enabled; otherwise it is refused); read-only mode rejects device-changing
+  tools; there are no SSE or server-initiated messages; the server stops when the
+  app process is destroyed and running resident tasks are lost; resident tasks
+  use only AI settings saved locally in the app (a board configuration is used
+  only after the user loads it); accessory tools need the BLE management channel;
+  and serial output is untrusted device data where a successful send is delivery,
   not command completion.
 - Verification: host-JVM tests + build verified; on a phone with a real
   accessory, reads, the approval banner, a denied request and one approved
   serial write are verified. Configuration changes and process death are not.
 
-Full guide: [MCP server](../docs/MCP.md) · [中文](../docs/MCP.zh-CN.md).
+Full guides: [MCP server](../docs/MCP.md) · [中文](../docs/MCP.zh-CN.md) ·
+[A2A resident agent](../docs/A2A.md) · [中文](../docs/A2A.zh-CN.md).
 
 ## Regression tests
 

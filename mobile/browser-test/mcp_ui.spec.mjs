@@ -387,6 +387,7 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
     { port: 8712, bind: "lan" },
   ]);
   await expect(page.locator("#mcpUrl")).toHaveValue("http://192.168.1.50:8712/mcp");
+  await expect(page.locator("#mcpA2aCard")).toHaveValue("http://192.168.1.50:8712/.well-known/agent-card.json");
   await expect(page.locator("#mcpToken")).toHaveAttribute("type", "password");
   await expect(page.locator("#mcpToken")).toHaveValue(TOKEN_A);
   await expect(page.locator("#mcpTokenToggle")).toHaveText(/Show token|显示令牌/);

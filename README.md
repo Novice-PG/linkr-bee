@@ -50,11 +50,12 @@ target's own UART bytes and does not replace the target shell.
   the bridge's UART, WiFi or log-upload settings. It remembers facts
   about each target between sessions, counts the tokens it used, and can export
   the whole diagnosis as a Markdown report.
-- Android app as an MCP server on the local network, so Claude Desktop, Cursor,
-  and other AI clients can read the console and — under a selectable access mode
-  (read-only, every command needs approval, only high-risk commands need
-  approval, or fully authorized) — send input and change settings. See the
-  [MCP server guide](docs/MCP.md).
+- Android app as an MCP server and A2A agent on the local network, so Claude
+  Desktop, Cursor, and other AI clients can read the console and — under a
+  selectable access mode (read-only, every command needs approval, only
+  high-risk commands need approval, or fully authorized) — send input and
+  change settings, or delegate a task to the app's resident assistant. See the
+  [MCP server guide](docs/MCP.md) and the [A2A guide](docs/A2A.md).
 
 ## Choose a client
 

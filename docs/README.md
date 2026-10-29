@@ -27,6 +27,7 @@ Screenshots are UI previews with sample output, not hardware acceptance evidence
 | [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) | Chinese | GATT services, framed requests, Reliable UART, and events |
 | [BLE pairing and recovery](BLE_PAIRING.md) | Chinese | Pairing GPIO authorization (GPIO1 on C3/C5; WROOM optional GPIO4, off by default), persistent bonds, client steps, and recovery |
 | [MCP server](MCP.md) · [中文](MCP.zh-CN.md) | English, Chinese | Run the Android app as a local MCP endpoint for Claude Desktop, Cursor, and other AI clients |
+| [A2A resident agent](A2A.md) · [中文](A2A.zh-CN.md) | English, Chinese | Expose the app's resident assistant over A2A: agent card, JSON-RPC tasks, one task approval |
 | [HarmonyOS bridge protocol](../harmonyos/BRIDGE_PROTOCOL.md) | English | ArkWeb-to-ArkTS JSON bridge contract |
 | [Visual assets](../assets/README.md) | English | Logos, screenshot languages, and reproducible capture instructions |
 

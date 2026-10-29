@@ -84,6 +84,7 @@ import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
 import { createMcpHost } from "./mcp_server.js";
+import { createResidentAgent } from "./resident_agent.js";
 import { createMcpUi } from "./mcp_ui.js";
 import { createAboutPage } from "./about_page.js";
 import { inputLeavesPendingLine } from "./agent_execution_policy.js";
@@ -101,6 +102,7 @@ let agentPanel = null;
 let agentSettings = null;
 let mcpHost = null;
 let mcpUi = null;
+let residentAgent = null;
 let terminalKeyPreferences = null;
 let aboutPage = null;
 let serialControlTimer = null;
@@ -6983,9 +6985,30 @@ function initMcp() {
   if (!bridge || !bridge.available) return;
   let storage;
   try { storage = localStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
+  /* The resident assistant is the app's own agent runtime, made callable by
+   * MCP/A2A clients. It uses the same device executor, accessory helpers,
+   * notes and board prompt as the human conversation; only its conversation is
+   * separate. Starting a task is approved once in MCP/A2A, and that approval is
+   * what the task's own writes rely on. */
+  residentAgent = createResidentAgent({
+    storage,
+    getConfig: () => agentSettings?.getConfig?.() || null,
+    getDevice: () => agentPanel?.getDevice?.() || null,
+    readBoardPrompt: readBoardPromptForAgent,
+    accessory: {
+      capability: accessoryCapability,
+      command: accessoryCommand,
+      execute: executeAccessoryChange,
+      diagnostics: collectAccessoryDiagnostics,
+      scan: scanWifi,
+    },
+    isHumanAgentBusy: () => Boolean(agentPanel?.isBusy?.()),
+    onTaskChange: () => mcpUi?.refresh(),
+  });
   mcpHost = createMcpHost({
     getBridge: () => globalThis.LinkrMcp || null,
     storage,
+    residentAgent,
     getDevice: () => agentPanel?.getDevice?.() || null,
     readLog: (options) => agentJournal.read(options),
     /* The accessory helpers are the app's own management-channel functions, so

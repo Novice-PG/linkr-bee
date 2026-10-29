@@ -24,6 +24,7 @@
 | [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) | GATT 服务、分帧请求、Reliable UART 与事件 |
 | [蓝牙配对与恢复](BLE_PAIRING.md) | 配对 GPIO 授权（C3/C5 为 GPIO1；WROOM 可选 GPIO4，默认关闭）、绑定保留、各端步骤与故障恢复 |
 | [MCP 服务器](MCP.zh-CN.md) · [English](MCP.md) | Android App 作为局域网 MCP 端点，供 Claude Desktop、Cursor 等 AI 客户端接入 |
+| [A2A 常驻助手](A2A.zh-CN.md) · [English](A2A.md) | 通过 A2A 暴露 App 内常驻助手：agent card、JSON-RPC 任务、一次任务确认 |
 | [鸿蒙桥接协议](../harmonyos/BRIDGE_PROTOCOL.md) | ArkWeb 与 ArkTS 之间的 JSON 桥接约定（英文） |
 | [视觉资源](../assets/README.md) | Logo、截图语言分组与重新截图的方法（英文） |
 

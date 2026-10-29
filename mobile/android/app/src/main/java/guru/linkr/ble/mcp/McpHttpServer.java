@@ -28,11 +28,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Small authenticated HTTP server that fronts the app's MCP endpoint.
  *
  * <p>The class deliberately contains no Android imports so the transport can be
- * exercised on a host JVM. All MCP protocol logic lives in JavaScript; this
- * server only parses an HTTP request, enforces the security envelope (origin,
- * bearer token, size limits) and hands authenticated {@code POST /mcp} bodies
- * to a {@link Handler}. The handler answers with a {@link Response} which is
- * written back verbatim.
+ * exercised on a host JVM. All protocol logic lives in JavaScript; this server
+ * only parses an HTTP request, enforces the security envelope (origin, bearer
+ * token, size limits) and hands authenticated {@code POST /mcp} and
+ * {@code POST /a2a} bodies to a {@link Handler}. It also forwards the public
+ * {@code GET /.well-known/agent-card.json} discovery document without a token.
+ * The handler answers with a {@link Response} which is written back verbatim.
  */
 public final class McpHttpServer {
 
@@ -52,7 +53,14 @@ public final class McpHttpServer {
     public static final String NOT_READY_BODY =
             "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":\"Linkr Bee app is not ready\"}}";
 
-    private static final String STATUS_BODY = "{\"name\":\"linkr-bee-mcp\",\"version\":\"0.1.0\",\"mcp\":\"/mcp\"}";
+    /** Authenticated JSON-RPC endpoint for A2A; {@code /a2a/} is an alias. */
+    private static final String A2A_PATH = "/a2a";
+
+    /** Public A2A discovery document, served without a bearer token. */
+    private static final String AGENT_CARD_PATH = "/.well-known/agent-card.json";
+
+    private static final String STATUS_BODY = "{\"name\":\"linkr-bee-mcp\",\"version\":\"0.1.0\","
+            + "\"mcp\":\"/mcp\",\"a2a\":\"/a2a\",\"agentCard\":\"/.well-known/agent-card.json\"}";
     private static final String BAD_REQUEST_BODY = "{\"error\":\"bad request\"}";
     private static final String UNAUTHORIZED_BODY = "{\"error\":\"unauthorized\"}";
     private static final String FORBIDDEN_BODY = "{\"error\":\"origin not allowed\"}";
@@ -93,7 +101,10 @@ public final class McpHttpServer {
         }
     }
 
-    /** Bridge to the WebView. Only authenticated {@code POST /mcp} bodies reach it. */
+    /**
+     * Bridge to the WebView. Authenticated {@code POST /mcp} and {@code POST /a2a}
+     * bodies reach it, plus the public agent-card {@code GET}.
+     */
     public interface Handler {
         CompletableFuture<Response> handle(Request request);
     }
@@ -318,10 +329,27 @@ public final class McpHttpServer {
             }
 
             if ("POST".equals(method) && "/mcp".equals(path)) {
-                Response response = handleMcpPost(socket, input, headers, hasOrigin);
+                Response response = handleAuthenticatedPost(socket, input, headers, hasOrigin, "/mcp");
                 if (response != null) {
                     writeResponse(socket, response, null);
                 }
+                return;
+            }
+
+            if ("POST".equals(method) && (A2A_PATH.equals(path) || "/a2a/".equals(path))) {
+                /* A2A clients may append a trailing slash; the sink only has to
+                 * route the canonical spelling. */
+                Response response = handleAuthenticatedPost(socket, input, headers, hasOrigin, A2A_PATH);
+                if (response != null) {
+                    writeResponse(socket, response, null);
+                }
+                return;
+            }
+
+            if ("GET".equals(method) && AGENT_CARD_PATH.equals(path)) {
+                /* Discovery is public by A2A design: no bearer token and no
+                 * Origin rejection for this route. */
+                writeResponse(socket, forward(buildRequest(socket, "GET", AGENT_CARD_PATH, "", headers)), null);
                 return;
             }
 
@@ -335,15 +363,30 @@ public final class McpHttpServer {
                 return;
             }
 
+            if (A2A_PATH.equals(path) || "/a2a/".equals(path)) {
+                writeResponse(socket, new Response(405, METHOD_NOT_ALLOWED_BODY), "POST");
+                return;
+            }
+
+            if (AGENT_CARD_PATH.equals(path)) {
+                writeResponse(socket, new Response(405, METHOD_NOT_ALLOWED_BODY), "GET");
+                return;
+            }
+
             writeResponse(socket, new Response(404, NOT_FOUND_BODY), null);
         } catch (IOException ignored) {
             // Read timeout, abrupt disconnect or shutdown; the socket is closed below.
         }
     }
 
-    /** Returns a response, or null when the connection died while reading the body. */
-    private Response handleMcpPost(Socket socket, InputStream input, Map<String, String> headers, boolean hasOrigin)
-            throws IOException {
+    /**
+     * Applies the authenticated-POST envelope (Origin, bearer, body limits) and
+     * forwards the body to the handler under {@code forwardedPath}.
+     *
+     * @return a response, or null when the connection died while reading the body
+     */
+    private Response handleAuthenticatedPost(Socket socket, InputStream input, Map<String, String> headers,
+            boolean hasOrigin, String forwardedPath) throws IOException {
         if (hasOrigin) {
             return new Response(403, FORBIDDEN_BODY);
         }
@@ -381,15 +424,15 @@ public final class McpHttpServer {
         if (!isAuthorized(headers.get("authorization"))) {
             return new Response(401, UNAUTHORIZED_BODY);
         }
+        return forward(buildRequest(
+                socket, "POST", forwardedPath, new String(body, StandardCharsets.UTF_8), headers));
+    }
+
+    private static Request buildRequest(
+            Socket socket, String method, String path, String body, Map<String, String> headers) {
         String remote = socket.getInetAddress() == null ? "" : socket.getInetAddress().getHostAddress();
         String userAgent = headers.get("user-agent");
-        Request request = new Request(
-                "POST",
-                "/mcp",
-                remote,
-                userAgent == null ? "" : userAgent,
-                new String(body, StandardCharsets.UTF_8));
-        return forward(request);
+        return new Request(method, path, remote, userAgent == null ? "" : userAgent, body);
     }
 
     private Response forward(Request request) {
