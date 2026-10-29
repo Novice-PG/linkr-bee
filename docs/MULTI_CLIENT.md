@@ -105,6 +105,12 @@ This profile is build-checked on C3 only. Full-featured C5 and WROOM builds
 remain at two BLE clients because of tight internal SRAM; do not apply the
 three-client profile to them without further memory work and validation.
 
+The host arbiter harness (including preemptive `claim`, idle `claim idle` and
+the seamless write hand-over) passes, and C3, C5 and `linkr_bee_x1_0` builds
+succeed with the 3000 ms default. The X1.0 image used for this change was built
+with the pinned `linkr_multipeer_zephyr` workspace because the default workspace's
+simple-boot loader already contains the upstream digest change the shim guards.
+
 Passing a build or host test is not hardware acceptance. Before shipping, test
 two actual hosts, optional third-host admission, different MTUs/transports,
 bonded reconnects, controller release/handover, slow peers, long UART bursts,

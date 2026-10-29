@@ -82,6 +82,11 @@ west build -d build-three -b esp32c3_supermini . -- -DEXTRA_CONF_FILE=multi3.con
 该实验配置只在 C3 上做构建验证。完整功能的 C5/WROOM 内部 SRAM 余量很小，
 本阶段保持两连接，不应直接套用三连接配置。
 
+主机控制权测试（包括抢占 `claim`、空闲 `claim idle` 与无感写入交接）通过，
+C3、C5 与 `linkr_bee_x1_0` 固件均以 3000 ms 默认值构建成功。X1.0 镜像使用固定的
+`linkr_multipeer_zephyr` 工作区构建，因为默认工作区的 simple-boot loader 已包含
+仓库 shim 正在防护的上游 digest 变化。
+
 编译、主机测试不等于实机验收。发布前需验证两台真实主机、第三台接入、不同 MTU 和
 通道、配对重连、控制权交接、慢客户端、持续串口日志、GPIO 配对门禁及 WiFi 共存。
 逐板检查栈水位、运行时堆、队列丢失和看门狗重启，三连接不能仅凭链接成功宣称稳定。
