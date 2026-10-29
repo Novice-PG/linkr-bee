@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="./window.css?v=20261026-safearea3" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261028-ai-import" />
     <link rel="stylesheet" href="./mobile-ui.css?v=20261026-mcp-auto" />
+    <link rel="stylesheet" href="./form_controls.css?v=20261029" />
   </head>
   <body>
     <main class="app-shell">
@@ -266,6 +267,16 @@
               </button>
             </span>
           </label>
+
+          <div id="uartModeField" class="field">
+            <label class="field-label" for="uartModeSelect" data-i18n="uartMode">BLE UART mode</label>
+            <select id="uartModeSelect" aria-describedby="uartModeHint uartTransportStatus">
+              <option value="interactive" data-i18n="uartModeInteractive">Interaction first</option>
+              <option value="reliable" data-i18n="uartModeReliable">Reliability first</option>
+            </select>
+            <span id="uartModeHint" class="field-hint"></span>
+          </div>
+          <p id="uartTransportStatus" class="field-hint" role="status" hidden></p>
 
           <label class="field">
             <span class="field-label" data-i18n="enterKey">Enter key</span>
@@ -823,7 +834,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261028-ai-import"></script>
+    <script type="module" src="./app.js?v=20261029-controls"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a

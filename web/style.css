@@ -693,6 +693,12 @@ input[aria-invalid="true"] {
   margin-bottom: 12px;
 }
 
+/* Explicit field layout must not override capability/transport visibility. */
+#uartModeField[hidden],
+#uartTransportStatus[hidden] {
+  display: none;
+}
+
 .field:last-child {
   margin-bottom: 0;
 }

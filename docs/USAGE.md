@@ -72,6 +72,7 @@ retained-transcript view. They do not represent a live hardware session.*
   than enabling local echo to compensate for a wrong line ending.
 - **Local echo** displays what you type locally. Leave it off for shells that
   already echo input, or each character may appear twice.
+- **BLE UART mode** defaults to **Interaction first** (NUS). Choose **Reliability first** for confirmed Reliable UART frames. The preference is saved and applies on the next BLE connection; changing it does not interrupt active input. The settings show the current channel and any fallback. Devices without a reliable channel use NUS and hide the unsupported selector. LAN WebSocket transport is unaffected. Confirmation means the Bee accepted a frame, not that the target executed a command.
 - **Chunk size** controls outgoing transfer chunks, not baud rate. Keep the
   default unless diagnosing a specific transport limit.
 - **Terminal font** uses fonts installed on the host. A Nerd Font must be installed

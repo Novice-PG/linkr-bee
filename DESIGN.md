@@ -198,6 +198,27 @@ components:
 - **Focus:** 边框转焦点蓝 + 3px 蓝色外发光，无 outline
 - **Disabled:** 不单独置灰输入框；依赖所属按钮组的禁用态表达
 
+### Selects and option menus
+
+- Single-value settings use the shared `select_controls.js` enhancement. Keep the
+  native `<select>` as the source of values, disabled state, form submission and
+  `input`/`change` events; expose one themed combobox to assistive technology.
+- Triggers share `--control-height`, `--control-radius`, `--control-fill` and
+  `--control-edge` with form fields. Menus reuse the opaque `--sticky-surface` and
+  `--overlay-shadow`; selected rows show a check, keyboard focus uses the focus
+  token. No platform-blue option menu or extra accent colour.
+- Menus open in the top layer where supported, fit the visual viewport, flip
+  above a low trigger, and scroll internally. Options have 36 px minimum targets,
+  raised to 44 px for coarse pointers. Long values wrap inside the menu.
+- Editable model IDs and SSIDs retain free text. When suggestions are available,
+  a companion arrow opens this same menu; ArrowDown also opens it from the input.
+  Selecting a suggestion updates the real input and its events.
+- Support arrows, Home/End, PageUp/PageDown, type-ahead, Enter/Space selection,
+  Escape cancellation and Tab dismissal. Escape closes the menu before its
+  parent drawer; outside clicks dismiss without changing the value.
+- Dynamic options, programmatic values, translated labels and disabled states
+  must stay in sync. `[hidden]` always removes a control or overlay from layout.
+
 ### Inline disclosures
 - **Usage:** 低频但相关的设置（高级参数、CLIProxy 导入）收进主卡片底部的
   `.agent-inline-disclosure`：1px 分隔线 + 12.5px 次要色摘要 + 右侧小箭头，默认收起。

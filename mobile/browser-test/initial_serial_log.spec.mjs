@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
+  // These framing regressions explicitly exercise the reliable channel.
+  await page.addInitScript(() => localStorage.setItem("linkr-uart-mode", "reliable"));
   await page.route("**/app.js?*", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, body: await response.text() +
