@@ -1,0 +1,194 @@
+.ble-guidance {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 10px 0 2px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius, 8px);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ble-guidance[hidden] {
+  display: none !important;
+}
+
+.ble-guidance-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--accent-strong);
+  font: 700 12px/1 var(--font-mono, monospace);
+}
+
+.ble-guidance-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ble-guidance-open {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ble-guidance-dialog {
+  width: min(92vw, 560px);
+  max-height: min(86dvh, 720px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 18px;
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.ble-guidance-dialog::backdrop {
+  background: rgba(0, 0, 0, .55);
+}
+
+.ble-guidance-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.ble-guidance-dialog-head h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.ble-guidance-close {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.ble-guidance-lead,
+.ble-guidance-fallback {
+  margin: 8px 0 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.ble-guidance-steps {
+  display: grid;
+  gap: 13px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.ble-guidance-steps li {
+  padding-left: 2px;
+}
+
+.ble-guidance-steps strong {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.ble-guidance-steps p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ble-guidance-copy-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+
+.ble-guidance-copy-row code {
+  min-width: 0;
+  flex: 1 1 220px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--input-bg);
+  color: var(--text);
+  font: 11.5px/1.35 var(--font-mono, monospace);
+}
+
+.ble-guidance-copy {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.ble-guidance-hint {
+  color: var(--placeholder);
+  font-size: 11.5px;
+}
+
+.ble-guidance-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.ble-guidance-status:empty {
+  display: none;
+}
+
+.ble-guidance-status {
+  margin-top: 8px;
+}
+
+@media (pointer: coarse), (max-width: 600px) {
+  .ble-guidance-open,
+  .ble-guidance-copy {
+    min-height: 44px;
+  }
+
+  .ble-guidance-close {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+@media (max-width: 600px) {
+  .ble-guidance {
+    flex-wrap: wrap;
+  }
+
+  .ble-guidance-open {
+    margin-left: 29px;
+  }
+
+  .ble-guidance-dialog {
+    width: calc(100vw - 20px);
+    padding: 14px;
+  }
+
+  .ble-guidance-actions .btn {
+    flex: 1 1 auto;
+  }
+}

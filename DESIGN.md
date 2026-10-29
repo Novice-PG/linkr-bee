@@ -245,6 +245,14 @@ components:
 ### Toast
 - 底部居中、最多同时 3 条；绿描边为常规，红描边为错误（toast-error）；毛玻璃底 + 上浮淡入，2.2s 自动退场。
 
+### Web Bluetooth guidance
+- 仅桌面 Linux 的 web 壳在 `navigator.bluetooth` 缺失或页面不是 secure context 时，
+  在 Connection 卡内显示一条内联提示，不自动弹窗；按钮打开说明 dialog。
+- dialog 给出可复制的 `chrome://flags/#enable-web-bluetooth`（及两个推荐项）、
+  localhost/HTTPS 要求和 BlueZ 检查步骤；LAN 可用时提供“改用 LAN 模式”动作。
+- 引导只在 BLE 模式显示，切到 LAN 后隐藏；原生 Android/HarmonyOS 传输不渲染。
+- 弹窗沿用 panel/line/input token，移动端按钮不低于 44px，不新增颜色或阴影。
+
 ### Terminal
 - 全站最暗表面（#05080d），xterm.js 渲染；头部工具条承载字号/全屏/滚动/复制；连接时标题旁 LED 点亮并泛绿光，输入提示条文字转信号绿。
 - 手机键栏默认是 4 列 × 2 行的收藏键网格（48px 高），≤340px 改 3 列（不缩小 44px 触控目标）；平板是 8 键单行（每键 ≤64px），桌面是单行可滚动键带并常显细滚动条；不再用“半截键”当滚动提示。触屏的 More 展开全部键，桌面全部键已在带内。
