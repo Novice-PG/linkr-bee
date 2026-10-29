@@ -57,6 +57,29 @@ FIRMWARE_RE = re.compile(r"^linkr-bee-(.+)-firmware-([a-z0-9-]+)\.zip$")
 WEB_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-web\.zip$")
 APK_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-android-debug\.apk$")
 
+# The desktop matrix always builds the Linux and Windows legs; the two macOS
+# legs are optional because the hosted macOS runners are not always assignable
+# and the workflow only builds them when the ENABLE_MACOS repository variable
+# is true. A release without them is complete for every platform that ran; a
+# release missing a Linux or Windows leg is a broken build, not a variant.
+REQUIRED_DESKTOP_TARGETS = {
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
+    "i686-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "i686-pc-windows-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+}
+OPTIONAL_DESKTOP_TARGETS = {
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+}
+# Per target: the interface and the CLI. macOS adds the same pair again as
+# `.dmg`; each Debian architecture adds one package.
+DESKTOP_ARCHIVES_PER_TARGET = 2
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -318,7 +341,39 @@ def main() -> int:
     if web_staging.exists():
         shutil.rmtree(web_staging)
 
-    expected_counts = {"desktop": 28, "firmware": 6, "web": 1, "apk": 1}
+    # Which desktop targets arrived decides the expected total, so the macOS
+    # legs can be absent without weakening the check on the others: every
+    # Linux/Windows target must be there, with its two archives (and its .deb),
+    # and the count must match exactly what those targets add up to.
+    desktop_targets: set[str] = set()
+    for path in assets:
+        match = DESKTOP_RE.match(path.name)
+        if match:
+            desktop_targets.add(match.group(3))
+            continue
+        match = DEB_RE.match(path.name)
+        if match:
+            arch = DEB_ARCH.get(match.group(2))
+            if not arch:
+                raise SystemExit(f"unknown Debian architecture: {match.group(2)}")
+            desktop_targets.add(arch)
+    missing = REQUIRED_DESKTOP_TARGETS - desktop_targets
+    if missing:
+        raise SystemExit(
+            "the desktop matrix is missing: " + ", ".join(sorted(missing)))
+    macos = desktop_targets & OPTIONAL_DESKTOP_TARGETS
+
+    expected_counts = {
+        "desktop": (
+            (len(REQUIRED_DESKTOP_TARGETS) + len(macos))
+            * DESKTOP_ARCHIVES_PER_TARGET
+            + len(DEB_ARCH)
+            + len(macos) * DESKTOP_ARCHIVES_PER_TARGET
+        ),
+        "firmware": 6,
+        "web": 1,
+        "apk": 1,
+    }
     counts = {key: 0 for key in expected_counts}
     for path in assets:
         if DESKTOP_RE.match(path.name) or DEB_RE.match(path.name):

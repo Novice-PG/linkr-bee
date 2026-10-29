@@ -149,6 +149,13 @@ assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
 release dispatch can run the same assembly as a dry run from a tag without
 touching the GitHub release.
 
+The desktop matrix always builds the Linux and Windows legs. Its two macOS legs
+are optional: they run only when the repository variable `ENABLE_MACOS` is
+`true`, because hosted macOS runners are not always assigned, and a leg that
+queues and is then cancelled fails the run and holds back every other
+platform's archive. `tools/assemble_release.py` accepts a release with or
+without them and refuses one that is missing a Linux or Windows leg.
+
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
 

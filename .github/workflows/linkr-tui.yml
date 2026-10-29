@@ -12,6 +12,9 @@ name: Host terminal (bee)
 # macOS, `.tar.gz` and `.deb` for Linux. Tag a release with
 # `linkr-tui-v<version>`; the archives are attached to it. The tag is namespaced
 # so it cannot collide with the firmware's `v*` releases.
+#
+# The two macOS legs are built only when the repository variable
+# `ENABLE_MACOS` is `true`; the Linux and Windows legs always are.
 
 on:
   push:
@@ -172,77 +175,79 @@ jobs:
             echo "::endgroup::"
           done
 
-  package:
-    name: Package ${{ matrix.target }}
-    needs: [gates]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+  # The matrix is planned rather than written into `package`, because the two
+  # macOS legs are switchable: when the hosted macOS runners are not assigned,
+  # a leg sits in the queue, is cancelled, and fails the whole run — which also
+  # holds back every other platform's archive. `ENABLE_MACOS` (a repository
+  # variable) turns them on; leaving it unset builds the eight Linux/Windows
+  # legs only. The legs themselves stay in this file, so nothing is deleted.
+  plan:
+    name: Plan the desktop matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Decide which legs run
+        id: plan
+        shell: bash
+        env:
+          ENABLE_MACOS: ${{ vars.ENABLE_MACOS }}
           # Linux on x86-64: the host this is developed on, so it is also the
           # one whose archive is *run* before it is uploaded. It links the
           # host's own libdbus, installed with the cross tools below.
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            native: true
-            apt: libdbus-1-dev
-            deb: true
+          #
           # Linux on ARM and on 32-bit x86: cross builds, each with its own
           # linker and its own staged libdbus. Both are Debian architectures
           # (arm64, armhf, i386) as well as Rust targets, which is what the two
           # extra columns are for.
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            apt: gcc-aarch64-linux-gnu
-            linker_var: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
-            linker: aarch64-linux-gnu-gcc
-            stage: true
-            deb: true
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            apt: gcc-arm-linux-gnueabihf
-            linker_var: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
-            linker: arm-linux-gnueabihf-gcc
-            stage: true
-            deb: true
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-            apt: gcc-i686-linux-gnu nasm
-            linker_var: CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
-            linker: i686-linux-gnu-gcc
-            stage: true
-            deb: true
+          #
           # Windows, GNU ABI: built on Linux, where mingw-w64 is one apt away.
           # `zip` writes the archive there and `unzip` reads it back for the
           # listing check; a Windows runner falls back to 7z and PowerShell.
-          - os: ubuntu-latest
-            target: x86_64-pc-windows-gnu
-            apt: gcc-mingw-w64-x86-64 zip unzip
-            linker_var: CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
-            linker: x86_64-w64-mingw32-gcc
-          - os: ubuntu-latest
-            target: i686-pc-windows-gnu
-            apt: gcc-mingw-w64-i686 zip unzip nasm
-            linker_var: CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER
-            linker: i686-w64-mingw32-gcc
+          #
           # Windows, MSVC ABI, on Windows: the ARM64 tools ship with the
           # Visual Studio build the runner has.
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            native: true
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-          # macOS is off for now: the hosted macOS runners were not assigned
-          # (jobs queued 15 minutes and were cancelled twice on 2026-10-28),
-          # which failed the whole run and dropped the other platforms' release.
-          # Re-enable these two legs when the runners are back:
-          # - os: macos-latest
-          #   target: aarch64-apple-darwin
-          #   native: true
-          # - os: macos-latest
-          #   target: x86_64-apple-darwin
+          BASE: |
+            [
+              {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu", "native": true, "apt": "libdbus-1-dev", "deb": true},
+              {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-gnu", "apt": "gcc-aarch64-linux-gnu", "linker_var": "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", "linker": "aarch64-linux-gnu-gcc", "stage": true, "deb": true},
+              {"os": "ubuntu-latest", "target": "armv7-unknown-linux-gnueabihf", "apt": "gcc-arm-linux-gnueabihf", "linker_var": "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER", "linker": "arm-linux-gnueabihf-gcc", "stage": true, "deb": true},
+              {"os": "ubuntu-latest", "target": "i686-unknown-linux-gnu", "apt": "gcc-i686-linux-gnu nasm", "linker_var": "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER", "linker": "i686-linux-gnu-gcc", "stage": true, "deb": true},
+              {"os": "ubuntu-latest", "target": "x86_64-pc-windows-gnu", "apt": "gcc-mingw-w64-x86-64 zip unzip", "linker_var": "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER", "linker": "x86_64-w64-mingw32-gcc"},
+              {"os": "ubuntu-latest", "target": "i686-pc-windows-gnu", "apt": "gcc-mingw-w64-i686 zip unzip nasm", "linker_var": "CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER", "linker": "i686-w64-mingw32-gcc"},
+              {"os": "windows-latest", "target": "x86_64-pc-windows-msvc", "native": true},
+              {"os": "windows-latest", "target": "aarch64-pc-windows-msvc"}
+            ]
+          # macOS on both architectures. `macos-latest` is ARM, and Apple's
+          # clang links either, so the x86-64 build is a target swap and no
+          # more. Optional: see ENABLE_MACOS above.
+          MACOS: |
+            [
+              {"os": "macos-latest", "target": "aarch64-apple-darwin", "native": true},
+              {"os": "macos-latest", "target": "x86_64-apple-darwin"}
+            ]
+        run: |
+          set -euo pipefail
+          if [ "${ENABLE_MACOS:-false}" = "true" ]; then
+            echo "macOS legs: on"
+            include=$(jq -c -n --argjson base "$BASE" --argjson macos "$MACOS" \
+              '$base + $macos')
+          else
+            echo "macOS legs: off (set the ENABLE_MACOS repository variable to true to build them)"
+            include=$(jq -c -n --argjson base "$BASE" '$base')
+          fi
+          echo "matrix=$(jq -c -n --argjson include "$include" '{include: $include}')" \
+            >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: [gates, plan]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Check out repository
