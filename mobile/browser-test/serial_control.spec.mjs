@@ -19,10 +19,9 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("readonly blocks typing, terminal replies, geometry and queued commands", async ({ page }) => {
+test("readonly blocks automatic replies and direct queued writes but enables typing", async ({ page }) => {
   const result = await page.evaluate(async () => {
     const c = window.__control;
-    c.onTerminalData("reboot\r");
     c.onTerminalData("\x1b[1;1R", { userInput: false });
     c.handleIncomingBytes(new TextEncoder().encode("root@target:~# "));
     try { await c.enqueueBytes(new TextEncoder().encode("sudo reboot\r")); }
@@ -31,8 +30,22 @@ test("readonly blocks typing, terminal replies, geometry and queued commands", a
   expect(result).toMatch(/Read-only|只读/);
   await page.waitForTimeout(600);
   expect(await page.evaluate(() => window.sent)).toEqual([]);
-  await expect(page.locator("#breakButton")).toBeDisabled();
+  /* Typing is enabled in a read-only session: the first keystroke asks for
+   * the console when the other owner is idle. */
+  await expect(page.locator("#breakButton")).toBeEnabled();
   await expect(page.locator("#serialControlButton")).toBeEnabled();
+});
+
+test("typing in a read-only session takes over the idle console seamlessly", async ({ page }) => {
+  await page.evaluate(() => window.__control.onTerminalData("reboot\r"));
+  await expect
+    .poll(() => page.evaluate(() => window.sent))
+    .toContain("@control claim idle");
+  await page.evaluate(() => window.__control.consumeSerialControl(
+    "OK control self=2 owner=2 mode=control epoch=4 peers=2 ble_max=2 linkr_reserved=0"));
+  await expect
+    .poll(() => page.evaluate(() => window.sent))
+    .toEqual(expect.arrayContaining([expect.stringContaining("reboot")]));
 });
 
 test("control can be requested and released without disconnecting", async ({ page }) => {
@@ -45,7 +58,9 @@ test("control can be requested and released without disconnecting", async ({ pag
   expect(await page.evaluate(() => window.sent)).toEqual(["@control claim", "@control release"]);
   await page.evaluate(() => window.__control.consumeSerialControl(
     "OK control self=2 owner=0 mode=available epoch=5 peers=2 ble_max=2 linkr_reserved=0"));
-  await expect(page.locator("#breakButton")).toBeDisabled();
+  /* Released is still an input-capable session: the next key takes the idle
+   * console instead of asking the user to press Take control first. */
+  await expect(page.locator("#breakButton")).toBeEnabled();
   expect(await page.evaluate(() => window.__control.state.connected)).toBe(true);
 });
 

@@ -7,6 +7,14 @@
 #include "serial_session.h"
 
 #define SESSION_COUNT (CONFIG_BT_MAX_CONN + 4)
+
+/* How long an owner may go without writing before another session may take the
+ * console on its own. An explicit @c claim is always immediate; this window is
+ * only for the seamless path (a keystroke on a read-only client). */
+#ifndef CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS
+#define CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS 3000
+#endif
+
 static struct {
 	const void *peer;
 	uint32_t id;
@@ -16,11 +24,31 @@ static struct {
 static uint32_t next_id;
 static uint32_t owner;
 static uint32_t epoch = 1;
+static uint32_t owner_active_ms;
 K_MUTEX_DEFINE(session_lock);
 
 static void ownership_changed(void)
 {
 	if (++epoch == 0) ++epoch;
+}
+
+static void owner_touch(uint32_t now)
+{
+	owner_active_ms = now;
+}
+
+/* Wrapping-safe: both values come from the same 32-bit uptime counter. */
+static bool owner_is_idle(uint32_t now)
+{
+	return owner && (uint32_t)(now - owner_active_ms) >=
+		(uint32_t)CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS;
+}
+
+static void set_owner(uint32_t id, uint32_t now)
+{
+	owner = id;
+	owner_touch(now);
+	ownership_changed();
 }
 
 static uint32_t peer_id(const void *peer)
@@ -64,7 +92,7 @@ void linkr_session_close(const void *peer)
 	k_mutex_lock(&session_lock, K_FOREVER);
 	for (size_t i = 0; i < SESSION_COUNT; i++) {
 		if (sessions[i].peer != peer) continue;
-		if (owner == sessions[i].id) { owner = 0; ownership_changed(); }
+		if (owner == sessions[i].id) { owner = 0; owner_active_ms = 0; ownership_changed(); }
 		memset(&sessions[i], 0, sizeof(sessions[i]));
 	}
 	k_mutex_unlock(&session_lock);
@@ -73,9 +101,20 @@ void linkr_session_close(const void *peer)
 uint32_t linkr_session_ticket(const void *peer, bool claim_if_idle)
 {
 	uint32_t ticket = 0;
+	uint32_t now = k_uptime_get_32();
 	k_mutex_lock(&session_lock, K_FOREVER);
 	uint32_t id = peer_id(peer);
-	if (id && !owner && claim_if_idle && !peer_managed(peer)) { owner = id; ownership_changed(); }
+	/* A free console still needs an explicit claim from a client that has
+	 * used the control API before (release means release). An owner that has
+	 * stopped writing is different: the first keystroke from another session
+	 * takes over, which is what makes hand-over feel seamless for a human. */
+	if (id && claim_if_idle) {
+		if (!owner) {
+			if (!peer_managed(peer)) set_owner(id, now);
+		} else if (owner != id && owner_is_idle(now)) {
+			set_owner(id, now);
+		}
+	}
 	if (id && owner == id) ticket = epoch;
 	k_mutex_unlock(&session_lock);
 	return ticket;
@@ -84,7 +123,10 @@ uint32_t linkr_session_ticket(const void *peer, bool claim_if_idle)
 bool linkr_session_begin(uint32_t ticket)
 {
 	k_mutex_lock(&session_lock, K_FOREVER);
-	if (ticket && owner && ticket == epoch) return true;
+	if (ticket && owner && ticket == epoch) {
+		owner_touch(k_uptime_get_32());
+		return true;
+	}
 	k_mutex_unlock(&session_lock);
 	return false;
 }
@@ -104,14 +146,28 @@ uint32_t linkr_session_epoch(const void *peer)
 
 bool linkr_session_command_begin(const void *peer, uint32_t queued_epoch)
 {
+	uint32_t now = k_uptime_get_32();
 	k_mutex_lock(&session_lock, K_FOREVER);
 	uint32_t self = peer_id(peer);
-	if (!self || !queued_epoch || queued_epoch != epoch || (owner && owner != self) ||
-	    (!owner && peer_managed(peer))) {
+	if (!self || !queued_epoch || queued_epoch != epoch) {
 		k_mutex_unlock(&session_lock);
 		return false;
 	}
-	if (!owner) { owner = self; ownership_changed(); }
+	if (!owner) {
+		if (peer_managed(peer)) {
+			k_mutex_unlock(&session_lock);
+			return false;
+		}
+		set_owner(self, now);
+	} else if (owner != self) {
+		if (!owner_is_idle(now)) {
+			k_mutex_unlock(&session_lock);
+			return false;
+		}
+		set_owner(self, now);
+	} else {
+		owner_touch(now);
+	}
 	return true;
 }
 
@@ -131,11 +187,22 @@ static bool session_control(const void *peer, const char *command,
 	const char *error = NULL;
 	if (!self) error = "disconnected";
 	else if (!strcmp(action, "claim")) {
-		if (owner && owner != self) error = "busy";
-		else if (!owner) { owner = self; ownership_changed(); }
+		/* Explicit request: the user asked for the console, so take it even
+		 * from a session that is currently typing. The old owner becomes
+		 * read-only on its next status poll; its in-flight bytes still finish. */
+		if (!self) error = "disconnected";
+		else if (owner == self) owner_touch(k_uptime_get_32());
+		else set_owner(self, k_uptime_get_32());
+	} else if (!strcmp(action, "claim idle")) {
+		/* Seamless path: steal only when the current owner has stopped
+		 * writing. An active typist keeps the console. */
+		uint32_t now = k_uptime_get_32();
+		if (owner && owner != self && !owner_is_idle(now)) error = "busy";
+		else if (owner != self) set_owner(self, now);
+		else owner_touch(now);
 	} else if (!strcmp(action, "release")) {
 		if (owner != self) error = "not_owner";
-		else { owner = 0; ownership_changed(); }
+		else { owner = 0; owner_active_ms = 0; ownership_changed(); }
 	} else if (!strncmp(action, "yield ", 6)) {
 		char *end;
 		unsigned long target = strtoul(action + 6, &end, 10);
@@ -145,7 +212,7 @@ static bool session_control(const void *peer, const char *command,
 		}
 		if (owner != self) error = "not_owner";
 		else if (!target || target > UINT32_MAX || *end || !found) error = "bad_peer";
-		else if (owner != target) { owner = target; ownership_changed(); }
+		else if (owner != target) set_owner(target, k_uptime_get_32());
 	} else if (strcmp(action, "?")) error = "bad_action";
 	unsigned int peers = 0;
 	for (size_t i = 0; i < SESSION_COUNT; i++) peers += sessions[i].peer != NULL;

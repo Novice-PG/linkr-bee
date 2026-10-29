@@ -295,6 +295,18 @@ config LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_RTS_CTS
 
 endchoice
 
+config LINKR_BLE_BRIDGE_SESSION_IDLE_MS
+	int "Idle milliseconds before another session may take the console"
+	default 3000
+	range 500 60000
+	help
+	  An explicit @c claim always takes the serial console. This timeout is
+	  the seamless path: a write from another session may take over after the
+	  current owner has been silent for this long, so a person can simply start
+	  typing on a read-only client instead of pressing Take control. Keep it
+	  long enough to cover a pause between keystrokes; the old owner's already
+	  queued bytes are protected by the ownership epoch either way.
+
 config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 	bool "Enable BLE control commands"
 	default y

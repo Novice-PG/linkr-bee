@@ -9,6 +9,8 @@
 
 static char a, b, c;
 static char response[256];
+/* The fake Zephyr clock used by serial_session.c on the host. */
+uint32_t test_uptime_ms;
 static void command(const void *peer, const char *text)
 {
 	assert(linkr_session_control(peer, text, response, sizeof(response)));
@@ -89,6 +91,64 @@ int main(int argc, char **argv)
 		pthread_join(first, NULL);
 		pthread_join(second, NULL);
 		assert((linkr_session_ticket(&a, false) != 0) != (linkr_session_ticket(&c, false) != 0));
+	} else if (!strcmp(argv[1], "preempt_claim")) {
+		command(&a, "c claim");
+		uint32_t old = linkr_session_ticket(&a, false);
+		assert(old);
+		command(&b, "c claim");
+		assert(strstr(response, "owner=") && strstr(response, "mode=control"));
+		assert(!linkr_session_begin(old));
+		assert(linkr_session_ticket(&b, false));
+	} else if (!strcmp(argv[1], "claim_idle")) {
+		command(&a, "c claim");
+		uint32_t old = linkr_session_ticket(&a, false);
+		test_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS;
+		command(&b, "c claim idle");
+		assert(strstr(response, "mode=control"));
+		assert(!linkr_session_begin(old));
+		assert(linkr_session_ticket(&b, false));
+	} else if (!strcmp(argv[1], "claim_idle_active")) {
+		command(&a, "c claim");
+		uint32_t active = linkr_session_ticket(&a, false);
+		command(&b, "c claim idle");
+		assert(strstr(response, "control=busy"));
+		assert(linkr_session_begin(active));
+		linkr_session_end();
+	} else if (!strcmp(argv[1], "auto_idle_takeover")) {
+		command(&a, "c claim");
+		uint32_t old = linkr_session_ticket(&a, false);
+		test_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS;
+		uint32_t next = linkr_session_ticket(&b, true);
+		assert(next);
+		assert(!linkr_session_begin(old));
+		assert(linkr_session_begin(next));
+		linkr_session_end();
+	} else if (!strcmp(argv[1], "auto_idle_takeover_managed")) {
+		command(&a, "c claim");
+		uint32_t old = linkr_session_ticket(&a, false);
+		command(&b, "c?");
+		test_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS;
+		uint32_t next = linkr_session_ticket(&b, true);
+		assert(next);
+		assert(!linkr_session_begin(old));
+		assert(linkr_session_begin(next));
+		linkr_session_end();
+	} else if (!strcmp(argv[1], "command_idle_takeover")) {
+		command(&a, "c claim");
+		uint32_t old = linkr_session_ticket(&a, false);
+		uint32_t queued = linkr_session_epoch(&b);
+		test_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS;
+		assert(linkr_session_command_begin(&b, queued));
+		linkr_session_end();
+		assert(!linkr_session_begin(old));
+		assert(linkr_session_ticket(&b, false));
+	} else if (!strcmp(argv[1], "auto_active_rejected")) {
+		command(&a, "c claim");
+		uint32_t active = linkr_session_ticket(&a, false);
+		assert(!linkr_session_ticket(&b, true));
+		assert(!linkr_session_command_begin(&b, linkr_session_epoch(&b)));
+		assert(linkr_session_begin(active));
+		linkr_session_end();
 	} else if (!strcmp(argv[1], "disconnected")) {
 		linkr_session_close(&a);
 		assert(!linkr_session_ticket(&a, true));

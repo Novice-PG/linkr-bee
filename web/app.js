@@ -108,6 +108,8 @@ let aboutPage = null;
 let serialControlTimer = null;
 let serialControlPolling = false;
 let serialControlPending = false;
+let serialControlWaiter = null;
+let idleClaimInFlight = null;
 let serialInputRevision = 0;
 let serialInputPending = false;
 let bleNotificationSession = null;
@@ -528,6 +530,7 @@ const XTERM_LIGHT = {
 const I18N = {
   en: {
     serialReadonly: "Read only", serialControlled: "In control", serialAvailable: "No controller",
+    serialReadonlyHint: "Typing takes over automatically when the other session is idle; Take control preempts it immediately.",
     claimControl: "Take control", releaseControl: "Release",
     serialReadonlyError: "Read-only session. Take control before sending input.",
     title: "Linkr Bee Terminal",
@@ -819,7 +822,8 @@ const I18N = {
   zh: {
     serialReadonly: "只读", serialControlled: "控制中", serialAvailable: "无人控制",
     claimControl: "申请控制", releaseControl: "释放",
-    serialReadonlyError: "当前为只读会话，请先申请控制权。",
+    serialReadonlyHint: "对方空闲时，输入会自动接管控制权；点「申请控制」可立即抢占。",
+    serialReadonlyError: "对方正在输入，未自动接管；点「申请控制」可强制接管。",
     title: "Linkr Bee 终端",
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
@@ -1545,7 +1549,7 @@ function scheduleTerminalGeometrySync() {
 
     state.shellPromptVisible = false;
     state.terminalGeometrySyncInFlight = geometry.key;
-    writeText(terminalGeometryCommand(geometry.cols, geometry.rows))
+    writeText(terminalGeometryCommand(geometry.cols, geometry.rows), { claim: false })
       .then(() => {
         if (session === state.terminalGeometrySession) {
           state.terminalGeometrySynced = geometry.key;
@@ -2109,6 +2113,13 @@ function canSerialInput() {
   return state.connected && (!state.serialControl || state.serialControl.mode === "control");
 }
 
+/* UART typing is allowed to try even in a read-only session: the first
+ * keystroke asks the bridge for the idle console and becomes input once the
+ * hand-over succeeds. Management controls stay strict (see canSerialInput). */
+function canAttemptUserInput() {
+  return Boolean(state.connected);
+}
+
 function assertSerialInput(revision = state.serialControlRevision) {
   if (!canSerialInput() || revision !== state.serialControlRevision) {
     throw new Error(t("serialReadonlyError"));
@@ -2135,7 +2146,7 @@ function renderSerialControl() {
     button.title = button.textContent;
     button.setAttribute("aria-label", button.textContent);
   }
-  const writable = canSerialInput();
+  const writable = canAttemptUserInput();
   if (state.term) {
     state.term.options.disableStdin = !writable;
     if (!writable) state.term.blur();
@@ -2144,7 +2155,7 @@ function renderSerialControl() {
     elements.pasteTerminalButton, ...elements.modifierButtons, ...elements.terminalKeyButtons]) {
     if (element) element.disabled = !writable;
   }
-  const management = writable && state.mode === "ble" && state.mgmtReady;
+  const management = canSerialInput() && state.mode === "ble" && state.mgmtReady;
   elements.setUartButton.disabled = !management;
   elements.wifiSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
   elements.wifiOffButton.disabled = elements.wifiSetButton.disabled;
@@ -2155,7 +2166,7 @@ function renderSerialControl() {
   updateBleNameControls();
   document.querySelectorAll("#cheatList button[data-cmd], #presets button, .presets button")
     .forEach(item => { item.disabled = !writable; });
-  if (control && !writable) elements.terminalInputHint.textContent = t("serialReadonlyError");
+  if (control && !canSerialInput()) elements.terminalInputHint.textContent = t("serialReadonlyHint");
   else if (state.connected) elements.terminalInputHint.textContent = t("terminalInputHint");
 }
 
@@ -2181,6 +2192,8 @@ function applySerialControl(control) {
 
 function consumeSerialControl(text) {
   const control = parseSerialControl(text);
+  const waiter = serialControlWaiter;
+  serialControlWaiter = null;
   if (control) {
     const first = !state.serialControl;
     applySerialControl(control);
@@ -2188,6 +2201,7 @@ function consumeSerialControl(text) {
       startSerialControlPoll();
       if (first && control.mode === "available") requestSerialControl("claim").catch(() => {});
     }
+    waiter?.(text);
     return true;
   }
   if (String(text).trim().startsWith("ERR control=")) {
@@ -2196,9 +2210,55 @@ function consumeSerialControl(text) {
       applySerialControl({ ...state.serialControl, mode: "readonly" });
     }
     renderSerialControl();
+    waiter?.(text);
     return true;
   }
   return false;
+}
+
+function waitForSerialControlReply(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const done = (text) => {
+      clearTimeout(timer);
+      resolve(text);
+    };
+    const timer = setTimeout(() => {
+      if (serialControlWaiter === done) serialControlWaiter = null;
+      resolve(null);
+    }, timeoutMs);
+    serialControlWaiter = done;
+  });
+}
+
+/* Seamless hand-over: ask the bridge for the console only if its current
+ * owner has been quiet long enough. The explicit button uses "claim", which
+ * preempts immediately; this path never interrupts an active typist. */
+async function claimIdleControl() {
+  if (state.serialControl?.mode === "control") return true;
+  if (!state.connected || !state.serialControl) return false;
+  if (idleClaimInFlight) return idleClaimInFlight;
+  serialControlPending = true;
+  renderSerialControl();
+  idleClaimInFlight = (async () => {
+    try {
+      if (state.mode === "ws") {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
+        const reply = waitForSerialControlReply();
+        state.ws.send("@control claim idle");
+        await reply;
+      } else {
+        await sendControl("@c claim idle", { returnResponse: true, quiet: true });
+      }
+      return state.serialControl?.mode === "control";
+    } catch {
+      return false;
+    } finally {
+      serialControlPending = false;
+      renderSerialControl();
+      idleClaimInFlight = null;
+    }
+  })();
+  return idleClaimInFlight;
 }
 
 async function requestSerialControl(action = "?") {
@@ -4826,7 +4886,11 @@ function enqueueBytes(bytes, sensitive = false, { generation = state.writeGenera
   return operation;
 }
 
-async function writeText(text, options) {
+async function writeText(text, options = {}) {
+  if (options.claim !== false && state.serialControl && state.serialControl.mode !== "control") {
+    const claimed = await claimIdleControl();
+    if (!claimed) throw new Error(t("serialReadonlyError"));
+  }
   await enqueueBytes(encoder.encode(text), false, options);
 }
 
@@ -4864,7 +4928,7 @@ function resetModifiers() {
 }
 
 function onTerminalData(data, { raw = false, userInput = true } = {}) {
-  if (!canSerialInput() || !data) {
+  if (!data || (!canSerialInput() && !(userInput && canAttemptUserInput()))) {
     return;
   }
   if (!userInput) {
@@ -4873,7 +4937,7 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
     // They must not mark the terminal input line as pending: a program that
     // queries the terminal (DSR/DA/focus) would otherwise block tracked
     // commands and geometry sync until the user pressed Enter.
-    writeText(data, { trackPending: false }).catch((error) => appendLine(`[error] ${error.message}`));
+    writeText(data, { trackPending: false, claim: false }).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
   terminalInputUntil = performance.now() + 1000;

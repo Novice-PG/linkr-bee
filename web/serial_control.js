@@ -18,6 +18,6 @@ export function parseSerialControl(text) {
 }
 
 export function isReadonlyManagementCommand(command) {
-  return /^@(?:c\?|c (?:claim|release|yield [1-9]\d*)|h|i\?|u\?|n\?|a\?|w\?|l\?|o\?|r\?|r slots|p\?|p get(?: \d+(?: \d+)?)?|p active|y\?|y get \d+)$/.test(command) ||
-    /^@linkr (?:control\?|control (?:claim|release|yield [1-9]\d*)|help|info\?|uart\?|name\?|autobaud\?|wifi\?|target\?|led\?|opto\?|ir\?|ir slots|prompt\?|prompt get(?: \d+(?: \d+)?)?|prompt active|aiconf\?|aiconf get \d+)$/.test(command);
+  return /^@(?:c\?|c (?:claim|claim idle|release|yield [1-9]\d*)|h|i\?|u\?|n\?|a\?|w\?|l\?|o\?|r\?|r slots|p\?|p get(?: \d+(?: \d+)?)?|p active|y\?|y get \d+)$/.test(command) ||
+    /^@linkr (?:control\?|control (?:claim|claim idle|release|yield [1-9]\d*)|help|info\?|uart\?|name\?|autobaud\?|wifi\?|target\?|led\?|opto\?|ir\?|ir slots|prompt\?|prompt get(?: \d+(?: \d+)?)?|prompt active|aiconf\?|aiconf get \d+)$/.test(command);
 }

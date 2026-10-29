@@ -13,7 +13,7 @@ test("control status is validated against its owner identity", () => {
 });
 
 test("readonly clients can query and negotiate but cannot mutate device settings", () => {
-  for (const command of ["@c?", "@c claim", "@c release", "@c yield 2", "@i?", "@u?", "@linkr target?",
+  for (const command of ["@c?", "@c claim", "@c claim idle", "@c release", "@c yield 2", "@i?", "@u?", "@linkr target?",
     "@l?", "@o?", "@r?", "@r slots", "@linkr led?", "@linkr ir?",
     "@p?", "@p get 0", "@p get 3 96", "@p active", "@linkr prompt?",
     "@linkr prompt get 1 0", "@linkr prompt active",

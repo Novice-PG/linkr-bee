@@ -18,7 +18,10 @@ class SerialSessionTests(unittest.TestCase):
         (path / "zephyr/sys").mkdir(parents=True)
         (path / "zephyr/kernel.h").write_text(r'''
 #include <pthread.h>
+#include <stdint.h>
 #define K_FOREVER -1
+extern uint32_t test_uptime_ms;
+static inline uint32_t k_uptime_get_32(void) { return test_uptime_ms; }
 struct k_mutex { pthread_mutex_t native; };
 #define K_MUTEX_DEFINE(name) \
 struct k_mutex name; \
@@ -54,6 +57,7 @@ static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
         subprocess.run([
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-D_GNU_SOURCE",
             "-Wall", "-Wextra", "-Werror", "-pthread", "-DCONFIG_BT_MAX_CONN=2",
+            "-DCONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS=3000",
             "-I", str(path), "-I", str(ROOT / "src"), str(ROOT / "src/serial_session.c"),
             str(ROOT / "tests/serial_session_harness.c"), "-o", str(cls.binary),
         ], check=True)
@@ -61,7 +65,10 @@ static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
     def test_real_arbiter_scenarios(self):
         for scenario in ["single_writer", "managed_release", "handover", "reconnect",
                          "queued_command", "concurrent_claims", "disconnected",
-                         "bad_handover", "legacy_lan", "aux_permissions"]:
+                         "bad_handover", "legacy_lan", "aux_permissions",
+                         "preempt_claim", "claim_idle", "claim_idle_active",
+                         "auto_idle_takeover", "auto_idle_takeover_managed",
+                         "command_idle_takeover", "auto_active_rejected"]:
             with self.subTest(scenario=scenario):
                 result = subprocess.run([str(self.binary), scenario], capture_output=True,
                                         text=True, check=True, timeout=10)
