@@ -7,10 +7,10 @@
     <meta name="theme-color" id="themeColorMeta" content="#05080D" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20261028-ai-import" />
+    <link rel="stylesheet" href="./style.css?v=20261029-layout" />
     <link rel="stylesheet" href="./window.css?v=20261026-safearea3" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261028-ai-import" />
-    <link rel="stylesheet" href="./mobile-ui.css?v=20261026-mcp-auto" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261029-layout" />
+    <link rel="stylesheet" href="./mobile-ui.css?v=20261029-layout" />
     <link rel="stylesheet" href="./form_controls.css?v=20261029" />
   </head>
   <body>
@@ -27,6 +27,7 @@
           <div>
             <h1 data-i18n="title">Linkr Bee Terminal</h1>
             <p id="supportText" class="support-text">Checking Web Bluetooth…</p>
+            <p id="compactDevice" class="support-text compact-device" hidden></p>
           </div>
         </div>
 
@@ -834,7 +835,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261029-controls"></script>
+    <script type="module" src="./app.js?v=20261029-layout"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a

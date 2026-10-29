@@ -131,14 +131,13 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
 
   const section = document.createElement("section");
   section.id = "mcpSettings";
-  section.className = "card agent-settings mcp-settings";
+  section.className = "card mcp-settings";
   section.dataset.settingsPage = "ai";
   section.hidden = true;
   section.setAttribute("aria-labelledby", "mcpSettingsTitle");
   section.innerHTML = `
     <div class="card-title"><span class="dot"></span><span id="mcpSettingsTitle" data-mcp="title"></span></div>
-    <form id="mcpSettingsForm" novalidate>
-      <div class="agent-settings-scroll">
+    <div class="mcp-settings-body">
         <label class="check"><input id="mcpEnabled" type="checkbox"><span data-mcp="enable"></span></label>
         <p class="field-hint" data-mcp="enableHint"></p>
         <p class="field-hint mcp-warning" data-mcp="warning"></p>
@@ -201,14 +200,26 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
           <div id="mcpAuditList" class="mcp-audit-list" role="status"></div>
         </details>
         <p id="mcpStatus" class="field-hint" role="status"></p>
-      </div>
-    </form>`;
+    </div>`;
 
   // Appended in the settings panel rather than in index.html: the section must
   // not exist on builds without the native MCP listener (web, iOS, HarmonyOS).
+  // Keep MCP inside the AI card's single scroll container. Previously it was a
+  // second .agent-settings page with its own scroll area, which split the AI
+  // page into two panes on phones and left the lower card cut off.
   const anchor = mount.querySelector("#agentSettings");
-  if (anchor) anchor.after(section);
+  const aiScroll = anchor?.querySelector(".agent-settings-scroll");
+  if (aiScroll) aiScroll.append(section);
+  else if (anchor) anchor.append(section);
   else mount.appendChild(section);
+
+  // MCP inputs now live inside the AI form; Enter must not submit the AI
+  // configuration. Their change handlers already persist the MCP fields.
+  section.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.closest("input, select")) {
+      event.preventDefault();
+    }
+  });
 
   const $ = (id) => section.querySelector(`#${id}`);
   const elements = {

@@ -79,11 +79,51 @@
   .terminal-key-scroll .terminal-key-group { display: contents; }
   .terminal-key-scroll button { order: var(--favorite-key-order, 100); }
   .terminal-input-actions:not(.keys-expanded) .terminal-key-scroll button:not([data-favorite-key]) { display: none; }
+  /* The default eight favourites do not fit beside the pinned Ctrl-C and More
+   * at 390px. Let the favourite row wrap instead of clipping the fifth key;
+   * the expanded grid keeps its two scrollable rows. */
+  .terminal-input-actions:not(.keys-expanded) .terminal-key-scroll {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 64px));
+    grid-auto-rows: 48px;
+    align-content: flex-start;
+    justify-content: center;
+    gap: 4px;
+    overflow-x: visible;
+    padding-right: 0;
+    border-right: 0;
+  }
   .terminal-card .terminal-key,
   .terminal-card .terminal-keyboard,
   .terminal-card #breakButton { min-height: 48px; height: 48px; min-width: 48px; padding-inline: 10px; }
   .terminal-card #breakButton { min-width: 58px; }
   .terminal-card .terminal-keys-toggle { display: inline-flex; flex: 0 0 auto; font-family: inherit; }
+
+  /* Four favourites per row at phone widths: eight defaults form a complete
+   * 2x4 grid, with no half-key and no horizontal scroll. Tablets keep one row
+   * of eight capped at 64px so keys do not balloon. */
+  @media (max-width: 600px) {
+    .terminal-input-actions:not(.keys-expanded) .terminal-key-scroll {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 380px) {
+    .terminal-card .terminal-key,
+    .terminal-card .terminal-keyboard,
+    .terminal-card #breakButton {
+      min-width: 44px;
+      padding-inline: 6px;
+    }
+  }
+
+  /* At 320px four 44px keys plus the pinned Ctrl-C/More cannot fit in one
+   * row; use three columns (three short rows) instead of shrinking targets. */
+  @media (max-width: 340px) {
+    .terminal-input-actions:not(.keys-expanded) .terminal-key-scroll {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
   .terminal-keys-customize:not([hidden]) {
     display: block;
     min-height: 44px;
@@ -155,6 +195,17 @@
 /* ---------- MCP server (Android app only) ---------- */
 /* .field-hint sets display:block, which defeats the hidden attribute. */
 .mcp-settings [hidden] { display: none; }
+/* The MCP card lives inside the AI card's scroll, not in a second page scroll.
+ * Keep the same vertical rhythm the old .agent-settings-scroll provided. */
+.mcp-settings-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  align-content: start;
+  gap: 10px;
+}
+.mcp-settings-body > * { min-width: 0; max-width: 100%; }
+.mcp-settings .field { margin-bottom: 0; }
 /* The no-confirmation access mode is a security decision: make it visibly red. */
 .mcp-settings select.is-danger { color: var(--danger); border-color: var(--danger); }
 .mcp-settings .password-row { display: flex; align-items: center; gap: 6px; }

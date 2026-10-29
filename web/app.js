@@ -342,6 +342,7 @@ const elements = {
   statusDot: $("statusDot"),
   statusText: $("statusText"),
   deviceName: $("deviceName"),
+  compactDevice: $("compactDevice"),
   connectButton: $("connectButton"),
   disconnectButton: $("disconnectButton"),
   switchDeviceButton: $("switchDeviceButton"),
@@ -770,7 +771,7 @@ const I18N = {
     serialOutput: "Serial Terminal",
     terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
-    terminalInputHint: "Modifiers apply once · Swipe right-hand keys for more",
+    terminalInputHint: "Modifiers apply once · Scroll for more keys",
     terminalInputDisconnected: "Connect a device to enable terminal input",
     emptyTitle: "No device yet",
     emptyHint: "Tap Connect to scan for a nearby Linkr Bee",
@@ -1067,7 +1068,7 @@ const I18N = {
     serialOutput: "串口终端",
     terminalAria: "交互式串口终端",
     xterm: "xterm.js",
-    terminalInputHint: "组合键单次生效 · 左右滑动右侧按键查看更多",
+    terminalInputHint: "组合键单次生效 · 滚动查看更多按键",
     terminalInputDisconnected: "连接设备后即可在终端内直接输入",
     emptyTitle: "还没有连接设备",
     emptyHint: "点右上角「连接」，扫描附近的 Linkr Bee",
@@ -2411,11 +2412,18 @@ function applyBleName(parsed, { custom = null } = {}) {
 }
 
 function renderDeviceName() {
-  elements.deviceName.textContent = state.mode === "ws"
+  const name = state.mode === "ws"
     ? state.wsHost || ""
     : state.device
       ? state.device.name || state.device.id
       : "";
+  elements.deviceName.textContent = name;
+  /* The phone topbar hides the pill's word and device name; keep the identity
+   * on a second line of the brand block instead of dropping it entirely. */
+  if (elements.compactDevice) {
+    elements.compactDevice.textContent = name;
+    elements.compactDevice.hidden = !state.connected || !name;
+  }
 }
 
 async function readBleName({ quiet = false } = {}) {
@@ -4475,18 +4483,27 @@ function initCollapsibleCards() {
   const collapsed = loadCollapsedCards();
   const cards = Array.from(document.querySelectorAll("#controlsPanel section.card"))
     .filter((card) => !card.matches("#agentSettings, #aboutPage"))
-    .filter((card) => card.querySelector(":scope > .card-title"));
+    .filter((card) => card.querySelector(":scope > .card-title"))
+    /* MCP is appended after the first pass, so allow a second idempotent pass. */
+    .filter((card) => !card.querySelector(":scope > .card-title > .card-toggle"));
   for (const card of cards) {
     const title = card.querySelector(":scope > .card-title");
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "card-toggle";
-    toggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>';
+    /* The chevron is drawn in CSS so section cards and native <details> cards
+     * use the exact same glyph, weight, size and rotation. */
     title.append(toggle);
+    card.classList.add("is-collapsible");
     const entry = { card, toggle, key: cardKey(card) };
     cardToggles.push(entry);
     toggle.addEventListener("click", () =>
       setCardCollapsed(card, !card.classList.contains("is-collapsed")));
+    /* A native <details> header toggles anywhere on the summary; match it. */
+    title.addEventListener("click", (event) => {
+      if (event.target.closest("button, a, input, select, textarea")) return;
+      setCardCollapsed(card, !card.classList.contains("is-collapsed"));
+    });
     const isCollapsed = collapsed.has(entry.key);
     card.classList.toggle("is-collapsed", isCollapsed);
     updateCardToggle(entry);
@@ -7264,6 +7281,9 @@ function init() {
     },
   });
   initMcp();
+  /* MCP is created after the first pass; add its header chevron without
+   * duplicating the toggles already created for the static cards. */
+  initCollapsibleCards();
   initSoftKeyboardLayout();
   syncSidebarForViewport();
   if (mobileMedia.addEventListener) {

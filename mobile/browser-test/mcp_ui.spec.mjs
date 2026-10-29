@@ -351,8 +351,41 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
   // The section is mounted next to the AI settings card and only shows on that tab.
   await expect(page.locator("#mcpSettings")).toBeVisible();
   expect(
+    await page.evaluate(() => document.getElementById("mcpSettings")?.parentElement?.className),
+  ).toContain("agent-settings-scroll");
+  expect(
     await page.evaluate(() => document.getElementById("mcpSettings")?.previousElementSibling?.id),
-  ).toBe("agentSettings");
+  ).toBe("agentPrivacyCard");
+  expect(await page.locator("#mcpSettings .agent-settings-scroll").count()).toBe(0);
+  expect(await page.locator("#mcpSettings > .card-title > .card-toggle")).toHaveCount(1);
+  await page.locator("#mcpSettings > .card-title").click();
+  await expect(page.locator("#mcpSettings")).toHaveClass(/is-collapsed/);
+  await page.locator("#mcpSettings > .card-title").click();
+  await expect(page.locator("#mcpSettings")).not.toHaveClass(/is-collapsed/);
+  const chevronCenters = await page.evaluate(() =>
+    [...document.querySelectorAll("#agentSettings .card")].flatMap((card) => {
+      const title = card.querySelector(":scope > .card-title");
+      if (!title) return [];
+      const titleRect = title.getBoundingClientRect();
+      const toggle = title.querySelector(":scope > .card-toggle");
+      if (toggle) {
+        const rect = toggle.getBoundingClientRect();
+        return [rect.left + rect.width / 2];
+      }
+      const style = getComputedStyle(title, "::after");
+      const width = parseFloat(style.width) || 0;
+      const margin = parseFloat(style.marginRight) || 0;
+      const paddingRight = parseFloat(getComputedStyle(title).paddingRight) || 0;
+      return width ? [titleRect.right - paddingRight - margin - width / 2] : [];
+    }),
+  );
+  expect(Math.max(...chevronCenters) - Math.min(...chevronCenters)).toBeLessThanOrEqual(0.5);
+  expect(
+    await page.evaluate(() => {
+      const body = document.querySelector("#mcpSettings .mcp-settings-body");
+      return body ? body.scrollWidth <= body.clientWidth + 1 : false;
+    }),
+  ).toBe(true);
   await page.locator('[data-settings-target="connection"]').tap();
   await expect(page.locator("#mcpSettings")).toBeHidden();
   await page.locator('[data-settings-target="ai"]').tap();
