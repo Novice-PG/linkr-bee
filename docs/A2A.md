@@ -7,7 +7,15 @@ instead of driving the serial console tool by tool. The MCP server covers the
 tool half; both run on the same app, port and bearer token.
 
 > Status: implemented and covered by host-JVM, JavaScript and browser tests.
-> Hardware verification is recorded in the MCP guide's verification section.
+> On a real phone (2026-10-29, Android 16): the agent card was served over LAN,
+> `SendMessage` showed the one approval card, the resident task ran against a
+> mock OpenAI-compatible endpoint and returned `TASK_STATE_COMPLETED` with an
+> artifact; `GetTask`/`ListTasks` and the MCP `start_agent_task` path were also
+> exercised. The target board was not connected during that run (it advertised
+> a new BLE address that needs GPIO1 pairing), so the resident agent's device
+> tools were not exercised on hardware. One background-approval attempt let the
+> task complete but the blocking HTTP response was lost, so callers should use
+> `returnImmediately:true` plus `GetTask` for background tasks.
 
 ## Prerequisites
 

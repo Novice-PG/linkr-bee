@@ -6,7 +6,12 @@ agent-to-agent 的一半：外部 agent 委托任务，而不是逐个调用串�
 的 MCP 服务器。两者共用同一个 App、端口和 Bearer 令牌。
 
 > 状态：协议、任务管理和传输已实现，并有主机 JVM、JavaScript 与浏览器测试覆盖。
-> 真机验证记录见 MCP 指南的“验证状态”一节。
+> 真机验证（2026-10-29，Android 16）：局域网可拉取 agent card；`SendMessage`
+> 弹出一次确认后，常驻任务在手机上对 mock OpenAI 兼容端点执行并返回
+> `TASK_STATE_COMPLETED` 与 artifact；`GetTask`/`ListTasks` 与 MCP
+> `start_agent_task` 路径也验证过。该轮目标板未连接（板子广播了新地址，需要 GPIO1
+> 配对），因此助手对目标串口的工具未在真机执行。一次后台确认尝试中任务完成但阻塞式
+> HTTP 响应丢失，后台任务建议用 `returnImmediately:true` + `GetTask` 轮询。
 
 ## 前提
 

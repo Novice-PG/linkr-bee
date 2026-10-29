@@ -25,7 +25,10 @@ Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
   配置与状态）、`mobile/test/a2a_protocol.test.mjs`（card/任务映射/参数校验）、
   `mobile/test/mcp_server.test.mjs`（5 个 MCP 工具、确认、只读、忙碌保护、A2A JSON-RPC、
   agent card）、Java `McpHttpServerTest`（`/a2a` 鉴权/Origin/大小限制与公开 card 路由）。
-- **验证边界**：主机测试与构建通过；真机 + 真实配件的 A2A 任务、确认与执行待补验证。
+- **验证边界**：主机测试与构建通过；真机（mock OpenAI 兼容端点）已验证 agent card、
+  A2A 一次确认任务、GetTask/ListTasks 与 MCP start_agent_task/get_agent_task。目标板
+  未连接（新 BLE 地址需 GPIO1 配对），串口/配件工具与真实模型服务待补验证；后台任务的
+  阻塞式 HTTP 响应曾丢失，建议 returnImmediately + 轮询。
 
 ## 2026-10-26：MCP 服务器（Android）
 

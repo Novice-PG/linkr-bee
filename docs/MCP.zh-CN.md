@@ -397,9 +397,11 @@ MCP 工具描述和 `initialize` 返回的说明会向客户端重复这些规�
 `GET /.well-known/agent-card.json`、405/401/403 与请求体限制）有主机 JVM 测试；
 常驻任务管理器、A2A 协议映射与 5 个委派工具有 `node --test` 覆盖（排队、会话、取消、
 一次确认后的自动执行代理、只读拒绝、A2A SendMessage/GetTask/ListTasks/CancelTask
-与 agent card）；MCP 卡片的 A2A 端点行有 Playwright 覆盖；debug APK 构建通过。真机上
-用真实模型端点执行 A2A/常驻任务尚未验证（本次改动期间手机未连接 adb），因此不声称
-该路径已通过硬件验证。
+与 agent card）；MCP 卡片的 A2A 端点行有 Playwright 覆盖。真机上（mock OpenAI
+兼容端点）验证了 agent card、A2A 一次确认任务流程、`GetTask`/`ListTasks` 以及 MCP
+`start_agent_task`/`get_agent_task`。该轮目标板未连接（新 BLE 地址需要 GPIO1 配对），
+因此助手的串口/配件工具与真实模型服务仍未真机验证；一次后台确认尝试完成了任务但阻塞式
+HTTP 响应丢失，后台任务请用 `returnImmediately:true` + 轮询。
 
 2026-10-26 在真机上验证（StepX PZ261A，Android 16，adb 安装 debug APK，通过 BLE 连接
 Linkr Bee 配件）：

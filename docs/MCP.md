@@ -501,10 +501,14 @@ limits) have host-JVM tests; the resident task manager, A2A protocol mapping and
 the five delegation tools have `node --test` coverage (queueing, sessions,
 cancellation, the one-approval auto-execute proxy, read-only refusal, A2A
 SendMessage/GetTask/ListTasks/CancelTask and the agent card); the MCP card's A2A
-endpoint row has Playwright coverage. The debug APK builds. On-device execution
-of an A2A task and a resident task with a real model endpoint is still pending
-(the phone was not attached to adb during this change), so no hardware claim is
-made for that path yet.
+endpoint row has Playwright coverage. On a phone with a mock OpenAI-compatible
+endpoint, the agent card, the A2A one-approval task flow, `GetTask`/`ListTasks`
+and the MCP `start_agent_task`/`get_agent_task` path were verified end to end.
+The target board was not connected during that run (new BLE address needing
+GPIO1 pairing), so the resident agent's serial/accessory tools and a real model
+provider remain unverified on hardware. A background-approval attempt completed
+the task but lost the blocking HTTP response; use `returnImmediately:true` and
+poll for background tasks.
 
 Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
 over adb, connected to a Linkr Bee accessory over BLE):
