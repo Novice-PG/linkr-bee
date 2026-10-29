@@ -16,15 +16,18 @@ Linkr 固件端适配及可信 Linkr 身份绑定暂不实现。状态明确返�
 ## 客户端交互
 
 Web 和移动端共用页面检查能力位 bit 7。连接后先查询控制权，无人控制时自动申请；
-其他会话保持只读，可点击“申请控制”。当前控制端可“释放”，不必断开连接。
-状态每两秒刷新。鸿蒙外壳复用该页面，但不代表已完成 Linkr 固件端适配。
+其他会话对自动任务保持只读，但终端仍可输入：第一次按键会请求**空闲交接**，当前控制端
+安静超过 `CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS`（默认 3 秒）时自动接过控制权并发送
+这次输入。“申请控制”按钮是抢占路径，会立即生效，即使对方正在输入。控制端可“释放”，
+不必断开连接；释放后的下一次人工输入可以重新取回。状态每两秒刷新。鸿蒙外壳复用该页面。
 
-键盘、终端自动应答、快捷命令、AI 执行、UART 设置及远端终端尺寸同步均跟随控制权。
-旁观端调整本地窗口不会发送 `stty`，丢失控制权时取消旧的待发送任务。
+键盘、终端自动应答、快捷命令、AI 执行、UART 设置及远端终端尺寸同步均跟随控制权；
+唯一的例外是人工按键可以触发上述空闲交接。旁观端调整本地窗口不会发送 `stty`，丢失
+控制权时取消旧的待发送任务。
 
-未使用新控制权 API 的旧客户端，可以用首次 UART 写入或修改管理指令取得空闲控制权，
-但不能在其他会话控制时写入。使用新 API 的客户端释放控制后必须重新显式申请，
-延迟到达的键盘或 AI 数据不能自动抢回控制。旧 CLI/TUI 暂无专门的控制状态按钮。
+未使用新控制权 API 的旧客户端，可以用首次 UART 写入或修改管理指令取得空闲控制权；
+当前控制端安静超过空闲窗口后也会被接管，但不能在对方持续写入时插入。旧 CLI/TUI 暂无
+专门的控制状态按钮，但首次写入同样享受空闲规则。
 
 ## 协议
 
@@ -33,7 +36,8 @@ Management v1 帧格式与请求编号不变，新增 bit 7 `MULTI_SESSION`：
 | 指令 | 行为 |
 | --- | --- |
 | `@c?` | 查询本会话编号、控制端及容量 |
-| `@c claim` | 空闲时申请控制，不强行抢占 |
+| `@c claim` | 立即取得控制权，可抢占正在输入的会话 |
+| `@c claim idle` | 仅当当前控制端安静超过空闲窗口时取得控制权 |
 | `@c release` | 控制端释放控制权 |
 | `@c yield 2` | 控制端主动交接给在线会话 2 |
 
@@ -45,8 +49,10 @@ OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved
 
 `mode` 分别为 `control`、`readonly`、`available`；会话编号只在本次连接有效。
 `peers` 包括 BLE 和 LAN，`ble_max` 单独表示 BLE 容量。控制权改变时 `epoch` 递增。
-失败会返回 `control=busy`、`not_owner`、`bad_peer`、`bad_action`、`disconnected`
-或 `readonly`。
+失败会返回 `control=busy`（空闲申请时对方仍在输入）、`not_owner`、`bad_peer`、
+`bad_action`、`disconnected` 或 `readonly`。空闲窗口由 Kconfig
+`LINKR_BLE_BRIDGE_SESSION_IDLE_MS` 控制（默认 3000 毫秒）；每次被接受的 UART 写入或
+管理修改都会刷新控制端活动时间，已经排队的字节仍由 epoch 保护。
 
 LAN 认证不变。新固件在认证完成后主动发送文本状态帧；客户端收到该能力声明后，
 才可发送 `@control ?`、`@control claim`、`@control release` 或 `@control yield 2`
@@ -75,6 +81,11 @@ west build -d build-three -b esp32c3_supermini . -- -DEXTRA_CONF_FILE=multi3.con
 
 该实验配置只在 C3 上做构建验证。完整功能的 C5/WROOM 内部 SRAM 余量很小，
 本阶段保持两连接，不应直接套用三连接配置。
+
+主机控制权测试（包括抢占 `claim`、空闲 `claim idle` 与无感写入交接）通过，
+C3、C5 与 `linkr_bee_x1_0` 固件均以 3000 ms 默认值构建成功。X1.0 镜像使用固定的
+`linkr_multipeer_zephyr` 工作区构建，因为默认工作区的 simple-boot loader 已包含
+仓库 shim 正在防护的上游 digest 变化。
 
 编译、主机测试不等于实机验收。发布前需验证两台真实主机、第三台接入、不同 MTU 和
 通道、配对重连、控制权交接、慢客户端、持续串口日志、GPIO 配对门禁及 WiFi 共存。

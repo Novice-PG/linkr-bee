@@ -1,6 +1,8 @@
 "use strict";
 
 import { MGMT_CAP_MULTI_SESSION, parseSerialControl, isReadonlyManagementCommand } from "./serial_control.js";
+import { installSelectControls } from "./select_controls.js";
+import { normalizeUartMode, uartTransportPlan } from "./uart_transport_mode.js";
 import { createLanTokenStore } from "./lan_token_store.js";
 import {
   BOARD_SWATCHES,
@@ -84,6 +86,7 @@ import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
 import { createMcpHost } from "./mcp_server.js";
+import { createResidentAgent } from "./resident_agent.js";
 import { createMcpUi } from "./mcp_ui.js";
 import { createAboutPage } from "./about_page.js";
 import { inputLeavesPendingLine } from "./agent_execution_policy.js";
@@ -101,14 +104,18 @@ let agentPanel = null;
 let agentSettings = null;
 let mcpHost = null;
 let mcpUi = null;
+let residentAgent = null;
 let terminalKeyPreferences = null;
 let aboutPage = null;
 let serialControlTimer = null;
 let serialControlPolling = false;
 let serialControlPending = false;
+let serialControlWaiter = null;
+let idleClaimInFlight = null;
 let serialInputRevision = 0;
 let serialInputPending = false;
 let bleNotificationSession = null;
+let bleUartNotificationSession = null;
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -227,6 +234,10 @@ const state = {
   serialControl: null,
   serialControlRevision: 0,
   reliableReady: false,
+  uartMode: "interactive",
+  uartSessionMode: null,
+  uartReliableAvailable: null,
+  uartFallback: false,
   legacy: false,
   reliableTxSequence: 1,
   reliableRxSequence: 1,
@@ -331,6 +342,7 @@ const elements = {
   statusDot: $("statusDot"),
   statusText: $("statusText"),
   deviceName: $("deviceName"),
+  compactDevice: $("compactDevice"),
   connectButton: $("connectButton"),
   disconnectButton: $("disconnectButton"),
   switchDeviceButton: $("switchDeviceButton"),
@@ -363,6 +375,10 @@ const elements = {
   uartInput: $("uartInput"),
   enterSelect: $("enterSelect"),
   chunkInput: $("chunkInput"),
+  uartModeField: $("uartModeField"),
+  uartModeSelect: $("uartModeSelect"),
+  uartModeHint: $("uartModeHint"),
+  uartTransportStatus: $("uartTransportStatus"),
   fontSelect: $("fontSelect"),
   fontPreview: $("fontPreview"),
   localEchoInput: $("localEchoInput"),
@@ -466,6 +482,7 @@ const LANG_KEY = "linkr-lang";
 const FONT_FAMILY_KEY = "linkr-font-family";
 const LAST_DEVICE_ID_KEY = "linkr-last-device-id";
 const TRANSPORT_KEY = "linkr-transport";
+const UART_MODE_KEY = "linkr-uart-mode";
 const WS_HOST_KEY = "linkr-ws-host";
 const lanTokens = createLanTokenStore(localStorage);
 /* LAN access handshake. The bridge announces whether a token is required, so
@@ -526,6 +543,7 @@ const XTERM_LIGHT = {
 const I18N = {
   en: {
     serialReadonly: "Read only", serialControlled: "In control", serialAvailable: "No controller",
+    serialReadonlyHint: "Typing takes over automatically when the other session is idle; Take control preempts it immediately.",
     claimControl: "Take control", releaseControl: "Release",
     serialReadonlyError: "Read-only session. Take control before sending input.",
     title: "Linkr Bee Terminal",
@@ -557,6 +575,7 @@ const I18N = {
     reconnectWaiting: "Reconnecting in {s}s (attempt {n}/{total})",
     reconnectRestored: "Link restored automatically",
     reconnectGaveUp: "Automatic reconnect failed after {total} attempts. Press Reconnect to try again.",
+    reconnectPausedForPairing: "Automatic reconnect stopped: pairing needs a fresh key press, then press Connect.",
     reconnectCancelled: "Automatic reconnect cancelled",
     reconnectCancel: "Cancel reconnect",
     authorizedDeviceFailed: "Saved device unavailable; choose it again",
@@ -639,6 +658,16 @@ const I18N = {
     pasteUnavailable: "Clipboard unavailable. Long-press in the terminal to paste.",
     keyboard: "Keyboard",
     uart: "UART",
+    uartMode: "BLE UART mode",
+    uartModeInteractive: "Interaction first",
+    uartModeReliable: "Reliability first",
+    uartModeInteractiveHint: "Favors quick input and log streaming, without UART frame delivery confirmation.",
+    uartModeReliableHint: "Confirms each fragment at the Bee; throughput may be lower. This does not confirm execution on the target.",
+    uartModeNext: "Saved for the next BLE connection.",
+    uartActiveNus: "Current: interaction channel · NUS",
+    uartActiveReliable: "Current: reliable channel · Reliable UART",
+    uartNusOnly: "This device supports only the interaction channel.",
+    uartModeFallback: "Preferred channel unavailable; using the compatible channel.",
     enterKey: "Enter key",
     chunkSize: "Chunk size",
     fontFamily: "Terminal font",
@@ -743,7 +772,7 @@ const I18N = {
     serialOutput: "Serial Terminal",
     terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
-    terminalInputHint: "Modifiers apply once · Swipe right-hand keys for more",
+    terminalInputHint: "Modifiers apply once · Scroll for more keys",
     terminalInputDisconnected: "Connect a device to enable terminal input",
     emptyTitle: "No device yet",
     emptyHint: "Tap Connect to scan for a nearby Linkr Bee",
@@ -787,8 +816,8 @@ const I18N = {
     baud: "Baud",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
-    pairingHint: "New host: hold Bee GPIO1 to GND before connecting and accept system pairing. Bonded hosts reconnect without GPIO1.",
-    pairingFailed: "If pairing failed, hold GPIO1 to GND and reconnect. If the host lost its keys, forget its old system bond first. A full Bee bond table requires a factory reset.",
+    pairingHint: "New host: press the Bee pairing key once (Linkr Bee X1.0: USER_KEY/GPIO3; C3/C5: GPIO1), then connect within 30 s. Bonded hosts reconnect without a key press.",
+    pairingFailed: "Pairing was refused. Press the pairing key again, then choose Connect to start a new pairing; the terminal does not reconnect on its own.",
     saved: "Log saved",
     uartSet: "UART configured",
     wifiSet: "WiFi configured",
@@ -817,7 +846,8 @@ const I18N = {
   zh: {
     serialReadonly: "只读", serialControlled: "控制中", serialAvailable: "无人控制",
     claimControl: "申请控制", releaseControl: "释放",
-    serialReadonlyError: "当前为只读会话，请先申请控制权。",
+    serialReadonlyHint: "对方空闲时，输入会自动接管控制权；点「申请控制」可立即抢占。",
+    serialReadonlyError: "对方正在输入，未自动接管；点「申请控制」可强制接管。",
     title: "Linkr Bee 终端",
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
@@ -847,6 +877,7 @@ const I18N = {
     reconnectWaiting: "{s} 秒后重连（第 {n}/{total} 次）",
     reconnectRestored: "连接已自动恢复",
     reconnectGaveUp: "自动重连 {total} 次失败，请点「重新连接」再试。",
+    reconnectPausedForPairing: "已停止自动重连：配对需要重新按键，之后再点「连接」。",
     reconnectCancelled: "已取消自动重连",
     reconnectCancel: "取消重连",
     authorizedDeviceFailed: "已授权设备不可用，请重新选择设备",
@@ -925,6 +956,16 @@ const I18N = {
     pasteUnavailable: "无法读取剪贴板，请长按终端进行粘贴。",
     keyboard: "键盘",
     uart: "UART",
+    uartMode: "BLE 串口模式",
+    uartModeInteractive: "交互优先",
+    uartModeReliable: "可靠优先",
+    uartModeInteractiveHint: "优先响应速度，适合终端输入和日志查看；不提供 UART 帧级交付确认。",
+    uartModeReliableHint: "逐片确认 Bee 收包，吞吐可能降低；不代表目标机已执行。",
+    uartModeNext: "已保存，下次 BLE 连接生效。",
+    uartActiveNus: "当前：交互通道 · NUS",
+    uartActiveReliable: "当前：可靠通道 · Reliable UART",
+    uartNusOnly: "此设备仅支持交互通道。",
+    uartModeFallback: "首选通道不可用，已使用兼容通道。",
     enterKey: "回车键",
     chunkSize: "分片大小",
     fontFamily: "终端字体",
@@ -1029,7 +1070,7 @@ const I18N = {
     serialOutput: "串口终端",
     terminalAria: "交互式串口终端",
     xterm: "xterm.js",
-    terminalInputHint: "组合键单次生效 · 左右滑动右侧按键查看更多",
+    terminalInputHint: "组合键单次生效 · 滚动查看更多按键",
     terminalInputDisconnected: "连接设备后即可在终端内直接输入",
     emptyTitle: "还没有连接设备",
     emptyHint: "点右上角「连接」，扫描附近的 Linkr Bee",
@@ -1073,8 +1114,8 @@ const I18N = {
     baud: "波特率",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
-    pairingHint: "首次连接新主机：先将 Bee GPIO1 接地，再连接并接受系统配对。已绑定主机无需拉低 GPIO1。",
-    pairingFailed: "若配对失败，请将 GPIO1 接地后重连；主机密钥丢失时，先在系统中忽略旧绑定。Bee 绑定表已满时需恢复出厂。",
+    pairingHint: "首次连接新主机：先按一下 Bee 的配对键（Linkr Bee X1.0：USER_KEY/GPIO3；C3/C5：GPIO1），并在 30 秒内发起连接。已绑定主机无需按键。",
+    pairingFailed: "配对被拒绝。请再次按下配对键，再点「连接」重新发起配对；终端不会自动重连。",
     saved: "日志已保存",
     uartSet: "UART 已配置",
     wifiSet: "WiFi 已配置",
@@ -1177,6 +1218,8 @@ function applyTerminalFont(fontId, persist = false) {
   }
   if (elements.fontPreview) {
     elements.fontPreview.style.fontFamily = stack;
+    elements.fontPreview.textContent = next === "system"
+      ? "user@bee:~ $ echo ready" : "\ue0a0 main \ue0b0 \uf07c ~/project";
   }
   if (persist) {
     saveSetting(FONT_FAMILY_KEY, next);
@@ -1465,6 +1508,7 @@ function applyLang() {
   mcpUi?.refreshLang();
   terminalKeyPreferences?.refreshLang();
   aboutPage?.refreshLang();
+  renderUartMode();
   renderSerialControl();
 }
 
@@ -1543,7 +1587,7 @@ function scheduleTerminalGeometrySync() {
 
     state.shellPromptVisible = false;
     state.terminalGeometrySyncInFlight = geometry.key;
-    writeText(terminalGeometryCommand(geometry.cols, geometry.rows))
+    writeText(terminalGeometryCommand(geometry.cols, geometry.rows), { claim: false })
       .then(() => {
         if (session === state.terminalGeometrySession) {
           state.terminalGeometrySynced = geometry.key;
@@ -2107,6 +2151,13 @@ function canSerialInput() {
   return state.connected && (!state.serialControl || state.serialControl.mode === "control");
 }
 
+/* UART typing is allowed to try even in a read-only session: the first
+ * keystroke asks the bridge for the idle console and becomes input once the
+ * hand-over succeeds. Management controls stay strict (see canSerialInput). */
+function canAttemptUserInput() {
+  return Boolean(state.connected);
+}
+
 function assertSerialInput(revision = state.serialControlRevision) {
   if (!canSerialInput() || revision !== state.serialControlRevision) {
     throw new Error(t("serialReadonlyError"));
@@ -2133,7 +2184,7 @@ function renderSerialControl() {
     button.title = button.textContent;
     button.setAttribute("aria-label", button.textContent);
   }
-  const writable = canSerialInput();
+  const writable = canAttemptUserInput();
   if (state.term) {
     state.term.options.disableStdin = !writable;
     if (!writable) state.term.blur();
@@ -2142,7 +2193,7 @@ function renderSerialControl() {
     elements.pasteTerminalButton, ...elements.modifierButtons, ...elements.terminalKeyButtons]) {
     if (element) element.disabled = !writable;
   }
-  const management = writable && state.mode === "ble" && state.mgmtReady;
+  const management = canSerialInput() && state.mode === "ble" && state.mgmtReady;
   elements.setUartButton.disabled = !management;
   elements.wifiSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
   elements.wifiOffButton.disabled = elements.wifiSetButton.disabled;
@@ -2153,7 +2204,7 @@ function renderSerialControl() {
   updateBleNameControls();
   document.querySelectorAll("#cheatList button[data-cmd], #presets button, .presets button")
     .forEach(item => { item.disabled = !writable; });
-  if (control && !writable) elements.terminalInputHint.textContent = t("serialReadonlyError");
+  if (control && !canSerialInput()) elements.terminalInputHint.textContent = t("serialReadonlyHint");
   else if (state.connected) elements.terminalInputHint.textContent = t("terminalInputHint");
 }
 
@@ -2179,6 +2230,8 @@ function applySerialControl(control) {
 
 function consumeSerialControl(text) {
   const control = parseSerialControl(text);
+  const waiter = serialControlWaiter;
+  serialControlWaiter = null;
   if (control) {
     const first = !state.serialControl;
     applySerialControl(control);
@@ -2186,6 +2239,7 @@ function consumeSerialControl(text) {
       startSerialControlPoll();
       if (first && control.mode === "available") requestSerialControl("claim").catch(() => {});
     }
+    waiter?.(text);
     return true;
   }
   if (String(text).trim().startsWith("ERR control=")) {
@@ -2194,9 +2248,55 @@ function consumeSerialControl(text) {
       applySerialControl({ ...state.serialControl, mode: "readonly" });
     }
     renderSerialControl();
+    waiter?.(text);
     return true;
   }
   return false;
+}
+
+function waitForSerialControlReply(timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const done = (text) => {
+      clearTimeout(timer);
+      resolve(text);
+    };
+    const timer = setTimeout(() => {
+      if (serialControlWaiter === done) serialControlWaiter = null;
+      resolve(null);
+    }, timeoutMs);
+    serialControlWaiter = done;
+  });
+}
+
+/* Seamless hand-over: ask the bridge for the console only if its current
+ * owner has been quiet long enough. The explicit button uses "claim", which
+ * preempts immediately; this path never interrupts an active typist. */
+async function claimIdleControl() {
+  if (state.serialControl?.mode === "control") return true;
+  if (!state.connected || !state.serialControl) return false;
+  if (idleClaimInFlight) return idleClaimInFlight;
+  serialControlPending = true;
+  renderSerialControl();
+  idleClaimInFlight = (async () => {
+    try {
+      if (state.mode === "ws") {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return false;
+        const reply = waitForSerialControlReply();
+        state.ws.send("@control claim idle");
+        await reply;
+      } else {
+        await sendControl("@c claim idle", { returnResponse: true, quiet: true });
+      }
+      return state.serialControl?.mode === "control";
+    } catch {
+      return false;
+    } finally {
+      serialControlPending = false;
+      renderSerialControl();
+      idleClaimInFlight = null;
+    }
+  })();
+  return idleClaimInFlight;
 }
 
 async function requestSerialControl(action = "?") {
@@ -2314,11 +2414,18 @@ function applyBleName(parsed, { custom = null } = {}) {
 }
 
 function renderDeviceName() {
-  elements.deviceName.textContent = state.mode === "ws"
+  const name = state.mode === "ws"
     ? state.wsHost || ""
     : state.device
       ? state.device.name || state.device.id
       : "";
+  elements.deviceName.textContent = name;
+  /* The phone topbar hides the pill's word and device name; keep the identity
+   * on a second line of the brand block instead of dropping it entirely. */
+  if (elements.compactDevice) {
+    elements.compactDevice.textContent = name;
+    elements.compactDevice.hidden = !state.connected || !name;
+  }
 }
 
 async function readBleName({ quiet = false } = {}) {
@@ -3428,6 +3535,22 @@ const autoReconnect = {
 /* Set by a user-initiated disconnect so the teardown it causes is not treated
  * as a lost link. onDisconnected() consumes it. */
 let userInitiatedDisconnect = false;
+/* The last connect attempt's failure class. Pairing is refused by the Bee until
+ * the user presses its pairing key, so a refused encrypted read must not be
+ * answered with the automatic reconnect loop: that loop can never succeed and
+ * hides the fact that a physical press is required. The next manual Connect is
+ * the user's re-initiation. */
+let lastConnectFailure = null;
+
+function pairingRefused(error) {
+  const text = String(error?.message || "");
+
+  /* Only explicit authentication failures require a fresh pairing attempt.
+   * Timeouts/disconnects can happen during any GATT operation, including the
+   * first encrypted read. SecurityError alone may instead be a browser policy
+   * restriction and is not evidence that the Bee refused pairing. */
+  return /insufficient (authentication|encryption|security)|authentication failed|pairing failed/i.test(text);
+}
 
 function setConnecting(connecting) {
   connecting = connecting || connectionInFlight;
@@ -4378,18 +4501,27 @@ function initCollapsibleCards() {
   const collapsed = loadCollapsedCards();
   const cards = Array.from(document.querySelectorAll("#controlsPanel section.card"))
     .filter((card) => !card.matches("#agentSettings, #aboutPage"))
-    .filter((card) => card.querySelector(":scope > .card-title"));
+    .filter((card) => card.querySelector(":scope > .card-title"))
+    /* MCP is appended after the first pass, so allow a second idempotent pass. */
+    .filter((card) => !card.querySelector(":scope > .card-title > .card-toggle"));
   for (const card of cards) {
     const title = card.querySelector(":scope > .card-title");
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "card-toggle";
-    toggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>';
+    /* The chevron is drawn in CSS so section cards and native <details> cards
+     * use the exact same glyph, weight, size and rotation. */
     title.append(toggle);
+    card.classList.add("is-collapsible");
     const entry = { card, toggle, key: cardKey(card) };
     cardToggles.push(entry);
     toggle.addEventListener("click", () =>
       setCardCollapsed(card, !card.classList.contains("is-collapsed")));
+    /* A native <details> header toggles anywhere on the summary; match it. */
+    title.addEventListener("click", (event) => {
+      if (event.target.closest("button, a, input, select, textarea")) return;
+      setCardCollapsed(card, !card.classList.contains("is-collapsed"));
+    });
     const isCollapsed = collapsed.has(entry.key);
     card.classList.toggle("is-collapsed", isCollapsed);
     updateCardToggle(entry);
@@ -4456,6 +4588,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     );
   }
   renderDeviceName();
+  renderUartMode();
   elements.connectButton.disabled = connectionInFlight || connected || !canConnect;
   if (elements.mobileConnectBtn) {
     elements.mobileConnectBtn.disabled = connectionInFlight || (!connected && !canConnect);
@@ -4601,6 +4734,27 @@ function normalizeEnter(text) {
     crlf: "\r\n",
   }[mode];
   return normalized.replace(/\n/g, replacement);
+}
+
+function renderUartMode() {
+  const ble = state.mode === "ble";
+  const onlyNus = state.connected && state.uartReliableAvailable === false;
+  elements.uartModeField.hidden = !ble || onlyNus;
+  elements.uartModeSelect.value = state.uartMode;
+  elements.uartModeHint.textContent = t(state.uartMode === "reliable"
+    ? "uartModeReliableHint" : "uartModeInteractiveHint");
+  elements.uartTransportStatus.hidden = !ble || !state.connected;
+  if (!ble || !state.connected) {
+    elements.uartTransportStatus.textContent = "";
+    return;
+  }
+  const lines = [t(state.reliableReady ? "uartActiveReliable" : "uartActiveNus")];
+  if (onlyNus) lines.push(t("uartNusOnly"));
+  else if (state.uartFallback) lines.push(t("uartModeFallback"));
+  if (state.uartSessionMode && state.uartMode !== state.uartSessionMode) {
+    lines.push(t("uartModeNext"));
+  }
+  elements.uartTransportStatus.textContent = lines.join(lang === "zh" ? "；" : ". ");
 }
 
 function chunkSize() {
@@ -4824,7 +4978,11 @@ function enqueueBytes(bytes, sensitive = false, { generation = state.writeGenera
   return operation;
 }
 
-async function writeText(text, options) {
+async function writeText(text, options = {}) {
+  if (options.claim !== false && state.serialControl && state.serialControl.mode !== "control") {
+    const claimed = await claimIdleControl();
+    if (!claimed) throw new Error(t("serialReadonlyError"));
+  }
   await enqueueBytes(encoder.encode(text), false, options);
 }
 
@@ -4862,7 +5020,7 @@ function resetModifiers() {
 }
 
 function onTerminalData(data, { raw = false, userInput = true } = {}) {
-  if (!canSerialInput() || !data) {
+  if (!data || (!canSerialInput() && !(userInput && canAttemptUserInput()))) {
     return;
   }
   if (!userInput) {
@@ -4871,7 +5029,7 @@ function onTerminalData(data, { raw = false, userInput = true } = {}) {
     // They must not mark the terminal input line as pending: a program that
     // queries the terminal (DSR/DA/focus) would otherwise block tracked
     // commands and geometry sync until the user pressed Enter.
-    writeText(data, { trackPending: false }).catch((error) => appendLine(`[error] ${error.message}`));
+    writeText(data, { trackPending: false, claim: false }).catch((error) => appendLine(`[error] ${error.message}`));
     return;
   }
   terminalInputUntil = performance.now() + 1000;
@@ -5076,6 +5234,10 @@ function handleIncomingBytes(bytes) {
 
 function onDisconnected({ unexpected = false } = {}) {
   bleNotificationSession = null;
+  bleUartNotificationSession = null;
+  state.uartSessionMode = null;
+  state.uartReliableAvailable = null;
+  state.uartFallback = false;
   const wasConnected = state.connected;
   const manual = userInitiatedDisconnect;
   userInitiatedDisconnect = false;
@@ -5236,6 +5398,20 @@ async function attemptAutoReconnect(index) {
   autoReconnect.controller = null;
   if (state.mode === "ble" && state.bleReselectId) {
     autoReconnect.active = false;
+    setConnecting(false);
+    refreshDynamicTexts();
+    return;
+  }
+  if (lastConnectFailure?.pairing) {
+    /* The Bee refuses pairing until its key is pressed, so dialling again can
+     * never recover the link. Stop here and leave the Connect button to the
+     * user; the pairing hint shown by the failed attempt is the instruction. */
+    autoReconnect.active = false;
+    autoReconnect.attempts = 0;
+    autoReconnect.nextAt = 0;
+    stopAutoReconnectTimer();
+    stopAutoReconnectTicker();
+    appendLine(`[reconnect] ${t("reconnectPausedForPairing")}`);
     setConnecting(false);
     refreshDynamicTexts();
     return;
@@ -5483,6 +5659,8 @@ async function adoptLegacyNus(device, signal) {
   );
   signal?.throwIfAborted();
   state.legacy = true;
+  state.uartReliableAvailable = false;
+  state.uartFallback = state.uartSessionMode === "reliable";
   state.mgmtReady = false;
   state.reliableReady = false;
   state.nusReady = true;
@@ -5495,8 +5673,80 @@ async function adoptLegacyNus(device, signal) {
   appendLine(t("legacyHint"));
 }
 
+/* Choose once per BLE session. A UI preference change never interrupts an
+ * in-flight frame or replays queued input on another UART characteristic. */
+async function subscribeBleUart(device, signal, notificationSession) {
+  const validSession = () => {
+    signal?.throwIfAborted();
+    if (bleNotificationSession !== notificationSession) {
+      throw new Error("Bluetooth device session changed");
+    }
+  };
+  const available = hasManagementCapability(MGMT_CAP_RELIABLE_UART);
+  const preferNus = hasManagementCapability(MGMT_CAP_PREFER_NUS);
+  state.uartReliableAvailable = available && !preferNus;
+  const plan = uartTransportPlan(state.uartSessionMode, { reliable: available, preferNus });
+  let lastError;
+  for (const channel of plan) {
+    validSession();
+    const token = {};
+    bleUartNotificationSession = token;
+    state.nusReady = state.reliableReady = false;
+    const reliable = channel === "reliable";
+    const service = reliable ? RELIABLE_UART_SERVICE : NUS_SERVICE;
+    const tx = reliable ? RELIABLE_UART_TX : NUS_TX;
+    const accepts = () => !signal?.aborted &&
+      bleNotificationSession === notificationSession && bleUartNotificationSession === token;
+    try {
+      if (reliable) {
+        const value = await bleTransport.read(device.id, RELIABLE_UART_SERVICE, RELIABLE_UART_STATE);
+        validSession();
+        if (value.byteLength !== 16 || value.getUint8(0) !== 1 ||
+            value.getUint16(2, true) === 0 || value.getUint32(4, true) === 0 ||
+            value.getUint32(8, true) === 0) {
+          throw new Error("Invalid Reliable UART state");
+        }
+        reliableReassembler.reset();
+        state.reliableMaxPayload = Math.min(value.getUint16(2, true),
+          BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE);
+        state.reliableWriteSize = RELIABLE_UART_WRITE_START;
+        state.reliableTxSequence = value.getUint32(4, true);
+        state.reliableRxSequence = value.getUint32(8, true);
+        state.reliableRxDesync = false;
+      }
+      await bleTransport.startNotifications(device.id, service, tx, value => {
+        if (!accepts()) return;
+        if (reliable) onReliableUartIndication(value);
+        else handleIncomingBytes(new Uint8Array(value.buffer.slice(
+          value.byteOffset, value.byteOffset + value.byteLength)));
+      });
+      validSession();
+      state.reliableReady = reliable;
+      state.nusReady = !reliable;
+      state.uartFallback = channel !== (normalizeUartMode(state.uartSessionMode) === "reliable" ? "reliable" : "nus");
+      if (state.uartFallback) appendLine(`[warn] ${t("uartModeFallback")}`);
+      return;
+    } catch (error) {
+      // A failed subscription may already have installed a callback. Retire
+      // it before trying the other channel so late packets cannot duplicate RX.
+      if (bleNotificationSession !== notificationSession || bleUartNotificationSession !== token) {
+        throw error; // A retired attempt must not unsubscribe the next device.
+      }
+      bleUartNotificationSession = null;
+      try { await bleTransport.stopNotifications(device.id, service, tx); }
+      catch { /* A missing characteristic may have failed before subscribing. */ }
+      validSession();
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("No UART transport available");
+}
+
 async function connectOnce({ chooseDevice = false, reselectId = null, signal } = {}) {
   signal?.throwIfAborted();
+  /* Every attempt starts without a failure class; the catch below records one
+   * so automatic reconnect can tell a pairing refusal from a lost link. */
+  lastConnectFailure = null;
   if (state.mode === "ws") {
     setConnecting(true);
     try {
@@ -5521,6 +5771,9 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   }
 
   setConnecting(true);
+  state.uartSessionMode = state.uartMode;
+  state.uartReliableAvailable = null;
+  state.uartFallback = false;
   const restoredAttempt = Boolean(!chooseDevice && !reselectId && state.device && state.deviceRestored);
   let device = chooseDevice || reselectId ? null : state.device;
   let transportConnected = false;
@@ -5560,12 +5813,9 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
         MGMT_PROTOCOL,
       );
     } catch (error) {
-      /* The oldest firmware has no Management Service, and its terminal
-       * stays usable. Which board this is, is told by the failure and not
-       * by the name: a service that is not there is a legacy board, while
-       * a read that was refused is a pairing problem on a board that
-       * promised the service. The name says neither - the owner chooses
-       * it, and can choose it for a current board too. */
+      /* Only a missing service identifies legacy firmware. Other failures
+       * retain their original cause: an encrypted read can time out or lose
+       * its link without pairing having been refused. */
       if (!isMissingService(error)) throw error;
       await adoptLegacyNus(device, signal);
       return;
@@ -5630,94 +5880,7 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
     );
     signal?.throwIfAborted();
     state.mgmtReady = true;
-    /* Two transports are supported. Mainline boards keep the reliable UART
-     * channel; a board that advertises PREFER_NUS (the ESP32-CAM) uses the raw
-     * NUS pipe, and a board that loses the reliable service falls back to NUS
-     * instead of failing to connect. */
-    const preferNus = hasManagementCapability(MGMT_CAP_PREFER_NUS);
-    let useNus = preferNus || !hasManagementCapability(MGMT_CAP_RELIABLE_UART);
-
-    if (!useNus) {
-      try {
-        const reliableState = await bleTransport.read(
-          device.id,
-          RELIABLE_UART_SERVICE,
-          RELIABLE_UART_STATE,
-        );
-        signal?.throwIfAborted();
-        if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
-          throw new Error("Unsupported Reliable UART version");
-        }
-        const reliablePayloadLimit = reliableState.getUint16(2, true);
-        const reliableTxSequence = reliableState.getUint32(4, true);
-        const reliableRxSequence = reliableState.getUint32(8, true);
-        if (
-          reliablePayloadLimit === 0 ||
-          reliableTxSequence === 0 ||
-          reliableRxSequence === 0
-        ) {
-          throw new Error("Invalid Reliable UART state");
-        }
-        state.reliableMaxPayload = Math.max(
-          1,
-          Math.min(
-            reliablePayloadLimit,
-            BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
-          ),
-        );
-        state.reliableWriteSize = RELIABLE_UART_WRITE_START;
-        state.reliableTxSequence = reliableTxSequence;
-        state.reliableRxSequence = reliableRxSequence;
-        state.reliableRxDesync = false;
-        await bleTransport.startNotifications(
-          device.id,
-          RELIABLE_UART_SERVICE,
-          RELIABLE_UART_TX,
-          (value) => {
-            if (!signal?.aborted && bleNotificationSession === notificationSession) onReliableUartIndication(value);
-          },
-        );
-        signal?.throwIfAborted();
-        state.reliableReady = true;
-        state.nusReady = false;
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        useNus = true;
-        state.reliableReady = false;
-        appendLine(`[warn] Reliable UART unavailable (${error.message}); using NUS`);
-        try {
-          await bleTransport.stopNotifications(
-            device.id,
-            RELIABLE_UART_SERVICE,
-            RELIABLE_UART_TX,
-          );
-        } catch (_error) {
-          // The reliable path may have failed before subscribing.
-        }
-      }
-    }
-
-    signal?.throwIfAborted();
-    if (useNus) {
-      await bleTransport.startNotifications(
-        device.id,
-        NUS_SERVICE,
-        NUS_TX,
-        (value) => {
-          if (signal?.aborted || bleNotificationSession !== notificationSession) return;
-          const bytes = new Uint8Array(
-            value.buffer.slice(
-              value.byteOffset,
-              value.byteOffset + value.byteLength,
-            ),
-          );
-          handleIncomingBytes(bytes);
-        },
-      );
-      signal?.throwIfAborted();
-      state.nusReady = true;
-      state.reliableReady = false;
-    }
+    await subscribeBleUart(device, signal, notificationSession);
     state.legacy = false;
     state.deviceRestored = false;
     if (hasManagementCapability(MGMT_CAP_MULTI_SESSION)) {
@@ -5739,12 +5902,14 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   } catch (error) {
     if (!signal?.aborted) appendLine(`[error] ${error.message}`);
     const needsReselect = error.code === "BLE_RESELECT_REQUIRED";
+    const pairingFailure = pairingRefused(error);
+    lastConnectFailure = pairingFailure ? { pairing: true } : null;
     if (needsReselect && device && !signal?.aborted) {
       state.bleReselectId = device.id;
       appendLine(`[reconnect] ${t("bleReselectHint")}`);
       toast(t("bleReselectHint"), "error");
     }
-    if (pairingAttempted && !signal?.aborted && !needsReselect) {
+    if (pairingAttempted && !signal?.aborted && !needsReselect && pairingFailure) {
       appendLine(`[pairing] ${t("pairingFailed")}`);
       toast(t("pairingFailed"), "error");
     }
@@ -5866,6 +6031,8 @@ function saveLog() {
 }
 
 function loadPersisted() {
+  state.uartMode = normalizeUartMode(localStorage.getItem(UART_MODE_KEY));
+  renderUartMode();
   const uart = localStorage.getItem("linkr-uart");
   if (uart) {
     elements.uartInput.value = uart;
@@ -6109,7 +6276,14 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   }
 
   if (focusDrawer && drawerOpen) {
-    requestAnimationFrame(() => elements.drawerClose.focus({ preventScroll: true }));
+    requestAnimationFrame(() => {
+      // A fast click/keystroke may already have focused a field while the
+      // drawer was opening. Do not redirect that input to the close button.
+      if (elements.appShell.classList.contains("sidebar-open") &&
+          !elements.controlsPanel.contains(document.activeElement)) {
+        elements.drawerClose.focus({ preventScroll: true });
+      }
+    });
   } else if (
     restoreToggle &&
     !drawerOpen &&
@@ -6680,6 +6854,11 @@ function bind() {
   elements.enterSelect.addEventListener("change", () =>
     saveSetting("linkr-enter", elements.enterSelect.value),
   );
+  elements.uartModeSelect.addEventListener("change", () => {
+    state.uartMode = normalizeUartMode(elements.uartModeSelect.value);
+    saveSetting(UART_MODE_KEY, state.uartMode);
+    renderUartMode();
+  });
   elements.chunkInput.addEventListener("change", () =>
     saveSetting("linkr-chunk", elements.chunkInput.value),
   );
@@ -6983,9 +7162,33 @@ function initMcp() {
   if (!bridge || !bridge.available) return;
   let storage;
   try { storage = localStorage; } catch { storage = { getItem: () => null, setItem: () => {} }; }
+  /* The resident assistant is the app's own agent runtime, made callable by
+   * MCP/A2A clients. It uses the same device executor, accessory helpers,
+   * notes and board prompt as the human conversation; only its conversation is
+   * separate. Starting a task is approved once in MCP/A2A, and that approval is
+   * what the task's own writes rely on. */
+  residentAgent = createResidentAgent({
+    storage,
+    getConfig: () => agentSettings?.getConfig?.() || null,
+    getDevice: () => agentPanel?.getDevice?.() || null,
+    readBoardPrompt: readBoardPromptForAgent,
+    accessory: {
+      capability: accessoryCapability,
+      command: accessoryCommand,
+      execute: executeAccessoryChange,
+      diagnostics: collectAccessoryDiagnostics,
+      scan: scanWifi,
+    },
+    isHumanAgentBusy: () => Boolean(agentPanel?.isBusy?.()),
+    onTaskChange: () => {
+      agentPanel?.residentChanged();
+      mcpUi?.refresh();
+    },
+  });
   mcpHost = createMcpHost({
     getBridge: () => globalThis.LinkrMcp || null,
     storage,
+    residentAgent,
     getDevice: () => agentPanel?.getDevice?.() || null,
     readLog: (options) => agentJournal.read(options),
     /* The accessory helpers are the app's own management-channel functions, so
@@ -7058,6 +7261,10 @@ function init() {
     onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); state.term?.blur(); },
   });
   agentPanel = createAgentPanel({
+    resident: {
+      isBusy: () => residentAgent?.isBusy() === true,
+      cancelAll: () => residentAgent?.cancelAll(),
+    },
     button: $("agentButton"), getLang: () => lang,
     settings: agentSettings,
     bindingControl: command => sendControl(command, {returnResponse:true}),
@@ -7108,6 +7315,9 @@ function init() {
     },
   });
   initMcp();
+  /* MCP is created after the first pass; add its header chevron without
+   * duplicating the toggles already created for the static cards. */
+  initCollapsibleCards();
   initSoftKeyboardLayout();
   syncSidebarForViewport();
   if (mobileMedia.addEventListener) {
@@ -7115,6 +7325,7 @@ function init() {
   } else if (mobileMedia.addListener) {
     mobileMedia.addListener(syncSidebarForViewport);
   }
+  installSelectControls(elements.controlsPanel);
   appendLine(t("welcome"));
   if (state.mode === "ble") {
     restoreAuthorizedDevice().catch((error) =>

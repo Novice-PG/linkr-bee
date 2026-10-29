@@ -3,6 +3,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include "ble_security.h"
 
@@ -31,17 +32,84 @@ LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
 static const struct gpio_dt_spec pairing_gpio =
 	GPIO_DT_SPEC_GET(DT_ALIAS(linkr_pairing), gpios);
 
+/* The host almost never starts pairing while the user is still holding the key:
+ * scanning, choosing the device and the browser's own connect happen first, and
+ * the pairing request follows later. Latch the press and accept pairing for a
+ * short window afterwards. The security property stays "a person touched the
+ * board before this host could pair", without asking the user to guess when the
+ * host will ask for keys. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)
+#define PAIRING_GRACE_MS CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS
+#else
+#define PAIRING_GRACE_MS 0
+#endif
+
+static struct gpio_callback pairing_press_callback;
+/* A 32-bit millisecond timestamp would reopen an old authorization every
+ * 49.7 days. Keep the full uptime and protect the shared 64-bit value from
+ * torn reads between the GPIO ISR and the Bluetooth thread on 32-bit MCUs. */
+static struct k_spinlock pairing_press_lock;
+static int64_t pairing_pressed_at;
+static bool pairing_press_seen;
+
+static void pairing_press_latch(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&pairing_press_lock);
+
+	pairing_pressed_at = k_uptime_get();
+	pairing_press_seen = true;
+	k_spin_unlock(&pairing_press_lock, key);
+}
+
+static void pairing_pressed(const struct device *port,
+			    struct gpio_callback *callback, gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+
+	/* Interrupt context: only record when the press happened. */
+	pairing_press_latch();
+}
+
+/* True while the pairing GPIO is held active, or within PAIRING_GRACE_MS of
+ * the last press. A failed read fails closed rather than authorizing pairing. */
+static bool pairing_gpio_authorizes(void)
+{
+	int pressed;
+	int64_t age;
+	bool authorized;
+	k_spinlock_key_t key;
+
+	if (!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)) {
+		return true;
+	}
+	pressed = gpio_pin_get_dt(&pairing_gpio);
+	if (pressed < 0) {
+		return false;
+	}
+	if (pressed == 1) {
+		return true;
+	}
+	if (PAIRING_GRACE_MS <= 0) {
+		return false;
+	}
+	key = k_spin_lock(&pairing_press_lock);
+	age = k_uptime_get() - pairing_pressed_at;
+	authorized = pairing_press_seen && age >= 0 && age <= PAIRING_GRACE_MS;
+	k_spin_unlock(&pairing_press_lock, key);
+	return authorized;
+}
+
 static enum bt_security_err pairing_accept(
 	struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
 {
 	ARG_UNUSED(conn);
 	ARG_UNUSED(feat);
 	/* Applies to every new key exchange, including replacement of a bond.
-	 * Existing LTK encryption does not invoke this callback. A GPIO read
-	 * failure must fail closed, not be mistaken for an active-low input. */
-	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) &&
-	    gpio_pin_get_dt(&pairing_gpio) != 1) {
-		LOG_WRN("Pairing denied: hold the pairing GPIO low before requesting pairing");
+	 * Existing LTK encryption does not invoke this callback. */
+	if (!pairing_gpio_authorizes()) {
+		LOG_WRN("Pairing denied: press the pairing GPIO, then request pairing again");
 		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
 	}
 	LOG_INF("Pairing authorized");
@@ -97,6 +165,20 @@ int linkr_ble_security_init(void)
 		if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
 		err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
 		if (err) return err;
+		/* Register the callback before enabling the edge, so a press that
+		 * lands while the interrupt is being configured is still latched by
+		 * the initial level read below instead of being lost. */
+		gpio_init_callback(&pairing_press_callback, pairing_pressed,
+				   BIT(pairing_gpio.pin));
+		err = gpio_add_callback_dt(&pairing_gpio, &pairing_press_callback);
+		if (err) return err;
+		err = gpio_pin_interrupt_configure_dt(&pairing_gpio,
+						     GPIO_INT_EDGE_TO_ACTIVE);
+		if (err) return err;
+		/* A key already held at init produces no edge; latch it here. */
+		if (gpio_pin_get_dt(&pairing_gpio) == 1) {
+			pairing_press_latch();
+		}
 	}
 	err = bt_conn_auth_cb_register(&auth_callbacks);
 	if (err) return err;

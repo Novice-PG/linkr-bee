@@ -198,25 +198,65 @@ components:
 - **Focus:** 边框转焦点蓝 + 3px 蓝色外发光，无 outline
 - **Disabled:** 不单独置灰输入框；依赖所属按钮组的禁用态表达
 
+### Selects and option menus
+
+- Single-value settings use the shared `select_controls.js` enhancement. Keep the
+  native `<select>` as the source of values, disabled state, form submission and
+  `input`/`change` events; expose one themed combobox to assistive technology.
+- Triggers share `--control-height`, `--control-radius`, `--control-fill` and
+  `--control-edge` with form fields. Menus reuse the opaque `--sticky-surface` and
+  `--overlay-shadow`; selected rows show a check, keyboard focus uses the focus
+  token. No platform-blue option menu or extra accent colour.
+- Menus open in the top layer where supported, fit the visual viewport, flip
+  above a low trigger, and scroll internally. Options have 36 px minimum targets,
+  raised to 44 px for coarse pointers. Long values wrap inside the menu.
+- Editable model IDs and SSIDs retain free text. When suggestions are available,
+  a companion arrow opens this same menu; ArrowDown also opens it from the input.
+  Selecting a suggestion updates the real input and its events.
+- Support arrows, Home/End, PageUp/PageDown, type-ahead, Enter/Space selection,
+  Escape cancellation and Tab dismissal. Escape closes the menu before its
+  parent drawer; outside clicks dismiss without changing the value.
+- Dynamic options, programmatic values, translated labels and disabled states
+  must stay in sync. `[hidden]` always removes a control or overlay from layout.
+
 ### Inline disclosures
 - **Usage:** 低频但相关的设置（高级参数、CLIProxy 导入）收进主卡片底部的
   `.agent-inline-disclosure`：1px 分隔线 + 12.5px 次要色摘要 + 右侧小箭头，默认收起。
 - **Cards that are disclosures:** 整张卡片折叠时用 `<details class="card">` 和
-  `summary.card-title`；关闭态只保留标题带，不留空白 padding。
+  `summary.card-title`，或 `section.card` + `.card-toggle`；两种实现共用同一个
+  7×7 / 2px CSS chevron：关闭指向右、展开指向下，24px 按钮，整条标题带可点击。
+  两种实现的箭头都对齐到卡片内容区右缘内 8.5px（24px 按钮中心）；不能一左一右。
+  关闭态只保留标题带，不留空白 padding。
 - **AI settings scroll:** AI 页独占一个滚动区（`.agent-settings-scroll`），底部状态/兜底
   操作是固定 footer。一个页面只有一个滚动条，footer 不覆盖内容。
 
 ### Navigation
 - 本系统无传统导航。顶栏 = 品牌区 + 状态药丸 + 全局动作（主题/语言/面板开关）；移动端侧栏降级为左滑抽屉（transform 滑入 + 半透明背板）。
+- 设置分区名与顺序固定（Connect/Serial/Network/Board/AI/About），但导航组件互斥：≥1101px 显示左侧 rail 时隐藏设置 tab 行；没有 rail 的抽屉/窄屏才显示 tab 行。同一宽度不能同时出现 rail 和“第二条 titlebar”。
+- 手机（≤600px）tab 单行显示，AI 不落到第二排；平板/窄桌面（601–1100px）用两行 auto-fit，六个分区全部可见；触屏 tab 高度 44px。
+- AI 页（含 MCP 服务器卡）只有一个滚动区：MCP 作为最后一张 card 放在同一个 `.agent-settings-scroll`，固定 footer 不覆盖内容；不要再拆成第二个可滚动页面/并为每张卡单独裁高。
+- 手机、平板、桌面使用同一分区名称和顺序，只在面板宽度、rail 是否出现上变化；不因宽度换一套导航模型。
+- 桌面打开终端 AI 助手（agent-mode）时 rail 保持可见，不能把 rail 栏留成 56px 空白；移动端抽屉布局本来就没有 rail，行为不变。
 
 ### Status Pill (signature)
 - 药丸形容器（999px），状态点 9px：红=断连、绿=已连接；已连接时环形脉冲扩散，药丸边框转 45% 绿；设备名以次要色尾随，超长省略。
+- ≤600px 药丸只保留色点；设备名在品牌区第二行单独显示，断开时隐藏。601px 起药丸显示设备名。
 
 ### Toast
 - 底部居中、最多同时 3 条；绿描边为常规，红描边为错误（toast-error）；毛玻璃底 + 上浮淡入，2.2s 自动退场。
 
+### Web Bluetooth guidance
+- 仅桌面 Linux 的 web 壳在 `navigator.bluetooth` 缺失或页面不是 secure context 时，
+  在 Connection 卡内显示一条内联提示，不自动弹窗；按钮打开说明 dialog。
+- dialog 给出可复制的 `chrome://flags/#enable-web-bluetooth`（及两个推荐项）、
+  localhost/HTTPS 要求和 BlueZ 检查步骤；LAN 可用时提供“改用 LAN 模式”动作。
+- 引导只在 BLE 模式显示，切到 LAN 后隐藏；原生 Android/HarmonyOS 传输不渲染。
+- 弹窗沿用 panel/line/input token，移动端按钮不低于 44px，不新增颜色或阴影。
+
 ### Terminal
 - 全站最暗表面（#05080d），xterm.js 渲染；头部工具条承载字号/全屏/滚动/复制；连接时标题旁 LED 点亮并泛绿光，输入提示条文字转信号绿。
+- 手机键栏默认是 4 列 × 2 行的收藏键网格（48px 高），≤340px 改 3 列（不缩小 44px 触控目标）；平板是 8 键单行（每键 ≤64px），桌面是单行可滚动键带并常显细滚动条；不再用“半截键”当滚动提示。触屏的 More 展开全部键，桌面全部键已在带内。
+- 滚动条、焦点环、状态文字和键栏都要在 phone/tablet/desktop 三个断点及 zh/en、light/dark 下验收；触控目标不低于 44px，桌面不低于 36px。
 
 ## 6. Do's and Don'ts
 

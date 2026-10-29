@@ -295,6 +295,18 @@ config LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_RTS_CTS
 
 endchoice
 
+config LINKR_BLE_BRIDGE_SESSION_IDLE_MS
+	int "Idle milliseconds before another session may take the console"
+	default 3000
+	range 500 60000
+	help
+	  An explicit @c claim always takes the serial console. This timeout is
+	  the seamless path: a write from another session may take over after the
+	  current owner has been silent for this long, so a person can simply start
+	  typing on a read-only client instead of pressing Take control. Keep it
+	  long enough to cover a pause between keystrokes; the old owner's already
+	  queued bytes are protected by the ownership epoch either way.
+
 config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 	bool "Enable BLE control commands"
 	default y
@@ -307,10 +319,28 @@ config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 	bool "Require GPIO button press for BLE pairing"
 	default n
 	help
-	  When enabled, the pairing GPIO (linkr-pairing alias) must be held
-	  active before the host can initiate BLE pairing. Set to n to allow
+	  When enabled, the pairing GPIO (linkr-pairing alias) must have been
+	  pressed before the host can initiate BLE pairing. Set to n to allow
 	  pairing without physical button access, e.g. for boards without a
 	  dedicated pairing button or during development.
+
+config LINKR_BLE_BRIDGE_PAIRING_GRACE_MS
+	int "Pairing authorization window after the pairing GPIO press (ms)"
+	depends on LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
+	default 30000
+	range 0 300000
+	help
+	  A press of the pairing GPIO authorizes pairing requests received
+	  within this many milliseconds after the press. Hosts scan, connect
+	  and only then request keys, so requiring the key to be held for the
+	  whole exchange asks users to guess when to press. Keep the window
+	  short enough that an authorized press cannot be reused long after the
+	  person walked away; the security property is still "somebody touched
+	  the board shortly before the new host paired".
+
+	  Holding the key low at the moment of the pairing request continues to
+	  authorize it. Set 0 to require the key low during the pairing request,
+	  which is the behaviour before this option existed.
 
 config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
 	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"

@@ -20,19 +20,25 @@ role string; reservation must eventually use an authorized bonded identity.
 
 The shared Web/mobile terminal reads capability bit 7 (`MULTI_SESSION`). On new
 firmware it queries ownership and claims control if idle. Other sessions remain
-read-only, with a Take control button. The controller can Release without
-disconnecting. Status is refreshed every two seconds. The same frontend is used
-by the HarmonyOS shell; this change does not implement Linkr-side firmware.
+read-only for automatic work, but their terminal stays typable: the first
+keystroke asks for an **idle hand-over** and becomes input when the current owner
+has been quiet for `CONFIG_LINKR_BLE_BRIDGE_SESSION_IDLE_MS` (default 3 s). The
+**Take control** button is the preemptive path and wins immediately, even while
+the other session is typing. The controller can Release without disconnecting;
+the next user input may take the released console. Status is refreshed every two
+seconds. The same frontend is used by the HarmonyOS shell.
 
-Only the controller sends terminal replies, keyboard input, AI commands,
-shortcuts and remote terminal-size changes. Observers can resize their local
-view without sending `stty`. Losing control invalidates pending client writes.
+Only the controller sends terminal replies, AI commands, shortcuts and remote
+terminal-size changes. A human keystroke is the exception: it may trigger the
+idle hand-over described above. Observers can resize their local view without
+sending `stty`. Losing control invalidates pending client writes.
 
 Legacy clients that do not negotiate ownership can claim an idle console with
-their first UART write or modifying management command. They cannot write while
-another session owns it. Once a client uses the ownership API, it must claim
-explicitly after releasing; late AI/keyboard data must not implicitly reclaim.
-Legacy CLI/TUI clients do not yet provide a dedicated ownership status/button.
+their first UART write or modifying management command; an owner that has been
+quiet for the idle window is also taken over. They cannot write while another
+session is actively writing. Legacy CLI/TUI clients do not yet provide a
+dedicated ownership status/button, but their first write benefits from the same
+idle rule.
 
 ## Management Protocol
 
@@ -42,7 +48,8 @@ the following commands are supported; check it before using them on old firmware
 | Command | Meaning |
 | --- | --- |
 | `@c?` | Read this session's ID, owner and capacity |
-| `@c claim` | Take control if idle; no forced takeover |
+| `@c claim` | Take control immediately, preempting an active owner |
+| `@c claim idle` | Take control only when the owner has been quiet for the idle window |
 | `@c release` | Release control, controller only |
 | `@c yield 2` | Transfer control to live session 2, controller only |
 
@@ -55,8 +62,12 @@ OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved
 `mode` is `control`, `readonly` or `available`. IDs are assigned for each live
 connection, not persistent host identities. `peers` includes BLE and LAN
 sessions; `ble_max` is the separate BLE capacity. `epoch` changes whenever
-ownership changes. Errors include `control=busy`, `not_owner`, `bad_peer`,
-`bad_action`, `disconnected` and `readonly`.
+ownership changes. Errors include `control=busy` (idle claim while the owner is
+still typing), `not_owner`, `bad_peer`, `bad_action`, `disconnected` and
+`readonly`. The idle window is the Kconfig option
+`LINKR_BLE_BRIDGE_SESSION_IDLE_MS` (default 3000). Owner activity is refreshed by
+every accepted UART write and management mutation; already queued bytes are
+protected by the epoch either way.
 
 LAN authentication is unchanged. New firmware sends an ownership status as a
 text frame after successful authentication. Only after this feature announcement
@@ -93,6 +104,12 @@ west build -d build-three -b esp32c3_supermini . -- -DEXTRA_CONF_FILE=multi3.con
 This profile is build-checked on C3 only. Full-featured C5 and WROOM builds
 remain at two BLE clients because of tight internal SRAM; do not apply the
 three-client profile to them without further memory work and validation.
+
+The host arbiter harness (including preemptive `claim`, idle `claim idle` and
+the seamless write hand-over) passes, and C3, C5 and `linkr_bee_x1_0` builds
+succeed with the 3000 ms default. The X1.0 image used for this change was built
+with the pinned `linkr_multipeer_zephyr` workspace because the default workspace's
+simple-boot loader already contains the upstream digest change the shim guards.
 
 Passing a build or host test is not hardware acceptance. Before shipping, test
 two actual hosts, optional third-host admission, different MTUs/transports,

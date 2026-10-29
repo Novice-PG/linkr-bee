@@ -197,7 +197,12 @@ curl -s http://192.168.1.42:8712/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-The status page returns only the server name, version, and MCP path.
+The status page returns only the server name, version, the MCP path, and the A2A
+endpoint/card paths:
+
+```json
+{"name":"linkr-bee-mcp","version":"0.1.0","mcp":"/mcp","a2a":"/a2a","agentCard":"/.well-known/agent-card.json"}
+```
 
 ## Tools
 
@@ -227,6 +232,11 @@ directly.
 | `disconnect_bee` | refused | ask | ask for `forget:true` | run | — |
 | `set_bee_name` | refused | ask | run | run | BLE management channel |
 | `set_lan_bridge` | refused | ask | ask for `on`/`rotate-token` | run | BLE management channel |
+| `get_agent_status` | run | run | run | run | usable AI settings |
+| `start_agent_task` | refused | ask | ask | run | usable AI settings; one approval covers the task |
+| `get_agent_task` | run | run | run | run | a resident task |
+| `list_agent_tasks` | run | run | run | run | — |
+| `cancel_agent_task` | run | run | run | run | a resident task |
 
 - **Read-only tools** need no approval in any mode and never send UART input or
   change the accessory. `get_bee_status` also works while disconnected: it
@@ -242,6 +252,17 @@ directly.
   `scan_bee_devices` is an observation and runs in `read` mode; `connect_bee` and
   `disconnect_bee` are write tools, so `read` refuses them. In `guarded` mode a
   plain disconnect runs directly and only `forget:true` asks.
+- **Resident agent tools** delegate work to the assistant that runs inside the
+  app. `start_agent_task` is the one approval for a task: inside it the
+  assistant's serial writes and accessory changes run without further phone
+  prompts, using the app's saved AI configuration and the board-stored
+  instructions (a board configuration is used only after the user has loaded it
+  into the app). One task runs at a time, up to 8 wait in the queue, tasks are
+  polled with `get_agent_task` and stopped with `cancel_agent_task`; in read-only
+  mode a task can be polled and canceled but not started. While a task is active
+  other device-changing MCP calls are refused so nothing fights over the serial
+  gate. The same service is exposed over A2A: see the
+  [A2A guide](A2A.md).
 - **Board configuration tools** (`set_bee_name`, `set_lan_bridge`) change the
   bridge's advertised BLE name or its LAN WebSocket listener through the
   encrypted management channel. They are write tools: `read` refuses them,
@@ -396,7 +417,11 @@ the client:
 
 ## Limitations
 
-- **Android only.** The native MCP listener exists only in the Android shell.
+- **Android only.** The native MCP/A2A listener exists only in the Android shell.
+- **Resident tasks live in the app process.** The foreground service keeps the
+  app alive while it is backgrounded, but killing the process stops the server
+  and loses running resident tasks. Task history is not persisted. A2A streaming
+  (SSE) and push notifications are not supported; poll `GetTask`/`get_agent_task`.
 - **No server-initiated messages.** The transport is POST-only: `GET /mcp` and
   `DELETE /mcp` return `405`, and server notifications, progress updates,
   sampling, and elicitation are not sent. Use clients that work with plain
@@ -470,6 +495,21 @@ classifier, approval paths, redaction, single-write guard), the settings card an
 approval banner have Playwright coverage against a fake native bridge, and the
 Android and web builds succeed.
 
+Resident agent and A2A coverage (2026-10-29): the A2A transport routes
+(`POST /a2a`, public `GET /.well-known/agent-card.json`, 405/401/403 and body
+limits) have host-JVM tests; the resident task manager, A2A protocol mapping and
+the five delegation tools have `node --test` coverage (queueing, sessions,
+cancellation, the one-approval auto-execute proxy, read-only refusal, A2A
+SendMessage/GetTask/ListTasks/CancelTask and the agent card); the MCP card's A2A
+endpoint row has Playwright coverage. On a phone with a mock OpenAI-compatible
+endpoint, the agent card, the A2A one-approval task flow, `GetTask`/`ListTasks`
+and the MCP `start_agent_task`/`get_agent_task` path were verified end to end.
+The target board was not connected during that run (new BLE address needing
+GPIO1 pairing), so the resident agent's serial/accessory tools and a real model
+provider remain unverified on hardware. A background-approval attempt completed
+the task but lost the blocking HTTP response; use `returnImmediately:true` and
+poll for background tasks.
+
 Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
 over adb, connected to a Linkr Bee accessory over BLE):
 
@@ -478,7 +518,7 @@ over adb, connected to a Linkr Bee accessory over BLE):
 - from another machine on the same Wi-Fi, `GET /` returns the status JSON,
   `POST /mcp` returns 401 without a bearer token and 403 with an `Origin`
   header, `initialize` negotiates `2025-06-18` and `tools/list` returns the
-  sixteen tools;
+  twenty-one tools;
 - `get_device_status` reports the live accessory (`connected:true`,
   `transport:"ble"`, device name/id, `115200,8,n,1,n`, byte counters);
   `get_accessory_diagnostics` returns the bridge's own `@i?` groups (firmware
@@ -526,6 +566,7 @@ paths are hardware-verified.
 
 ## Related documentation
 
+- [A2A guide](A2A.md)
 - [Mobile app and assistant](../mobile/README.md)
 - [User guide](USAGE.md)
 - [Agent capability and roadmap (Chinese)](AGENT_ROADMAP.zh-CN.md)

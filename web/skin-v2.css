@@ -250,12 +250,6 @@ body {
   }
 }
 
-/* Agent mode takes over the whole shell; the rail belongs to the settings
- * layout and must not claim a grid cell there. */
-html.agent-mode .rail {
-  display: none;
-}
-
 /* ---------- Topbar ---------- */
 
 .topbar {
@@ -299,6 +293,11 @@ h1 {
   margin-top: 2px;
   font-size: 11px;
   color: var(--placeholder);
+}
+
+/* Phone-only brand identity line; hidden until the <=600 rule re-enables it. */
+.compact-device {
+  display: none;
 }
 
 [data-theme="dark"] h1 {
@@ -782,15 +781,20 @@ details.card > summary.card-title::after {
   width: 7px;
   height: 7px;
   margin-left: auto;
-  margin-right: 3px;
+  /* Match the section-card toggle: its 24px hit box is centred on the glyph,
+   * so the glyph's right edge is 8.5px inside the summary's content edge. The
+   * summary's own horizontal padding is outside this box. */
+  margin-right: 8.5px;
   border-right: 2px solid var(--muted);
   border-bottom: 2px solid var(--muted);
-  transform: rotate(45deg);
+  /* Closed points right; open points down. The section-card toggle below
+   * draws the same 7px chevron so every card header reads identically. */
+  transform: rotate(-45deg);
   transition: transform 0.18s ease;
 }
 
 details.card[open] > summary.card-title::after {
-  transform: rotate(-135deg);
+  transform: rotate(45deg);
 }
 
 /* A closed card is just its header band, not a band plus empty padding. */
@@ -882,9 +886,13 @@ details.card:not([open]) > summary.card-title {
   color: var(--text);
 }
 
-.card-toggle svg {
-  width: 14px;
-  height: 14px;
+.card-toggle::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
   transition: transform 0.18s ease;
 }
 
@@ -901,42 +909,47 @@ details.card:not([open]) > summary.card-title {
   display: none !important;
 }
 
-.card.is-collapsed .card-toggle svg {
-  transform: rotate(-90deg);
+.card.is-collapsible > .card-title {
+  cursor: pointer;
+}
+
+.card.is-collapsed .card-toggle::before {
+  transform: rotate(-45deg);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card-toggle svg {
+  .card-toggle::before {
     transition: none;
   }
 }
 
 .settings-tabs {
+  /* One labelled row, never a wrapped stack. The drawer/tablet panel can be
+   * narrower than six full labels, so the strip scrolls horizontally instead
+   * of turning AI into a lonely second row; AI stays in the visible head of
+   * the strip and About is one swipe further. */
   display: grid;
+  grid-template-columns: none;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
-  gap: 3px;
+  grid-auto-columns: minmax(56px, 1fr);
+  gap: 4px;
   flex: 0 0 auto;
   padding: 3px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-soft) transparent;
+  scroll-snap-type: x proximity;
   border: 1px solid var(--line-soft);
   border-radius: 10px;
   background: var(--input-bg);
 }
 
 @media (min-width: 1101px) {
-  /* One section switcher, not two. The rail IS this row of buttons, and with
-   * the drawer open they sat six pixels apart, both highlighting the same
-   * section — a duplicate menu. The tabs stay in the DOM because rail_nav.js
-   * forwards rail clicks to them; `display: none` leaves them clickable but
-   * takes the duplicate row out of the tab order. Below 1101 px the rail is
-   * not laid out, so the tabs remain the only way to switch and stay visible.
-   *
-   * `!important` because the older sheets re-assert `display: grid` on this
-   * strip with higher specificity than a plain class — style.css:2606 keys on
-   * `.controls.has-agent-settings` and :2306 on `html.settings-drawer-layout`,
-   * and this file is the presentation layer that retunes them without editing
-   * them. One declaration that cannot be outranked beats a selector list that
-   * breaks the next time the legacy sheet grows another variant. */
+  /* The rail and the tab row are the same menu. Once the rail is laid out,
+   * the tab row would duplicate it and read as a second title bar, so hide it;
+   * rail_nav.js still forwards rail clicks to the real tabs. Below 1101px the
+   * rail is absent and the one-row tab strip is the section switcher. */
   html:not(.settings-drawer-layout) .settings-tabs {
     display: none !important;
   }
@@ -964,12 +977,75 @@ details.card:not([open]) > summary.card-title {
 }
 
 .settings-tab {
-  min-height: 30px;
-  padding: 5px 8px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 5px 4px;
   border-radius: 7px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--muted);
+  white-space: nowrap;
+  scroll-snap-align: start;
+}
+
+/* Phone: one row so AI never drops into a second "stack"; all six fit at
+ * 390px and the last one stays reachable by swiping on very narrow phones. */
+html.settings-drawer-layout .settings-tabs,
+.controls.has-agent-settings .settings-tabs {
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(56px, 1fr);
+  overflow-x: auto;
+}
+
+@media (max-width: 1100px) {
+  .settings-tabs {
+    grid-template-columns: none;
+    grid-auto-columns: minmax(56px, 1fr);
+    overflow-x: auto;
+  }
+}
+
+/* Tablet / narrow desktop: the panel is wide enough for two tidy labelled
+ * rows, so all six sections stay visible without a swipe. */
+@media (min-width: 601px) and (max-width: 1100px) {
+  html.settings-drawer-layout .settings-tabs,
+  .controls.has-agent-settings .settings-tabs,
+  .settings-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow: visible;
+  }
+}
+
+/* Phone: six equal tracks, no horizontal clipping and no second row. At the
+ * 360px device viewport the panel gives ~344px, which is enough for 6 x 53px;
+ * the active AI tab can never scroll the first tab out of view. */
+@media (max-width: 600px) {
+  html.settings-drawer-layout .settings-tabs,
+  .controls.has-agent-settings .settings-tabs,
+  .settings-tabs {
+    grid-auto-columns: minmax(0, 1fr);
+    overflow-x: hidden;
+  }
+
+  .settings-tabs .settings-tab {
+    padding-inline: 2px;
+  }
+}
+
+@media (max-width: 340px) {
+  .settings-tabs .settings-tab {
+    padding-inline: 1px;
+    font-size: 10.5px;
+  }
+}
+
+@media (pointer: coarse), (max-width: 900px) {
+  .settings-tabs .settings-tab {
+    min-height: 44px;
+  }
 }
 
 .settings-tab.active {
@@ -1112,8 +1188,8 @@ details.card:not([open]) > summary.card-title {
   align-items: center;
 }
 
-/* The strip holds 34 keys, so it never fits: reserve a hairline track and
- * reveal the thumb on hover. Space is reserved up front so nothing shifts. */
+/* Desktop holds 34 keys in one scrollable strip; touch uses the wrapped
+ * favourite grid in mobile-ui.css. Reserve the track so nothing shifts. */
 .terminal-key-scroll {
   flex: 1 1 auto;
   min-width: 0;
@@ -1122,10 +1198,8 @@ details.card:not([open]) > summary.card-title {
   padding: 2px 8px 5px 0;
   overflow-x: auto;
   scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  /* A half-visible key at the right edge is the scroll affordance itself; the
-   * hairline tells it apart from the pinned Ctrl-C. (A mask-image fade was
-   * tried first and is ignored by WKWebView.) */
+  /* Keep a hairline scrollbar visible; the thumb strengthens on pointer hover.
+   * Touch no longer relies on a half-visible key as its scroll cue. */
   border-right: 1px solid var(--line-soft);
 }
 
@@ -1152,6 +1226,15 @@ details.card:not([open]) > summary.card-title {
   .terminal-key-scroll:hover::-webkit-scrollbar-thumb,
   .terminal-key-scroll:focus-within::-webkit-scrollbar-thumb {
     background: var(--line-strong);
+  }
+}
+
+@media (min-width: 901px) {
+  /* Every key is already in the strip on desktop, so the mobile "more" and
+   * favourite-editor affordances would be no-ops. */
+  #terminalKeysToggle,
+  #terminalKeysCustomize {
+    display: none !important;
   }
 }
 
@@ -1422,8 +1505,22 @@ details.card:not([open]) > summary.card-title {
     font-size: 11px;
   }
 
-  .status-pill .device-name {
-    display: none;
+  @media (max-width: 600px) {
+    .status-pill .device-name {
+      display: none;
+    }
+
+    /* Keep the board identity visible on a phone: the support line is hidden
+     * there, so the brand block gets a dedicated one-line device name. */
+    .brand .compact-device:not([hidden]) {
+      display: block;
+      margin-top: 1px;
+      overflow: hidden;
+      font-size: 11px;
+      color: var(--placeholder);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
   }
 
   .terminal-card .terminal-key,

@@ -14,10 +14,15 @@ and the individual platform guides.
    Bee RX is GPIO20 and Bee TX is GPIO21.
 2. Open the client. For the Web terminal, run `tools/serve_web.sh` from the repository
    root and visit `http://127.0.0.1:8765/` in Chrome/Chromium.
-3. For a new host on a board with pairing authorization enabled (C3/C5), hold
-   **GPIO1** to GND, select **Connect**, and accept the operating system's pairing
-   prompt. WROOM disables the physical check by default and needs no GPIO4 press.
-   Release it once paired. An existing bond does not need the jumper again.
+3. For a new host on a board with pairing authorization enabled (C3/C5), press
+   **GPIO1** and select **Connect** within 30 seconds, then accept the operating
+   system's pairing prompt. The press opens a 30 s authorization window
+   (`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`), so it does not have to be held
+   during pairing; press again if the window expired. If pairing is refused the
+   terminal stops its automatic reconnect: press the key again and press
+   **Connect** to start a new pairing. WROOM disables the physical check by
+   default and needs no GPIO4 press. An existing bond does not need the key
+   again.
 4. Open **Serial** in the settings rail. Match the target's baud, data bits, parity,
    stop bits, and flow control; the default is `115200,8,n,1,n`.
 5. Reset the target or press Enter in the terminal to obtain its console prompt.
@@ -32,7 +37,9 @@ backoff of 1, 2, 4, 8, 16 and 30 seconds, six attempts in total. The status line
 shows the attempt and countdown and the Connect button becomes **Cancel
 reconnect**; a successful redial keeps the transcript and appends a
 `[reconnect]` line, and no input or command is replayed. A deliberate disconnect
-is never retried. After six failures the client stops and asks you to press
+is never retried, and a pairing refusal stops the retries after the first
+attempt: pairing needs a fresh key press, so press the pairing key and press
+**Connect** to re-initiate it. After six failures the client stops and asks you to press
 Reconnect; the TUI has `--no-auto-reconnect` for the opposite behaviour.
 TUI BLE retries use the actual connected device ID, not a fresh name search.
 Cancellation also applies during dialing: if the system Bluetooth call is still
@@ -72,6 +79,7 @@ retained-transcript view. They do not represent a live hardware session.*
   than enabling local echo to compensate for a wrong line ending.
 - **Local echo** displays what you type locally. Leave it off for shells that
   already echo input, or each character may appear twice.
+- **BLE UART mode** defaults to **Interaction first** (NUS). Choose **Reliability first** for confirmed Reliable UART frames. The preference is saved and applies on the next BLE connection; changing it does not interrupt active input. The settings show the current channel and any fallback. Devices without a reliable channel use NUS and hide the unsupported selector. LAN WebSocket transport is unaffected. Confirmation means the Bee accepted a frame, not that the target executed a command.
 - **Chunk size** controls outgoing transfer chunks, not baud rate. Keep the
   default unless diagnosing a specific transport limit.
 - **Terminal font** uses fonts installed on the host. A Nerd Font must be installed

@@ -321,3 +321,65 @@ test("background rediscovery failure stops retries without opening a chooser", a
   expect(await page.evaluate(() => window.__reselect.requests)).toBe(0);
   expect(await page.evaluate(() => window.__reselect.connects)).toEqual(["original-bee"]);
 });
+
+test("a pairing refusal during automatic reconnect stops the retries", async ({ page }) => {
+  /* The Bee refuses pairing until its key is pressed. Dialling again cannot
+   * recover the link, so the loop must stop and leave Connect to the user. */
+  await page.evaluate(() => {
+    const { state, setConnected, onDisconnected, setBleTransport } = window.__test;
+    window.__ble = { connects: 0 };
+    setBleTransport({
+      isAvailable: () => true,
+      initialize: async () => {},
+      connect: async () => { window.__ble.connects++; },
+      read: async () => { throw new Error("Insufficient authentication"); },
+      disconnect: async () => {},
+    });
+    state.mode = "ble";
+    state.device = { id: "AA:BB:CC:DD:EE:FF", name: "Linkr Bee 36E8" };
+    setConnected(true);
+    onDisconnected({ unexpected: true });
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__test.autoReconnect.active), { timeout: 5000 })
+    .toBe(false);
+  expect(await page.evaluate(() => window.__ble.connects)).toBe(1);
+  await expect(page.locator(".toast").filter({ hasText: /pairing key|配对键/i })).toBeVisible();
+  await expect(page.locator("#connectButton")).toBeEnabled();
+  const text = await page.locator("#terminalOutput").innerText();
+  expect(text).toContain("Automatic reconnect stopped");
+});
+
+for (const failure of [
+  { stage: "read", message: "GATT operation timed out" },
+  { stage: "read", message: "GATT Server is disconnected" },
+  { stage: "connect", message: "GATT Server is disconnected" },
+  { stage: "read", name: "SecurityError", message: "Access to the service is blocked by browser policy" },
+]) {
+  test(`non-pairing ${failure.stage} failure keeps retries: ${failure.message}`, async ({ page }) => {
+    await page.evaluate((failure) => {
+      const { state, setConnected, onDisconnected, setBleTransport } = window.__test;
+      window.__ble = { connects: 0 };
+      const fail = () => { throw Object.assign(new Error(failure.message), { name: failure.name || "NetworkError" }); };
+      setBleTransport({
+        isAvailable: () => true,
+        initialize: async () => {},
+        connect: async () => { window.__ble.connects++; if (failure.stage === "connect") fail(); },
+        read: async () => fail(),
+        disconnect: async () => {},
+      });
+      state.mode = "ble";
+      state.device = { id: "AA:BB:CC:DD:EE:FF", name: "Linkr Bee 36E8" };
+      setConnected(true);
+      onDisconnected({ unexpected: true });
+    }, failure);
+    await expect.poll(() => page.evaluate(() => window.__ble.connects)).toBe(3);
+    await expect.poll(() => page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
+    const text = await page.locator("#terminalOutput").innerText();
+    expect(text).toMatch(/Automatic reconnect failed after\s+3 attempts/);
+    expect(text).not.toContain("Automatic reconnect stopped");
+    expect(text).not.toContain("Pairing was refused");
+    await expect(page.locator(".toast").filter({ hasText: /Pairing was refused|配对被拒绝/i })).toHaveCount(0);
+    await expect(page.locator("#connectButton")).toBeEnabled();
+  });
+}

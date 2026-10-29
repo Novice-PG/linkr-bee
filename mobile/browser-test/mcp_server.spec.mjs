@@ -99,7 +99,7 @@ test("the forwarded MCP transport answers initialize and tools/list through the 
 
   const list = await emitRpc(page, toolsList);
   const names = JSON.parse(list.payload.body).result.tools.map((tool) => tool.name);
-  expect(names).toHaveLength(16);
+  expect(names).toHaveLength(21);
   expect(names).toContain("send_serial_input");
   expect(names).toContain("read_serial_log");
 });

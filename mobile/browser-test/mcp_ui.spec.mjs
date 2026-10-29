@@ -179,6 +179,7 @@ async function exposeAppInternals(page) {
         "  clearDevice() { agentPanel.getDevice = () => null; },\n" +
         "  get host() { return mcpHost; },\n" +
         "  get panel() { return agentPanel; },\n" +
+        "  get resident() { return residentAgent; },\n" +
         "};\n",
     });
   });
@@ -350,8 +351,41 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
   // The section is mounted next to the AI settings card and only shows on that tab.
   await expect(page.locator("#mcpSettings")).toBeVisible();
   expect(
+    await page.evaluate(() => document.getElementById("mcpSettings")?.parentElement?.className),
+  ).toContain("agent-settings-scroll");
+  expect(
     await page.evaluate(() => document.getElementById("mcpSettings")?.previousElementSibling?.id),
-  ).toBe("agentSettings");
+  ).toBe("agentPrivacyCard");
+  expect(await page.locator("#mcpSettings .agent-settings-scroll").count()).toBe(0);
+  expect(await page.locator("#mcpSettings > .card-title > .card-toggle")).toHaveCount(1);
+  await page.locator("#mcpSettings > .card-title").click();
+  await expect(page.locator("#mcpSettings")).toHaveClass(/is-collapsed/);
+  await page.locator("#mcpSettings > .card-title").click();
+  await expect(page.locator("#mcpSettings")).not.toHaveClass(/is-collapsed/);
+  const chevronCenters = await page.evaluate(() =>
+    [...document.querySelectorAll("#agentSettings .card")].flatMap((card) => {
+      const title = card.querySelector(":scope > .card-title");
+      if (!title) return [];
+      const titleRect = title.getBoundingClientRect();
+      const toggle = title.querySelector(":scope > .card-toggle");
+      if (toggle) {
+        const rect = toggle.getBoundingClientRect();
+        return [rect.left + rect.width / 2];
+      }
+      const style = getComputedStyle(title, "::after");
+      const width = parseFloat(style.width) || 0;
+      const margin = parseFloat(style.marginRight) || 0;
+      const paddingRight = parseFloat(getComputedStyle(title).paddingRight) || 0;
+      return width ? [titleRect.right - paddingRight - margin - width / 2] : [];
+    }),
+  );
+  expect(Math.max(...chevronCenters) - Math.min(...chevronCenters)).toBeLessThanOrEqual(0.5);
+  expect(
+    await page.evaluate(() => {
+      const body = document.querySelector("#mcpSettings .mcp-settings-body");
+      return body ? body.scrollWidth <= body.clientWidth + 1 : false;
+    }),
+  ).toBe(true);
   await page.locator('[data-settings-target="connection"]').tap();
   await expect(page.locator("#mcpSettings")).toBeHidden();
   await page.locator('[data-settings-target="ai"]').tap();
@@ -387,6 +421,7 @@ test("MCP card appears under the AI tab and enabling starts the bridge with the 
     { port: 8712, bind: "lan" },
   ]);
   await expect(page.locator("#mcpUrl")).toHaveValue("http://192.168.1.50:8712/mcp");
+  await expect(page.locator("#mcpA2aCard")).toHaveValue("http://192.168.1.50:8712/.well-known/agent-card.json");
   await expect(page.locator("#mcpToken")).toHaveAttribute("type", "password");
   await expect(page.locator("#mcpToken")).toHaveValue(TOKEN_A);
   await expect(page.locator("#mcpTokenToggle")).toHaveText(/Show token|显示令牌/);
@@ -826,3 +861,70 @@ test("a hidden page without notification permission refuses instead of hanging",
   expect(resultText(payload)).toContain("denied on the phone");
   expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 });
+
+async function prepareResidentUi(page, { lang = "en", theme = "dark" } = {}) {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await page.addInitScript(({ lang, theme }) => {
+    localStorage.setItem("linkr-lang", lang);
+    localStorage.setItem("linkr-theme", theme);
+    localStorage.setItem("linkr-agent-model", JSON.stringify({
+      endpoint: "https://model.test/v1", model: "test", apiKey: "test",
+      provider: "openai-completions", reasoning: "off", contextWindow: 128000, maxTokens: 4096,
+    }));
+    window.__testRunners = [];
+  }, { lang, theme });
+  await page.route(/\/(?:agent_runtime\.js|agent-runtime\.mjs)(?:\?.*)?$/, route =>
+    route.fulfill({ contentType: "text/javascript", body: `
+      export const available = true;
+      export async function createSerialAgent() {
+        let release;
+        const runner = {
+          prompt: () => new Promise(resolve => { release = resolve; }),
+          abort: () => release?.({}),
+          snapshot: () => [],
+        };
+        window.__testRunners.push(runner);
+        return runner;
+      }` }));
+  await openApp(page);
+  await installFakeDevice(page);
+  await page.locator("#agentButton").click();
+  await expect(page.locator("#agentPanel")).toBeVisible();
+}
+
+for (const [width, lang, theme] of [[390, "zh", "light"], [390, "en", "dark"], [834, "zh", "dark"], [1440, "en", "light"]]) {
+  test(`resident task owns the local Stop button and excludes human submissions (${width}/${lang}/${theme})`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await prepareResidentUi(page, { lang, theme });
+    const ids = await page.evaluate(() => {
+      const agent = window.__mcpTest.resident;
+      return [agent.startTask({ request: "active task" }).taskId,
+        agent.startTask({ request: "queued task" }).taskId];
+    });
+    await expect.poll(() => page.evaluate(() => window.__testRunners.length)).toBe(1);
+    await expect(page.locator("#agentResidentStatus")).toBeVisible();
+    await expect(page.locator("#agentStop")).toBeEnabled();
+    await expect(page.locator("#agentAsk")).toBeDisabled();
+    await page.locator("#agentQuestion").fill("must not start concurrently");
+    await page.locator("#agentForm").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(await page.evaluate(() => window.__testRunners.length)).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath("resident-stop.png") });
+    await page.locator("#agentStop").click();
+    await expect.poll(() => page.evaluate(() => window.__mcpTest.resident.isBusy())).toBe(false);
+    expect(await page.evaluate(async ids => Promise.all(ids.map(async id => (await window.__mcpTest.resident.getTask(id)).state)), ids))
+      .toEqual(["canceled", "canceled"]);
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await expect(page.locator("#agentStop")).toBeDisabled();
+    await expect(page.locator("#agentResidentStatus")).toBeHidden();
+    // The existing draft survives cancellation and becomes a normal local run.
+    await page.locator("#agentAsk").click();
+    await expect.poll(() => page.evaluate(() => window.__testRunners.length)).toBe(2);
+    const error = await page.evaluate(() => {
+      try { window.__mcpTest.resident.startTask({ request: "cannot interrupt human" }); return ""; }
+      catch (error) { return error.message; }
+    });
+    expect(error).toMatch(/assistant is busy/);
+    await page.locator("#agentStop").click();
+  });
+}

@@ -65,6 +65,30 @@ class BleSecurityTests(unittest.TestCase):
     def test_gpio_gate_applies_to_new_and_replacement_keys(self):
         subprocess.run([self.binary, "gate"], check=True)
 
+    def test_press_opens_a_pairing_window_after_release(self):
+        """The host scans and connects before it requests keys, so the user's
+        press must authorize pairing for a while after they let go."""
+        subprocess.run([self.binary, "grace"], check=True)
+
+    def test_expired_press_does_not_reopen_after_uptime_wrap(self):
+        subprocess.run([self.binary, "uptime_wrap"], check=True)
+
+    def test_zero_grace_restores_the_held_during_request_rule(self):
+        binary = Path(self.tmp.name) / "security-test-held"
+        subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra",
+                        "-Werror", "-DCONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS=0",
+                        "-I", self.tmp.name, str(ROOT / "tests/ble_security_harness.c"),
+                        "-o", str(binary)], check=True)
+        subprocess.run([binary, "no_grace"], check=True)
+
+    def test_pairing_window_is_opt_in_and_documented(self):
+        kconfig = (ROOT / "Kconfig").read_text()
+        self.assertIn("config LINKR_BLE_BRIDGE_PAIRING_GRACE_MS", kconfig)
+        window = kconfig.split("config LINKR_BLE_BRIDGE_PAIRING_GRACE_MS", 1)[1]
+        window = window.split("config ", 1)[0]
+        self.assertIn("default 30000", window)
+        self.assertIn("range 0 300000", window)
+
     def test_reconnect_requests_encryption_without_forcing_pairing(self):
         subprocess.run([self.binary, "reconnect"], check=True)
 

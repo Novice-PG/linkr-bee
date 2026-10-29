@@ -10,7 +10,7 @@ struct bt_conn { int unused; };
 struct bt_conn_info { uint8_t id; };
 static bool bonded_peer = true;
 struct bt_conn_pairing_feat { int unused; };
-struct gpio_dt_spec { int unused; };
+struct gpio_dt_spec { int port; int pin; int unused; };
 typedef int bt_security_t;
 enum bt_security_err { BT_SECURITY_ERR_SUCCESS, BT_SECURITY_ERR_PAIR_NOT_ALLOWED };
 struct bt_conn_auth_cb {
@@ -29,9 +29,12 @@ struct bt_conn_cb {
 #ifndef CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 #define CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH 1
 #endif
+#ifndef CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS
+#define CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS 30000
+#endif
 #define IS_ENABLED(option) (option)
 #define GPIO_INPUT 1
-#define GPIO_DT_SPEC_GET(...) { 0 }
+#define GPIO_DT_SPEC_GET(...) { 0, 0, 0 }
 #define BT_CONN_CB_DEFINE(name) struct bt_conn_cb name
 #define ARG_UNUSED(x) (void)(x)
 #define LOG_MODULE_REGISTER(...)
@@ -39,6 +42,42 @@ static void quiet_log(const char *fmt, ...) { (void)fmt; }
 #define LOG_WRN(...) quiet_log(__VA_ARGS__)
 #define LOG_INF(...) quiet_log(__VA_ARGS__)
 #define LOG_ERR(...) quiet_log(__VA_ARGS__)
+
+/* The pairing gate latches the press from a GPIO interrupt and measures the
+ * authorization window with the full uptime counter. This single-threaded
+ * harness supplies lock stubs; firmware builds check the real ISR-safe locks. */
+struct device { int unused; };
+struct gpio_callback;
+typedef unsigned int gpio_port_pins_t;
+struct k_spinlock { bool locked; };
+typedef int k_spinlock_key_t;
+static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{ assert(!lock->locked); lock->locked = true; return 0; }
+static inline void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{ (void)key; assert(lock->locked); lock->locked = false; }
+#define BIT(n) (1U << (n))
+#define GPIO_INT_EDGE_TO_ACTIVE 0x40
+typedef void (*gpio_callback_handler_t)(const struct device *port,
+                                        struct gpio_callback *cb,
+                                        gpio_port_pins_t pins);
+struct gpio_callback {
+    gpio_callback_handler_t handler;
+    gpio_port_pins_t pin_mask;
+};
+struct gpio_callback *registered_pairing_cb;
+int64_t fake_uptime_ms;
+int interrupt_configures;
+static inline void gpio_init_callback(struct gpio_callback *cb,
+                                      gpio_callback_handler_t handler,
+                                      gpio_port_pins_t pin_mask)
+{ cb->handler = handler; cb->pin_mask = pin_mask; }
+static inline int gpio_add_callback_dt(const struct gpio_dt_spec *spec,
+                                       struct gpio_callback *cb)
+{ (void)spec; registered_pairing_cb = cb; return 0; }
+static inline int gpio_pin_interrupt_configure_dt(const struct gpio_dt_spec *spec, int flags)
+{ (void)spec; assert(flags == GPIO_INT_EDGE_TO_ACTIVE); interrupt_configures++; return 0; }
+static inline int64_t k_uptime_get(void) { return fake_uptime_ms; }
+
 static int gpio_value, gpio_reads, configured_error, request_error, disconnects;
 static int security_requested;
 static bool gpio_ready = true;
@@ -70,6 +109,7 @@ int main(int argc, char **argv)
     struct bt_conn_pairing_feat feat = { 0 };
     assert(argc == 2);
     assert(linkr_ble_security_init() == 0);
+    gpio_reads = 0; /* Init samples the held level once; scenarios count reads after. */
     if (!strcmp(argv[1], "gate")) {
         gpio_value = 0; /* GPIO1 high: inactive logical value. */
         assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
@@ -80,6 +120,76 @@ int main(int argc, char **argv)
         pairing_complete(&conn, true);
         gpio_value = 0;
         /* Successful bonding cannot grant blanket permission to replace keys. */
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        gpio_value = 1;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        assert(disconnects == 0);
+    } else if (!strcmp(argv[1], "grace")) {
+        /* A press latches an authorization window; the host scans, connects
+         * and only then asks for keys, up to the configured window later. */
+        fake_uptime_ms = 1000;
+        gpio_value = 0;
+        assert(registered_pairing_cb && registered_pairing_cb->handler);
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        fake_uptime_ms = 1000 + CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        fake_uptime_ms = 1000 + CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS + 1;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        /* A later press re-arms the window from that moment. */
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        fake_uptime_ms += 1000;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        /* Holding the key authorizes regardless of the window. */
+        gpio_value = 1;
+        fake_uptime_ms += 120000;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        /* A key already held when the firmware starts is latched without an
+         * edge; releasing it afterwards still leaves the window open. */
+        fake_uptime_ms += 1000;
+        assert(linkr_ble_security_init() == 0);
+        assert(interrupt_configures == 2);
+        gpio_value = 0;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        /* Past the window, and with a failed read, pairing is refused. */
+        fake_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS + 1;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        gpio_value = -EIO;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        assert(disconnects == 0);
+    } else if (!strcmp(argv[1], "uptime_wrap")) {
+        const int64_t cycle = INT64_C(1) << 32;
+        gpio_value = 0;
+        /* Even before the first press, a large uptime cannot authorize. */
+        fake_uptime_ms = cycle + 1000;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        fake_uptime_ms = 1000;
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        fake_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS + 1;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        /* Old presses must not become fresh after one or multiple 32-bit wraps. */
+        for (int cycles = 1; cycles <= 3; cycles++) {
+            fake_uptime_ms = cycles * cycle + 1000;
+            assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        }
+        /* A real press near a wrap still gets its entire configured window. */
+        fake_uptime_ms = 4 * cycle - 10;
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        fake_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        fake_uptime_ms++;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        /* Re-arm normally after long uptime, and keep read errors fail-closed. */
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        gpio_value = -EIO;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+    } else if (!strcmp(argv[1], "no_grace")) {
+        /* GRACE_MS=0 restores the "key held during the request" rule. */
+        assert(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS == 0);
+        fake_uptime_ms = 1000;
+        gpio_value = 0;
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
         assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
         gpio_value = 1;
         assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);

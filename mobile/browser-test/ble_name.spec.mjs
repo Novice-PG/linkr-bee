@@ -156,7 +156,7 @@ test("a board wearing a legacy name is not taken for a legacy board", async ({ p
   });
   expect(result.connected).toBe(false);
   expect(result.legacy).toBe(false);
-  await expect(page.locator(".toast").filter({ hasText: "GPIO1" })).toBeVisible();
+  await expect(page.locator(".toast").filter({ hasText: /pairing key|配对键/i })).toBeVisible();
 });
 
 test("a board is restored by the id it was seen under", async ({ page }) => {

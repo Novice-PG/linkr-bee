@@ -3,6 +3,33 @@
 本文记录 AI（Agent）功能当前的能力边界、已确认的缺口和排期。实机验收记录见
 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md)。
 
+## 2026-10-29：常驻助手与 agent-to-agent（MCP + A2A）
+
+Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
+
+- **MCP 委派工具**（5 个，工具总数 21）：`get_agent_status`、`start_agent_task`、
+  `get_agent_task`、`list_agent_tasks`、`cancel_agent_task`。任务异步排队，一次只跑一个，
+  最多 8 个等待；默认没有墙钟硬超时，调用方可用 `timeoutMs`（最长 24 小时）设期限，
+  正常停止方式是取消任务；会话用 `sessionId` 续聊，`newSession` 重开。
+- **A2A**：同一端口提供 `/.well-known/agent-card.json` 与 `POST /a2a`，实现 A2A v1.0
+  JSON-RPC 的 `SendMessage`、`GetTask`、`ListTasks`、`CancelTask`、
+  `GetExtendedAgentCard`；Bearer 校验复用 MCP 令牌；card 声明不支持流式与推送，客户端
+  轮询。文件/结构化消息明确拒绝，只接受文本。
+- **确认与执行**：启动任务是一次确认；批准后任务内串口写入与配件修改不再逐条确认，
+  仍走 App 的执行器、证据纪律和单写入闸门。只读模式拒绝启动任务；任务运行期间外部
+  写工具被拒绝。配置只使用 App 本地已保存的 AI 配置，板载配置必须由用户手动“从板载
+  载入”后才会被使用；板载提示词在会话开始时读取一次。
+- **生命周期**：任务活在 App 进程内；前台服务维持后台可达，杀进程丢失运行任务；任务
+  历史持久化、SSE/推送、多会话并发是后续工作。
+- **测试**：`mobile/test/resident_agent.test.mjs`（任务队列、会话、取消、自动执行代理、
+  配置与状态）、`mobile/test/a2a_protocol.test.mjs`（card/任务映射/参数校验）、
+  `mobile/test/mcp_server.test.mjs`（5 个 MCP 工具、确认、只读、忙碌保护、A2A JSON-RPC、
+  agent card）、Java `McpHttpServerTest`（`/a2a` 鉴权/Origin/大小限制与公开 card 路由）。
+- **验证边界**：主机测试与构建通过；真机（mock OpenAI 兼容端点）已验证 agent card、
+  A2A 一次确认任务、GetTask/ListTasks 与 MCP start_agent_task/get_agent_task。目标板
+  未连接（新 BLE 地址需 GPIO1 配对），串口/配件工具与真实模型服务待补验证；后台任务的
+  阻塞式 HTTP 响应曾丢失，建议 returnImmediately + 轮询。
+
 ## 2026-10-26：MCP 服务器（Android）
 
 Android App 现在可作为局域网内的 MCP 服务器（`POST /mcp`、JSON-RPC 2.0、Bearer
@@ -14,12 +41,13 @@ HTTP 传输与前台服务生命周期。
   （配置、64 个十六进制字符的令牌、请求转发与 180 秒超时）、`LinkrMcpService`
   （`connectedDevice` 前台服务）、`LinkrMcpPlugin`（Capacitor 桥）。监听 `0.0.0.0`
   或回环；带 `Origin` 的请求以 `403` 拒绝；请求头上限 16 KiB、请求体上限 1 MiB。
-- 工具：16 个，复用现有的串口执行闸门与配件管理通道，没有第二条串口写路径。6 个只读
+- 工具：21 个，复用现有的串口执行闸门与配件管理通道，没有第二条串口写路径。10 个只读
   工具（`get_device_status`、`read_serial_log`、`search_serial_log`、
-  `get_accessory_diagnostics`、`get_bee_status`、`get_execution_status`）；
-  `wifi_scan` 与 `scan_bee_devices` 只观察、不保存配置；8 个写入工具
+  `get_accessory_diagnostics`、`get_bee_status`、`get_execution_status`、
+  `get_agent_status`、`get_agent_task`、`list_agent_tasks`、`cancel_agent_task`）；
+  `wifi_scan` 与 `scan_bee_devices` 只观察、不保存配置；9 个写入工具
   （`send_serial_input`、`set_uart_config`、`set_wifi`、`set_webdav`、`connect_bee`、
-  `disconnect_bee`、`set_bee_name`、`set_lan_bridge`）。设备变更调用一次只允许一个。
+  `disconnect_bee`、`set_bee_name`、`set_lan_bridge`、`start_agent_task`）。设备变更调用一次只允许一个。
   连接工具（扫描/连接/断开）控制 App 自己的蓝牙会话，不是目标控制台；主机配置工具修改
   广播名与局域网 WebSocket 监听。`send_serial_input` 支持
   `trackExit`/`waitForCompletion`（追踪 POSIX shell 命令的完成令牌与退出码，退出码 0

@@ -1,0 +1,143 @@
+/* Shared form surfaces. Native selects remain the source of form values; their
+ * themed comboboxes and listboxes are rendered by select_controls.js. */
+:root {
+  --control-height: 36px;
+  --control-option-height: 36px;
+  --control-fill: var(--input-bg);
+  --control-edge: var(--line-strong);
+  --control-hover-fill: var(--panel-3);
+}
+
+/* A hidden capability or closed overlay must never be revived by display:flex. */
+[hidden] { display: none !important; }
+
+.controls :is(input:not([type="checkbox"]):not([type="radio"]):not([type="color"]), textarea) {
+  min-width: 0;
+  border-color: var(--control-edge);
+  border-radius: var(--control-radius);
+  background: var(--control-fill);
+}
+.controls :is(input, textarea):focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+:where(.controls) .check { min-height: 36px; }
+.controls .field-label { line-height: 1.4; }
+.controls .field-hint { overflow-wrap: anywhere; }
+
+.select-control {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+/* Keep layout dimensions for native form tooling, but expose only the themed
+ * trigger to pointer, keyboard and assistive-technology users. */
+.controls select.select-native {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  margin: 0;
+  padding: 7px 11px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--control-radius);
+  background: var(--control-fill);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 20px;
+  text-align: start;
+  cursor: pointer;
+  transition: border-color .12s ease, background-color .12s ease;
+}
+.select-trigger:hover:not(:disabled) { border-color: var(--text-placeholder, var(--muted)); background: var(--control-hover-fill); }
+.select-trigger[aria-expanded="true"] { border-color: var(--focus); }
+.select-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.select-trigger:disabled { cursor: not-allowed; color: var(--muted); opacity: .55; }
+.select-value { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-trigger > svg { width: 16px; height: 16px; flex: 0 0 16px; color: var(--muted); transition: transform .12s ease; }
+.select-trigger[aria-expanded="true"] > svg { transform: rotate(180deg); }
+
+.select-listbox {
+  position: fixed;
+  inset: auto;
+  z-index: 200;
+  box-sizing: border-box;
+  width: 240px;
+  max-width: calc(100vw - 16px);
+  max-height: 320px;
+  margin: 0;
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--control-radius);
+  background: var(--sticky-surface, var(--panel));
+  color: var(--text);
+  box-shadow: var(--overlay-shadow);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  user-select: none;
+  touch-action: pan-y;
+}
+.select-listbox::backdrop { background: transparent; pointer-events: none; }
+.select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--control-option-height);
+  padding: 7px 9px;
+  border-radius: calc(var(--control-radius) - 3px);
+  cursor: pointer;
+}
+.select-option-label { min-width: 0; overflow-wrap: anywhere; }
+.select-option-check { flex: 0 0 16px; width: 16px; height: 16px; opacity: 0; }
+.select-option[aria-selected="true"] { background: var(--panel-3); font-weight: 600; }
+.select-option[aria-selected="true"] .select-option-check { opacity: 1; }
+.select-option.is-active:not([aria-disabled="true"]) { background: var(--control-hover-fill); outline: 1px solid var(--focus); outline-offset: -1px; }
+.select-option[aria-disabled="true"] { color: var(--muted); opacity: .6; cursor: not-allowed; }
+.select-group-label, .select-empty { padding: 8px 9px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.select-group-label { font-weight: 600; }
+
+@media (pointer: coarse) {
+  :where(.controls) .check { min-height: 44px; }
+  .select-trigger { min-height: 44px; }
+  .select-option { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .select-trigger, .select-trigger > svg { transition: none; }
+}
+
+@media (max-width: 900px) {
+  .select-trigger { font-size: 16px; }
+  .select-listbox { font-size: 14px; }
+}
+
+/* Editable model IDs and SSIDs keep their text field and use the same option
+ * menu as selects, rather than an unthemed browser datalist window. */
+.suggestion-control { display: flex; align-items: stretch; gap: 8px; min-width: 0; width: 100%; }
+.suggestion-control > input { flex: 1 1 0; min-width: 0; }
+.suggestion-control > .select-control { flex: 0 0 40px; width: 40px; }
+.suggestion-control .select-trigger { height: 100%; padding-inline: 11px; justify-content: center; }
+.suggestion-control .select-value { display: none; }

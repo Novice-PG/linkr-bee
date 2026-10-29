@@ -41,9 +41,10 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 - 浏览器和手机 App 内置助手：检索串口日志，按所选审批策略执行目标命令；修改桥接器
   自身的 UART、WiFi 和日志上传设置前需确认。它会记住每台目标设备的事实、统计
   本轮消耗的 token，并可以把整个排查过程导出成 Markdown 报告。
-- Android App 可在局域网内充当 MCP 服务器，Claude Desktop、Cursor 等 AI 客户端能
-  读取控制台，并按所选访问权限（只读、每条命令需授权、仅高危命令需授权、完全授权）
-  发送输入、修改设置。见 [MCP 服务器指南](docs/MCP.zh-CN.md)。
+- Android App 可在局域网内充当 MCP 服务器与 A2A agent，Claude Desktop、Cursor 等 AI
+  客户端能读取控制台，并按所选访问权限（只读、每条命令需授权、仅高危命令需授权、
+  完全授权）发送输入、修改设置，或把任务委派给 App 内的常驻助手。见
+  [MCP 服务器指南](docs/MCP.zh-CN.md) 与 [A2A 指南](docs/A2A.zh-CN.md)。
 
 ## 选择客户端
 
@@ -110,8 +111,10 @@ UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
    WROOM 的自动波特率按键为 GPIO13，只在
    `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y` 时使用（默认构建关闭）。
 
-4. 需要物理授权的板型，把配对 GPIO 接地（C3/C5 为 **GPIO1**，Linkr Bee X1.0
-   为 **USER_KEY/GPIO3**），连接并接受系统配对提示，完成后释放。WROOM 默认关闭配对授权，不需要按 GPIO4；如需启用，
+4. 需要物理授权的板型，按一下配对键（C3/C5 为 **GPIO1**，Linkr Bee X1.0
+   为 **USER_KEY/GPIO3**），并在 30 秒内连接、接受系统配对提示。这个授权窗口由
+   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS` 控制（默认 30 秒），不需要一直按住。
+   WROOM 默认关闭配对授权，不需要按 GPIO4；如需启用，
    打开 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`。这台主机会被记住。
 
 5. 打开客户端。Web 终端：
@@ -176,10 +179,10 @@ Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
 
 ## 配对与安全
 
-- 蓝牙链路要求加密和绑定。C3/C5 每台新主机配对时把 **GPIO1** 接地授权一次
-  （Linkr Bee X1.0 为 **GPIO3/USER_KEY**）；
-  WROOM 默认关闭物理授权，不需要按 GPIO4，启用
-  `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` 后才要求拉低 GPIO4。
+- 蓝牙链路要求加密和绑定。C3/C5 每台新主机配对时按一下 **GPIO1**，并在 30 秒内
+  发起连接（Linkr Bee X1.0 为 **GPIO3/USER_KEY**）；按键打开授权窗口，不需要一直
+  按住。WROOM 默认关闭物理授权，不需要按 GPIO4，启用
+  `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` 后才要求按 GPIO4。
 - 最多记住八台主机，重启后保留，不会自动淘汰旧主机；要加第九台，先删掉不用的或恢复
   出厂。
 - 配对使用 LE Secure Connections Just Works，没有中间人身份核验，只在能看见配件的
@@ -198,7 +201,7 @@ Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
 | 没有输出 | 目标 TX 接了配件 RX、目标确实在输出、波特率一致 |
 | 有输出但输入没反应 | 目标 RX 接了配件 TX；除非 CTS 和 RTS 都接了，否则关掉硬件流控 |
 | 输出乱码 | UART 格式与目标一致：波特率、数据位、校验位、停止位 |
-| 没有配对提示 | C3/C5 在连接前把 GPIO1 接地（Linkr Bee X1.0 为 GPIO3/USER_KEY）；WROOM 默认不需要按 GPIO，除非启用了可选的配对授权 |
+| 没有配对提示 | C3/C5 先按一下 GPIO1，再在 30 秒内连接（Linkr Bee X1.0 为 GPIO3/USER_KEY）；窗口过期就再按一次。WROOM 默认不需要按 GPIO，除非启用了可选的配对授权 |
 | 局域网模式连不上 | 配件在 2.4 GHz 网络上、主机同网段、令牌与蓝牙通道读到的一致 |
 
 ## 已知限制

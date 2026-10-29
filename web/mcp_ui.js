@@ -33,6 +33,8 @@ const labels = {
   bindLan: ["所有网络接口（同网段可访问）", "All interfaces (reachable on the LAN)"],
   bindLoopback: ["仅本机回环", "Loopback only"],
   endpoint: ["MCP 地址", "MCP endpoint"],
+  a2aEndpoint: ["A2A Agent Card", "A2A agent card"],
+  a2aHint: ["同一端口提供 A2A：客户端读取这个 card，再用同一个令牌向 /a2a 发送 JSON-RPC 任务；启动任务时手机会确认一次。", "The same server exposes A2A: a client reads this card and sends JSON-RPC tasks to /a2a with the same token. Starting a task asks on the phone once."],
   token: ["访问令牌", "Access token"],
   tokenHint: ["令牌只保存在这台手机上，不会上传。复制到 AI 客户端的配置里；重新生成后旧令牌立即失效。", "The token stays on this phone and is never uploaded. Copy it into the AI client configuration; regenerating invalidates the old token immediately."],
   showToken: ["显示令牌", "Show token"],
@@ -83,6 +85,11 @@ const labels = {
   tool_set_bee_name: ["修改主机蓝牙名", "Change Bee BLE name"],
   tool_set_lan_bridge: ["配置主机局域网桥接", "Configure Bee LAN bridge"],
   tool_get_execution_status: ["读取执行状态", "Read execution status"],
+  tool_get_agent_status: ["读取常驻助手状态", "Read resident agent status"],
+  tool_start_agent_task: ["启动常驻助手任务", "Start resident agent task"],
+  tool_get_agent_task: ["读取常驻助手任务", "Read resident agent task"],
+  tool_list_agent_tasks: ["列出常驻助手任务", "List resident agent tasks"],
+  tool_cancel_agent_task: ["取消常驻助手任务", "Cancel resident agent task"],
 };
 
 const TOOL_LABEL_KEYS = {
@@ -102,6 +109,11 @@ const TOOL_LABEL_KEYS = {
   set_bee_name: "tool_set_bee_name",
   set_lan_bridge: "tool_set_lan_bridge",
   get_execution_status: "tool_get_execution_status",
+  get_agent_status: "tool_get_agent_status",
+  start_agent_task: "tool_start_agent_task",
+  get_agent_task: "tool_get_agent_task",
+  list_agent_tasks: "tool_list_agent_tasks",
+  cancel_agent_task: "tool_cancel_agent_task",
 };
 
 const APPROVAL_TIMEOUT_MS = 90000;
@@ -119,14 +131,13 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
 
   const section = document.createElement("section");
   section.id = "mcpSettings";
-  section.className = "card agent-settings mcp-settings";
+  section.className = "card mcp-settings";
   section.dataset.settingsPage = "ai";
   section.hidden = true;
   section.setAttribute("aria-labelledby", "mcpSettingsTitle");
   section.innerHTML = `
     <div class="card-title"><span class="dot"></span><span id="mcpSettingsTitle" data-mcp="title"></span></div>
-    <form id="mcpSettingsForm" novalidate>
-      <div class="agent-settings-scroll">
+    <div class="mcp-settings-body">
         <label class="check"><input id="mcpEnabled" type="checkbox"><span data-mcp="enable"></span></label>
         <p class="field-hint" data-mcp="enableHint"></p>
         <p class="field-hint mcp-warning" data-mcp="warning"></p>
@@ -158,6 +169,13 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
               <button id="mcpCopyUrl" class="btn btn-soft" type="button" data-mcp="copy"></button>
             </span>
           </label>
+          <label class="field"><span class="field-label" data-mcp="a2aEndpoint"></span>
+            <span class="password-row">
+              <input id="mcpA2aCard" type="text" readonly spellcheck="false">
+              <button id="mcpCopyA2a" class="btn btn-soft" type="button" data-mcp="copy"></button>
+            </span>
+            <span class="field-hint" data-mcp="a2aHint"></span>
+          </label>
           <label class="field"><span class="field-label" data-mcp="token"></span>
             <span class="password-row">
               <input id="mcpToken" type="password" readonly spellcheck="false" autocomplete="off">
@@ -182,20 +200,33 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
           <div id="mcpAuditList" class="mcp-audit-list" role="status"></div>
         </details>
         <p id="mcpStatus" class="field-hint" role="status"></p>
-      </div>
-    </form>`;
+    </div>`;
 
   // Appended in the settings panel rather than in index.html: the section must
   // not exist on builds without the native MCP listener (web, iOS, HarmonyOS).
+  // Keep MCP inside the AI card's single scroll container. Previously it was a
+  // second .agent-settings page with its own scroll area, which split the AI
+  // page into two panes on phones and left the lower card cut off.
   const anchor = mount.querySelector("#agentSettings");
-  if (anchor) anchor.after(section);
+  const aiScroll = anchor?.querySelector(".agent-settings-scroll");
+  if (aiScroll) aiScroll.append(section);
+  else if (anchor) anchor.append(section);
   else mount.appendChild(section);
+
+  // MCP inputs now live inside the AI form; Enter must not submit the AI
+  // configuration. Their change handlers already persist the MCP fields.
+  section.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.closest("input, select")) {
+      event.preventDefault();
+    }
+  });
 
   const $ = (id) => section.querySelector(`#${id}`);
   const elements = {
     enabled: $("mcpEnabled"), access: $("mcpAccess"),
     port: $("mcpPort"), bind: $("mcpBind"), endpoint: $("mcpEndpointBlock"),
-    url: $("mcpUrl"), token: $("mcpToken"), tokenToggle: $("mcpTokenToggle"),
+    url: $("mcpUrl"), a2aCard: $("mcpA2aCard"), copyA2a: $("mcpCopyA2a"),
+    token: $("mcpToken"), tokenToggle: $("mcpTokenToggle"),
     copyUrl: $("mcpCopyUrl"), copyToken: $("mcpCopyToken"), regenerate: $("mcpRegenerate"),
     snippet: $("mcpSnippet"), copySnippet: $("mcpCopySnippet"), status: $("mcpStatus"),
     auditList: $("mcpAuditList"), clientConfig: $("mcpClientConfig"), audit: $("mcpAudit"),
@@ -285,6 +316,8 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
       ? `http://127.0.0.1:${config.port}/mcp`
       : `http://<phone-ip>:${config.port}/mcp`);
     if (document.activeElement !== elements.url) elements.url.value = url;
+    const a2aCardUrl = (state.url || url).replace(/\/mcp$/, "/.well-known/agent-card.json");
+    if (document.activeElement !== elements.a2aCard) elements.a2aCard.value = a2aCardUrl;
     elements.token.value = state.token || "";
     elements.regenerate.disabled = busy || !state.running;
     const snippet = claudeConfigSnippet({ url: state.url || url, token: state.token || "" });
@@ -421,6 +454,7 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     render();
   });
   elements.copyUrl.addEventListener("click", () => copyText(elements.url.value));
+  elements.copyA2a.addEventListener("click", () => copyText(elements.a2aCard.value));
   elements.copyToken.addEventListener("click", () => copyText(elements.token.value));
   elements.copySnippet.addEventListener("click", () => copyText(elements.snippet.textContent || ""));
 

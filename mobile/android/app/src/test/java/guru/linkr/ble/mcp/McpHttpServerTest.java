@@ -41,6 +41,11 @@ public class McpHttpServerTest {
     private static final String ROTATED_TOKEN = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
     private static final String WRONG_TOKEN = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
+    private static final String A2A_PATH = "/a2a";
+    private static final String AGENT_CARD_PATH = "/.well-known/agent-card.json";
+    private static final String AGENT_CARD_BODY =
+            "{\"name\":\"linkr-bee\",\"version\":\"0.1.0\",\"skills\":[]}";
+
     private McpHttpServer server;
 
     @After
@@ -62,7 +67,10 @@ public class McpHttpServerTest {
         RawResponse response = exchange(started.getPort(), http("GET", "/", headers(), null));
 
         assertEquals(200, response.status);
-        assertEquals("{\"name\":\"linkr-bee-mcp\",\"version\":\"0.1.0\",\"mcp\":\"/mcp\"}", response.body);
+        assertEquals(
+                "{\"name\":\"linkr-bee-mcp\",\"version\":\"0.1.0\",\"mcp\":\"/mcp\",\"a2a\":\"/a2a\","
+                        + "\"agentCard\":\"/.well-known/agent-card.json\"}",
+                response.body);
         assertEquals("application/json; charset=utf-8", response.headers.get("content-type"));
         assertEquals("no-store", response.headers.get("cache-control"));
     }
@@ -121,6 +129,215 @@ public class McpHttpServerTest {
         assertEquals(body, request.body);
         assertEquals("mcp-test-client", request.userAgent);
         assertFalse(request.remote.isEmpty());
+    }
+
+    // ------------------------------------------------------------ a2a transport
+
+    @Test
+    public void postA2aWithoutTokenIsUnauthorized() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        });
+
+        Map<String, String> requestHeaders = headers("Content-Length", "2");
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, bytes("{}")));
+
+        assertEquals(401, response.status);
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    public void postA2aWithWrongTokenIsUnauthorized() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        });
+
+        Map<String, String> requestHeaders = headers(
+                "Authorization", "Bearer " + WRONG_TOKEN,
+                "Content-Length", "2");
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, bytes("{}")));
+
+        assertEquals(401, response.status);
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    public void postA2aWithOriginIsForbidden() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        });
+        Map<String, String> requestHeaders = a2aHeaders("{}");
+        requestHeaders.put("Origin", "http://evil.example");
+
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, bytes("{}")));
+
+        assertEquals(403, response.status);
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    public void postA2aWithoutContentLengthIsLengthRequired() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("A body without Content-Length must not reach the WebView sink");
+        });
+
+        RawResponse response = exchange(
+                started.getPort(),
+                http("POST", A2A_PATH, headers("Authorization", "Bearer " + TOKEN), null));
+
+        assertEquals(411, response.status);
+    }
+
+    @Test
+    public void postA2aChunkedEncodingIsLengthRequired() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("Chunked bodies must not reach the WebView sink");
+        });
+
+        Map<String, String> requestHeaders = headers(
+                "Authorization", "Bearer " + TOKEN,
+                "Transfer-Encoding", "chunked");
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, null));
+
+        assertEquals(411, response.status);
+    }
+
+    @Test
+    public void postA2aOversizedBodyIsRejected() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("Oversized bodies must not reach the WebView sink");
+        });
+
+        Map<String, String> requestHeaders = headers(
+                "Authorization", "Bearer " + TOKEN,
+                "Content-Length", String.valueOf(McpHttpServer.MAX_BODY_BYTES + 1));
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, null));
+
+        assertEquals(413, response.status);
+    }
+
+    @Test
+    public void authenticatedPostA2aIsForwardedAndResponseReturned() throws Exception {
+        AtomicReference<McpHttpServer.Request> captured = new AtomicReference<>();
+        McpHttpServer started = start(request -> {
+            captured.set(request);
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{\"result\":{\"ok\":true}}"));
+        });
+        String body = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"message/send\",\"params\":{}}";
+
+        Map<String, String> requestHeaders = a2aHeaders(body);
+        requestHeaders.put("User-Agent", "a2a-test-client");
+        RawResponse response = exchange(started.getPort(), http("POST", A2A_PATH, requestHeaders, bytes(body)));
+
+        assertEquals(200, response.status);
+        assertEquals("{\"result\":{\"ok\":true}}", response.body);
+        assertEquals("application/json; charset=utf-8", response.headers.get("content-type"));
+        assertEquals("no-store", response.headers.get("cache-control"));
+
+        McpHttpServer.Request request = captured.get();
+        assertNotNull(request);
+        assertEquals("POST", request.method);
+        assertEquals(A2A_PATH, request.path);
+        assertEquals(body, request.body);
+        assertEquals("a2a-test-client", request.userAgent);
+        assertFalse(request.remote.isEmpty());
+    }
+
+    @Test
+    public void postA2aTrailingSlashAliasForwardsCanonicalPath() throws Exception {
+        AtomicReference<McpHttpServer.Request> captured = new AtomicReference<>();
+        McpHttpServer started = start(request -> {
+            captured.set(request);
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{\"ok\":true}"));
+        });
+        String body = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}";
+
+        RawResponse response = exchange(
+                started.getPort(), http("POST", "/a2a/", a2aHeaders(body), bytes(body)));
+
+        assertEquals(200, response.status);
+        assertEquals("{\"ok\":true}", response.body);
+        assertNotNull(captured.get());
+        assertEquals("POST", captured.get().method);
+        assertEquals(A2A_PATH, captured.get().path);
+        assertEquals(body, captured.get().body);
+    }
+
+    @Test
+    public void agentCardIsPublicAndForwardedWithoutAuthorization() throws Exception {
+        AtomicReference<McpHttpServer.Request> captured = new AtomicReference<>();
+        McpHttpServer started = start(request -> {
+            captured.set(request);
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, AGENT_CARD_BODY));
+        });
+
+        RawResponse response = exchange(started.getPort(), http("GET", AGENT_CARD_PATH, headers(), null));
+
+        assertEquals(200, response.status);
+        assertEquals(AGENT_CARD_BODY, response.body);
+        assertEquals("application/json; charset=utf-8", response.headers.get("content-type"));
+        assertEquals("no-store", response.headers.get("cache-control"));
+
+        McpHttpServer.Request request = captured.get();
+        assertNotNull("the public card must reach the WebView sink", request);
+        assertEquals("GET", request.method);
+        assertEquals(AGENT_CARD_PATH, request.path);
+        assertEquals("", request.body);
+        assertEquals("", request.userAgent);
+    }
+
+    @Test
+    public void agentCardIgnoresOriginHeader() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, AGENT_CARD_BODY));
+        });
+        Map<String, String> requestHeaders = headers("Origin", "http://browser.example");
+
+        RawResponse response = exchange(started.getPort(), http("GET", AGENT_CARD_PATH, requestHeaders, null));
+
+        assertEquals("a browser may read the public card", 200, response.status);
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    public void getAndDeleteOnA2aAreMethodNotAllowed() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("Only POST /a2a may reach the WebView sink");
+        });
+
+        for (String target : new String[] {A2A_PATH, "/a2a/"}) {
+            RawResponse get = exchange(started.getPort(), http("GET", target, headers(), null));
+            assertEquals(405, get.status);
+            assertEquals("POST", get.headers.get("allow"));
+
+            RawResponse delete = exchange(started.getPort(), http("DELETE", target, headers(), null));
+            assertEquals(405, delete.status);
+            assertEquals("POST", delete.headers.get("allow"));
+        }
+    }
+
+    @Test
+    public void postAndDeleteOnAgentCardAreMethodNotAllowed() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("Only GET " + AGENT_CARD_PATH + " may reach the WebView sink");
+        });
+
+        RawResponse post = exchange(
+                started.getPort(), http("POST", AGENT_CARD_PATH, headers("Content-Length", "2"), bytes("{}")));
+        assertEquals(405, post.status);
+        assertEquals("GET", post.headers.get("allow"));
+
+        RawResponse delete = exchange(started.getPort(), http("DELETE", AGENT_CARD_PATH, headers(), null));
+        assertEquals(405, delete.status);
+        assertEquals("GET", delete.headers.get("allow"));
     }
 
     @Test
@@ -504,6 +721,10 @@ public class McpHttpServerTest {
                 "Authorization", "Bearer " + TOKEN,
                 "Content-Length", String.valueOf(bytes(body).length));
         return map;
+    }
+
+    private static Map<String, String> a2aHeaders(String body) {
+        return authorizedHeaders(body);
     }
 
     private static byte[] bytes(String value) {

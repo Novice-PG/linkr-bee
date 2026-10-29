@@ -166,7 +166,11 @@ curl -s http://192.168.1.42:8712/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-状态页只返回服务器名称、版本和 MCP 路径。
+状态页只返回服务器名称、版本、MCP 路径，以及 A2A 端点与 card 路径：
+
+```json
+{"name":"linkr-bee-mcp","version":"0.1.0","mcp":"/mcp","a2a":"/a2a","agentCard":"/.well-known/agent-card.json"}
+```
 
 ## 工具
 
@@ -193,6 +197,11 @@ curl -s http://192.168.1.42:8712/mcp \
 | `disconnect_bee` | 拒绝 | 确认 | `forget:true` 时确认 | 直接执行 | — |
 | `set_bee_name` | 拒绝 | 确认 | 直接执行 | 直接执行 | BLE 管理通道 |
 | `set_lan_bridge` | 拒绝 | 确认 | `on`/`rotate-token` 时确认 | 直接执行 | BLE 管理通道 |
+| `get_agent_status` | 直接执行 | 直接执行 | 直接执行 | 直接执行 | 可用的 AI 配置 |
+| `start_agent_task` | 拒绝 | 确认 | 确认 | 直接执行 | 可用的 AI 配置；一次确认覆盖该任务 |
+| `get_agent_task` | 直接执行 | 直接执行 | 直接执行 | 直接执行 | 常驻任务 |
+| `list_agent_tasks` | 直接执行 | 直接执行 | 直接执行 | 直接执行 | — |
+| `cancel_agent_task` | 直接执行 | 直接执行 | 直接执行 | 直接执行 | 常驻任务 |
 
 - **只读工具**在任何模式下都无需确认，从不发送 UART 输入，也不修改配件。
   `get_bee_status` 在未连接时也可用：它报告 App 自己到主机的连接。
@@ -204,6 +213,13 @@ curl -s http://192.168.1.42:8712/mcp \
   断开后这些工具会报错，直到 `connect_bee` 成功。`scan_bee_devices` 属于观察操作，
   只读模式直接执行；`connect_bee` 与 `disconnect_bee` 是写工具，只读模式会拒绝。
   `guarded` 模式下普通断开直接执行，只有 `forget:true` 需要确认。
+- **常驻助手工具**（`get_agent_status`、`start_agent_task`、`get_agent_task`、
+  `list_agent_tasks`、`cancel_agent_task`）把任务交给 App 内的助手。
+  `start_agent_task` 是一次确认覆盖整个任务：任务内助手的串口写入和配件修改不再逐条
+  确认，使用 App 已保存的 AI 配置和板载提示词（板载配置必须由用户先载入本机才会使用）。
+  同时只跑一个任务，最多 8 个排队；用 `get_agent_task` 轮询、`cancel_agent_task` 取消。
+  只读模式可以查询和取消任务，但不能启动。任务运行期间其他写设备的 MCP 调用会被拒绝，
+  避免争抢串口。同一服务也通过 A2A 提供，见 [A2A 指南](A2A.zh-CN.md)。
 - **主机配置工具**（`set_bee_name`、`set_lan_bridge`）通过加密管理通道修改主机广播的
   蓝牙名或局域网 WebSocket 监听。它们是写工具：只读模式拒绝，`confirm` 每次调用确认
   一次，`auto` 直接执行。`guarded` 模式下 `set_bee_name` 直接执行，`set_lan_bridge`
@@ -314,7 +330,10 @@ MCP 工具描述和 `initialize` 返回的说明会向客户端重复这些规�
 
 ## 限制
 
-- **仅 Android。** 原生 MCP 监听只存在于 Android 外壳中。
+- **仅 Android。** 原生 MCP/A2A 监听只存在于 Android 外壳中。
+- **常驻任务活在 App 进程内。** 前台服务保证退到后台后进程仍存活，但杀掉进程会停止服务
+  并丢失运行中的常驻任务；任务历史尚未持久化。A2A 流式（SSE）与服务端推送不支持，
+  请轮询 `GetTask`/`get_agent_task`。
 - **没有服务端主动消息。** 传输只接受 POST：`GET /mcp` 和 `DELETE /mcp` 返回 `405`，
   服务器不发送通知、进度更新、采样或 elicitation。请使用支持纯请求/响应工具调用的
   客户端。
@@ -374,13 +393,23 @@ MCP 工具描述和 `initialize` 返回的说明会向客户端重复这些规�
 协商、四种访问权限与 `guarded` 高危分类、审批路径、脱敏、单写入串行），设置卡片与
 确认横幅有 Playwright 测试（注入假的原生桥），Android 与 Web 构建均通过。
 
+常驻助手与 A2A 覆盖率（2026-10-29）：A2A 传输路由（`POST /a2a`、公开
+`GET /.well-known/agent-card.json`、405/401/403 与请求体限制）有主机 JVM 测试；
+常驻任务管理器、A2A 协议映射与 5 个委派工具有 `node --test` 覆盖（排队、会话、取消、
+一次确认后的自动执行代理、只读拒绝、A2A SendMessage/GetTask/ListTasks/CancelTask
+与 agent card）；MCP 卡片的 A2A 端点行有 Playwright 覆盖。真机上（mock OpenAI
+兼容端点）验证了 agent card、A2A 一次确认任务流程、`GetTask`/`ListTasks` 以及 MCP
+`start_agent_task`/`get_agent_task`。该轮目标板未连接（新 BLE 地址需要 GPIO1 配对），
+因此助手的串口/配件工具与真实模型服务仍未真机验证；一次后台确认尝试完成了任务但阻塞式
+HTTP 响应丢失，后台任务请用 `returnImmediately:true` + 轮询。
+
 2026-10-26 在真机上验证（StepX PZ261A，Android 16，adb 安装 debug APK，通过 BLE 连接
 Linkr Bee 配件）：
 
 - 卡片可以启动服务：端口 8712、监听 `lan`、生成 64 位十六进制令牌，地址显示为
   `http://<WiFi IP>:8712/mcp`；
 - 同一 Wi-Fi 的另一台机器上：`GET /` 返回状态 JSON；`POST /mcp` 无令牌返回 401、带
-  `Origin` 头返回 403；`initialize` 协商到 `2025-06-18`；`tools/list` 返回 16 个工具；
+  `Origin` 头返回 403；`initialize` 协商到 `2025-06-18`；`tools/list` 返回 21 个工具；
 - `get_device_status` 返回真实配件（`connected:true`、`transport:"ble"`、设备名/ID、
   `115200,8,n,1,n`、收发字节数）；`get_accessory_diagnostics` 返回配件自身 `@i?` 分组
   （固件 0.1.2、Zephyr 4.4.1、UART/WiFi/WebDAV/ws 计数）；`read_serial_log` 返回日志
@@ -413,6 +442,7 @@ Linkr Bee 配件）：
 
 ## 相关文档
 
+- [A2A 指南](A2A.zh-CN.md)
 - [移动端 App 与助手](../mobile/README.md)（英文）
 - [使用指南](USAGE.zh-CN.md)
 - [Agent 能力与路线图](AGENT_ROADMAP.zh-CN.md)
