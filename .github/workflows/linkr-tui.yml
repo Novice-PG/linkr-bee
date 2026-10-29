@@ -185,6 +185,11 @@ jobs:
     name: Plan the desktop matrix
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    # The workflow's default working directory is the crate; this job needs no
+    # checkout and runs from the workspace root.
+    defaults:
+      run:
+        working-directory: .
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
