@@ -234,13 +234,15 @@ jobs:
             native: true
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-          # macOS on both architectures. `macos-latest` is ARM, and Apple's
-          # clang links either, so the x86-64 build is a target swap and no more.
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            native: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          # macOS is off for now: the hosted macOS runners were not assigned
+          # (jobs queued 15 minutes and were cancelled twice on 2026-10-28),
+          # which failed the whole run and dropped the other platforms' release.
+          # Re-enable these two legs when the runners are back:
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
+          #   native: true
+          # - os: macos-latest
+          #   target: x86_64-apple-darwin
 
     steps:
       - name: Check out repository
