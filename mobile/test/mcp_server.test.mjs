@@ -1821,3 +1821,49 @@ test("A2A GetTask, CancelTask, ListTasks and unsupported streaming answer honest
   const unknownMethod = await a2a(host, { jsonrpc: "2.0", id: 7, method: "NoSuchMethod" });
   assert.equal(unknownMethod.message.error.code, -32601);
 });
+
+for (const action of ["disable", "rotate token", "read only", "target change", "native cancel", "deadline"]) {
+  test(`A2A pending approval cannot execute after ${action}`, async () => {
+    let approve, entered, sessionId = 1;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const agent = fakeResidentAgent();
+    const bridge = fakeBridge();
+    const host = createHost({
+      bridge: bridge.bridge, residentAgent: agent,
+      device: { getStatus: () => ({ connected: true, sessionId }) },
+      requestApproval: () => { entered(); return new Promise(resolve => { approve = resolve; }); },
+    });
+    await host.attach(); await host.enable();
+    const pending = host.handleHttp({
+      id: "approval-revocation", path: "/a2a",
+      ...(action === "deadline" ? { deadlineMs: Date.now() + 1080 } : {}),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage",
+        params: { message: { role: "ROLE_USER", parts: [{ text: "configure target" }] } } }),
+    });
+    await ready;
+    if (action === "disable") await host.disable();
+    if (action === "rotate token") await host.regenerateToken();
+    if (action === "read only") await host.setConfig({ access: "read" });
+    if (action === "target change") sessionId++;
+    if (action === "native cancel") bridge.listeners.find(item => item.event === "requestCancelled").callback({ id: "approval-revocation" });
+    if (action === "deadline") await new Promise(resolve => setTimeout(resolve, 100));
+    approve({ approved: true });
+    const result = JSON.parse((await pending).body);
+    assert.ok(result.error);
+    assert.equal(agent.calls.start.length, 0);
+    await host.dispose();
+  });
+}
+
+test("A2A validates task limits before asking for approval", async () => {
+  const agent = fakeResidentAgent();
+  let approvals = 0;
+  const { host } = await enabledHost({
+    residentAgent: agent, requestApproval: async () => { approvals++; return { approved: true }; },
+  });
+  const response = await a2a(host, { jsonrpc: "2.0", id: 1, method: "SendMessage",
+    params: { message: { role: "ROLE_USER", parts: [{ text: "work" }] }, metadata: { maxTurns: -1 } } });
+  assert.equal(response.message.error.code, -32602);
+  assert.equal(approvals, 0);
+  assert.equal(agent.calls.start.length, 0);
+});

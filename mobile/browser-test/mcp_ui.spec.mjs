@@ -179,6 +179,7 @@ async function exposeAppInternals(page) {
         "  clearDevice() { agentPanel.getDevice = () => null; },\n" +
         "  get host() { return mcpHost; },\n" +
         "  get panel() { return agentPanel; },\n" +
+        "  get resident() { return residentAgent; },\n" +
         "};\n",
     });
   });
@@ -827,3 +828,70 @@ test("a hidden page without notification permission refuses instead of hanging",
   expect(resultText(payload)).toContain("denied on the phone");
   expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 });
+
+async function prepareResidentUi(page, { lang = "en", theme = "dark" } = {}) {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await page.addInitScript(({ lang, theme }) => {
+    localStorage.setItem("linkr-lang", lang);
+    localStorage.setItem("linkr-theme", theme);
+    localStorage.setItem("linkr-agent-model", JSON.stringify({
+      endpoint: "https://model.test/v1", model: "test", apiKey: "test",
+      provider: "openai-completions", reasoning: "off", contextWindow: 128000, maxTokens: 4096,
+    }));
+    window.__testRunners = [];
+  }, { lang, theme });
+  await page.route(/\/(?:agent_runtime\.js|agent-runtime\.mjs)(?:\?.*)?$/, route =>
+    route.fulfill({ contentType: "text/javascript", body: `
+      export const available = true;
+      export async function createSerialAgent() {
+        let release;
+        const runner = {
+          prompt: () => new Promise(resolve => { release = resolve; }),
+          abort: () => release?.({}),
+          snapshot: () => [],
+        };
+        window.__testRunners.push(runner);
+        return runner;
+      }` }));
+  await openApp(page);
+  await installFakeDevice(page);
+  await page.locator("#agentButton").click();
+  await expect(page.locator("#agentPanel")).toBeVisible();
+}
+
+for (const [width, lang, theme] of [[390, "zh", "light"], [390, "en", "dark"], [834, "zh", "dark"], [1440, "en", "light"]]) {
+  test(`resident task owns the local Stop button and excludes human submissions (${width}/${lang}/${theme})`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await prepareResidentUi(page, { lang, theme });
+    const ids = await page.evaluate(() => {
+      const agent = window.__mcpTest.resident;
+      return [agent.startTask({ request: "active task" }).taskId,
+        agent.startTask({ request: "queued task" }).taskId];
+    });
+    await expect.poll(() => page.evaluate(() => window.__testRunners.length)).toBe(1);
+    await expect(page.locator("#agentResidentStatus")).toBeVisible();
+    await expect(page.locator("#agentStop")).toBeEnabled();
+    await expect(page.locator("#agentAsk")).toBeDisabled();
+    await page.locator("#agentQuestion").fill("must not start concurrently");
+    await page.locator("#agentForm").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(await page.evaluate(() => window.__testRunners.length)).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath("resident-stop.png") });
+    await page.locator("#agentStop").click();
+    await expect.poll(() => page.evaluate(() => window.__mcpTest.resident.isBusy())).toBe(false);
+    expect(await page.evaluate(async ids => Promise.all(ids.map(async id => (await window.__mcpTest.resident.getTask(id)).state)), ids))
+      .toEqual(["canceled", "canceled"]);
+    await expect(page.locator("#agentAsk")).toBeEnabled();
+    await expect(page.locator("#agentStop")).toBeDisabled();
+    await expect(page.locator("#agentResidentStatus")).toBeHidden();
+    // The existing draft survives cancellation and becomes a normal local run.
+    await page.locator("#agentAsk").click();
+    await expect.poll(() => page.evaluate(() => window.__testRunners.length)).toBe(2);
+    const error = await page.evaluate(() => {
+      try { window.__mcpTest.resident.startTask({ request: "cannot interrupt human" }); return ""; }
+      catch (error) { return error.message; }
+    });
+    expect(error).toMatch(/assistant is busy/);
+    await page.locator("#agentStop").click();
+  });
+}

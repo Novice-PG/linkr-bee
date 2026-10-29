@@ -19,6 +19,8 @@ import { checkpointForTask } from "./agent_task_state.js";
 const MODE_PICKER_MIN_HEIGHT = 96;
 
 const labels = {
+  residentBusy: ["常驻任务执行中；停止会取消当前及排队任务。", "Resident task in progress. Stop cancels active and queued tasks."],
+
   history: ["任务记录与设备", "Tasks and device"], refreshProfile: ["探测设备", "Probe device"],
   noProfile: ["尚未探测设备能力", "Device capabilities not probed"], staleProfile: ["档案已过期，请重新探测", "Profile stale; probe again"],
   forgetTasks: ["清除记录", "Clear records"], recover: ["核实上次任务", "Verify previous task"],
@@ -142,7 +144,7 @@ const labels = {
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -189,6 +191,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       <div class="agent-actions"><button class="btn" type="button" id="agentProbe" data-ai="refreshProfile"></button><button class="btn" type="button" id="agentExport" data-ai="exportReport"></button><button class="btn" type="button" id="agentForget" data-ai="forgetTasks"></button></div>
       <div id="agentTasks"></div><p id="agentStorageError" role="status"></p></details>
     <div id="agentMessages" class="agent-messages" role="log" aria-live="polite"><p class="agent-empty" data-ai="empty"></p></div>
+    <p id="agentResidentStatus" class="agent-status" role="status" hidden></p>
     <p id="agentStatus" class="agent-status" role="status"></p>
     <p id="agentUsage" class="agent-usage" role="status"></p>
     <div id="agentQueueControls" class="agent-queue-controls" hidden>
@@ -224,6 +227,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let executionMode = "auto";
   let fingerprint = "";
   let busy = false;
+  const isResidentBusy = () => resident?.isBusy?.() === true;
   let version = 0;
   let eventVersion = 0;
   let answer = null;
@@ -391,13 +395,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   function refreshHistory() {
     const status = device.getStatus(), profile = status.profile;
     $("agentProfile").textContent = profile ? [profile.stale && text("staleProfile"), profile.model || profile.system, profile.os, profile.storage, profile.tools.join(", ")].filter(Boolean).join("\n") : text("noProfile");
-    $("agentProbe").disabled = busy || !status.connected;
+    $("agentProbe").disabled = busy || isResidentBusy() || !status.connected;
     $("agentForget").disabled = busy;
     const key = deviceIdentity(status);
     const tasks = taskStore.list(key);
     const notes = noteStore.list(key);
     $("agentExport").disabled = !tasks.length && !notes.length && !device.getRecords().length;
-    const signature = JSON.stringify([key,busy,tasks,notes,getLang()]);
+    const signature = JSON.stringify([key,busy,isResidentBusy(),tasks,notes,getLang()]);
     if (signature === historySignature) return;
     historySignature = signature;
     if (!editingPolicy()) refreshPolicy();
@@ -429,7 +433,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       row.dataset.task = task.id; row.open = expanded.has(task.id);
       title.textContent = `${task.status} · ${task.goal}`;
       description.textContent = [task.summary, formatPlan(task.plan)].filter(Boolean).join('\n');
-      restore.type = "button"; restore.className = "btn"; restore.textContent = text("recover"); restore.disabled = busy;
+      restore.type = "button"; restore.className = "btn"; restore.textContent = text("recover"); restore.disabled = busy || isResidentBusy();
       restore.addEventListener("click", () => {
         recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions,plan:task.plan,checkpoint:task.checkpoint};
         $("agentQuestion").value = `${text("recover")}: ${task.goal}`;
@@ -471,6 +475,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     $("agentModeClose").setAttribute("aria-label", text("closePicker"));
     $("agentNew").title = text("clear");
     $("agentNew").setAttribute("aria-label", text("clear"));
+    refreshActivity();
     refreshConsole(); refreshHistory();
   }
   function refreshMode() {
@@ -516,12 +521,20 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       step.nextAction && '→ '+step.nextAction,
     ].filter(Boolean).join('\n')).join('\n');
   }
+  function refreshActivity() {
+    const residentBusy = isResidentBusy();
+    settings.setBusy(busy || residentBusy);
+    $("agentAsk").disabled = $("agentNew").disabled = busy || residentBusy;
+    $("agentStop").disabled = !(busy || residentBusy);
+    $("agentResidentStatus").hidden = !residentBusy;
+    $("agentResidentStatus").textContent = residentBusy ? text("residentBusy") : "";
+    modeButton.disabled = residentBusy;
+    for (const option of modeOptions) option.disabled = residentBusy;
+  }
   function setBusy(value) {
     busy = value;
     refreshHistory();
-    settings.setBusy(value);
-    $("agentAsk").disabled = $("agentNew").disabled = value;
-    $("agentStop").disabled = !value;
+    refreshActivity();
     $("agentQueueControls").hidden = !value;
     $("agentSteer").disabled = $("agentFollowUp").disabled = true;
     $("agentStatus").textContent = value ? text("thinking") : "";
@@ -616,7 +629,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
      * not happen ten times a second while the terminal is merely streaming logs.
      * The session guard means the expensive scan runs at most once per session. */
     const quick = currentStatus();
-    if (busy || bindingState?.verified || !quick.connected || quick.transport !== "ble" ||
+    if (busy || isResidentBusy() || bindingState?.verified || !quick.connected || quick.transport !== "ble" ||
         quick.inputPending || autoIdentitySession === quick.sessionId) return;
     const status = device.getStatus();
     if (status.console.kind !== "shell" || status.sessionId !== quick.sessionId) return;
@@ -817,7 +830,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   $("agentForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const question = $("agentQuestion").value.trim();
-    if (busy || !question) return;
+    if (busy || isResidentBusy() || !question) return;
     const config = settings.getConfig();
     if (!config) {
       openSettings();
@@ -926,7 +939,12 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       if (opened) { showModePicker(false); $("agentQuestion").focus(); }
     })();
   }, true);
-  $("agentStop").addEventListener("click", () => stop("stopped"));
+  $("agentStop").addEventListener("click", () => {
+    if (isResidentBusy()) {
+      resident.cancelAll();
+      refreshActivity();
+    } else stop("stopped");
+  });
   function positionModePicker() {
     if (modePicker.hidden) return;
     const viewport = window.visualViewport;
@@ -1105,7 +1123,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   refreshLang();
   const api = {
     async targetBinding(action, { automatic = false } = {}) {
-      if (busy) throw new Error("Agent is running; stop it first.");
+      if (busy || isResidentBusy()) throw new Error("Agent is running; stop it first.");
       const initial = getStatus();
       if (!initial.connected || initial.transport !== "ble") throw new Error("Connect Bee over BLE to manage its Flash binding.");
       const session = initial.sessionId;
@@ -1171,6 +1189,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
      * can never open a second write path to the UART. */
     getDevice: () => device,
     isBusy: () => busy,
+    residentChanged() { refreshActivity(); refreshHistory(); },
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),
     logsCleared() { stop("stopped", { preserveConversation: false }); clearConversation(); refreshConsole(); },
     connectionChanged(connected) {

@@ -249,3 +249,115 @@ test("status exposes model details but never the key or headers", () => {
   assert.equal(JSON.stringify(status).includes("secret-key"), false);
   assert.equal(JSON.stringify(status).toLowerCase().includes("apikey"), false);
 });
+
+test("queued tasks stay bound to their approved target and release the gate on mismatch", async () => {
+  let target = "A", release, started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const seen = [];
+  const agent = createResidentAgent({
+    getConfig: () => CONFIG,
+    getDevice: () => ({ ...fakeBaseDevice(), getStatus: () => ({ connected: true, deviceId: target, sessionId: target }) }),
+    createAgent: async ({ device }) => {
+      const bound = device.getStatus().deviceId;
+      return { prompt: async text => {
+        seen.push([text, bound]);
+        if (text === "first") { started(); await new Promise(resolve => { release = resolve; }); }
+        return {};
+      }};
+    },
+  });
+  agent.startTask({ request: "first" }); await ready;
+  const queued = agent.startTask({ request: "configure A" });
+  target = "B"; release();
+  const failed = await waitForState(agent, queued.taskId, ["failed"]);
+  assert.match(failed.error, /target session changed/);
+  assert.deepEqual(seen, [["first", "A"]]);
+  assert.equal(agent.isBusy(), false);
+  const next = agent.startTask({ request: "configure B" });
+  await waitForState(agent, next.taskId, ["completed"]);
+  assert.deepEqual(seen[1], ["configure B", "B"]);
+});
+
+for (const missing of ["config", "device"]) {
+  test(`queue recovers after missing ${missing} at task start`, async () => {
+    let config = CONFIG, device = fakeBaseDevice(), release, started;
+    const ready = new Promise(resolve => { started = resolve; });
+    const agent = createResidentAgent({
+      getConfig: () => config, getDevice: () => device,
+      createAgent: async () => ({ prompt: async text => {
+        if (text === "first") { started(); await new Promise(resolve => { release = resolve; }); }
+        return {};
+      }}),
+    });
+    agent.startTask({ request: "first" }); await ready;
+    const queued = agent.startTask({ request: "second" });
+    if (missing === "config") config = null; else device = null;
+    release();
+    await waitForState(agent, queued.taskId, ["failed"]);
+    assert.equal(agent.isBusy(), false);
+    config = CONFIG; device = fakeBaseDevice();
+    const next = agent.startTask({ request: "third" });
+    await waitForState(agent, next.taskId, ["completed"]);
+  });
+}
+
+for (const phase of ["board prompt", "runtime loading"]) {
+  test(`cancel all during ${phase} drains queue without starting model work`, async () => {
+    let release, entered;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const block = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+    let prompts = 0;
+    const agent = createResidentAgent({
+      getConfig: () => CONFIG, getDevice: () => fakeBaseDevice(),
+      readBoardPrompt: phase === "board prompt" ? block : () => "",
+      createAgent: async () => {
+        if (phase === "runtime loading") await block();
+        return { prompt: async () => { prompts++; }, abort() {} };
+      },
+    });
+    const first = agent.startTask({ request: "first" }); await ready;
+    const second = agent.startTask({ request: "second" });
+    agent.cancelAll();
+    assert.equal(agent.isBusy(), true); // initialization still owns the gate
+    release();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal((await agent.getTask(first.taskId)).state, "canceled");
+    assert.equal((await agent.getTask(second.taskId)).state, "canceled");
+    assert.equal(agent.isBusy(), false);
+    assert.equal(prompts, 0);
+  });
+
+  test(`target change during ${phase} prevents model start`, async () => {
+    let target = 1, release, entered;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const block = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+    let prompts = 0;
+    const agent = createResidentAgent({
+      getConfig: () => CONFIG,
+      getDevice: () => ({ ...fakeBaseDevice(), getStatus: () => ({ connected: true, sessionId: target }) }),
+      readBoardPrompt: phase === "board prompt" ? block : () => "",
+      createAgent: async () => {
+        if (phase === "runtime loading") await block();
+        return { prompt: async () => { prompts++; }, abort() {} };
+      },
+    });
+    const task = agent.startTask({ request: "first" }); await ready;
+    target++; release();
+    assert.match((await waitForState(agent, task.taskId, ["failed"])).error, /target session changed/);
+    assert.equal(prompts, 0);
+    assert.equal(agent.isBusy(), false);
+  });
+}
+
+test("local stop cancels active and queued work, keeping the gate until abort settles", async () => {
+  const h = build({ block: true });
+  const first = h.agent.startTask({ request: "first" });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const second = h.agent.startTask({ request: "second" });
+  h.agent.cancelAll();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await h.agent.getTask(first.taskId)).state, "canceled");
+  assert.equal((await h.agent.getTask(second.taskId)).state, "canceled");
+  assert.equal(h.runners.length, 1);
+  assert.equal(h.agent.isBusy(), false);
+});

@@ -801,6 +801,7 @@ export function createMcpHost(deps = {}) {
     if (!isPlainObject(state)) return;
     if (bridgeSnapshot?.running === true && state.running === false) {
       revokeCalls("The MCP server stopped; pending authorization was revoked.");
+      deps.residentAgent?.cancelAll?.();
     } else if (bridgeSnapshot?.token && state.token && bridgeSnapshot.token !== state.token) {
       revokeCalls("The MCP token changed; pending authorization was revoked.");
     }
@@ -1020,6 +1021,7 @@ export function createMcpHost(deps = {}) {
   }
 
   async function disable() {
+    deps.residentAgent?.cancelAll?.();
     revokeCalls("MCP was disabled; pending authorization was revoked.");
     if (config.enabled) {
       config = { ...config, enabled: false };
@@ -1674,6 +1676,9 @@ export function createMcpHost(deps = {}) {
       call = deviceCallController(context?.deadlineMs);
       activeCalls.add(call);
       if (context?.requestId != null) nativeCalls.set(String(context.requestId), call);
+      if (context?.requestId != null && cancelledNativeRequests.has(String(context.requestId))) {
+        call.abort("The native request was cancelled before execution.");
+      }
       call.signal.throwIfAborted();
 
       if (toolNeedsApproval(tool, args, config.access)) {
@@ -1821,12 +1826,6 @@ export function createMcpHost(deps = {}) {
     return agent.getTask(id, options);
   }
 
-  function a2aBusyError() {
-    return Object.assign(new Error("The resident agent is running or has queued tasks. Poll get_agent_task and retry when the queue is empty."), {
-      a2aCode: -32002, a2aReason: "TASK_BUSY",
-    });
-  }
-
   async function handleA2aRpc(bodyString, context) {
     let message;
     try {
@@ -1869,34 +1868,22 @@ export function createMcpHost(deps = {}) {
             }
             sessionId = existing.sessionId;
           }
-          if (writeBusy) throw a2aBusyError();
-          const startTool = TOOL_BY_NAME.get("start_agent_task");
-          if (toolNeedsApproval(startTool, { request: parsed.request }, config.access)) {
-            const decision = await requestToolApproval(startTool, { request: parsed.request }, new AbortController().signal);
-            if (!decision.approved) {
-              throw Object.assign(new Error(decision.failure
-                ? `The approval request did not complete (${decision.failure}).`
-                : "The task was denied on the phone."), { a2aCode: -32003, a2aReason: "DENIED" });
-            }
+          // Delegate through the same gate as MCP: approval revocation, native
+          // request cancellation/deadline, target snapshot, audit and write lock.
+          const args = { request: parsed.request };
+          if (sessionId) args.sessionId = sessionId;
+          for (const key of ["maxTurns", "maxTools", "timeoutMs"]) {
+            if (params.metadata?.[key] !== undefined) args[key] = params.metadata[key];
           }
-          const agent = deps.residentAgent;
-          if (!agent || typeof agent.startTask !== "function") throw new Error("The resident agent is unavailable in this app build.");
-          let task;
-          try {
-            task = await agent.startTask({
-              request: parsed.request,
-              ...(sessionId ? { sessionId } : {}),
-              maxTurns: params.metadata?.maxTurns,
-              maxTools: params.metadata?.maxTools,
-              timeoutMs: params.metadata?.timeoutMs,
-            });
-          } catch (error) {
-            const busy = /queue is full|assistant is busy/i.test(String(error?.message || ""));
-            throw Object.assign(new Error(error?.message || "The task could not be started."), {
-              a2aCode: busy ? -32002 : -32602,
-              a2aReason: busy ? "TASK_BUSY" : "INVALID_PARAMS",
+          const result = await callTool({ name: "start_agent_task", arguments: args }, context);
+          if (result.isError) {
+            const reason = result.content?.[0]?.text || "The task could not be started.";
+            const busy = /busy|queue is full|another action is in progress/i.test(reason);
+            throw Object.assign(new Error(reason), {
+              a2aCode: busy ? -32002 : -32003, a2aReason: busy ? "TASK_BUSY" : "DENIED",
             });
           }
+          const task = JSON.parse(result.content[0].text);
           let snapshot = task;
           if (!parsed.returnImmediately) {
             /* A2A defaults to blocking. A serial task can outlive any sane HTTP
@@ -1939,7 +1926,8 @@ export function createMcpHost(deps = {}) {
           throw Object.assign(new Error(`Method not found: ${method}`), { a2aCode: -32601, a2aReason: "METHOD_NOT_FOUND" });
       }
     } catch (error) {
-      const code = Number.isInteger(error?.a2aCode) ? error.a2aCode : -32603;
+      const code = Number.isInteger(error?.a2aCode) ? error.a2aCode
+        : error instanceof RpcError ? error.code : -32603;
       const reason = error?.a2aReason || "INTERNAL_ERROR";
       return { status: 200, body: JSON.stringify(a2aError(id, code, error?.message || "Internal error", { reason })) };
     }
@@ -1960,7 +1948,7 @@ export function createMcpHost(deps = {}) {
           ? { status: 200, body: JSON.stringify(agentCard()) }
           : { status: 404, body: JSON.stringify({ error: "A2A is disabled" }) };
       } else if (path === A2A_JSONRPC_PATH) {
-        if (expired) {
+        if (expired || cancelledNativeRequests.has(String(id))) {
           response = { status: 504, body: JSON.stringify(a2aError(null, -32000, "The native A2A request expired.")) };
         } else if (!config.enabled || bridgeSnapshot?.running === false) {
           response = { status: 503, body: JSON.stringify(a2aError(null, -32000, "A2A is disabled or stopped; request not executed.")) };

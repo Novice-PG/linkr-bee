@@ -358,38 +358,48 @@ export function createResidentAgent(deps = {}) {
     }
   }
 
+  function captureTarget() {
+    const status = deps.getDevice?.()?.getStatus?.() ?? {};
+    return {
+      sessionId: status.sessionId, deviceId: status.deviceId,
+      connected: status.connected, transport: status.transport,
+      targetId: deviceIdentity(status),
+    };
+  }
+
+  function checkTarget(task) {
+    const current = captureTarget();
+    if (Object.keys(task.target).some(key => task.target[key] !== current[key])) {
+      throw new Error("The target session changed after task approval. Start a new task for the current target.");
+    }
+  }
+
   async function runTask(task) {
-    const config = configuredConfig();
-    const base = deps.getDevice?.();
-    if (!config) {
-      task.state = "failed";
-      task.error = "The resident agent has no usable AI configuration. Open AI settings, or load the board AI configuration into the app first.";
-      task.finishedAt = iso(now());
-      lastError = task.error;
-      return;
-    }
-    if (!base) {
-      task.state = "failed";
-      task.error = "The serial executor is unavailable in this app build.";
-      task.finishedAt = iso(now());
-      return;
-    }
-    task.state = "running";
-    task.startedAt = iso(now());
-    task.progress = "thinking";
-    notifyTask(task);
-    const session = ensureSession(task.sessionId);
-    if (!session.promptLoaded) {
-      try {
-        session.prompt = String((await deps.readBoardPrompt?.()) ?? "").trim();
-      } catch {
-        session.prompt = "";
-      }
-      session.promptLoaded = true;
-      saveSession(task.sessionId, session);
-    }
+    const operation = active;
     let runner = null;
+    let session = null;
     try {
+      const config = requireConfig();
+      const base = deps.getDevice?.();
+      if (!base) throw new Error("The serial executor is unavailable in this app build.");
+      checkTarget(task);
+      if (deps.isHumanAgentBusy?.()) throw new Error("The in-app assistant is busy with a question.");
+      task.state = "running";
+      task.startedAt = iso(now());
+      task.progress = "thinking";
+      notifyTask(task);
+      session = ensureSession(task.sessionId);
+      if (!session.promptLoaded) {
+        try {
+          session.prompt = String((await deps.readBoardPrompt?.()) ?? "").trim();
+        } catch {
+          session.prompt = "";
+        }
+        if (isTerminal(task.state)) return;
+        checkTarget(task);
+        session.promptLoaded = true;
+        saveSession(task.sessionId, session);
+      }
       const options = {
         config,
         device: approvedDevice(base, () => base.getStatus()),
@@ -418,9 +428,10 @@ export function createResidentAgent(deps = {}) {
         try { runner.abort?.(); } catch { /* best effort */ }
         return;
       }
-      active = { task, runner, timer: null };
+      checkTarget(task);
+      operation.runner = runner;
       if (task.timeoutMs > 0) {
-        active.timer = setTimeout(() => {
+        operation.timer = setTimeout(() => {
           task.timedOut = true;
           try { runner.abort?.(); } catch { /* best effort */ }
         }, task.timeoutMs);
@@ -454,8 +465,8 @@ export function createResidentAgent(deps = {}) {
         task.error = clip(error?.message || String(error), 1000);
       }
     } finally {
-      if (active?.timer) clearTimeout(active.timer);
-      active = null;
+      if (operation?.timer) clearTimeout(operation.timer);
+      if (active === operation) active = null;
       task.finishedAt = iso(now());
       if (task.state === "running") task.state = "failed";
       if (!task.result && !task.error && task.state === "completed") task.result = "";
@@ -495,6 +506,7 @@ export function createResidentAgent(deps = {}) {
     const task = {
       id: `agent-${crypto.randomUUID()}`,
       sessionId,
+      target: captureTarget(),
       request: clip(args.request, 2000),
       promptText,
       state: "queued",
@@ -518,6 +530,7 @@ export function createResidentAgent(deps = {}) {
     taskOrder.push(task.id);
     evictOldTasks();
     queue.push(task.id);
+    notifyTask(task);
     pump();
     return publicTask(task);
   }
@@ -591,14 +604,17 @@ export function createResidentAgent(deps = {}) {
     return Boolean(active) || queue.length > 0;
   }
 
+  function cancelAll() {
+    // Remove queued work before aborting the runner: completion must not pump
+    // a task that the owner just asked to stop.
+    const waiting = queue.splice(0);
+    for (const id of waiting) void cancelTask(id);
+    if (active) void cancelTask(active.task.id);
+  }
+
   function dispose() {
-    for (const task of tasks.values()) {
-      if (task.state === "queued") { task.state = "canceled"; task.finishedAt = iso(now()); }
-    }
-    queue.length = 0;
-    try { active?.runner?.abort?.(); } catch { /* best effort */ }
-    if (active?.timer) clearTimeout(active.timer);
-    active = null;
+    cancelAll();
+    // Keep the gate held until the runner (or its initialization) settles.
   }
 
   return {
@@ -608,6 +624,7 @@ export function createResidentAgent(deps = {}) {
     getTask,
     listTasks,
     cancelTask,
+    cancelAll,
     dispose,
     /* Exposed for tests and for the A2A adapter's task mapping. */
     publicTask,

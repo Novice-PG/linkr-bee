@@ -7129,7 +7129,10 @@ function initMcp() {
       scan: scanWifi,
     },
     isHumanAgentBusy: () => Boolean(agentPanel?.isBusy?.()),
-    onTaskChange: () => mcpUi?.refresh(),
+    onTaskChange: () => {
+      agentPanel?.residentChanged();
+      mcpUi?.refresh();
+    },
   });
   mcpHost = createMcpHost({
     getBridge: () => globalThis.LinkrMcp || null,
@@ -7207,6 +7210,10 @@ function init() {
     onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); state.term?.blur(); },
   });
   agentPanel = createAgentPanel({
+    resident: {
+      isBusy: () => residentAgent?.isBusy() === true,
+      cancelAll: () => residentAgent?.cancelAll(),
+    },
     button: $("agentButton"), getLang: () => lang,
     settings: agentSettings,
     bindingControl: command => sendControl(command, {returnResponse:true}),

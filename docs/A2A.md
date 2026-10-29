@@ -107,7 +107,13 @@ A completed task carries the assistant's answer as an artifact:
   boot must not be killed by a timer while it is making progress. Callers that
   want a deadline can set `metadata.timeoutMs` (up to 24 hours; 0 means none);
   `CancelTask` (MCP: `cancel_agent_task`) is the normal way to stop a long task.
-  The app's Stop action also aborts the active task.
+  The assistant panel's Stop button cancels the active task and all queued tasks.
+  The panel shows when resident work owns the executor and blocks local questions
+  until it settles. Turning off the MCP server also cancels resident work.
+- Each queued task is bound to the device/session approved at submission. A
+  target switch or reconnect before execution fails the old task; submit a new
+  task for the current target. A2A approval is revoked on server shutdown,
+  token/access changes or native request cancellation, just like MCP.
 - Sessions: `contextId` (A2A) or `sessionId` (MCP) continues the same
   conversation. Omit it for the default session; use `newSession` (MCP) or a new
   `contextId` for a fresh one. Board-stored instructions are read once when a
