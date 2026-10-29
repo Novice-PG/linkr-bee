@@ -91,3 +91,15 @@ test("desktop 1440 shows the rail and hides the duplicate tab titlebar", async (
   expect(result.deviceName?.display).not.toBe("none");
   await context.close();
 });
+
+test("desktop keeps the rail visible while the terminal AI assistant is open", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, isMobile: false, hasTouch: false });
+  const page = await context.newPage();
+  await page.goto("/?demo=board");
+  await page.waitForSelector("#agentButton");
+  await page.locator("#agentButton").click();
+  await expect(page.locator("html")).toHaveClass(/agent-mode/);
+  await expect(page.locator(".rail")).toBeVisible();
+  await expect(page.locator("#agentPanel")).toBeVisible();
+  await context.close();
+});

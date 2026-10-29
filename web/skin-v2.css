@@ -250,12 +250,6 @@ body {
   }
 }
 
-/* Agent mode takes over the whole shell; the rail belongs to the settings
- * layout and must not claim a grid cell there. */
-html.agent-mode .rail {
-  display: none;
-}
-
 /* ---------- Topbar ---------- */
 
 .topbar {
