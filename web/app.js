@@ -575,6 +575,7 @@ const I18N = {
     reconnectWaiting: "Reconnecting in {s}s (attempt {n}/{total})",
     reconnectRestored: "Link restored automatically",
     reconnectGaveUp: "Automatic reconnect failed after {total} attempts. Press Reconnect to try again.",
+    reconnectPausedForPairing: "Automatic reconnect stopped: pairing needs a fresh key press, then press Connect.",
     reconnectCancelled: "Automatic reconnect cancelled",
     reconnectCancel: "Cancel reconnect",
     authorizedDeviceFailed: "Saved device unavailable; choose it again",
@@ -815,8 +816,8 @@ const I18N = {
     baud: "Baud",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
-    pairingHint: "New host: hold Bee GPIO1 to GND before connecting and accept system pairing. Bonded hosts reconnect without GPIO1.",
-    pairingFailed: "If pairing failed, hold GPIO1 to GND and reconnect. If the host lost its keys, forget its old system bond first. A full Bee bond table requires a factory reset.",
+    pairingHint: "New host: press the Bee pairing key once (Linkr Bee X1.0: USER_KEY/GPIO3; C3/C5: GPIO1), then connect within 30 s. Bonded hosts reconnect without a key press.",
+    pairingFailed: "Pairing was refused. Press the pairing key again, then choose Connect to start a new pairing; the terminal does not reconnect on its own.",
     saved: "Log saved",
     uartSet: "UART configured",
     wifiSet: "WiFi configured",
@@ -876,6 +877,7 @@ const I18N = {
     reconnectWaiting: "{s} 秒后重连（第 {n}/{total} 次）",
     reconnectRestored: "连接已自动恢复",
     reconnectGaveUp: "自动重连 {total} 次失败，请点「重新连接」再试。",
+    reconnectPausedForPairing: "已停止自动重连：配对需要重新按键，之后再点「连接」。",
     reconnectCancelled: "已取消自动重连",
     reconnectCancel: "取消重连",
     authorizedDeviceFailed: "已授权设备不可用，请重新选择设备",
@@ -1112,8 +1114,8 @@ const I18N = {
     baud: "波特率",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
-    pairingHint: "首次连接新主机：先将 Bee GPIO1 接地，再连接并接受系统配对。已绑定主机无需拉低 GPIO1。",
-    pairingFailed: "若配对失败，请将 GPIO1 接地后重连；主机密钥丢失时，先在系统中忽略旧绑定。Bee 绑定表已满时需恢复出厂。",
+    pairingHint: "首次连接新主机：先按一下 Bee 的配对键（Linkr Bee X1.0：USER_KEY/GPIO3；C3/C5：GPIO1），并在 30 秒内发起连接。已绑定主机无需按键。",
+    pairingFailed: "配对被拒绝。请再次按下配对键，再点「连接」重新发起配对；终端不会自动重连。",
     saved: "日志已保存",
     uartSet: "UART 已配置",
     wifiSet: "WiFi 已配置",
@@ -3533,6 +3535,23 @@ const autoReconnect = {
 /* Set by a user-initiated disconnect so the teardown it causes is not treated
  * as a lost link. onDisconnected() consumes it. */
 let userInitiatedDisconnect = false;
+/* The last connect attempt's failure class. Pairing is refused by the Bee until
+ * the user presses its pairing key, so a refused encrypted read must not be
+ * answered with the automatic reconnect loop: that loop can never succeed and
+ * hides the fact that a physical press is required. The next manual Connect is
+ * the user's re-initiation. */
+let lastConnectFailure = null;
+
+function pairingRefused(error) {
+  const name = String(error?.name || "");
+  const text = String(error?.message || "");
+
+  if (name === "SecurityError") return true;
+  /* A read refused on the first encrypted characteristic is the pairing
+   * refusal documented for this board; a missing service is a legacy board
+   * and is handled before this check. */
+  return /insufficient (authentication|encryption|security)|authentication failed|pairing failed|GATT Server is disconnected/i.test(text);
+}
 
 function setConnecting(connecting) {
   connecting = connecting || connectionInFlight;
@@ -5384,6 +5403,20 @@ async function attemptAutoReconnect(index) {
     refreshDynamicTexts();
     return;
   }
+  if (lastConnectFailure?.pairing) {
+    /* The Bee refuses pairing until its key is pressed, so dialling again can
+     * never recover the link. Stop here and leave the Connect button to the
+     * user; the pairing hint shown by the failed attempt is the instruction. */
+    autoReconnect.active = false;
+    autoReconnect.attempts = 0;
+    autoReconnect.nextAt = 0;
+    stopAutoReconnectTimer();
+    stopAutoReconnectTicker();
+    appendLine(`[reconnect] ${t("reconnectPausedForPairing")}`);
+    setConnecting(false);
+    refreshDynamicTexts();
+    return;
+  }
   if (state.connected) {
     autoReconnect.active = false;
     autoReconnect.attempts = 0;
@@ -5712,6 +5745,9 @@ async function subscribeBleUart(device, signal, notificationSession) {
 
 async function connectOnce({ chooseDevice = false, reselectId = null, signal } = {}) {
   signal?.throwIfAborted();
+  /* Every attempt starts without a failure class; the catch below records one
+   * so automatic reconnect can tell a pairing refusal from a lost link. */
+  lastConnectFailure = null;
   if (state.mode === "ws") {
     setConnecting(true);
     try {
@@ -5743,6 +5779,7 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   let device = chooseDevice || reselectId ? null : state.device;
   let transportConnected = false;
   let pairingAttempted = false;
+  let pairingRefusedDuringConnect = false;
   try {
     await bleTransport.initialize();
     signal?.throwIfAborted();
@@ -5784,7 +5821,10 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
        * a read that was refused is a pairing problem on a board that
        * promised the service. The name says neither - the owner chooses
        * it, and can choose it for a current board too. */
-      if (!isMissingService(error)) throw error;
+      if (!isMissingService(error)) {
+        pairingRefusedDuringConnect = true;
+        throw error;
+      }
       await adoptLegacyNus(device, signal);
       return;
     }
@@ -5870,12 +5910,14 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   } catch (error) {
     if (!signal?.aborted) appendLine(`[error] ${error.message}`);
     const needsReselect = error.code === "BLE_RESELECT_REQUIRED";
+    const pairingFailure = pairingRefusedDuringConnect || pairingRefused(error);
+    lastConnectFailure = pairingFailure ? { pairing: true } : null;
     if (needsReselect && device && !signal?.aborted) {
       state.bleReselectId = device.id;
       appendLine(`[reconnect] ${t("bleReselectHint")}`);
       toast(t("bleReselectHint"), "error");
     }
-    if (pairingAttempted && !signal?.aborted && !needsReselect) {
+    if (pairingAttempted && !signal?.aborted && !needsReselect && pairingFailure) {
       appendLine(`[pairing] ${t("pairingFailed")}`);
       toast(t("pairingFailed"), "error");
     }

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("a refused encrypted read shows GPIO1 recovery and sends no UART data", async ({ page }) => {
+test("a refused encrypted read shows the pairing-key recovery and sends no UART data", async ({ page }) => {
   await page.route("**/app.js?*", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, body: await response.text() +
@@ -24,7 +24,8 @@ test("a refused encrypted read shows GPIO1 recovery and sends no UART data", asy
     return { calls, connected: state.connected };
   });
   expect(result).toEqual({ calls: ["connect", "read", "disconnect"], connected: false });
-  await expect(page.locator(".toast").filter({ hasText: "GPIO1" })).toBeVisible();
+  await expect(page.locator(".toast").filter({ hasText: /pairing key|配对键/i })).toBeVisible();
+  await expect(page.locator("#blePairingHint")).toContainText("30");
   await expect(page.locator("#connectButton")).toBeEnabled();
 });
 

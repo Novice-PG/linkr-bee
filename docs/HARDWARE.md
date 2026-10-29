@@ -246,7 +246,7 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
   - `@d=http://host/path/` / `@d off` / `@d?`（匿名 HTTP WebDAV）
   - `@h`（help）
 - WiFi 默认启用但无线电关闭，`@w=` 后开启；凭据默认只在 RAM，只有启用 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才写入 NVS（要求 secure boot + flash encryption）
-- C3/C5 的 GPIO1 为配对授权输入，内部上拉、低有效，通过按钮或跳线接 GND；WROOM 的 GPIO4 为可选输入，默认 `PAIRING_GPIO_AUTH=n`，不需要物理按键。Management 与两个 UART 服务要求加密 BLE；绑定持久化，已绑定主机重连无需拉低配对 GPIO。配对 GPIO 不执行恢复出厂。详见 [蓝牙配对](BLE_PAIRING.md)。
+- C3/C5 的 GPIO1 为配对授权输入，内部上拉、低有效，通过按钮或跳线接 GND；WROOM 的 GPIO4 为可选输入，默认 `PAIRING_GPIO_AUTH=n`，不需要物理按键。按下配对键会打开 30 秒授权窗口（`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`），窗口内发起配对即可，不需要一直按住。Management 与两个 UART 服务要求加密 BLE；绑定持久化，已绑定主机重连无需操作配对 GPIO。配对 GPIO 不执行恢复出厂。详见 [蓝牙配对](BLE_PAIRING.md)。
 
 ## 13. 量产要点
 

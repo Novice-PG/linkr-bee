@@ -324,10 +324,12 @@ BLE 路径丢弃的数据不会在重连后补发。
 ### 配对 GPIO、持久化与恢复出厂
 
 固件启用 LE Secure Connections Just Works 配对、绑定和加密 GATT 访问。
-C3/C5 在新增主机或替换旧密钥时，需要在请求到达前将 GPIO1 拉低。WROOM 的
+C3/C5 在新增主机或替换旧密钥时，需要先按下 GPIO1 打开 30 秒授权窗口。WROOM 的
 board conf 默认 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，不需要按
 GPIO4；只有把该选项设为 `y` 时，GPIO4 才作为物理授权输入。已有绑定的加密
-重连无需操作配对 GPIO。默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过
+重连无需操作配对 GPIO；新主机配对需在按下配对键后的 30 秒授权窗口内发起
+（`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`，设为 0 恢复“请求时必须按住”）。
+默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过
 恢复出厂清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
 
 C5 DevKitC 需要在 GPIO1 外接按钮或跳线；板载 BOOT 和 RST 不能用于配对授权。

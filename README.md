@@ -128,10 +128,12 @@ The UART side is 3.3 V logic, not RS-232. See the
    it is used only when `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y` (off in the
    default build).
 
-4. Authorize this host if the board requires it: hold the pairing GPIO to GND
-   (**GPIO1** on C3/C5, **USER_KEY/GPIO3** on the Linkr Bee X1.0), connect, and
-   accept the pairing prompt. WROOM ships
-   with pairing authorization disabled, so no GPIO4 press is needed; enable
+4. Authorize this host if the board requires it: press the pairing key once
+   (**GPIO1** on C3/C5, **USER_KEY/GPIO3** on the Linkr Bee X1.0) and connect
+   within 30 seconds, then accept the pairing prompt. The window is
+   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS` (30 s by default), so the key does
+   not have to be held for the whole exchange. WROOM ships with pairing
+   authorization disabled, so no GPIO4 press is needed; enable
    `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` to require it.
 
 5. Open a client. For the web terminal:
@@ -210,9 +212,10 @@ network. Use LAN mode on a network you trust.
 ## Pairing and security
 
 - The Bluetooth LE link is encrypted and bonded. On C3/C5 each new host is
-  authorized once by holding **GPIO1** to GND during pairing
-  (**GPIO3/USER_KEY** on the Linkr Bee X1.0). WROOM disables the
-  physical pairing check by default; GPIO4 is optional when
+  authorized once by pressing **GPIO1** to GND and connecting within 30 seconds
+  (**GPIO3/USER_KEY** on the Linkr Bee X1.0); the press opens the window, the
+  key does not have to stay held. WROOM disables the physical pairing check by
+  default; GPIO4 is optional when
   `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` is enabled.
 - Eight hosts are remembered across reboots and are not evicted automatically, so
   remove an unused host or factory-reset before adding a ninth.
@@ -232,7 +235,7 @@ network. Use LAN mode on a network you trust.
 | No output | Target TX to accessory RX, target is printing, baud rate matches |
 | Output but no input | Target RX to accessory TX; hardware flow control off unless CTS and RTS are both wired |
 | Garbled output | UART format matches the target: baud rate, data bits, parity, stop bits |
-| No pairing prompt | On C3/C5, ground GPIO1 before connecting (Linkr Bee X1.0: GPIO3/USER_KEY); WROOM needs no GPIO press unless its optional pairing check is enabled |
+| No pairing prompt | On C3/C5, press GPIO1 then connect within 30 s (Linkr Bee X1.0: GPIO3/USER_KEY); press again if the window expired. WROOM needs no GPIO press unless its optional pairing check is enabled |
 | LAN mode fails | Accessory on 2.4 GHz, host on the same network, token matches the one reported over Bluetooth LE |
 
 ## Limits

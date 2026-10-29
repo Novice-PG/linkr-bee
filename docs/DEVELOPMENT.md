@@ -432,11 +432,13 @@ log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
 ### Pairing GPIO, persistence, and factory reset
 
 BLE uses LE Secure Connections Just Works pairing, bonding and encrypted GATT
-access. C3/C5 hold GPIO1 low before a new host requests pairing. WROOM ships
-with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no GPIO press is needed;
-if that option is enabled, GPIO4 is the pairing input. Existing bonds restore
-encryption without the pairing GPIO; replacing lost host keys requires it again
-when the check is enabled. The default is eight bonds with no automatic
+access. C3/C5 press GPIO1 to open a pairing window: a press authorizes pairing
+requests for `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS` (30 s by default; 0
+restores the old "held during the request" rule), so the key does not have to
+stay held. WROOM ships with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no
+GPIO press is needed; if that option is enabled, GPIO4 is the pairing input.
+Existing bonds restore encryption without the pairing GPIO; replacing lost host
+keys requires a fresh press when the check is enabled. The default is eight bonds with no automatic
 eviction. A full table requires factory reset before adding more hosts. See
 [pairing and recovery](BLE_PAIRING.md).
 

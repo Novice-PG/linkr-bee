@@ -319,10 +319,28 @@ config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 	bool "Require GPIO button press for BLE pairing"
 	default n
 	help
-	  When enabled, the pairing GPIO (linkr-pairing alias) must be held
-	  active before the host can initiate BLE pairing. Set to n to allow
+	  When enabled, the pairing GPIO (linkr-pairing alias) must have been
+	  pressed before the host can initiate BLE pairing. Set to n to allow
 	  pairing without physical button access, e.g. for boards without a
 	  dedicated pairing button or during development.
+
+config LINKR_BLE_BRIDGE_PAIRING_GRACE_MS
+	int "Pairing authorization window after the pairing GPIO press (ms)"
+	depends on LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
+	default 30000
+	range 0 300000
+	help
+	  A press of the pairing GPIO authorizes pairing requests received
+	  within this many milliseconds after the press. Hosts scan, connect
+	  and only then request keys, so requiring the key to be held for the
+	  whole exchange asks users to guess when to press. Keep the window
+	  short enough that an authorized press cannot be reused long after the
+	  person walked away; the security property is still "somebody touched
+	  the board shortly before the new host paired".
+
+	  Holding the key low at the moment of the pairing request continues to
+	  authorize it. Set 0 to require the key low during the pairing request,
+	  which is the behaviour before this option existed.
 
 config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
 	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"
