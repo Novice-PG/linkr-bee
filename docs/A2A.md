@@ -94,8 +94,12 @@ A completed task carries the assistant's answer as an artifact:
   accessory changes run without further phone prompts. It still uses the app's
   own executors, evidence rules and one-write-at-a-time gate. A second external
   write tool call while a task is active is refused with a clear error.
-- One task runs at a time; up to 8 wait in the queue. A task has a 15-minute
-  timeout and can be stopped with `CancelTask` (MCP: `cancel_agent_task`).
+- One task runs at a time; up to 8 wait in the queue. There is **no hard
+  wall-clock limit by default**: a slow model or a target that takes minutes to
+  boot must not be killed by a timer while it is making progress. Callers that
+  want a deadline can set `metadata.timeoutMs` (up to 24 hours; 0 means none);
+  `CancelTask` (MCP: `cancel_agent_task`) is the normal way to stop a long task.
+  The app's Stop action also aborts the active task.
 - Sessions: `contextId` (A2A) or `sessionId` (MCP) continues the same
   conversation. Omit it for the default session; use `newSession` (MCP) or a new
   `contextId` for a fresh one. Board-stored instructions are read once when a

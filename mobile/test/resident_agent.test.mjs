@@ -119,8 +119,9 @@ async function waitForState(agent, taskId, states, timeoutMs = 2000) {
 test("arguments and readiness are validated before a task is queued", async () => {
   for (const args of [null, {}, { request: "   " }, { request: "x".repeat(12001) },
     { request: "ok", sessionId: "bad id" }, { request: "ok", maxTurns: 0 },
-    { request: "ok", maxTools: 999 }]) {
-    assert.throws(() => validateResidentTaskArgs(args), /object|request|sessionId|maxTurns|maxTools/);
+    { request: "ok", maxTools: 999 }, { request: "ok", timeoutMs: -1 },
+    { request: "ok", timeoutMs: 86400001 }]) {
+    assert.throws(() => validateResidentTaskArgs(args), /object|request|sessionId|maxTurns|maxTools|timeoutMs/);
   }
   const noConfig = createResidentAgent({
     storage: fakeStorage(),
@@ -214,6 +215,29 @@ test("a busy human conversation or disabled agent blocks new tasks", async () =>
 
   const disabled = build({ config: null });
   assert.throws(() => disabled.agent.startTask({ request: "hello" }), /AI configuration/);
+});
+
+test("a task has no wall-clock deadline unless the caller asks for one", async () => {
+  const harness = build({ block: true });
+  const task = harness.agent.startTask({ request: "long task" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const running = await harness.agent.getTask(task.taskId);
+  assert.equal(running.state, "running");
+  assert.equal(running.timedOut, false);
+  const status = harness.agent.getStatus();
+  assert.equal(status.limits.defaultTaskTimeoutMs, 0);
+  assert.equal(status.limits.maxTaskTimeoutMs, 24 * 60 * 60 * 1000);
+  await harness.agent.cancelTask(task.taskId);
+  harness.agent.dispose();
+});
+
+test("an explicit per-task timeout aborts and reports a timed-out failure", async () => {
+  const harness = build({ block: true });
+  const task = harness.agent.startTask({ request: "bounded task", timeoutMs: 25 });
+  const done = await waitForState(harness.agent, task.taskId, ["failed"], 1000);
+  assert.equal(done.timedOut, true);
+  assert.match(done.error, /timed out/);
+  harness.agent.dispose();
 });
 
 test("status exposes model details but never the key or headers", () => {

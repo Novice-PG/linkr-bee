@@ -33,7 +33,13 @@ export const RESIDENT_MAX_QUEUE = 8;
 export const RESIDENT_MAX_SESSIONS = 6;
 export const RESIDENT_SESSION_MESSAGES = 40;
 export const RESIDENT_SESSION_BYTES = 96000;
-export const RESIDENT_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+/* There is no hard wall-clock limit by default: a model can be slow, a target
+ * can take minutes to boot, and a task the phone owner chose to start should
+ * not be killed by a timer while it is making progress. Callers may set an
+ * explicit per-task deadline (0/absent = none); cancel_agent_task and the app's
+ * Stop action remain the way to end one early. */
+export const RESIDENT_DEFAULT_TASK_TIMEOUT_MS = 0;
+export const RESIDENT_MAX_TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const RESIDENT_MAX_REQUEST_CHARS = 12000;
 export const RESIDENT_MAX_CONTEXT_CHARS = 8000;
 export const RESIDENT_MAX_RESULT_CHARS = 30000;
@@ -103,6 +109,10 @@ export function validateResidentTaskArgs(args = {}) {
   if (args.sessionId !== undefined && (typeof args.sessionId !== "string" || !RESIDENT_SESSION_ID.test(args.sessionId))) {
     throw new Error("arguments.sessionId must be 1-128 characters of letters, digits, dot, underscore, colon or hyphen.");
   }
+  const timeoutMs = args.timeoutMs === undefined ? RESIDENT_DEFAULT_TASK_TIMEOUT_MS : Number(args.timeoutMs);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > RESIDENT_MAX_TASK_TIMEOUT_MS) {
+    throw new Error(`arguments.timeoutMs must be 0 (no deadline) or an integer up to ${RESIDENT_MAX_TASK_TIMEOUT_MS} ms.`);
+  }
   const maxTurns = args.maxTurns === undefined ? 32 : Number(args.maxTurns);
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > RESIDENT_MAX_TURNS) {
     throw new Error(`arguments.maxTurns must be an integer between 1 and ${RESIDENT_MAX_TURNS}.`);
@@ -111,7 +121,7 @@ export function validateResidentTaskArgs(args = {}) {
   if (!Number.isInteger(maxTools) || maxTools < 1 || maxTools > RESIDENT_MAX_TOOLS) {
     throw new Error(`arguments.maxTools must be an integer between 1 and ${RESIDENT_MAX_TOOLS}.`);
   }
-  return { request, context, sessionId: args.sessionId, newSession: args.newSession === true, maxTurns, maxTools };
+  return { request, context, sessionId: args.sessionId, newSession: args.newSession === true, maxTurns, maxTools, timeoutMs };
 }
 
 /* A device view for an approved task. The task-start approval is the one
@@ -409,10 +419,12 @@ export function createResidentAgent(deps = {}) {
         return;
       }
       active = { task, runner, timer: null };
-      active.timer = setTimeout(() => {
-        task.timedOut = true;
-        try { runner.abort?.(); } catch { /* best effort */ }
-      }, numberOr(deps.taskTimeoutMs, RESIDENT_TASK_TIMEOUT_MS));
+      if (task.timeoutMs > 0) {
+        active.timer = setTimeout(() => {
+          task.timedOut = true;
+          try { runner.abort?.(); } catch { /* best effort */ }
+        }, task.timeoutMs);
+      }
       const outcome = await runner.prompt(task.promptText);
       if (isTerminal(task.state)) {
         /* Cancellation already filed the task; keep its sentence. */
@@ -500,6 +512,7 @@ export function createResidentAgent(deps = {}) {
       progress: "queued",
       maxTurns: args.maxTurns,
       maxTools: args.maxTools,
+      timeoutMs: args.timeoutMs,
     };
     tasks.set(task.id, task);
     taskOrder.push(task.id);
@@ -566,7 +579,8 @@ export function createResidentAgent(deps = {}) {
         maxTurns: RESIDENT_MAX_TURNS, maxTools: RESIDENT_MAX_TOOLS,
         requestChars: RESIDENT_MAX_REQUEST_CHARS,
         contextChars: RESIDENT_MAX_CONTEXT_CHARS,
-        taskTimeoutMs: numberOr(deps.taskTimeoutMs, RESIDENT_TASK_TIMEOUT_MS),
+        defaultTaskTimeoutMs: RESIDENT_DEFAULT_TASK_TIMEOUT_MS,
+        maxTaskTimeoutMs: RESIDENT_MAX_TASK_TIMEOUT_MS,
       },
       recentTasks: listTasks({ limit: 5 }),
       lastError,

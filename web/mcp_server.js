@@ -304,7 +304,7 @@ export const MCP_TOOLS = Object.freeze([
   }),
   Object.freeze({
     name: "start_agent_task",
-    description: "Hand a task to the app's resident assistant and return immediately with a taskId to poll. The assistant runs with the AI settings saved in the app (a board-stored configuration is used only after the user has loaded it into the app), the board-stored instructions and the app's serial/accessory tools. Approving this call is the one consent for the task: inside it, serial writes and accessory changes run without further phone prompts, so review the request before approving. Tasks run one at a time and are queued; a task can be read with get_agent_task and stopped with cancel_agent_task. The assistant's output is model output, not device evidence: verify it with the read tools or the serial log.",
+    description: "Hand a task to the app's resident assistant and return immediately with a taskId to poll. The assistant runs with the AI settings saved in the app (a board-stored configuration is used only after the user has loaded it into the app), the board-stored instructions and the app's serial/accessory tools. Approving this call is the one consent for the task: inside it, serial writes and accessory changes run without further phone prompts, so review the request before approving. Tasks run one at a time and are queued; a task can be read with get_agent_task and stopped with cancel_agent_task. There is no hard wall-clock limit by default; pass timeoutMs (up to 24 hours) only when the caller wants a deadline, and remember that cancel_agent_task is the normal way to stop a long task. The assistant's output is model output, not device evidence: verify it with the read tools or the serial log.",
     inputSchema: {
       type: "object",
       properties: {
@@ -314,6 +314,7 @@ export const MCP_TOOLS = Object.freeze([
         newSession: { type: "boolean" },
         maxTurns: { type: "integer", minimum: 1, maximum: 64 },
         maxTools: { type: "integer", minimum: 1, maximum: 200 },
+        timeoutMs: { type: "integer", minimum: 0, maximum: 86400000 },
       },
       required: ["request"],
       additionalProperties: false,
@@ -1887,6 +1888,7 @@ export function createMcpHost(deps = {}) {
               ...(sessionId ? { sessionId } : {}),
               maxTurns: params.metadata?.maxTurns,
               maxTools: params.metadata?.maxTools,
+              timeoutMs: params.metadata?.timeoutMs,
             });
           } catch (error) {
             const busy = /queue is full|assistant is busy/i.test(String(error?.message || ""));

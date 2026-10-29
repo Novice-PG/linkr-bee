@@ -9,7 +9,8 @@ Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
 
 - **MCP 委派工具**（5 个，工具总数 21）：`get_agent_status`、`start_agent_task`、
   `get_agent_task`、`list_agent_tasks`、`cancel_agent_task`。任务异步排队，一次只跑一个，
-  最多 8 个等待；单任务 15 分钟超时；会话用 `sessionId` 续聊，`newSession` 重开。
+  最多 8 个等待；默认没有墙钟硬超时，调用方可用 `timeoutMs`（最长 24 小时）设期限，
+  正常停止方式是取消任务；会话用 `sessionId` 续聊，`newSession` 重开。
 - **A2A**：同一端口提供 `/.well-known/agent-card.json` 与 `POST /a2a`，实现 A2A v1.0
   JSON-RPC 的 `SendMessage`、`GetTask`、`ListTasks`、`CancelTask`、
   `GetExtendedAgentCard`；Bearer 校验复用 MCP 令牌；card 声明不支持流式与推送，客户端
