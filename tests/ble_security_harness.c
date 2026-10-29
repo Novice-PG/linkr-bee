@@ -44,13 +44,17 @@ static void quiet_log(const char *fmt, ...) { (void)fmt; }
 #define LOG_ERR(...) quiet_log(__VA_ARGS__)
 
 /* The pairing gate latches the press from a GPIO interrupt and measures the
- * authorization window with the 32-bit uptime counter, so the host harness
- * provides both plus the atomic primitives the production code uses. */
+ * authorization window with the full uptime counter. This single-threaded
+ * harness supplies lock stubs; firmware builds check the real ISR-safe locks. */
 struct device { int unused; };
 struct gpio_callback;
 typedef unsigned int gpio_port_pins_t;
-typedef int atomic_val_t;
-typedef int atomic_t;
+struct k_spinlock { bool locked; };
+typedef int k_spinlock_key_t;
+static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{ assert(!lock->locked); lock->locked = true; return 0; }
+static inline void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{ (void)key; assert(lock->locked); lock->locked = false; }
 #define BIT(n) (1U << (n))
 #define GPIO_INT_EDGE_TO_ACTIVE 0x40
 typedef void (*gpio_callback_handler_t)(const struct device *port,
@@ -61,7 +65,7 @@ struct gpio_callback {
     gpio_port_pins_t pin_mask;
 };
 struct gpio_callback *registered_pairing_cb;
-uint32_t fake_uptime_ms;
+int64_t fake_uptime_ms;
 int interrupt_configures;
 static inline void gpio_init_callback(struct gpio_callback *cb,
                                       gpio_callback_handler_t handler,
@@ -72,9 +76,7 @@ static inline int gpio_add_callback_dt(const struct gpio_dt_spec *spec,
 { (void)spec; registered_pairing_cb = cb; return 0; }
 static inline int gpio_pin_interrupt_configure_dt(const struct gpio_dt_spec *spec, int flags)
 { (void)spec; assert(flags == GPIO_INT_EDGE_TO_ACTIVE); interrupt_configures++; return 0; }
-static inline uint32_t k_uptime_get_32(void) { return fake_uptime_ms; }
-static inline atomic_val_t atomic_get(const atomic_t *target) { return *target; }
-static inline void atomic_set(atomic_t *target, atomic_val_t value) { *target = value; }
+static inline int64_t k_uptime_get(void) { return fake_uptime_ms; }
 
 static int gpio_value, gpio_reads, configured_error, request_error, disconnects;
 static int security_requested;
@@ -155,6 +157,33 @@ int main(int argc, char **argv)
         gpio_value = -EIO;
         assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
         assert(disconnects == 0);
+    } else if (!strcmp(argv[1], "uptime_wrap")) {
+        const int64_t cycle = INT64_C(1) << 32;
+        gpio_value = 0;
+        /* Even before the first press, a large uptime cannot authorize. */
+        fake_uptime_ms = cycle + 1000;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        fake_uptime_ms = 1000;
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        fake_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS + 1;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        /* Old presses must not become fresh after one or multiple 32-bit wraps. */
+        for (int cycles = 1; cycles <= 3; cycles++) {
+            fake_uptime_ms = cycles * cycle + 1000;
+            assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        }
+        /* A real press near a wrap still gets its entire configured window. */
+        fake_uptime_ms = 4 * cycle - 10;
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        fake_uptime_ms += CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        fake_uptime_ms++;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+        /* Re-arm normally after long uptime, and keep read errors fail-closed. */
+        registered_pairing_cb->handler(NULL, registered_pairing_cb, 1);
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_SUCCESS);
+        gpio_value = -EIO;
+        assert(registered_auth->pairing_accept(&conn, &feat) == BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
     } else if (!strcmp(argv[1], "no_grace")) {
         /* GRACE_MS=0 restores the "key held during the request" rule. */
         assert(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS == 0);

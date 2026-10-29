@@ -3543,14 +3543,13 @@ let userInitiatedDisconnect = false;
 let lastConnectFailure = null;
 
 function pairingRefused(error) {
-  const name = String(error?.name || "");
   const text = String(error?.message || "");
 
-  if (name === "SecurityError") return true;
-  /* A read refused on the first encrypted characteristic is the pairing
-   * refusal documented for this board; a missing service is a legacy board
-   * and is handled before this check. */
-  return /insufficient (authentication|encryption|security)|authentication failed|pairing failed|GATT Server is disconnected/i.test(text);
+  /* Only explicit authentication failures require a fresh pairing attempt.
+   * Timeouts/disconnects can happen during any GATT operation, including the
+   * first encrypted read. SecurityError alone may instead be a browser policy
+   * restriction and is not evidence that the Bee refused pairing. */
+  return /insufficient (authentication|encryption|security)|authentication failed|pairing failed/i.test(text);
 }
 
 function setConnecting(connecting) {
@@ -5779,7 +5778,6 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   let device = chooseDevice || reselectId ? null : state.device;
   let transportConnected = false;
   let pairingAttempted = false;
-  let pairingRefusedDuringConnect = false;
   try {
     await bleTransport.initialize();
     signal?.throwIfAborted();
@@ -5815,16 +5813,10 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
         MGMT_PROTOCOL,
       );
     } catch (error) {
-      /* The oldest firmware has no Management Service, and its terminal
-       * stays usable. Which board this is, is told by the failure and not
-       * by the name: a service that is not there is a legacy board, while
-       * a read that was refused is a pairing problem on a board that
-       * promised the service. The name says neither - the owner chooses
-       * it, and can choose it for a current board too. */
-      if (!isMissingService(error)) {
-        pairingRefusedDuringConnect = true;
-        throw error;
-      }
+      /* Only a missing service identifies legacy firmware. Other failures
+       * retain their original cause: an encrypted read can time out or lose
+       * its link without pairing having been refused. */
+      if (!isMissingService(error)) throw error;
       await adoptLegacyNus(device, signal);
       return;
     }
@@ -5910,7 +5902,7 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
   } catch (error) {
     if (!signal?.aborted) appendLine(`[error] ${error.message}`);
     const needsReselect = error.code === "BLE_RESELECT_REQUIRED";
-    const pairingFailure = pairingRefusedDuringConnect || pairingRefused(error);
+    const pairingFailure = pairingRefused(error);
     lastConnectFailure = pairingFailure ? { pairing: true } : null;
     if (needsReselect && device && !signal?.aborted) {
       state.bleReselectId = device.id;

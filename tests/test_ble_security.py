@@ -70,6 +70,9 @@ class BleSecurityTests(unittest.TestCase):
         press must authorize pairing for a while after they let go."""
         subprocess.run([self.binary, "grace"], check=True)
 
+    def test_expired_press_does_not_reopen_after_uptime_wrap(self):
+        subprocess.run([self.binary, "uptime_wrap"], check=True)
+
     def test_zero_grace_restores_the_held_during_request_rule(self):
         binary = Path(self.tmp.name) / "security-test-held"
         subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra",

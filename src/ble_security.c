@@ -5,7 +5,6 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/atomic.h>
 #include "ble_security.h"
 
 LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
@@ -46,13 +45,20 @@ static const struct gpio_dt_spec pairing_gpio =
 #endif
 
 static struct gpio_callback pairing_press_callback;
-static atomic_t pairing_pressed_at;
-static atomic_t pairing_press_seen;
+/* A 32-bit millisecond timestamp would reopen an old authorization every
+ * 49.7 days. Keep the full uptime and protect the shared 64-bit value from
+ * torn reads between the GPIO ISR and the Bluetooth thread on 32-bit MCUs. */
+static struct k_spinlock pairing_press_lock;
+static int64_t pairing_pressed_at;
+static bool pairing_press_seen;
 
 static void pairing_press_latch(void)
 {
-	atomic_set(&pairing_pressed_at, (atomic_val_t)k_uptime_get_32());
-	atomic_set(&pairing_press_seen, 1);
+	k_spinlock_key_t key = k_spin_lock(&pairing_press_lock);
+
+	pairing_pressed_at = k_uptime_get();
+	pairing_press_seen = true;
+	k_spin_unlock(&pairing_press_lock, key);
 }
 
 static void pairing_pressed(const struct device *port,
@@ -71,7 +77,9 @@ static void pairing_pressed(const struct device *port,
 static bool pairing_gpio_authorizes(void)
 {
 	int pressed;
-	uint32_t age;
+	int64_t age;
+	bool authorized;
+	k_spinlock_key_t key;
 
 	if (!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)) {
 		return true;
@@ -83,12 +91,14 @@ static bool pairing_gpio_authorizes(void)
 	if (pressed == 1) {
 		return true;
 	}
-	if (PAIRING_GRACE_MS <= 0 || !atomic_get(&pairing_press_seen)) {
+	if (PAIRING_GRACE_MS <= 0) {
 		return false;
 	}
-	/* Unsigned subtraction keeps the 32-bit uptime comparison wrap-safe. */
-	age = k_uptime_get_32() - (uint32_t)atomic_get(&pairing_pressed_at);
-	return age <= (uint32_t)PAIRING_GRACE_MS;
+	key = k_spin_lock(&pairing_press_lock);
+	age = k_uptime_get() - pairing_pressed_at;
+	authorized = pairing_press_seen && age >= 0 && age <= PAIRING_GRACE_MS;
+	k_spin_unlock(&pairing_press_lock, key);
+	return authorized;
 }
 
 static enum bt_security_err pairing_accept(
