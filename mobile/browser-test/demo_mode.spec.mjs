@@ -10,7 +10,8 @@ test("the demo URL connects a mock X1.0 and opens the board panel", async ({ pag
 
   await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
   await expect(page.locator("#deviceName")).toContainText("Linkr Bee X1.0 (demo)");
-  await expect(page.locator('[data-settings-page="board"]:visible')).toHaveCount(3);
+  // Four board cards: the saved-pairings card joined LED, optocoupler and IR.
+  await expect(page.locator('[data-settings-page="board"]:visible')).toHaveCount(4);
 
   await expect(page.locator("#boardLedStatus")).toContainText("001830");
   await expect(page.locator("#boardOptoStatus")).toContainText(/Contact open|触点已断开/);
