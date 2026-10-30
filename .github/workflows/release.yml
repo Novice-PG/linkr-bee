@@ -87,6 +87,14 @@ jobs:
           pattern: linkr-bee-esp32*
           path: artifacts/firmware
 
+      # The X1.0 artifact is named linkr-bee-<slug> with slug
+      # "linkr-bee-x1-0", so it does not match the esp32* pattern above.
+      - name: Download the Linkr Bee X1.0 firmware bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: linkr-bee-linkr-bee-x1-0
+          path: artifacts/firmware/linkr-bee-linkr-bee-x1-0
+
       - name: Download the Android APK
         uses: actions/download-artifact@v4
         with:

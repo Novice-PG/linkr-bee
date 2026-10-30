@@ -20,11 +20,18 @@ BOARDS = ("esp32c3-supermini", "esp32c3-devkitm", "esp32c3-devkitc",
 
 
 def write_fixture(root: Path, *, firmware_version: str = "0.1.2",
-                  web_version: str = "0.1.2", apk_version: str = "0.1.2") -> None:
-    """Write one artifact of each kind, carrying the versions asked for."""
+                  web_version: str = "0.1.2", apk_version: str = "0.1.2",
+                  macos: bool = True) -> None:
+    """Write one artifact of each kind, carrying the versions asked for.
+
+    ``macos=False`` writes the Linux and Windows legs only, the shape a run
+    has when the ENABLE_MACOS switch is off.
+    """
     for directory in ("desktop", "firmware", "web", "apk"):
         (root / directory).mkdir()
     for target in TARGETS:
+        if not macos and "apple" in target:
+            continue
         for prefix in ("linkr-bee", "linkr-bee-cli"):
             suffix = "zip" if "windows" in target else "tar.gz"
             (root / "desktop" / f"{prefix}-0.1.2-{target}.{suffix}").write_bytes(b"fixture")
@@ -88,6 +95,37 @@ class ReleaseAssemblyTests(unittest.TestCase):
                 for asset in manifest["assets"]:
                     self.assertEqual(asset["sha256"], hashlib.sha256(
                         (root / "out" / asset["name"]).read_bytes()).hexdigest())
+
+    def test_the_desktop_matrix_may_omit_the_macos_legs(self):
+        # The workflow builds the macOS legs only when ENABLE_MACOS is true, so
+        # a release has to assemble from the Linux and Windows legs alone.
+        with tempfile.TemporaryDirectory(prefix="linkr-release-no-macos-") as tmp:
+            root = Path(tmp)
+            write_fixture(root, macos=False)
+            result = subprocess.run(command_for(root),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # 20 desktop + 6 firmware + Web + APK, plus the checksums and the
+            # manifest.
+            self.assertEqual(len(list((root / "out").iterdir())), 30)
+            manifest = json.loads((root / "out/release-manifest.json").read_text())
+            self.assertEqual(len(manifest["assets"]), 28)
+            targets = {asset["target"] for asset in manifest["assets"]
+                       if asset["kind"] == "desktop"}
+            self.assertEqual(targets, set(TARGETS) - {"aarch64-apple-darwin",
+                                                      "x86_64-apple-darwin"})
+
+    def test_a_missing_linux_or_windows_leg_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-release-missing-") as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            for path in (root / "desktop").glob("*x86_64-pc-windows-gnu*"):
+                path.unlink()
+            result = subprocess.run(command_for(root),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("the desktop matrix is missing: x86_64-pc-windows-gnu",
+                          result.stderr)
 
     def test_component_versions_come_from_the_artifacts(self):
         cases = [

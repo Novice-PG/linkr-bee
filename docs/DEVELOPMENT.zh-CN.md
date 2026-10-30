@@ -131,6 +131,19 @@ west build -b linkr_bee_x1_0 linkr-bee
 组装固件 ZIP、Web 包、APK 与桌面压缩包。也可以在 tag 上手动词发一次
 dry-run，只执行组装、不修改 GitHub release。
 
+桌面矩阵始终构建 Linux 与 Windows 目标。两个 macOS 目标可选：只有仓库变量
+`ENABLE_MACOS` 为 `true` 时才构建，因为托管的 macOS runner 不一定分配得到，
+而排队后被取消的目标会让整个 run 失败，并拖住其他平台的压缩包。
+`tools/assemble_release.py` 接受带或不带 macOS 产物的发布，但缺少任一
+Linux 或 Windows 目标时会拒绝组装。
+
+发布之后组件还会继续前进：APK 打包的是同一提交构建的 Web 终端，固件也会跟随
+固件源码。手动触发 “Refresh release assets”
+（`.github/workflows/release-refresh.yml`，填 tag 并勾选 `apk` / `firmware`）
+会用当前 ref 重新构建选中的产物并替换到该发布上，由
+`tools/refresh_release.py` 同步改写 `release-manifest.json` 与 `SHA256SUMS`。
+没有勾选的资产不会被改动。
+
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：

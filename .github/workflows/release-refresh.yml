@@ -1,0 +1,114 @@
+name: Refresh release assets
+
+# A release is a snapshot of the tagged commit, but the components move on: the
+# APK wraps the Web terminal, and the firmware images are built from the same
+# tree. This dispatch rebuilds from the current ref and replaces the chosen
+# assets on an existing release, patching release-manifest.json and SHA256SUMS
+# from the rebuilt files so the published hashes keep describing the bytes
+# beside them. Assets it does not replace keep the files they were published
+# with.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to refresh"
+        required: true
+        default: "v0.1.0"
+      apk:
+        description: "Replace the Android APK"
+        type: boolean
+        default: true
+      firmware:
+        description: "Replace the six firmware bundles"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  # The build workflow already knows how to produce both kinds of asset: the
+  # APK job syncs the Web bundle into Capacitor, and each firmware leg zips its
+  # own board.
+  build:
+    uses: ./.github/workflows/build.yml
+
+  refresh:
+    name: Replace the assets and their checksums
+    needs: build
+    if: inputs.apk || inputs.firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the tool that rebuilds the assets
+        uses: actions/checkout@v4
+
+      - name: Collect the APK built by this run
+        if: inputs.apk
+        uses: actions/download-artifact@v4
+        with:
+          name: linkr-bee-apk
+          path: assets/apk
+
+      - name: Collect the firmware built by this run
+        if: inputs.firmware
+        uses: actions/download-artifact@v4
+        with:
+          # Every firmware artifact is named after its board; the APK and Web
+          # artifacts also match, and tools/refresh_release.py ignores anything
+          # that is not a board slug.
+          pattern: linkr-bee-*
+          path: assets/firmware
+
+      - name: Read the metadata the release carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p meta
+          gh release download "$TAG" \
+            --pattern 'SHA256SUMS' \
+            --pattern 'release-manifest.json' \
+            --dir meta
+
+      - name: Rebuild the assets and patch the metadata
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          args=(--tag "$TAG" --run-id "$GITHUB_RUN_ID"
+                --manifest meta/release-manifest.json
+                --sums meta/SHA256SUMS
+                --out release-out)
+          if [ "${{ inputs.apk }}" = "true" ]; then
+            args+=(--apk "$(ls assets/apk/*.apk)")
+          fi
+          if [ "${{ inputs.firmware }}" = "true" ]; then
+            args+=(--firmware-dir assets/firmware)
+          fi
+          python3 tools/refresh_release.py "${args[@]}"
+
+      - name: Replace the assets and upload the updated metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-out/*)
+          gh release upload "$TAG" "${files[@]}" \
+            meta/SHA256SUMS meta/release-manifest.json --clobber
+
+      - name: Read the release back
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "\(.size)\t\(.name)"' | sort -k2
