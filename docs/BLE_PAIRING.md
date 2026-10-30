@@ -111,3 +111,23 @@ Management、Reliable UART 和兼容 NUS 的特征值及 CCC 均要求加密访�
 表中“配对 GPIO”在 C3/C5 为 GPIO1；WROOM 默认关闭授权，手工启用时才是 GPIO4。
 建议覆盖 C3/C5/WROOM、Android、iOS、桌面 Chrome 与 Linux BlueZ，并在配对
 期间并发 UART 流量及 WiFi 活动验证栈和内存余量。
+
+### Manage saved hosts
+
+In **Settings → Board → Paired devices**, refresh the list and remove an
+individual pairing. The list uses Bluetooth identity addresses (public/random),
+not host names or temporary scan addresses, and marks the current host.
+Deletion requires the current control owner and confirmation. Removing a connected
+host disconnects it; removing this host stops browser automatic reconnection.
+Forget the old pairing in the host OS before pairing again under the board's
+normal physical-authorization policy. Other hosts and target-machine bindings
+are preserved. Older firmware without this command hides the card.
+
+The encrypted BLE management commands are `@linkr bonds?` (read-only) and
+`@linkr bonds remove <type>/<address>` (control owner only), for example
+`@linkr bonds remove 0/AA:BB:CC:DD:EE:01`. Type 0 is public, 1 is random.
+The removal acknowledgement `OK bonds queued` means accepted, not completed;
+queries report `pending` and the last removal `result` (zero on success).
+The firmware delays removal briefly so even the current host can receive the
+acknowledgement before its encrypted connection is closed. A lost acknowledgement
+does not prove failure; reconnect and refresh to verify.

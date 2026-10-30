@@ -2485,3 +2485,9 @@ button,
     gap: 8px;
   }
 }
+
+/* Paired-host identities wrap inside the existing board card. */
+.bond-list { display: grid; gap: 10px; margin-bottom: 12px; }
+.bond-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.bond-row > span { flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+.bond-row .btn { min-height: 44px; }

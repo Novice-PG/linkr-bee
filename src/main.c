@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "bond_manager.h"
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -1604,7 +1605,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
 		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
 		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
-		!strcmp(body, "target?") || linkr_aux_is_readonly(body);
+		!strcmp(body, "bonds?") || !strcmp(body, "target?") || linkr_aux_is_readonly(body);
 	if (!readonly) {
 		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {
 			(void)send_control_response(conn, "ERR control=readonly\r\n");
@@ -1624,6 +1625,12 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		}
 	}
 
+	char bond_response[512];
+	if (linkr_bond_command(conn, body, bond_response, sizeof(bond_response))) {
+		(void)send_control_response(conn, "%s", bond_response);
+		return true;
+	}
+
 	char target_response[80];
 	if (linkr_target_command(body, target_response, sizeof(target_response))) {
 		(void)send_control_response(conn, "%s", target_response);
@@ -1635,7 +1642,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 
 		linkr_aux_help(aux_help_text, sizeof(aux_help_text));
 		(void)send_control_response(conn,
-					     "OK cmds: @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
+					     "OK cmds: @linkr bonds?|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 					    "@n?|@n=<name>|@n default "
 #endif
