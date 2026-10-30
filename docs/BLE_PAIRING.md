@@ -125,9 +125,21 @@ Forget the old pairing in the host OS before pairing again under the board's
 normal physical-authorization policy. Other hosts and target-machine bindings
 are preserved. Older firmware without this command hides the card.
 
-The encrypted BLE management commands are `@linkr bonds?` (read-only) and
+Each pairing can also carry a **display label** (for example "Alice's phone"),
+stored on the board in NVS under the bond's identity address. The label is
+display-only and is never authenticated. The web editor pre-fills it from the
+browser's user agent, the phone apps from the connected device's Bluetooth name,
+and the TUI from the host user name; the owner can always edit or clear it.
+Deleting a pairing deletes its label too.
+
+The encrypted BLE management commands are `@linkr bonds?` (read-only),
 `@linkr bonds remove <type>/<address>` (control owner only), for example
-`@linkr bonds remove 0/AA:BB:CC:DD:EE:01`. Type 0 is public, 1 is random.
+`@linkr bonds remove 0/AA:BB:CC:DD:EE:01`, and
+`@linkr bonds label <type>/<address> [<hex>|clear]`. Type 0 is public, 1 is
+random. A label travels hex-encoded because it is UTF-8 text; a bare address is
+a read-only query, while writing or clearing needs the control owner. The list
+never carries labels, because eight of them would overflow the reply: read one
+address at a time.
 The removal acknowledgement `OK bonds queued` means accepted, not completed;
 queries report `pending` and the last removal `result` (zero on success).
 The firmware delays removal briefly so even the current host can receive the
