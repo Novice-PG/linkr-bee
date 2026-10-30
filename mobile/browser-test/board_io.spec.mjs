@@ -148,6 +148,7 @@ async function mockBoard(page, { replies = {}, learning = false, names = {}, cap
             : "OK ir slots=0:0,1:0,2:0,3:0,4:0,5:0,6:0,7:0 used=0";
         }
       }
+      if (command === "@linkr bonds?") return "ERR unknown command";
       return "OK";
     });
     setConnected(true);
@@ -178,7 +179,7 @@ test("the board section shows the state the board reports", async ({ page }) => 
   }, names: { "0": "客厅 电源" } });
   await openBoardPage(page);
 
-  await expect(page.locator('[data-settings-page="board"]')).toHaveCount(3);
+  await expect(page.locator('[data-settings-page="board"]')).toHaveCount(4);
   await expect(page.locator('[data-settings-page="board"]:visible')).toHaveCount(3);
   await expect(page.locator('#controlsPanel [data-settings-page="connection"]:visible')).toHaveCount(0);
 
@@ -343,6 +344,7 @@ test("the desktop rail opens the board section", async ({ browser }) => {
       if (command === "@o?") return "OK opto=open";
       if (command === "@r?") return "OK ir rx=off frames=0 repeats=0 glitches=0 last=none learn=idle,slots=0/8";
       if (command === "@r slots") return "OK ir slots=0:0,1:0,2:0,3:0,4:0,5:0,6:0,7:0 used=0";
+      if (command === "@linkr bonds?") return "ERR unknown command";
       return "OK";
     });
     setConnected(true);
@@ -526,7 +528,7 @@ test("the rail still shows one settings section at a time", async ({ browser }) 
     const { state, setConnected } = window.__test;
     state.mode = "ble";
     state.mgmtReady = true;
-    window.__test.setControl(async () => "OK");
+    window.__test.setControl(async command => command === "@linkr bonds?" ? "ERR unknown command" : "OK");
     setConnected(true);
   });
   await page.locator("#panelToggle").click();

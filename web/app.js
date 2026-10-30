@@ -1,3 +1,4 @@
+import { createBondUi } from "./bond_ui.js";
 "use strict";
 
 import { MGMT_CAP_MULTI_SESSION, parseSerialControl, isReadonlyManagementCommand } from "./serial_control.js";
@@ -290,6 +291,7 @@ const state = {
    * learned-slot table. `supported` stays null until the first reply says
    * whether this firmware exposes the @l/@o/@r group at all. */
   features: {
+    bonds: null,
     led: null,
     opto: null,
     ir: null,
@@ -2165,6 +2167,7 @@ function assertSerialInput(revision = state.serialControlRevision) {
 }
 
 function renderSerialControl() {
+  bondUi?.render();
   const status = document.getElementById("serialControlStatus");
   const button = document.getElementById("serialControlButton");
   const control = state.connected ? state.serialControl : null;
@@ -3600,6 +3603,7 @@ function setConnecting(connecting) {
  */
 
 let boardSwatchButtons = [];
+let bondUi = null;
 
 function boardUsable() {
   return state.connected && state.mode !== "ws" && state.mgmtReady;
@@ -3638,6 +3642,7 @@ function updateNetworkCardTitle() {
 function applyFeatureVisibility() {
   const features = state.features;
   const cards = [
+    [$("boardBondsCard"), features.bonds],
     [elements.boardLedCard, features.led],
     [elements.boardOptoCard, features.opto],
     [elements.boardIrCard, features.ir],
@@ -3655,7 +3660,7 @@ function applyFeatureVisibility() {
   /* Prompts live on the AI page now, so the Board section only depends on the
    * three board devices. */
   const boardUnsupported = features.led === false && features.opto === false &&
-    features.ir === false;
+    features.ir === false && features.bonds === false;
   setTabHidden("board", boardUnsupported);
 
   if (elements.wifiBlock) elements.wifiBlock.hidden = features.wifi === false;
@@ -3702,6 +3707,7 @@ function hideUnsupportedFeature(key, text) {
 }
 
 function refreshBoardLabels() {
+  bondUi?.render();
   for (const button of boardSwatchButtons) {
     if (!button.dataset.labelKey) continue;
     const label = t(button.dataset.labelKey);
@@ -3723,6 +3729,7 @@ function refreshBoardLabels() {
 }
 
 function updateBoardIoControls() {
+  bondUi?.render();
   state.board.canControl = state.connected && state.mode !== "ws" && state.mgmtReady;
   const enabled = state.board.canControl;
   const actions = [
@@ -4360,6 +4367,7 @@ function wireBoardPromptControls() {
 
 async function refreshBoardIo() {
   if (!state.board.canControl) return;
+  await bondUi?.query();
   await refreshBoardLed();
   await refreshBoardOpto();
   await refreshBoardIr();
@@ -4367,6 +4375,14 @@ async function refreshBoardIo() {
 }
 
 function wireBoardIoControls() {
+  bondUi = createBondUi({
+    card: $("boardBondsCard"),
+    context: () => ({ lang, supported: state.features.bonds, ready: boardUsable(), control: canSerialInput(), generation: state.writeGeneration }),
+    send: command => boardSend(command),
+    supported: value => setFeature("bonds", value),
+    beforeSelfDelete: () => { cancelAutoReconnect(); userInitiatedDisconnect = true; },
+    afterSelfDelete: (token, queued) => { if (!queued && state.writeGeneration === token) userInitiatedDisconnect = false; },
+  });
   if (!elements.boardLedSwatches) return;
   boardSwatchButtons = BOARD_SWATCHES.map((swatch) => {
     const button = document.createElement("button");
@@ -4541,7 +4557,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
 
   const connectionChanged = state.connected !== connected;
   if (connectionChanged) {
-    for (const key of ["led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
+    for (const key of ["bonds", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
       state.features[key] = null;
     }
     state.features.wifi = connected && !isWs && state.mgmtReady
