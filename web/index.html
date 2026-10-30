@@ -333,8 +333,10 @@
         <section id="logViewCard" class="card" data-settings-page="terminal" aria-labelledby="logViewTitle">
           <div class="card-title"><span class="dot"></span><span id="logViewTitle" data-i18n="logViewTitle">Log view</span></div>
           <label class="field">
-            <span class="field-label" data-i18n="logViewTitle">Log view</span>
-            <select id="logViewSelect" aria-describedby="logViewHint">
+            <!-- The card band above already says "Log view"; repeating it as a field
+                 label read as a duplicate heading. The control keeps the name. -->
+            <select id="logViewSelect" aria-describedby="logViewHint"
+                    data-i18n-aria="logViewTitle" aria-label="Log view">
               <option value="reading" data-i18n="logViewReading">Reading</option>
               <option value="raw" data-i18n="logViewRaw">Raw</option>
             </select>

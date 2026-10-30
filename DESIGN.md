@@ -192,6 +192,7 @@ components:
 - **Shadow Strategy:** 唯一的面板投影（见 Elevation）
 - **Internal Padding:** 16px；卡片间距 14px
 - **Title:** Title 层级 + 信号绿 7px 圆点引导
+- **Vertical rhythm:** 一张卡内部的竖向节奏只由**一种**机制决定。`display: grid; gap` 的卡片（`.board-card`、`.bond-card`）里，标题带和子项自带的上下外边距必须清零，否则 gap 会与它们叠加（14 + 14 + 8 = 36px，而 block 卡片是 14px）——同一列的卡片看起来就对不齐。
 
 ### Inputs / Fields
 - **Style:** 输入底色（比面板更暗的嵌层）、1px 描边、圆角 10px、高 36px

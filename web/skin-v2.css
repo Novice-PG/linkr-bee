@@ -455,10 +455,8 @@ h1 {
   box-shadow: var(--shadow-flat);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-  /* Firefox reserves a classic scrollbar; Chromium can overlay it. Reserving
-   * the gutter in both keeps the drawer's text measure identical. */
+  /* Reserve the lane whether or not this drawer scrolls right now, so the text
+   * measure does not shift between pages. */
   scrollbar-gutter: stable;
 }
 
@@ -528,7 +526,9 @@ h1 {
  * summary is the band and the hairline only appears once there is something
  * under it. */
 .controls .diagnostics-summary {
-  padding: 11px 16px;
+  /* Same horizontal edge as the body below it: the phone layout shrinks
+   * --card-pad to 13px, and a hardcoded 16px here offset the title by 3px. */
+  padding: 11px var(--card-pad, 16px);
   min-height: 44px;
   background: var(--panel-2);
 }
@@ -537,8 +537,24 @@ h1 {
   margin-bottom: 0;
 }
 
+/* The band is this card's full-bleed header and carries the card padding, so the
+ * body lines up with it: same horizontal edge, plus the 14px rhythm under the
+ * hairline. Without the top padding the first tile row sat flush against the
+ * band while every other card shows 14px there, and the old 14px side padding
+ * put the tiles 2px left of the title. */
+.controls .diagnostics-content {
+  padding: 14px var(--card-pad, 16px) var(--card-pad, 16px);
+}
+
 .controls .diagnostics-card[open] > .diagnostics-summary {
   border-bottom: 1px solid var(--line-soft);
+}
+
+/* Two action groups share this card. Without the gap the WebDAV heading sat
+ * flush against the WiFi buttons above it (0px, where every other group starts
+ * 14px down), so it read as a label for those buttons. */
+#webdavBlock {
+  margin-top: 14px;
 }
 
 /* Field labels are labels, not body copy: 12.5 px/400 read as prose next to
@@ -2169,13 +2185,29 @@ button,
  * same workbench grid, one quiet status line per action group. */
 .board-card {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 /* Paired devices live in the Connection section, not the Board hardware page. */
 .bond-card {
   display: grid;
-  gap: 12px;
+  gap: 14px;
+}
+
+/* Inside a grid card the gap is the only rhythm. Left alone, the header band's
+ * own 14px bottom margin, the gap, and the next row's top margin (6-8px on a
+ * hint or a button grid) all add up: 34px under the header against the 14px a
+ * block card shows, and uneven steps between the rows below it. The band's
+ * margin comes from `.controls .card > .card-title`, hence the prefix. */
+.controls .card.board-card > .card-title,
+.controls .card.bond-card > .card-title {
+  margin-bottom: 0;
+}
+
+.board-card > :not(.card-title),
+.bond-card > :not(.card-title) {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 /* The global `.field` margin is for stacked forms; inside the board rows it
@@ -2295,10 +2327,20 @@ button,
   outline-offset: 2px;
 }
 
-.board-color-row,
-.board-pulse-row {
+.board-color-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Pulse length and its button are a field row: the number field takes the space
+ * and the button keeps its own width, so the row ends where the button row above
+ * it ends. As a flex row the field shrank to its content width instead and left
+ * the right half of the card empty. */
+.board-pulse-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
 }
