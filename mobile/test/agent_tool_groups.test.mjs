@@ -32,7 +32,8 @@ test('focused default declares only core tools and reduces fixed context by at l
       stream:stream(context=>{lists[toolProfile]=names(context); return done;})});
     await agent.prompt('Read-only diagnosis');
   }
-  assert.deepEqual(new Set(lists.focused), CORE_TOOL_NAMES);
+  // Interactive choice is capability-gated: headless hosts cannot answer it.
+  assert.deepEqual(new Set(lists.focused), new Set([...CORE_TOOL_NAMES].filter(name => name !== "ask_user")));
   assert(metrics.focused.fixedChars < metrics.full.fixedChars * 0.65, JSON.stringify(metrics));
   assert.equal(metrics.focused.historyBudgetChars, 24000);
   assert.equal(metrics.full.toolCount, 27);

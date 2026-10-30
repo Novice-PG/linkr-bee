@@ -9,10 +9,12 @@
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
     <link rel="stylesheet" href="./style.css?v=20261029-layout" />
     <link rel="stylesheet" href="./window.css?v=20261026-safearea3" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261029-layout" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261029-toolbar" />
     <link rel="stylesheet" href="./mobile-ui.css?v=20261029-layout" />
     <link rel="stylesheet" href="./form_controls.css?v=20261029" />
     <link rel="stylesheet" href="./ble_guidance.css?v=20261029" />
+    <link rel="stylesheet" href="./agent_choices.css?v=20261029" />
+    <link rel="stylesheet" href="./agent_ui.css?v=20261029" />
   </head>
   <body>
     <main class="app-shell">
@@ -317,6 +319,31 @@
               <input id="debugInput" type="checkbox">
               <span data-i18n="debugIO">Debug I/O</span>
             </label>
+          </div>
+        </section>
+
+        <section id="logViewCard" class="card" data-settings-page="terminal" aria-labelledby="logViewTitle">
+          <div class="card-title"><span class="dot"></span><span id="logViewTitle" data-i18n="logViewTitle">Log view</span></div>
+          <label class="field">
+            <span class="field-label" data-i18n="logViewTitle">Log view</span>
+            <select id="logViewSelect" aria-describedby="logViewHint">
+              <option value="reading" data-i18n="logViewReading">Reading</option>
+              <option value="raw" data-i18n="logViewRaw">Raw</option>
+            </select>
+          </label>
+          <p id="logViewHint" class="field-hint" data-i18n="logViewHint">Reading hides only registered Agent wrappers and exit markers. Raw exports and board WebDAV retain original UART bytes.</p>
+          <div class="btn-grid compact two-actions">
+            <button id="saveReadingLog" class="btn btn-soft" type="button"><span class="btn-label" data-i18n="saveReadingLog">Export reading log</span></button>
+            <button id="saveRawLog" class="btn btn-soft" type="button"><span class="btn-label" data-i18n="saveRawLog">Export raw log</span></button>
+          </div>
+          <div class="field shell-integration-field">
+            <span class="field-label" data-i18n="shellIntegrationTitle">Session Shell integration</span>
+            <p class="field-hint" data-i18n="shellIntegrationHint">Optional for an idle POSIX shell. Defines a temporary function without sudo or files; commands still run in sh subprocesses. Re-enable after reconnecting or starting a new chat. Disabling only changes future tracking.</p>
+            <p id="shellIntegrationStatus" class="field-hint" role="status"></p>
+            <div class="btn-grid compact two-actions">
+              <button id="shellIntegrationEnable" class="btn btn-soft" type="button" disabled><span class="btn-label" data-i18n="shellIntegrationEnable">Enable for this Shell</span></button>
+              <button id="shellIntegrationDisable" class="btn btn-soft" type="button" disabled><span class="btn-label" data-i18n="shellIntegrationDisable">Use normal tracking</span></button>
+            </div>
           </div>
         </section>
 
@@ -722,8 +749,11 @@
               <span class="term-led"></span><span data-i18n="serialOutput">Serial Terminal</span>
             </span>
             <div class="term-tools">
+              <div id="serialControlGroup" class="serial-control-group" hidden>
               <span id="serialControlStatus" class="serial-control-status" role="status" hidden></span>
               <button id="serialControlButton" class="term-tool serial-control-button" type="button" hidden></button>
+              </div>
+              <div class="terminal-actions">
               <button id="agentButton" class="term-tool" type="button" aria-label="Serial assistant" hidden>AI</button>
               <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" data-i18n-aria="zoomOut" aria-label="Decrease font">A−</button>
               <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" data-i18n-aria="zoomIn" aria-label="Increase font">A+</button>
@@ -738,6 +768,7 @@
               <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" data-i18n-aria="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
               <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" data-i18n-aria="copy" aria-label="Copy selection">⧉</button>
               <span class="term-hint" data-i18n="xterm">xterm.js</span>
+              </div>
             </div>
           </div>
           <div
@@ -844,7 +875,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261029-layout"></script>
+    <script type="module" src="./app.js?v=20261029-shell-integration"></script>
     <script type="module" src="./ble_guidance.js?v=20261029"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>

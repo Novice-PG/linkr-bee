@@ -107,3 +107,15 @@ test("display entries are filtered to what the panel can render", () => {
   });
   assert.deepEqual(loadSession(store, "target:abc").display, [{ role: "assistant", text: "kept" }]);
 });
+
+test('intermediate commentary retains its presentation marker without accepting other kinds', () => {
+  const store = storage();
+  saveSession(store, 'target:activity', {display:[
+    {role:'assistant',text:'Checking the device.',kind:'activity'},
+    {role:'assistant',text:'The result.',kind:'arbitrary'},
+  ]});
+  assert.deepEqual(loadSession(store,'target:activity').display,[
+    {role:'assistant',text:'Checking the device.',kind:'activity'},
+    {role:'assistant',text:'The result.'},
+  ]);
+});

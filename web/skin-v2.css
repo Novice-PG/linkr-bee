@@ -1100,9 +1100,21 @@ html.settings-drawer-layout .settings-tabs,
 }
 
 .term-tools {
-  gap: 3px;
-  flex-wrap: nowrap;
+  min-width: 0;
+  gap: 6px 8px;
+  flex-wrap: wrap;
 }
+
+.serial-control-group,
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.serial-control-group { margin-inline-end: auto; }
+.terminal-actions { margin-inline-start: auto; gap: 3px; }
+.terminal-head .term-tools .serial-control-button { flex: 0 0 auto; width: auto; min-width: max-content; padding-inline: 8px; }
 
 .serial-control-status {
   color: var(--muted);
@@ -2491,3 +2503,10 @@ button,
 .bond-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .bond-row > span { flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
 .bond-row .btn { min-height: 44px; }
+
+/* Match the divider and spacing used by other settings subsections. */
+.shell-integration-field {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}

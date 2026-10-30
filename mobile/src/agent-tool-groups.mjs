@@ -9,7 +9,7 @@ const groups = {
   profile: { description: "Discover an unknown target's basic identity and capabilities; prefer focused probe_tools on known targets.", tools: ["probe_device_profile"] },
 };
 
-export const CORE_TOOL_NAMES = new Set(["load_tools", "load_skill", "get_task_checkpoint", "update_task_plan",
+export const CORE_TOOL_NAMES = new Set(["ask_user", "load_tools", "load_skill", "get_task_checkpoint", "update_task_plan",
   "get_device_status", "read_serial_log", "search_serial_log", "probe_tools", "send_serial_input",
   "run_shell_command", "inspect_serial_execution", "monitor_serial_execution", "wait_for_serial_output"]);
 

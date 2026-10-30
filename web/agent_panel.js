@@ -12,6 +12,8 @@ import { createCommandPolicyStore, formatPolicyList, parsePolicyList } from "./c
 import { clearSession, loadSession, saveSession } from "./agent_session.js";
 import { addUsage, emptyUsage, estimateCost, formatCost, formatTokens, loadPricing } from "./agent_usage.js";
 import { buildTaskReport } from "./agent_report.js";
+import { createAgentActivity } from "./agent_activity.js";
+import { requestAgentChoice } from "./agent_choices.js";
 import { checkpointForTask } from "./agent_task_state.js";
 
 /* Smallest usable picker height. The list scrolls, so staying clear of the
@@ -19,6 +21,14 @@ import { checkpointForTask } from "./agent_task_state.js";
 const MODE_PICKER_MIN_HEIGHT = 96;
 
 const labels = {
+  activityRunning: ["正在处理", "Working"], activityDone: ["执行过程", "Activity"],
+  activityError: ["执行遇到问题", "Activity needs attention"], activityStopped: ["已停止的过程", "Interrupted activity"],
+  activityCount: ["{count} 项 · {seconds} 秒", "{count} items · {seconds}s"],
+  processNote: ["处理说明", "Progress note"], reasoning: ["思考记录", "Model reasoning"],
+  queueTitle: ["补充与排队说明", "About steering and follow-ups"],
+  inputHint: ["Enter 发送 · Shift+Enter 换行", "Enter to send · Shift+Enter for newline"],
+  inputBusyHint: ["Enter 排队 · Shift+Enter 换行", "Enter to queue · Shift+Enter for newline"],
+  ask_user: ["等待你的选择", "Awaiting your choice"],
   residentBusy: ["常驻任务执行中；停止会取消当前及排队任务。", "Resident task in progress. Stop cancels active and queued tasks."],
 
   history: ["任务记录与设备", "Tasks and device"], refreshProfile: ["探测设备", "Probe device"],
@@ -40,6 +50,8 @@ const labels = {
   "console-sudo-password": ["等待 sudo 密码，请在终端输入", "Sudo password; enter in terminal"],
   "console-confirmation": ["等待交互确认", "Awaiting confirmation"], "console-pager": ["分页器等待输入", "Pager awaiting input"],
   copy: ["复制", "Copy"], copied: ["已复制", "Copied"], copyFailed: ["复制失败，请手动选择", "Copy failed; select manually"],
+  wireCommand: ["实际发送内容", "Wire payload"],
+  shellIntegration: ["启用本次 Shell 集成", "Enable session Shell integration"],
   logs: ["执行日志", "Execution log"],
   title: ["Agent", "Agent"], settingsButton: ["设置", "Settings"],
   enterMode: ["进入 Agent 模式", "Enter Agent mode"], exitMode: ["退出 Agent 模式", "Exit Agent mode"],
@@ -55,7 +67,7 @@ const labels = {
   modeChanged: ["档位已切换，对话已保留。本轮已停止，待确认输入已取消；已发送的输入无法撤回。请继续提问。", "Mode changed; conversation retained. This run stopped and pending input was cancelled; sent input cannot be recalled. Ask again to continue."],
   automatic: ["自动发送到当前被控机（控制字符已转义）：", "Automatically sending to the target (control characters escaped):"],
   send: ["发送", "Send"], stop: ["停止", "Stop"], clear: ["新对话", "New chat"], close: ["退出", "Exit"],
-  shortcuts: ["聚焦：{focus} · 发送：{send} · Enter 换行", "Focus: {focus} · Send: {send} · Enter for newline"],
+  shortcuts: ["聚焦：{focus} · Enter 发送 · Shift+Enter 换行 · {send} 补充本轮", "Focus: {focus} · Enter to send · Shift+Enter for newline · {send} to steer a running task"],
   question: ["描述你遇到的问题", "Describe the problem"],
   empty: ["例如：根据当前串口日志，分析系统为什么启动失败。", "For example: why did boot fail, based on the current serial log?"],
   thinking: ["正在分析…", "Analyzing…"], user: ["你", "You"], assistant: ["助手", "Assistant"],
@@ -144,7 +156,7 @@ const labels = {
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput, onExecutionRecord = null, readExecutionEvents = null }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -195,14 +207,14 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     <p id="agentStatus" class="agent-status" role="status"></p>
     <p id="agentUsage" class="agent-usage" role="status"></p>
     <div id="agentQueueControls" class="agent-queue-controls" hidden>
-      <p data-ai="queueHelp"></p>
+      <details class="agent-queue-help"><summary data-ai="queueTitle"></summary><p data-ai="queueHelp"></p></details>
       <div class="agent-actions"><button class="btn" type="button" id="agentSteer" data-ai="steer"></button><button class="btn" type="button" id="agentFollowUp" data-ai="followUp"></button></div>
       <div id="agentQueue" role="status"></div><button class="btn" type="button" id="agentClearQueue" data-ai="clearQueue" hidden></button>
     </div>
     <form id="agentForm" class="agent-form"><label class="agent-question"><span data-ai="question"></span>
-      <textarea id="agentQuestion" rows="1" maxlength="4000" required></textarea></label>
+      <textarea id="agentQuestion" rows="1" maxlength="4000" aria-describedby="agentInputHint" required></textarea></label>
       <div class="agent-actions"><button class="btn" id="agentStop" type="button" data-ai="stop" disabled></button>
-      <button class="btn btn-primary" id="agentAsk" type="submit"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button></div></form>`;
+      <button class="btn btn-primary" id="agentAsk" type="submit"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button></div><span id="agentInputHint" class="agent-input-hint"></span></form>`;
   const terminalPeek = document.createElement("button");
   terminalPeek.type = "button";
   terminalPeek.className = "agent-terminal-peek";
@@ -214,6 +226,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   button.setAttribute("aria-pressed", "false");
   const $ = (id) => dialog.querySelector(`#${id}`);
   const messages = $("agentMessages");
+  const activity = createAgentActivity({messages, text});
+  const reasoningBlocks = new Map();
   const modeButton = $("agentModeButton");
   const modePicker = $("agentModePicker");
   const modeOptions = [...dialog.querySelectorAll('[name="agentMode"]')];
@@ -222,6 +236,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let opening = false;
   let keyboardOpen = false;
   let editingAgent = false;
+  let awaitingChoice = false, peekWhileChoosing = false;
   let layoutRaf = 0;
   // Session-only preference: a fresh app starts in recommended Auto mode.
   let executionMode = "auto";
@@ -244,7 +259,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
    * decisions, they are context for the model. */
   const agentStatus = () => { const status = currentStatus();
     return {...status, notes: noteStore.list(deviceIdentity(status))}; };
-  const device = createDeviceExecutor({ getStatus: agentStatus, readLog, prepareInput, sendInput, onRecord: renderExecution,
+  const device = createDeviceExecutor({ getStatus: agentStatus, readLog, readExecutionEvents, prepareInput, sendInput, onRecord: record => { onExecutionRecord?.(record); renderExecution(record); },
     getCommandPolicy: () => policyStore.get(deviceKeyOf()),
     /* Full Auto ended by itself: say so, because the next command will need a
      * click and the user should know why. */
@@ -316,6 +331,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (lastTask?.checkpoint?.pendingExecutions?.length) recovery = {goal:lastTask.goal,summary:lastTask.summary,checkpoint:lastTask.checkpoint};
     displayTranscript = session?.display || [];
     restoredMessages = session?.messages?.length ? session.messages : null;
+    activity.reset();
     messages.replaceChildren();
     if (!session) {
       const empty = document.createElement("p");
@@ -324,7 +340,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       messages.append(empty);
       return;
     }
-    for (const entry of session.display) addMessage(entry.role, entry.text);
+    for (const entry of session.display) addMessage(entry.role, entry.text, {process:entry.kind === "activity"});
+    activity.finish();
     const note = document.createElement("p");
     note.className = "agent-note";
     note.textContent = text("sessionRestored");
@@ -464,10 +481,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     const focusKeys = `${modifier}+Shift+K`, sendKeys = `${modifier}+Enter`;
     $("agentQuestion").placeholder = text("question");
     $("agentQuestion").title = text("shortcuts").replace("{focus}", focusKeys).replace("{send}", sendKeys);
-    $("agentQuestion").setAttribute("aria-keyshortcuts", "Control+Shift+K Meta+Shift+K");
-    $("agentAsk").title = `${text("send")} (${sendKeys})`;
+    $("agentQuestion").setAttribute("aria-keyshortcuts", "Enter Shift+Enter Control+Enter Meta+Enter Control+Shift+K Meta+Shift+K");
+    $("agentAsk").title = `${text("send")} (Enter)`;
     $("agentAsk").setAttribute("aria-label", text("send"));
-    $("agentAsk").setAttribute("aria-keyshortcuts", "Control+Enter Meta+Enter");
+    $("agentAsk").setAttribute("aria-keyshortcuts", "Enter Control+Enter Meta+Enter");
     button.title += ` (${focusKeys})`;
     refreshMode();
     modePicker.setAttribute("aria-label", text("mode"));
@@ -475,6 +492,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     $("agentModeClose").setAttribute("aria-label", text("closePicker"));
     $("agentNew").title = text("clear");
     $("agentNew").setAttribute("aria-label", text("clear"));
+    activity.refresh();
     refreshActivity();
     refreshConsole(); refreshHistory();
   }
@@ -491,19 +509,23 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     modeButton.style.setProperty("--gear-index", modeOptions.findIndex((option) => option.value === executionMode));
     if (executionMode === "full-auto" && device.getStatus().executionModeExpiresAt) startCountdown();
   }
-  function addMessage(role, content = "") {
+  function addMessage(role, content = "", {process = false} = {}) {
+    if (role === "user") activity.boundary();
+    const follow = role === "user" || messages.scrollHeight - messages.scrollTop - messages.clientHeight < 64;
     messages.querySelector(".agent-empty")?.remove();
     const row = document.createElement("section");
     row.className = `agent-message agent-${role}`;
     const label = document.createElement("b");
-    label.textContent = text(role);
+    label.textContent = text(process ? "processNote" : role);
     const body = document.createElement("div");
     body.className = "agent-message-text";
     if (role === "assistant") renderAssistantMarkdown(body, content);
     else body.textContent = content;
     row.append(label, body);
-    messages.append(row);
-    messages.scrollTop = messages.scrollHeight;
+    const tool = !["assistant", "user", "ask_user", "download_to_computer", "download_to_target"].includes(role);
+    if (tool || process) activity.attach(row);
+    else messages.append(row);
+    if (follow) messages.scrollTop = messages.scrollHeight;
     return body;
   }
   function formatPlan(steps) {
@@ -528,11 +550,13 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     $("agentStop").disabled = !(busy || residentBusy);
     $("agentResidentStatus").hidden = !residentBusy;
     $("agentResidentStatus").textContent = residentBusy ? text("residentBusy") : "";
+    $("agentInputHint").textContent = text(busy ? "inputBusyHint" : "inputHint");
     modeButton.disabled = residentBusy;
     for (const option of modeOptions) option.disabled = residentBusy;
   }
   function setBusy(value) {
     busy = value;
+    if (!value) activity.finish(currentTask?.status === "failed" ? "error" : currentTask?.status === "interrupted" ? "interrupted" : "done");
     refreshHistory();
     refreshActivity();
     $("agentQueueControls").hidden = !value;
@@ -544,6 +568,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   function stop(reason, { preserveConversation = true } = {}) {
     if (currentTask && busy) { currentTask.status = "interrupted"; persistTask(); }
     version++;
+    activity.finish("interrupted");
     runner?.abort();
     $("agentQueue").textContent = '';
     $("agentClearQueue").hidden = true;
@@ -566,25 +591,33 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     }
     let body = executionRows.get(record.id);
     if (!body) {
-      body = activeInputRow || addMessage("send_serial_input");
+      if (record.shellTracking?.phase === "setup" && !busy && !isResidentBusy()) activity.boundary();
+      body = activeInputRow || addMessage(record.shellTracking?.phase === "setup" ? "shellIntegration" : "send_serial_input");
       body.dataset.execution = record.id;
       executionRows.set(record.id, body);
     }
     const waiting = record.state === "awaiting-approval";
+    if (waiting) activity.reveal(body);
     const heading = waiting ? text("approval") : `${record.mode} · ${text(`execution-${record.state}`)}`;
     const details = record.executionStatus === "completed" ? `Exit code: ${record.exitCode} · ${text("verificationNeeded")}` : record.delivery === "sent" ? `${text("delivered")}\n${text(`observation-${record.observation}`)}`
       : record.delivery === "unknown" ? text("deliveryUnknown") : "";
-    const expanded = body.querySelector("details")?.open || false;
+    const expanded = body.querySelector(".agent-execution-evidence")?.open || false;
     body.replaceChildren();
     const status = document.createElement("p");
     if (record.executionStatus === "completed" || record.observationClosed || ["denied","cancelled","failed"].includes(record.state)) body.dataset.finishedAt ||= String(Date.now());
     const elapsed = Math.max(0, Math.floor((Number(body.dataset.finishedAt) || Date.now()) - Date.parse(record.createdAt || new Date().toISOString())) / 1000);
     status.textContent = `${heading} · ${elapsed.toFixed(1)} s\n${details}${record.waitingFor ? "\n" + text(`console-${record.waitingFor}`) : ""}${record.error ? "\n" + record.error : ""}`;
     const command = document.createElement("pre"), copy = document.createElement("button");
-    command.textContent = JSON.stringify(record.payload);
+    command.textContent = (record.command ?? record.payload).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,
+      character => "\\x" + character.charCodeAt(0).toString(16).padStart(2, "0"));
     copy.type = "button"; copy.className = "btn"; copy.textContent = text("copy");
-    copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(record.payload); copy.textContent = text("copied"); } catch { copy.textContent = text("copyFailed"); } });
+    copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(record.command ?? record.payload); copy.textContent = text("copied"); } catch { copy.textContent = text("copyFailed"); } });
     body.append(status, command, copy);
+    if (record.command !== undefined && record.command !== record.payload) {
+      const wire = document.createElement("details"), summary = document.createElement("summary"), payload = document.createElement("pre");
+      wire.className = "agent-wire-payload"; summary.textContent = text("wireCommand"); payload.textContent = JSON.stringify(record.payload);
+      wire.append(summary, payload); body.append(wire);
+    }
     if (record.download) {
       const download = document.createElement("p");
       download.textContent = `${text("download_to_target")} · ${record.download.path}\n${record.download.downloader} · ${record.download.status || "in progress"}\n${record.download.bytes ?? "?"} bytes · SHA-256: ${record.download.sha256 || "pending"}\nExpected SHA-256: ${record.download.expectedSha256 || "not provided (computed only)"}`;
@@ -592,7 +625,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     }
     if (record.evidence) {
       const log = document.createElement("details"), summary = document.createElement("summary"), output = document.createElement("pre");
-      log.open = expanded; summary.textContent = text("logs");
+      log.className = "agent-execution-evidence"; log.open = expanded; summary.textContent = text("logs");
       output.textContent = record.evidence.slice(-4000) + (record.evidenceTruncated ? "\n" + text("truncated") : "");
       log.append(summary,output); body.append(log);
     }
@@ -614,6 +647,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       body.after(actions);
     }
     actions?.querySelectorAll("button").forEach((button) => { button.disabled = !waiting; });
+    if (record.observationClosed && !busy && !isResidentBusy()) {
+      activity.finish(record.executionStatus === "completed" ? "done" : "error");
+    }
     refreshConsole();
   }
   function refreshConsole() {
@@ -669,6 +705,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     device.reset();
     executionMode = device.mode;
     executionRows.clear();
+    activity.reset();
     messages.replaceChildren();
     refreshMode();
   }
@@ -702,14 +739,35 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         renderUsage();
       }
       const said = (event.message.content || []).filter(part => part.type === "text").map(part => part.text).join("\n").trim();
-      if (said) { displayTranscript.push({ role: "assistant", text: said }); scheduleSessionSave(); }
+      const process = (event.message.content || []).some(part => part.type === "toolCall");
+      for (const [index, part] of (event.message.content || []).entries()) {
+        if (part.type === "thinking" && !part.redacted && part.thinking) {
+          if (!reasoningBlocks.has(index)) reasoningBlocks.set(index, activity.thinking());
+          reasoningBlocks.get(index).update(part.thinking);
+        }
+      }
+      if (said) {
+        answer ??= addMessage("assistant", said);
+        if (process) { answer.parentElement.querySelector("b").textContent = text("processNote"); activity.attach(answer.parentElement); }
+        displayTranscript.push({ role: "assistant", text: said, ...(process ? {kind:"activity"} : {}) }); scheduleSessionSave();
+      }
     }
-    if (event.type === "message_start" && event.message.role === "assistant") answer = null;
+    if (event.type === "message_start" && event.message.role === "assistant") { answer = null; reasoningBlocks.clear(); }
+    if (event.type === "message_update" && ["thinking_delta", "thinking_end"].includes(event.assistantMessageEvent.type)) {
+      const update = event.assistantMessageEvent;
+      const index = update.contentIndex;
+      const value = update.type === "thinking_delta" ? update.delta : update.content;
+      if (value && !update.partial?.content?.[index]?.redacted) {
+        if (!reasoningBlocks.has(index)) reasoningBlocks.set(index, activity.thinking());
+        reasoningBlocks.get(index).update(value, update.type === "thinking_delta");
+      }
+    }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      const follow = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 64;
       answer ??= addMessage("assistant");
       renderAssistantMarkdown(answer, event.assistantMessageEvent.delta, { append: true });
       if (currentTask) { currentTask.summary = (currentTask.summary + event.assistantMessageEvent.delta).slice(-4000); scheduleTaskSave(); }
-      messages.scrollTop = messages.scrollHeight;
+      if (follow) messages.scrollTop = messages.scrollHeight;
     }
     if (event.type === "tool_execution_start") {
       const body = addMessage(event.toolName, text("working"));
@@ -778,7 +836,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         } catch { /* Tool errors can be plain text. */ }
       }
       const body = toolRows.get(event.toolCallId) || addMessage(event.toolName);
-      if (!body.dataset.execution && !body.dataset.download) body.textContent = preview.slice(0, 2000) + (preview.length > 2000 ? "…" : "");
+      if (!body.dataset.execution && !body.dataset.download && !body.dataset.choice) body.textContent = preview.slice(0, 2000) + (preview.length > 2000 ? "…" : "");
+      if (event.isError) activity.reveal(body, {error:true});
       toolRows.delete(event.toolCallId);
       if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = null;
     }
@@ -841,6 +900,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     persistTask();
     setBusy(true);
     $("agentQuestion").value = "";
+    resizeQuestion();
     const runVersion = version;
     const timer = setTimeout(() => stop("stopped"), 900000);
     try {
@@ -866,9 +926,30 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
               const command = accessory.command(action, args);
               const body = toolRows.get(id) || addMessage(`accessory_${action}`);
               body.textContent = "";
+              activity.reveal(body);
               await requestAccessoryApproval({ container: body, command, lang: getLang(), signal });
               return accessory.execute({ action, args, command, signal });
             },
+          },
+          requestUserInput: async ({id, signal, ...question}) => {
+            const body = toolRows.get(id) || addMessage("ask_user");
+            body.dataset.choice = "true";
+            $("agentStatus").textContent = text("ask_user");
+            awaitingChoice = true; peekWhileChoosing = false;
+            dialog.classList.add("agent-awaiting-choice");
+            syncLayout();
+            const pending = requestAgentChoice({container: body, ...question, signal, lang: getLang()});
+            requestAnimationFrame(() => {
+              if (awaitingChoice && body.isConnected) {
+                messages.scrollTop += body.parentElement.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+              }
+            });
+            try { return await pending; }
+            finally {
+              awaitingChoice = false; dialog.classList.remove("agent-awaiting-choice");
+              syncLayout();
+              if (busy) $("agentStatus").textContent = text("thinking");
+            }
           },
           restoredMessages,
           notes: {
@@ -911,17 +992,26 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   });
   $("agentQuestion").addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229) return;
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+    if (event.key === "Enter" && !event.altKey && !event.shiftKey) {
       event.preventDefault(); event.stopPropagation();
-      if (!event.repeat) { if(busy) queueInput('steer'); else $("agentForm").requestSubmit(); }
+      if (!event.repeat) {
+        if (busy) queueInput(event.ctrlKey || event.metaKey ? 'steer' : 'followUp');
+        else $("agentForm").requestSubmit();
+      }
     }
   });
+  function resizeQuestion() {
+    const input = $("agentQuestion");
+    input.style.height = "44px";
+    input.style.height = `${Math.min(100, Math.max(44, input.scrollHeight + 2))}px`;
+  }
+  $("agentQuestion").addEventListener("input", resizeQuestion);
   function queueInput(kind) {
     const input=$("agentQuestion");
     if(!input.value.trim()) return;
     try {
       if(!runner || !busy) throw new Error(text('stopped'));
-      runner.enqueue(input.value,kind); input.value='';
+      runner.enqueue(input.value,kind); input.value=''; resizeQuestion();
     } catch(error) { $("agentStatus").textContent=error.message; }
   }
   $("agentSteer").addEventListener('click',()=>queueInput('steer'));
@@ -1054,7 +1144,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       const active = document.activeElement;
       if (terminal.contains(active)) editingAgent = false;
       else if (dialog.contains(active) && active.matches("input:not([type=radio]), textarea")) editingAgent = true;
-      const collapsed = keyboardOpen && editingAgent;
+      // A required choice needs the same room as editing on a phone. The peek
+      // remains available; the ordinary terminal split returns after answering.
+      const choiceFocus = awaitingChoice && workspace.clientWidth < 960 && !peekWhileChoosing;
+      const collapsed = (keyboardOpen && editingAgent) || choiceFocus;
       const root = document.documentElement;
       root.style.setProperty("--agent-viewport-top", `${window.visualViewport?.offsetTop || 0}px`);
       root.classList.toggle("agent-keyboard-chat", collapsed);
@@ -1096,7 +1189,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   $("agentClose").addEventListener("click", closePanel);
   $("agentSettingsButton").addEventListener("click", openSettings);
-  terminalPeek.addEventListener("click", () => { editingAgent = false; focusTerminal(); syncLayout(); });
+  terminalPeek.addEventListener("click", () => { peekWhileChoosing = awaitingChoice; editingAgent = false; focusTerminal(); syncLayout(); });
   // Mobile app switches must cancel active work, but an idle conversation should
   // still match the visible history when the user returns with more information.
   document.addEventListener("visibilitychange", () => { if (document.hidden && busy) stop("stopped"); });

@@ -187,6 +187,10 @@ the page, and HTTPS pages cannot freely call insecure HTTP endpoints. Additional
 provider headers can be entered in settings; see the
 [platform assistant notes](../mobile/README.md#built-in-serial-assistant-pi).
 
+When a required detail or preference is missing, the assistant can show an option card. Select one or several options, or write your own answer, then choose **Continue**. No option is preselected. **Skip** returns no answer; stopping, closing or changing the connection cancels the card. Choosing an option does not replace command approval.
+
+Tool calls and intermediate notes appear under a collapsed **Activity** row; model-supplied reasoning has its own disclosure. Final answers remain in the conversation, and required approvals open automatically. **Enter** sends, **Shift+Enter** inserts a newline. While running, Enter queues a follow-up; Ctrl/Cmd+Enter adds guidance to the current task.
+
 | Mode | Serial input policy |
 | --- | --- |
 | Manual | Every proposed input waits for approval. |
@@ -261,7 +265,17 @@ computer's LAN address. Remote management access must follow the
 LAN carries UART data over WebSocket; BLE remains the configuration channel.
 The token controls access but does not encrypt `ws://` traffic. Use a trusted LAN.
 
-**Save Log** exports received serial data on the host. WebDAV is different: the
+In **Serial → Log view**, **Reading** (default) replaces exact, registered Agent command wrappers with the original command and shows a short exit status. **Raw** shows the unmodified stream. Unrecognized or incomplete markers are kept as received. Switching views redraws local history without sending input to the target; terminal input pauses briefly during redraw. The preference is saved on this host.
+
+**Export reading log** and **Export raw log** save the respective UART receive stream, up to the most recent 4 MiB each. The connection page's **Save current view** shortcut uses the selected view. UI notices and local echo are shown in terminal history but are not part of these UART exports. Agent execution evidence stays raw; open **Wire payload** on an execution card to inspect the exact command sent.
+
+**Session Shell integration** in the same card is optional. Stop at an idle, logged-in POSIX Shell and click **Enable for this Shell**. After its handshake is confirmed, tracked commands use a short `__linkr_run_v1 'command'` call. Start/finish boundaries and exit codes travel in invisible OSC properties instead of a fresh plaintext UUID on every command. The one-time setup still contains a session identifier and remains in raw logs.
+
+The helper lives only in the current Shell: no sudo, files, startup hooks or echo changes. Commands continue to run in `sh` subprocesses, so `cd` and environment changes do not persist to the interactive parent. Reconnects, detected boot/login output, clearing logs or a new chat require enabling again. **Use normal tracking** only changes future commands; the temporary function remains until the Shell exits or is replaced by a later enable action.
+
+A missing handshake or lost/mismatched boundaries never trigger an automatic retry. A missing exit boundary leaves the result unknown; subsequent explicit commands use normal tracking once integration is disabled. Some terminal intermediaries strip OSC, so keep normal tracking in that case. Raw exports and board WebDAV retain OSC bytes; the plain Agent journal hides control strings and reads validated boundary events separately. These markers correlate untrusted device output, and do not authenticate the target or prove task success. CLI/TUI tracking is unchanged. See the [protocol notes](SHELL_INTEGRATION.md).
+
+WebDAV is different: the
 accessory uploads UART logs itself after its WiFi and upload target are configured.
 The current firmware accepts anonymous **HTTP** upload endpoints only; it does not
 support HTTPS or Basic Auth. Keep the endpoint on a trusted network. Some firmware
