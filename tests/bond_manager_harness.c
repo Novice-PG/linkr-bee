@@ -12,6 +12,7 @@
 #define BT_SECURITY_L2 2
 #define BT_ADDR_STR_LEN 18
 #define snprintk snprintf
+#define CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX 48
 struct k_work { int unused; };
 struct k_work_delayable { void (*fn)(struct k_work *); };
 #define K_WORK_DELAYABLE_DEFINE(n,f) struct k_work_delayable n = {f}
@@ -37,6 +38,11 @@ static int bt_addr_le_from_str(const char*s,const char*t,bt_addr_le_t*a){if(strc
 static bool bt_le_bond_exists(uint8_t id,const bt_addr_le_t*a){assert(id==0);return exists&&bt_addr_le_eq(a,&self);}
 static int bt_unpair(uint8_t id,const bt_addr_le_t*a){assert(id==0&&bt_addr_le_eq(a,&self));exists=false;removals++;return 0;}
 static void bt_foreach_bond(uint8_t id,void(*cb)(const struct bt_bond_info*,void*),void*data){assert(id==0);if(exists){struct bt_bond_info b={self};cb(&b,data);}}
+/* Label storage is exercised by test_bond_label.py; here the bond manager only
+ * needs the symbols to link. */
+static int linkr_bond_label_get(const bt_addr_le_t *a,char*o,size_t n){(void)a;(void)o;(void)n;return 0;}
+static int linkr_bond_label_set(const bt_addr_le_t *a,const char*s,size_t n){(void)a;(void)s;return (int)n;}
+static int linkr_bond_label_clear(const bt_addr_le_t *a){(void)a;return 0;}
 #include "bond_production.inc"
 int main(void){
  struct bt_conn conn={0};char out[512];

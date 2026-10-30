@@ -495,6 +495,7 @@ fn action_for(request: &Request) -> Result<Action, String> {
     match request.op.as_str() {
         "info" => requests.queries.push(Query::Diagnostics),
         "lan" => requests.queries.push(Query::Lan),
+        "bonds" => requests.queries.push(Query::Bonds),
         // A read, and a write when a value rides along: the session's
         // spelling of `--query-uart` and `--uart <spec>`.
         "uart" => match request.value("value") {

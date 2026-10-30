@@ -67,6 +67,13 @@ pub enum Query {
     BleName,
     /// `@s?` — LAN access state, and the token the bridge expects.
     Lan,
+    /// `@linkr bonds?` — the hosts bonded to the bridge.
+    Bonds,
+    /// A paired-device label read or write. The command carries an identity
+    /// address, so it is built by [`crate::accessory::bond_label_set_command`]
+    /// and sent through `send_accessory`; this variant only names the shape of
+    /// the answer.
+    BondLabel,
 }
 
 impl Query {
@@ -80,6 +87,10 @@ impl Query {
             Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
             Query::BleName => crate::accessory::BLE_NAME_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
+            Query::Bonds => crate::accessory::BONDS_QUERY_COMMAND,
+            Query::BondLabel => {
+                unreachable!("bond label commands carry an address; send them through send_accessory")
+            }
         }
     }
 
@@ -110,7 +121,13 @@ impl Query {
                         .error
                         .is_empty()
             }
-            Query::Uart | Query::Wifi | Query::Webdav | Query::BleName | Query::Lan => {
+            Query::Uart
+            | Query::Wifi
+            | Query::Webdav
+            | Query::BleName
+            | Query::Lan
+            | Query::Bonds
+            | Query::BondLabel => {
                 // One parse: either half of the verdict ends the question.
                 let status = crate::accessory::reply_status(&lines.join("\n"));
                 status.ok || !status.error.is_empty()
@@ -134,6 +151,9 @@ impl Query {
         match self {
             Query::WifiScan => SCAN_TIMEOUT,
             Query::Diagnostics => INFO_TIMEOUT,
+            // The list is followed by one label read per bonded host, and the
+            // whole series has to fit in one wait.
+            Query::Bonds => REPLY_TIMEOUT * 4,
             _ => REPLY_TIMEOUT,
         }
     }

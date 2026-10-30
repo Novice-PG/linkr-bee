@@ -292,6 +292,7 @@ const state = {
    * whether this firmware exposes the @l/@o/@r group at all. */
   features: {
     bonds: null,
+    bondLabel: null,
     led: null,
     opto: null,
     ir: null,
@@ -4377,9 +4378,19 @@ async function refreshBoardIo() {
 function wireBoardIoControls() {
   bondUi = createBondUi({
     card: $("boardBondsCard"),
-    context: () => ({ lang, supported: state.features.bonds, ready: boardUsable(), control: canSerialInput(), generation: state.writeGeneration }),
+    context: () => ({
+      lang,
+      supported: state.features.bonds,
+      label: state.features.bondLabel,
+      ready: boardUsable(),
+      control: canSerialInput(),
+      generation: state.writeGeneration,
+      deviceName: () => state.device?.name || "",
+      platform: () => (bleTransport?.platform?.() || "web"),
+    }),
     send: command => boardSend(command),
     supported: value => setFeature("bonds", value),
+    supportedLabel: value => setFeature("bondLabel", value),
     beforeSelfDelete: () => { cancelAutoReconnect(); userInitiatedDisconnect = true; },
     afterSelfDelete: (token, queued) => { if (!queued && state.writeGeneration === token) userInitiatedDisconnect = false; },
   });
@@ -4557,7 +4568,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
 
   const connectionChanged = state.connected !== connected;
   if (connectionChanged) {
-    for (const key of ["bonds", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
+    for (const key of ["bonds", "bondLabel", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
       state.features[key] = null;
     }
     state.features.wifi = connected && !isWs && state.mgmtReady

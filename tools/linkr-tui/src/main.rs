@@ -706,6 +706,7 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
             "--query-ble-name" => args.requests.queries.push(device::Query::BleName),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
+            "--query-bonds" => args.requests.queries.push(device::Query::Bonds),
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
                 let raw = value("--wifi");

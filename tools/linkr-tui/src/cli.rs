@@ -295,6 +295,11 @@ pub const FLAGS: &[Flag] = &[
         "ask @s? and print the bridge's LAN address and token state",
     ),
     Flag::new(
+        "--query-bonds",
+        Value::None,
+        "ask @linkr bonds? and print the paired hosts and their labels",
+    ),
+    Flag::new(
         "--uart",
         Value::Free,
         "set UART as baud,data,parity,stop,flow",
@@ -550,9 +555,10 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
                     "webdav" => "--query-webdav",
                     "ble-name" => "--query-ble-name",
                     "lan" => "--query-lan",
+                    "bonds" => "--query-bonds",
                     other => {
                         return Err(format!(
-                        "query reads one of info, uart, wifi, webdav, ble-name or lan; '{other}' is not one"
+                        "query reads one of info, uart, wifi, webdav, ble-name, lan or bonds; '{other}' is not one"
                     ))
                     }
                 }
@@ -2050,6 +2056,8 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Webdav => "webdav",
         crate::device::Query::BleName => "ble-name",
         crate::device::Query::Lan => "lan",
+        crate::device::Query::Bonds => "bonds",
+        crate::device::Query::BondLabel => "bond-label",
     }
 }
 
@@ -2157,6 +2165,22 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
                 )
             }
         }
+        // One host per line: its identity address, then its label, then a
+        // marker for this connection. Bonded hosts come from `bonds?` and the
+        // labels were read after it.
+        crate::device::Query::Bonds => match &app.network.bonds {
+            Some(bonds) => bonds
+                .iter()
+                .map(|bond| {
+                    let label = bond.label.as_deref().unwrap_or("(no label)");
+                    let mark = if bond.is_self { "  [self]" } else { "" };
+                    format!("{}  {label}{mark}", bond.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => String::new(),
+        },
+        crate::device::Query::BondLabel => String::new(),
     })
 }
 
@@ -2676,6 +2700,7 @@ mod tests {
             (&["query", "webdav"], &["--query-webdav"]),
             (&["query", "ble-name"], &["--query-ble-name"]),
             (&["query", "lan"], &["--query-lan"]),
+            (&["query", "bonds"], &["--query-bonds"]),
             (&["query", "info", "--json"], &["--query-info", "--json"]),
             (
                 &["set", "uart", "115200,8,n,1,none"],

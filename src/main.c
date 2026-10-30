@@ -1598,6 +1598,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 	bool readonly = !strcmp(body, "h") || !strcmp(body, "help") ||
+		!strcmp(body, "aux") ||
 		!strcmp(body, "i?") || !strcmp(body, "info?") ||
 		!strcmp(body, "u?") || !strcmp(body, "uart?") ||
 		!strcmp(body, "n?") || !strcmp(body, "name?") ||
@@ -1605,7 +1606,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
 		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
 		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
-		!strcmp(body, "bonds?") || !strcmp(body, "target?") || linkr_aux_is_readonly(body);
+		!strcmp(body, "bonds?") || linkr_bond_is_readonly(body) ||
+		!strcmp(body, "target?") || linkr_aux_is_readonly(body);
 	if (!readonly) {
 		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {
 			(void)send_control_response(conn, "ERR control=readonly\r\n");
@@ -1638,11 +1640,12 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
-		char aux_help_text[LINKR_AUX_HELP_MAX];
-
-		linkr_aux_help(aux_help_text, sizeof(aux_help_text));
+		// The core list and the board-I/O list are two commands: together
+		// they exceed the 512-byte management payload and the reply would be
+		// replaced by "response too large". `@linkr aux` carries the board
+		// half, so both fit.
 		(void)send_control_response(conn,
-					     "OK cmds: @linkr bonds?|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
+					     "OK cmds: @linkr bonds?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 					    "@n?|@n=<name>|@n default "
 #endif
@@ -1657,9 +1660,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 #endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE)
 					    "@s?|@s on|@s off|"
-					    "@s token[=<32 hex>]|@s token off"
+					    "@s token[=<32 hex>]|@s token off "
 #endif
-					    "%s\r\n", aux_help_text);
+					    "(board I/O: @linkr aux)\r\n");
+		return true;
+	}
+	if (!strcmp(body, "aux")) {
+		char aux_help_text[LINKR_AUX_HELP_MAX];
+
+		linkr_aux_help(aux_help_text, sizeof(aux_help_text));
+		(void)send_control_response(conn, "OK aux: %s\r\n", aux_help_text);
 		return true;
 	}
 

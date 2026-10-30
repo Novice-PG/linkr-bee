@@ -772,6 +772,9 @@ pub struct App {
     /// The scan whose answer has not arrived, or that is owed another attempt
     /// after being refused. See [`ScanRetry`].
     pub scan_retry: Option<ScanRetry>,
+    /// Identity addresses whose paired-device labels are still to be read after
+    /// a `bonds?` answer. One management question at a time, so they queue.
+    pub bond_label_queue: VecDeque<String>,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -988,6 +991,7 @@ impl Default for App {
             ble_name_read_pending: false,
             lan_token_read_pending: false,
             scan_retry: None,
+            bond_label_queue: VecDeque::new(),
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -2550,6 +2554,7 @@ impl App {
         self.state = ConnectionState::Disconnected;
         self.wifi_write = None;
         self.scan_retry = None;
+        self.bond_label_queue.clear();
         // The lock a dial took out went with the dial: with the link down
         // there is nothing left for it to protect, and switching the transport
         // is exactly what hanging up is for. A transport the command line
@@ -2577,6 +2582,7 @@ impl App {
         self.transport_locked = self.transport_pinned;
         self.wifi_write = None;
         self.scan_retry = None;
+        self.bond_label_queue.clear();
         ended
     }
 
@@ -3453,7 +3459,13 @@ impl App {
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
+            Query::Uart
+            | Query::Wifi
+            | Query::WifiScan
+            | Query::Webdav
+            | Query::BleName
+            | Query::Bonds
+            | Query::BondLabel => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -3514,6 +3526,43 @@ impl App {
         self.send_accessory(&command, Query::Webdav)
     }
 
+    /// Read the bonded hosts. Their labels are read one address at a time
+    /// after the list arrives, so the fixed reply buffer never has to hold
+    /// them all.
+    pub fn refresh_bonds(&mut self) -> Result<(), String> {
+        self.ask_device(Query::Bonds)
+    }
+
+    /// Store a display label for one bonded host and read it back.
+    pub fn set_bond_label(&mut self, address: &str, label: &str) -> Result<(), String> {
+        let command = accessory::bond_label_set_command(address, label);
+        self.send_accessory(&command, Query::BondLabel)
+    }
+
+    /// Ask the bridge to remove one pairing.
+    ///
+    /// The approval card owns this one: removing a pairing drops a connection.
+    /// Its `OK bonds queued` is not a label, so the answer path re-reads the
+    /// list rather than folding a label, see [`App::apply_reply`].
+    pub fn remove_bond(&mut self, address: &str) -> Result<(), String> {
+        self.send_accessory(&format!("@linkr bonds remove {address}"), Query::BondLabel)
+    }
+
+    /// Ask for the next queued label, if the link is still up.
+    fn ask_next_bond_label(&mut self) {
+        if !self.ble_connected() {
+            self.bond_label_queue.clear();
+            return;
+        }
+        let Some(address) = self.bond_label_queue.pop_front() else {
+            return;
+        };
+        let command = accessory::bond_label_query_command(&address);
+        if let Err(why) = self.send_accessory(&command, Query::BondLabel) {
+            self.network.error = Some(why);
+        }
+    }
+
     /// Set the advertised BLE name and read it back.
     ///
     /// The read is the confirmation: the bridge advertises what it stored, and
@@ -3551,6 +3600,12 @@ impl App {
             b"@w" => Query::Wifi,
             b"@d" => Query::Webdav,
             b"@n" => Query::BleName,
+            b"@linkr" => {
+                if let Some(address) = command.strip_prefix("@linkr bonds remove ") {
+                    return self.remove_bond(address);
+                }
+                return Err(self.strings().net_bad_command.to_string());
+            }
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
         self.ble_name_write_pending = query == Query::BleName;
@@ -3639,10 +3694,14 @@ impl App {
             Query::WifiScan => self.strings().net_scan,
             _ => self.strings().net_status,
         };
-        self.push_notice(Notice {
-            text: format!("{prefix} {shown}"),
-            level: NoticeLevel::Info,
-        });
+        // Paired-device labels are read in a quiet series after the list; a
+        // notice per address would bury the log. The rows show the result.
+        if !command.starts_with("@linkr bonds ") {
+            self.push_notice(Notice {
+                text: format!("{prefix} {shown}"),
+                level: NoticeLevel::Info,
+            });
+        }
         Ok(())
     }
 
@@ -3826,6 +3885,40 @@ impl App {
                 } else if let Some(status) = accessory::parse_ble_name(&text) {
                     self.remember_the_board_name(&status.name);
                     self.network.ble_name = Some(status);
+                }
+            }
+            Query::Bonds => {
+                if let Some(list) = accessory::parse_bonds(&text) {
+                    let bonds: Vec<crate::views::network::BondEntry> = list
+                        .peers
+                        .into_iter()
+                        .map(|peer| crate::views::network::BondEntry {
+                            id: peer.id,
+                            is_self: peer.is_self,
+                            label: None,
+                        })
+                        .collect();
+                    self.bond_label_queue = bonds.iter().map(|bond| bond.id.clone()).collect();
+                    self.network.bonds = Some(bonds);
+                    self.ask_next_bond_label();
+                }
+            }
+            Query::BondLabel => {
+                if let Some(parsed) = accessory::parse_bond_label(&text) {
+                    if let Some(bonds) = self.network.bonds.as_mut() {
+                        if let Some(entry) = bonds
+                            .iter_mut()
+                            .find(|bond| bond.id.eq_ignore_ascii_case(&parsed.id))
+                        {
+                            entry.label = parsed.label;
+                        }
+                    }
+                    self.ask_next_bond_label();
+                } else {
+                    // A removal answers `OK bonds queued`, not a label: read the
+                    // list again so the row goes and the labels reload.
+                    self.bond_label_queue.clear();
+                    let _ = self.refresh_bonds();
                 }
             }
             // `@s?` is the only place the bridge reports its LAN access
@@ -4217,7 +4310,13 @@ impl App {
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
+            Query::Uart
+            | Query::Wifi
+            | Query::WifiScan
+            | Query::Webdav
+            | Query::BleName
+            | Query::Bonds
+            | Query::BondLabel => {
                 self.network.loading = false
             }
             Query::Lan => self.lan_status.loading = false,
