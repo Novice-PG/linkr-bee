@@ -14,7 +14,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  # The caller's workflow name is part of the group: this workflow is reused by
+  # a project release and by the APK refresh, and without it those runs would
+  # cancel the ordinary push build of the same ref (github.workflow is the
+  # caller's name inside a reusable workflow).
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
