@@ -4385,8 +4385,6 @@ function wireBoardIoControls() {
       ready: boardUsable(),
       control: canSerialInput(),
       generation: state.writeGeneration,
-      deviceName: () => state.device?.name || "",
-      platform: () => (bleTransport?.platform?.() || "web"),
     }),
     send: command => boardSend(command),
     supported: value => setFeature("bonds", value),

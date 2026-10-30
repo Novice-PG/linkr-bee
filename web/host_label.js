@@ -1,12 +1,13 @@
 /* Derive a default label for "this host". Pure so it is easy to test.
  *
- * The phone apps run inside a native shell and can read the connected
- * accessory's device name; a plain browser cannot see anything but its user
- * agent, so it falls back to the OS and browser. Either way the value is only
- * a suggestion for the label field, which the user can edit. */
-export function defaultHostLabel({ userAgent = "", deviceName = "", platform = "web" } = {}) {
-  const name = String(deviceName ?? "").trim();
-  if (platform !== "web" && name) return name;
+ * A browser can only see its user agent, and neither native shell can read the
+ * phone's own Bluetooth name, so both fall back to the OS and browser. The
+ * value is only a suggestion for the label field, which the user can edit.
+ *
+ * The connected accessory's name is deliberately not used: it is the board's
+ * advertised name, not this host's, and every phone talking to the same board
+ * would then share one label. */
+export function defaultHostLabel({ userAgent = "" } = {}) {
   return labelFromUserAgent(String(userAgent ?? ""));
 }
 

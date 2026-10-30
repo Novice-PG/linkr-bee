@@ -191,7 +191,8 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 
 | payload | 含义 |
 | --- | --- |
-| `@h` | 命令帮助 |
+| `@h` / `@linkr help` | 核心命令帮助；板载 I/O 语法见 `@linkr aux` |
+| `@linkr aux` | 板载 I/O 命令帮助（`@l`/`@o`/`@r`/`@p`/`@y`） |
 | `@n?` / `@linkr name?` | 查询当前广播名及是否为自定义名 |
 | `@n=<name>` / `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 自定义名；支持中文和 emoji（按字节计，通常每个 emoji 4 字节） |
 | `@n default` / `@linkr name default` | 删除自定义名，恢复 `Linkr Bee XXXX` |
@@ -215,6 +216,11 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 | `@linkr target?` | 查询 Bee 保存的目标机 UUID，无关联时返回 `OK target=none` |
 | `@linkr target=<UUID>` | 保存小写、带连字符的 36 字符 UUID；相同值不重复写入 |
 | `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
+| `@linkr bonds?` | 列出已保存的配对，每条一行 `BOND <type>/<addr> self=0/1` |
+| `@linkr bonds remove <type>/<addr>` | 删除一个配对（需控制权）；`OK bonds queued` 表示已受理，非已完成 |
+| `@linkr bonds label <type>/<addr>` | 查询该配对的显示标签（只读），无标签时回复 `none` |
+| `@linkr bonds label <type>/<addr> <hex>` | 设置标签，值为 UTF-8 的十六进制（需控制权） |
+| `@linkr bonds label <type>/<addr> clear` | 清除标签（需控制权） |
 | `@l?` | 查询 RGB 状态灯颜色（仅 Linkr Bee X1.0，其他板返回 `ERR led unsupported`） |
 | `@l=<r>,<g>,<b>` | 设置常亮颜色，通道 0–255 或 `0x00`–`0xff` |
 | `@l off` | 熄灭状态灯 |

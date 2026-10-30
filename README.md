@@ -44,6 +44,9 @@ target's own UART bytes and does not replace the target shell.
 - Send Enter as raw, CR, LF, or CRLF for bootloaders and different shells.
 - Save logs, upload them to WebDAV, and check firmware, UART buffer, WiFi, and
   transfer counters from the diagnostics panel.
+- Give each paired host a display label (for example "Alice's phone"), stored on
+  the board by identity address; the web and phone editors suggest the browser's
+  OS and the TUI suggests the user name, and the owner can edit it.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
 - Assistant in the browser and the phone apps: searches the serial log, runs
   target commands under a selectable approval policy, and asks before changing

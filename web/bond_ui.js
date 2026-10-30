@@ -53,11 +53,8 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
   }
 
   function suggestion() {
-    const ctx = context();
-    const deviceName = typeof ctx.deviceName === 'function' ? ctx.deviceName() : '';
-    const platform = typeof ctx.platform === 'function' ? ctx.platform() : 'web';
     const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-    return defaultHostLabel({ userAgent, deviceName, platform });
+    return defaultHostLabel({ userAgent });
   }
 
   function setLabelSupported(value) {

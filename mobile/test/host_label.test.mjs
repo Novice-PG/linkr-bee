@@ -23,14 +23,13 @@ test("user-agent labels name the OS and browser", () => {
   assert.equal(labelFromUserAgent("curl/8.0"), "");
 });
 
-test("native shells prefer the bluetooth device name", () => {
+test("the default label comes from the user agent, never the accessory name", () => {
   assert.equal(
-    defaultHostLabel({ platform: "android", deviceName: "Pixel 8", userAgent: "x" }),
-    "Pixel 8",
+    defaultHostLabel({
+      userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36",
+      deviceName: "Linkr Bee 078C",
+    }),
+    "Chrome · Android",
   );
-  assert.equal(
-    defaultHostLabel({ platform: "web", deviceName: "Pixel 8", userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/120" }),
-    "Chrome · Windows",
-  );
-  assert.equal(defaultHostLabel({ platform: "ios", deviceName: "", userAgent: "" }), "");
+  assert.equal(defaultHostLabel({ userAgent: "" }), "");
 });
