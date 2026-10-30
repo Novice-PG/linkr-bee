@@ -191,6 +191,15 @@ export const ABOUT_DATA = {
           "url": "https://github.com/linuxdeepin/deepin-desktop-theme",
           "changes": "Three cursor shapes extracted from the XCursor bundles and converted to PNG.",
           "licenseFile": "vendor/macaron-cursors/LICENSE-CC-BY-4.0.txt"
+        },
+        {
+          "name": "BabelStone Pseudographica (subset)",
+          "version": "16.0.0",
+          "license": "OFL-1.1",
+          "author": "Andrew West",
+          "url": "https://www.babelstone.co.uk/Fonts/Pseudographica.html",
+          "changes": "Subset to U+1CC00–U+1CEBF and U+1FB00–U+1FBFF, scaled horizontally to half-width for terminal cells, and renamed Linkr Legacy Computing.",
+          "licenseFile": "fonts/OFL.txt"
         }
       ]
     }

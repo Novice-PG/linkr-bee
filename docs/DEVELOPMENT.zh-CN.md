@@ -932,7 +932,10 @@ http://127.0.0.1:8765/
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
 - 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
-  字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
+  字形；所选字体会按当前浏览器来源持久化。Nerd 字体本身不内置；唯一内置的是
+  BabelStone Pseudographica 子集（`web/fonts/`），覆盖 Unicode 13/16 的
+  legacy computing 区块，因为桌面等宽字体栈会把这些 ANSI art 字形渲染成
+  `.notdef`
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
 - 识别常见 Bash/BusyBox 的 `$ ` 和 `# ` 提示符，登录后通过

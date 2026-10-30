@@ -1,3 +1,14 @@
+/* BabelStone-derived fallback for the Unicode legacy-computing blocks used by
+ * ANSI art in serial logs. System monospace fonts treat these as .notdef. */
+@font-face {
+  font-family: "Linkr Legacy Computing";
+  src: url("./fonts/linkr-legacy-computing.woff2?v=20261030") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+1CC00-1CEBF, U+1FB00-1FBFF;
+}
+
 :root {
   color-scheme: dark;
   /* Edge-to-edge safe areas. Android 15+ forbids fitting the window above the
@@ -44,7 +55,7 @@
   --selection-copy-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+    "Liberation Mono", "Linkr Legacy Computing", monospace;
   --layout-gap: clamp(12px, 1vw, 20px);
   --layout-gutter: clamp(10px, 1.25vw, 24px);
   --sidebar-width: clamp(300px, 22vw, 420px);

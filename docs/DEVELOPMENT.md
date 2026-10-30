@@ -1172,7 +1172,10 @@ The page can:
 - adjust line ending and BLE write chunk size
 - switch between the system monospace stack and common locally installed Nerd
   Fonts, with a Powerline/Nerd glyph preview; the selection is persisted for
-  the current browser origin, but the font files themselves are not bundled
+  the current browser origin, but the Nerd font files themselves are not
+  bundled. The only bundled face is a BabelStone Pseudographica subset for the
+  Unicode 13/16 legacy-computing blocks (`web/fonts/`), because desktop
+  monospace stacks render those ANSI-art glyphs as .notdef
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns

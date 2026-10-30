@@ -518,7 +518,8 @@ function reconnectDelays() {
 }
 
 const SYSTEM_TERMINAL_FONT =
-  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", ' +
+  '"Linkr Legacy Computing", monospace';
 const TERMINAL_FONTS = {
   system: SYSTEM_TERMINAL_FONT,
   symbols:
@@ -1774,6 +1775,15 @@ function initTerminal() {
   state.fitAddon = new globalThis.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
+  // Legacy-computing glyphs only trigger the fallback font on demand. Load it
+  // explicitly, then redraw so existing scrollback switches from .notdef to
+  // the real shapes as soon as it arrives.
+  if (document.fonts && document.fonts.load) {
+    document.fonts
+      .load(`${state.fontSize}px "Linkr Legacy Computing"`, "\u{1cc1a}\u{1fb00}")
+      .then(() => refreshTerminalFont(state.fontFamily))
+      .catch(() => {});
+  }
   subscribeTerminalInput(state.term, onTerminalData);
   state.term.onResize(onTerminalResize);
   state.term.onScroll(() => {
@@ -3717,8 +3727,8 @@ function applyFeatureVisibility() {
   if (elements.boardLearnBlock) elements.boardLearnBlock.hidden = learningHidden;
   if (elements.boardSavedBlock) elements.boardSavedBlock.hidden = learningHidden;
 
-  /* Prompts live on the AI page now, so the Board section only depends on the
-   * three board devices. */
+  /* Prompts live on the AI page now, so the Board section depends on the three
+   * board devices and the pairing surface. */
   const boardUnsupported = features.led === false && features.opto === false &&
     features.ir === false && features.bonds === false;
   setTabHidden("board", boardUnsupported);
