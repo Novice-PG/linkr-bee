@@ -114,7 +114,7 @@ Management、Reliable UART 和兼容 NUS 的特征值及 CCC 均要求加密访�
 
 ### Manage saved hosts
 
-In **Settings → Board → Paired devices**, refresh the list and remove an
+In **Settings → Connection → Paired devices**, refresh the list and remove an
 individual pairing. The list uses Bluetooth identity addresses (public/random),
 not host names or temporary scan addresses, and marks the current host.
 Deletion requires the current control owner and confirmation. Removing a connected
@@ -137,13 +137,22 @@ The encrypted BLE management commands are `@linkr bonds?` (read-only),
 `@linkr bonds label <type>/<address> [<hex>|clear]`. Type 0 is public, 1 is
 random. A label travels hex-encoded because it is UTF-8 text; a bare address is
 a read-only query (`OK bonds label=<address> none` or
-`OK bonds label=<address> hex=<hex>`), while writing or clearing needs the
-control owner. The firmware rejects labels that are not displayable UTF-8
-(including C0/C1 controls) and stores at most 48 bytes by default. The list
-never carries labels, because eight of them would overflow the reply: read one
-address at a time. The web and TUI clients cap their own label input at 48
-bytes; a build that changes `LINKR_BLE_BRIDGE_BOND_LABEL_MAX` must change the
-clients too.
+`OK bonds label=<address> hex=<hex>`), while writing or clearing another host's
+label needs the control owner.
+
+The earlier self-only form is kept for existing clients:
+`@linkr bonds name <label>` names the caller's own pairing and needs no console
+ownership, and `@linkr bonds names?` returns every stored name as
+`NAME <type>/<address> "<label>"` lines. The listing is capped at 32 bytes so
+eight maximal lines still fit one reply; the per-address form above returns the
+full label. A host can therefore rename itself without taking control, while an
+owner can still rename or clear any pairing.
+
+The firmware rejects labels that are not displayable UTF-8 (including C0/C1
+controls) and stores at most 48 bytes by default. The list never carries labels,
+because eight of them would overflow the reply: read one address at a time. The
+web and TUI clients cap their own label input at 48 bytes; a build that changes
+`LINKR_BLE_BRIDGE_BOND_LABEL_MAX` must change the clients too.
 The removal acknowledgement `OK bonds queued` means accepted, not completed;
 queries report `pending` and the last removal `result` (zero on success).
 The firmware delays removal briefly so even the current host can receive the

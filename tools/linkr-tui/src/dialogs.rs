@@ -1270,13 +1270,17 @@ pub fn prompt_ble_name(app: &mut App) {
 
 /// Ask for a paired-device label.
 ///
-/// The field starts with the current label, or with this host's own name when
-/// the board stores none, so naming a pairing is a correction rather than a
-/// retype. An empty answer clears the label.
-pub fn prompt_bond_label(app: &mut App, address: &str, current: Option<&str>) {
-    let suggested = current
-        .map(str::to_string)
-        .unwrap_or_else(crate::user::preferred_name);
+/// The field starts with the current label. Only this host's own pairing is
+/// suggested from the local user name: a remote phone named after the person
+/// at this desk would be a lie. An empty answer clears the label.
+pub fn prompt_bond_label(app: &mut App, address: &str, current: Option<&str>, is_self: bool) {
+    let suggested = current.map(str::to_string).unwrap_or_else(|| {
+        if is_self {
+            crate::user::preferred_name()
+        } else {
+            String::new()
+        }
+    });
     let prompt = Prompt::with_text(
         BOND_LABEL_TITLE,
         PromptAction::BondLabel {
@@ -2462,6 +2466,14 @@ fn start(app: &mut App, prompt: Prompt) {
         // without an approval card (unlike a BLE-name change, which alters the
         // advertisement). The write is still read back from the board.
         PromptAction::BondLabel { address } => {
+            if answer.trim().len() > crate::accessory::BOND_LABEL_MAX_BYTES {
+                let text = app.strings().net_paired_label_too_long.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: NoticeLevel::Error,
+                });
+                return;
+            }
             if let Err(why) = app.set_bond_label(&address, &answer) {
                 app.push_notice(crate::app::Notice {
                     text: why,

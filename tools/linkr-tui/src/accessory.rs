@@ -776,6 +776,21 @@ pub const BONDS_QUERY_COMMAND: &str = "@linkr bonds?";
 /// The firmware's default paired-device label cap, in UTF-8 bytes.
 pub const BOND_LABEL_MAX_BYTES: usize = 48;
 
+/// Whether `id` is the firmware's exact `<type>/<address>` identity shape.
+pub fn bond_id_valid(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 19
+        && matches!(bytes[0], b'0' | b'1')
+        && bytes[1] == b'/'
+        && bytes[2..].iter().enumerate().all(|(index, byte)| {
+            if index % 3 == 2 {
+                *byte == b':'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
 /// One line of `bonds?`: the identity address and whether it is this
 /// connection. The label is a second command, so it is not on this line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -811,7 +826,7 @@ pub fn parse_bonds(text: &str) -> Option<BondList> {
     for line in lines {
         let body = line.strip_prefix("BOND ")?;
         let (id, flag) = body.split_once(" self=")?;
-        if id.len() != 19 {
+        if !bond_id_valid(id) {
             return None;
         }
         peers.push(BondEntry {

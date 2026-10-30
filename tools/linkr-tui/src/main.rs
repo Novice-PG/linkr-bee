@@ -707,6 +707,29 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-ble-name" => args.requests.queries.push(device::Query::BleName),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
             "--query-bonds" => args.requests.queries.push(device::Query::Bonds),
+            "--rename-bond" => {
+                let raw = value("--rename-bond");
+                let (address, label) = raw.split_once('=').unwrap_or_else(|| {
+                    fail(prog, "'--rename-bond' wants <type>/<address>=<label>")
+                });
+                if !linkr_tui::accessory::bond_id_valid(address) {
+                    fail(
+                        prog,
+                        &format!("'{address}' is not a paired-device identity address"),
+                    );
+                }
+                args.requests.bond_label = Some((address.to_string(), label.to_string()));
+            }
+            "--remove-bond" => {
+                let address = value("--remove-bond");
+                if !linkr_tui::accessory::bond_id_valid(&address) {
+                    fail(
+                        prog,
+                        &format!("'{address}' is not a paired-device identity address"),
+                    );
+                }
+                args.requests.bond_remove = Some(address);
+            }
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
                 let raw = value("--wifi");
