@@ -1,3 +1,14 @@
+/* BabelStone-derived fallback for the Unicode legacy-computing blocks used by
+ * ANSI art in serial logs. System monospace fonts treat these as .notdef. */
+@font-face {
+  font-family: "Linkr Legacy Computing";
+  src: url("./fonts/linkr-legacy-computing.woff2?v=20261030") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+1CC00-1CEBF, U+1FB00-1FBFF;
+}
+
 :root {
   color-scheme: dark;
   /* Edge-to-edge safe areas. Android 15+ forbids fitting the window above the
@@ -44,7 +55,7 @@
   --selection-copy-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+    "Liberation Mono", "Linkr Legacy Computing", monospace;
   --layout-gap: clamp(12px, 1vw, 20px);
   --layout-gutter: clamp(10px, 1.25vw, 24px);
   --sidebar-width: clamp(300px, 22vw, 420px);
@@ -245,7 +256,11 @@ button {
 }
 
 /* ---------- Scrollbars ---------- */
-.controls,
+/* Chromium drops every ::-webkit-scrollbar rule below as soon as the element
+ * sets `scrollbar-width` or `scrollbar-color`, so the drawer must not set them:
+ * doing that silently replaced the inset thumb with the native bar, whose square
+ * corners crossed the drawer's 18px radius. The terminal viewport keeps the pair
+ * for Firefox and its bar lives inside a square surface anyway. */
 .xterm-viewport {
   scrollbar-color: var(--panel-3) transparent;
   scrollbar-width: thin;
@@ -262,9 +277,11 @@ button {
   background: transparent;
 }
 
+/* --panel-3 is lighter than the panel in the light theme: the thumb was there
+ * but invisible on the one surface that actually renders it. */
 .controls::-webkit-scrollbar-thumb,
 .xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--panel-3);
+  background: var(--line);
   background-clip: padding-box;
   border: 3px solid transparent;
   border-radius: 999px;
@@ -272,9 +289,19 @@ button {
 
 .controls::-webkit-scrollbar-thumb:hover,
 .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: var(--line);
+  background: var(--line-strong);
   background-clip: padding-box;
   border: 3px solid transparent;
+}
+
+/* Up to the drawer's touch layout the bar overlays instead of reserving a lane:
+ * ten pixels there pushed the six settings tabs under their 44px touch floor at
+ * 320px wide. Fingers scroll the drawer anyway. */
+@media (max-width: 900px) {
+  .controls::-webkit-scrollbar {
+    height: 0;
+    width: 0;
+  }
 }
 
 /* ---------- Layout ---------- */
@@ -983,11 +1010,53 @@ button:focus-visible {
   cursor: pointer;
 }
 
+/* A checked box reads as a mark, not a filled chip. The native control paints
+ * the accent colour across the whole square (solid in Chromium, a pale tint with
+ * a coloured tick in WebKit), which sat on the panel like a stray highlight next
+ * to the label. Nothing here is accent-filled: the box stays transparent, the
+ * border is a hairline and only the tick carries the colour.
+ *
+ * The 4px radius is deliberate: a 16px control cannot take the 10px control
+ * radius without turning into a lozenge. */
 .check input {
+  appearance: none;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent);
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  display: grid;
+  place-content: center;
   cursor: pointer;
+}
+
+.check input::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border-left: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(-45deg) translate(1px, -1px);
+  opacity: 0;
+}
+
+.check input:checked::after {
+  opacity: 1;
+}
+
+.check input:hover {
+  border-color: var(--muted);
+}
+
+.check input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.check input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* ---------- Work panel ---------- */
@@ -2882,7 +2951,7 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
 #targetBindingIdentity { overflow-wrap: anywhere; white-space: pre-wrap; }
 
 .target-binding .check { min-height: 44px; padding-block: 8px; }
-.target-binding .check input[type="checkbox"] { box-sizing: border-box; width: 18px; min-width: 18px; max-width: 18px; height: 18px; min-height: 18px; flex: 0 0 18px; margin: 0; padding: 0; appearance: auto; accent-color: var(--accent-strong); }
+.target-binding .check input[type="checkbox"] { box-sizing: border-box; width: 18px; min-width: 18px; max-width: 18px; height: 18px; min-height: 18px; flex: 0 0 18px; margin: 0; padding: 0; }
 
 /* ---------- Terminal selection handles ---------- */
 .terminal-selection-ui {

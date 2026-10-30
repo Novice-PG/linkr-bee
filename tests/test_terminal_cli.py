@@ -443,6 +443,70 @@ class CompletionTests(unittest.TestCase):
             self.assertIn(shell, result.stderr)
 
 
+class HostNameTests(unittest.TestCase):
+    """The name recorded next to this host's bond."""
+
+    def args(self, *argv):
+        return terminal.build_parser().parse_args(list(argv))
+
+    def test_default_is_this_machines_hostname(self):
+        with patch.object(terminal.socket, "gethostname", return_value=" mbp.local "):
+            self.assertEqual(terminal.host_label(self.args()), "mbp.local")
+
+    def test_an_explicit_name_wins(self):
+        with patch.object(terminal.socket, "gethostname", return_value="ignored"):
+            self.assertEqual(
+                terminal.host_label(self.args("--host-name", "	longlong 的 MacBook ")),
+                "	longlong 的 MacBook ".strip())
+
+    def test_no_host_name_skips_the_report(self):
+        self.assertIsNone(terminal.host_label(self.args("--no-host-name")))
+
+    def test_an_empty_hostname_is_not_reported(self):
+        with patch.object(terminal.socket, "gethostname", return_value="   "):
+            self.assertIsNone(terminal.host_label(self.args()))
+
+    def test_both_flags_are_a_usage_error(self):
+        result = subprocess.run(
+            [sys.executable, str(TERMINAL_PATH), "--host-name", "x",
+             "--no-host-name", "--no-terminal"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not both", result.stderr)
+
+
+class HostNameReportTests(unittest.IsolatedAsyncioTestCase):
+    class FakeManagement:
+        def __init__(self, error=None):
+            self.sent = []
+            self.error = error
+
+        async def send(self, command):
+            self.sent.append(command)
+            if self.error is not None:
+                raise self.error
+            return b"OK bonds name"
+
+    async def test_reports_the_exact_command(self):
+        management = self.FakeManagement()
+        await terminal.report_host_name(management, "longlong-mbp")
+        self.assertEqual(management.sent, [b"@linkr bonds name longlong-mbp"])
+
+    async def test_a_name_with_spaces_survives(self):
+        management = self.FakeManagement()
+        await terminal.report_host_name(management, "longlong 的 iPhone")
+        self.assertEqual(management.sent,
+                         ["@linkr bonds name longlong 的 iPhone".encode()])
+
+    async def test_a_refusal_is_a_warning_not_a_failed_session(self):
+        management = self.FakeManagement(error=RuntimeError("ERR bonds not found"))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            await terminal.report_host_name(management, "mbp")
+        self.assertIn("could not record this host's name", stderr.getvalue())
+        self.assertIn("ERR bonds not found", stderr.getvalue())
+
+
 class ScanRuleTests(unittest.TestCase):
     """--scan lists and exits unless the invocation asked for more."""
 

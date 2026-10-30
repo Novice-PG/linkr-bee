@@ -1606,9 +1606,15 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		!strcmp(body, "w?") || !strcmp(body, "wifi?") ||
 		!strcmp(body, "d?") || !strcmp(body, "webdav?") ||
 		!strcmp(body, "s?") || !strcmp(body, "socket?") ||
-		!strcmp(body, "bonds?") || linkr_bond_is_readonly(body) ||
+		!strcmp(body, "bonds?") || !strcmp(body, "bonds names?") ||
+		linkr_bond_is_readonly(body) ||
 		!strcmp(body, "target?") || linkr_aux_is_readonly(body);
-	if (!readonly) {
+	/* `bonds name` only writes the caller's own bond; it needs no console
+	 * ownership. `bonds label <self>` is the same idea in the management
+	 * form; arbitrary addresses still go through the control gate. */
+	bool own_bond = !strcmp(body, "bonds name") ||
+			!strncmp(body, "bonds name ", 11);
+	if (!readonly && !own_bond) {
 		if (!linkr_session_command_begin(conn, mgmt_capture.epoch)) {
 			(void)send_control_response(conn, "ERR control=readonly\r\n");
 			return true;
@@ -1645,7 +1651,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		// replaced by "response too large". `@linkr aux` carries the board
 		// half, so both fit.
 		(void)send_control_response(conn,
-					     "OK cmds: @linkr bonds?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
+					     "OK cmds: @linkr bonds?|@linkr bonds name <label>|@linkr bonds names?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 					    "@n?|@n=<name>|@n default "
 #endif

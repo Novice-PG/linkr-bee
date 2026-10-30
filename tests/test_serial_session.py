@@ -54,7 +54,7 @@ static bool linkr_bond_command(const void *conn, const char *body, char *out, si
  (void)conn; (void)body; (void)out; (void)n; return false;
 }
 static bool linkr_bond_is_readonly(const char *body) {
- return !strcmp(body, "bonds?");
+ (void)body; return false;
 }
 static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
  mgmt_capture.epoch = queued;

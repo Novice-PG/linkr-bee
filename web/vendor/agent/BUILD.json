@@ -23,7 +23,7 @@
     "web/agent_execution_policy.js": "b5109b721b5074101ca8a84de057747cd4ed524720322609059c1fb66541a6d2",
     "mobile/src/builtin-skills.mjs": "9cd9cb2ffdcb81710c62ce9204df285b3ddec881d6aff79dfd5eea9a65338f90",
     "mobile/src/agent-prompt.mjs": "08b78e6fb03085e194b1c496e3144a7c73db71ee18d42dea8523d237779341e5",
-    "mobile/src/agent-tool-groups.mjs": "2a20ea64d198a862db26ee99fc7112d4e619aa8535a8ec543ec0bfb7fd76a1e6",
+    "mobile/src/agent-tool-groups.mjs": "1609bfca16a5086adefbeabba1d2823b9f1b7ba5d703a8961acd390104ae1a5e",
     "web/download_plan.js": "14b671a194c5e7fa605e7585a2e758733c1cdc5bafe816b6881a8dfa54480371",
     "web/target_files.js": "cc6085e526f699e91672a9bf5036ef74a3fac27f8289e3cf234b9012bcfbde16",
     "web/target_verify.js": "8293c4f3f6fac047b77ddeee98730d5837b88884a730512b6326d6ba3dd5b540",
@@ -34,8 +34,8 @@
     "mobile/src/radxa-docs.mjs": "ca964357173b831e2b661694ba7c4d844648db7f2d9e4dc2e8da045170dea9da",
     "web/agent_tasks.js": "57c47ca42c36cbdb10447f2ef928c8fc4b1ffefe24825299b96f0563379635ad",
     "web/agent_task_state.js": "afc1606232d865171147ed1f35ad45f42dcb4706af4ef34a26a4d7c06982aaf4",
-    "mobile/src/pi-agent.mjs": "bb7605adc03a9b9758a703dc062f0aa4d57f532ec6cc3a90dd1e31c01ae97dfe",
+    "mobile/src/pi-agent.mjs": "12bfd7acc1234dc2c3780f1e9ba9483f87ff39a679dfe0eabfebfe9e8f7fd97e",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "fe85240589de52d529e34ef018aa3fab13fcdca888f79100c431ead062eb1296"
+  "sha256": "e50e59ec56ed820c2539d1b485737d74d3a7661f15f0d8f53609844232b96696"
 }

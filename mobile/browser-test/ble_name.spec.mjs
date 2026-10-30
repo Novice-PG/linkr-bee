@@ -110,7 +110,9 @@ test("set and restore show the name the board reads back", async ({ page }) => {
   await page.click("#bleNameDefaultButton");
   await expect(page.locator("#bleNameInput")).toHaveValue("Linkr Bee 078C");
   await expect(page.locator("#bleNameStatus")).toContainText("Linkr Bee 078C");
-  expect(await page.evaluate(() => window.__seenCommands)).toEqual([
+  // Opening Connection also probes the paired-device card; assert the name
+  // protocol itself, not unrelated management traffic on the same page.
+  expect(await page.evaluate(() => window.__seenCommands.filter((command) => command.startsWith("@n")))).toEqual([
     "@n=Bench Bee",
     "@n?",
     "@n default",

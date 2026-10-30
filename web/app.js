@@ -83,6 +83,7 @@ import {
 import { applyInputModifiers, terminalKeySequence } from "./terminal_keys.js";
 import { subscribeTerminalInput } from "./terminal_input.js";
 import { createTerminalKeyPreferences } from "./terminal_key_preferences.js";
+import { ByteHistory, createSerialPresentation } from "./serial_presentation.js";
 import { SerialJournal } from "./serial_journal.js";
 import { createAgentPanel } from "./agent_panel.js";
 import { createAgentSettings } from "./agent_settings.js";
@@ -260,7 +261,7 @@ const state = {
   resizeObserver: null,
   connected: false,
   termReady: false,
-  logBytes: [],
+  logView: "reading",
   autoScroll: true,
   fontSize: isHarmonyHost ? 11 : 13,
   fontFamily: "system",
@@ -292,7 +293,6 @@ const state = {
    * whether this firmware exposes the @l/@o/@r group at all. */
   features: {
     bonds: null,
-    bondLabel: null,
     led: null,
     opto: null,
     ir: null,
@@ -323,7 +323,6 @@ const state = {
   },
   boardPromptBytes: 0,
   diagnostics: {},
-  logSize: 0,
   terminalGeometry: null,
   terminalGeometrySynced: "",
   terminalGeometrySyncInFlight: "",
@@ -333,6 +332,12 @@ const state = {
 };
 
 const LOG_CAP_BYTES = 4 * 1024 * 1024;
+const rawLog = new ByteHistory(LOG_CAP_BYTES);
+const readingLog = new ByteHistory(LOG_CAP_BYTES);
+const rawDisplay = new ByteHistory(LOG_CAP_BYTES);
+const readingDisplay = new ByteHistory(LOG_CAP_BYTES);
+let terminalReplay = false, replayRevision = 0, replayTail = [], replayTailBytes = 0;
+const serialPresentation = createSerialPresentation({onIdle: appendDeferredReading});
 
 const $ = (id) => document.getElementById(id);
 
@@ -366,6 +371,12 @@ const elements = {
   setUartButton: $("setUartButton"),
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
+  logViewSelect: $("logViewSelect"),
+  saveReadingLog: $("saveReadingLog"),
+  saveRawLog: $("saveRawLog"),
+  shellIntegrationEnable: $("shellIntegrationEnable"),
+  shellIntegrationDisable: $("shellIntegrationDisable"),
+  shellIntegrationStatus: $("shellIntegrationStatus"),
   terminalOutput: $("terminalOutput"),
   terminalInputHint: $("terminalInputHint"),
   focusTerminalButton: $("focusTerminalButton"),
@@ -507,7 +518,8 @@ function reconnectDelays() {
 }
 
 const SYSTEM_TERMINAL_FONT =
-  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", ' +
+  '"Linkr Legacy Computing", monospace';
 const TERMINAL_FONTS = {
   system: SYSTEM_TERMINAL_FONT,
   symbols:
@@ -645,7 +657,17 @@ const I18N = {
     switchDevice: "Switch device",
     queryUart: "Query UART",
     clear: "Clear",
-    saveLog: "Save Log",
+    saveLog: "Save current view",
+    logViewTitle: "Log view", logViewReading: "Reading", logViewRaw: "Raw",
+    logViewHint: "Reading hides only registered Agent wrappers and exit markers. Switching redraws cached output without sending input. Raw exports and board WebDAV retain original UART bytes.",
+    saveReadingLog: "Export reading log", saveRawLog: "Export raw log",
+    shellIntegrationTitle: "Session Shell integration",
+    shellIntegrationHint: "Optional for an idle POSIX shell. Defines a temporary function without sudo or files; commands still run in sh subprocesses. Re-enable after reconnecting or starting a new chat. Disabling only changes future tracking.",
+    shellIntegrationEnable: "Enable for this Shell", shellIntegrationDisable: "Use normal tracking",
+    shellIntegrationDisabled: "Normal tracking · connect to an idle Shell to enable OSC boundaries.",
+    shellIntegrationReady: "Enabled · command boundaries and exit codes use OSC.",
+    shellIntegrationPending: "An execution is unresolved. Inspect the target, then start a new chat before enabling again.",
+    shellIntegrationEnabling: "Waiting for the Shell handshake…", shellIntegrationFailed: "Handshake unconfirmed. No command was retried; inspect the terminal before trying again.",
     set: "Set",
     off: "Off",
     ctrlC: "Ctrl-C",
@@ -943,7 +965,17 @@ const I18N = {
     switchDevice: "切换设备",
     queryUart: "查询 UART",
     clear: "清屏",
-    saveLog: "保存日志",
+    saveLog: "保存当前视图",
+    logViewTitle: "日志视图", logViewReading: "阅读", logViewRaw: "原始",
+    logViewHint: "阅读视图仅净化已登记的 Agent 包装命令和退出标记。切换只重绘缓存，不发送串口输入；原始导出和板端 WebDAV 保留 UART 原始字节。",
+    saveReadingLog: "导出阅读日志", saveRawLog: "导出原始日志",
+    shellIntegrationTitle: "本次 Shell 集成",
+    shellIntegrationHint: "可选，需要空闲的 POSIX Shell。只定义临时函数，无需 sudo、不写文件；命令仍在 sh 子进程执行。重连或新建对话后需重新启用。停用仅切换后续跟踪方式。",
+    shellIntegrationEnable: "启用当前 Shell", shellIntegrationDisable: "切回普通跟踪",
+    shellIntegrationDisabled: "普通跟踪 · 连接空闲 Shell 后可启用 OSC 边界。",
+    shellIntegrationReady: "已启用 · 通过 OSC 接收命令边界和退出码。",
+    shellIntegrationPending: "有未结束的执行记录，请检查目标机状态并新建对话后再启用。",
+    shellIntegrationEnabling: "正在等待 Shell 握手…", shellIntegrationFailed: "握手未确认，未重发任何命令；请检查终端后再操作。",
     set: "设置",
     off: "关闭",
     ctrlC: "Ctrl-C",
@@ -1512,6 +1544,7 @@ function applyLang() {
   terminalKeyPreferences?.refreshLang();
   aboutPage?.refreshLang();
   renderUartMode();
+  renderShellIntegration();
   renderSerialControl();
 }
 
@@ -1553,7 +1586,7 @@ function markTerminalBusy() {
 }
 
 function scheduleTerminalGeometrySync() {
-  if (!canSerialInput()) return;
+  if (terminalReplay || !canSerialInput()) return;
   if (handlesTerminalGeometryLocally()) {
     return;
   }
@@ -1575,6 +1608,7 @@ function scheduleTerminalGeometrySync() {
   state.terminalGeometrySyncTimer = setTimeout(() => {
     state.terminalGeometrySyncTimer = null;
     if (
+      terminalReplay ||
       !state.connected ||
       serialInputPending ||
       session !== state.terminalGeometrySession ||
@@ -1629,6 +1663,7 @@ function terminalHasIdleShellPrompt() {
 }
 
 function onTerminalWriteParsed() {
+  if (terminalReplay) return;
   state.shellPromptVisible = terminalHasIdleShellPrompt();
   if (state.shellPromptVisible) {
     scheduleTerminalGeometrySync();
@@ -1740,6 +1775,15 @@ function initTerminal() {
   state.fitAddon = new globalThis.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
+  // Legacy-computing glyphs only trigger the fallback font on demand. Load it
+  // explicitly, then redraw so existing scrollback switches from .notdef to
+  // the real shapes as soon as it arrives.
+  if (document.fonts && document.fonts.load) {
+    document.fonts
+      .load(`${state.fontSize}px "Linkr Legacy Computing"`, "\u{1cc1a}\u{1fb00}")
+      .then(() => refreshTerminalFont(state.fontFamily))
+      .catch(() => {});
+  }
   subscribeTerminalInput(state.term, onTerminalData);
   state.term.onResize(onTerminalResize);
   state.term.onScroll(() => {
@@ -1838,7 +1882,37 @@ function flushTerminalWrites() {
   state.term.write(merged, onTerminalWriteParsed);
 }
 
+function appendDeferredReading(bytes) {
+  readingLog.append(bytes); readingDisplay.append(bytes);
+  if (state.logView === "reading") queueTerminalOutput(bytes);
+}
+function flushReadingPrefix() {
+  const bytes = serialPresentation.flush();
+  if (bytes.length) appendDeferredReading(bytes);
+}
 function appendOutput(data) {
+  // UI/control messages are outside the UART stream. Finish a pending prefix
+  // first so neither reading history nor replay can reorder it around the UI.
+  flushReadingPrefix();
+  const bytes = typeof data === "string" ? encoder.encode(data) : data;
+  rawDisplay.append(bytes); readingDisplay.append(bytes);
+  queueTerminalOutput(bytes);
+}
+function queueTerminalOutput(data) {
+  if (!data.length) return;
+  if (terminalReplay) {
+    if (replayTailBytes + data.length > WRITE_BACKLOG_LIMIT) {
+      // The bounded display history already has these bytes. Restart from a
+      // fresh snapshot instead of retaining an unbounded second live queue.
+      replayRevision++;
+      replayTail = [];
+      replayTailBytes = 0;
+    } else {
+      replayTail.push(data);
+      replayTailBytes += data.length;
+    }
+    return;
+  }
   if (!state.term) {
     const text =
       data instanceof Uint8Array ? decoder.decode(data) : String(data);
@@ -1933,14 +2007,6 @@ function updateCounters() {
       elements.txCount.textContent = state.txBytes.toLocaleString();
     }
   });
-}
-
-function appendLogBytes(bytes) {
-  state.logBytes.push(bytes);
-  state.logSize += bytes.length;
-  while (state.logSize > LOG_CAP_BYTES && state.logBytes.length > 1) {
-    state.logSize -= state.logBytes.shift().byteLength;
-  }
 }
 
 function updateWifiDatalist() {
@@ -2172,6 +2238,7 @@ function renderSerialControl() {
   const status = document.getElementById("serialControlStatus");
   const button = document.getElementById("serialControlButton");
   const control = state.connected ? state.serialControl : null;
+  document.getElementById("serialControlGroup").hidden = !control;
   if (status) {
     status.hidden = !control;
     if (control) {
@@ -2229,6 +2296,7 @@ function applySerialControl(control) {
   state.serialControl = control;
   serialControlPending = false;
   renderSerialControl();
+  renderShellIntegration();
   if (control.mode === "control") scheduleTerminalGeometrySync();
 }
 
@@ -3556,6 +3624,7 @@ function pairingRefused(error) {
   return /insufficient (authentication|encryption|security)|authentication failed|pairing failed/i.test(text);
 }
 
+
 function setConnecting(connecting) {
   connecting = connecting || connectionInFlight;
   // Same source as setConnected(): a failure path must not re-enable a Connect
@@ -3642,26 +3711,25 @@ function updateNetworkCardTitle() {
 
 function applyFeatureVisibility() {
   const features = state.features;
+  const bondsCard = $("boardBondsCard");
+  if (bondsCard) bondsCard.hidden = features.bonds === false;
   const cards = [
-    [$("boardBondsCard"), features.bonds],
     [elements.boardLedCard, features.led],
     [elements.boardOptoCard, features.opto],
     [elements.boardIrCard, features.ir],
   ];
-  let boardCards = 0;
   for (const [card, supported] of cards) {
     if (!card) continue;
     card.hidden = supported === false;
-    if (!card.hidden) boardCards += 1;
   }
   const learningHidden = features.ir === false || features.irLearn === false;
   if (elements.boardLearnBlock) elements.boardLearnBlock.hidden = learningHidden;
   if (elements.boardSavedBlock) elements.boardSavedBlock.hidden = learningHidden;
 
-  /* Prompts live on the AI page now, so the Board section only depends on the
-   * three board devices. */
+  /* Prompts live on the AI page and paired devices in Connection, so the Board
+   * section depends only on the three board devices. */
   const boardUnsupported = features.led === false && features.opto === false &&
-    features.ir === false && features.bonds === false;
+    features.ir === false;
   setTabHidden("board", boardUnsupported);
 
   if (elements.wifiBlock) elements.wifiBlock.hidden = features.wifi === false;
@@ -4368,7 +4436,6 @@ function wireBoardPromptControls() {
 
 async function refreshBoardIo() {
   if (!state.board.canControl) return;
-  await bondUi?.query();
   await refreshBoardLed();
   await refreshBoardOpto();
   await refreshBoardIr();
@@ -4378,17 +4445,9 @@ async function refreshBoardIo() {
 function wireBoardIoControls() {
   bondUi = createBondUi({
     card: $("boardBondsCard"),
-    context: () => ({
-      lang,
-      supported: state.features.bonds,
-      label: state.features.bondLabel,
-      ready: boardUsable(),
-      control: canSerialInput(),
-      generation: state.writeGeneration,
-    }),
-    send: command => boardSend(command),
+    context: () => ({ lang, supported: state.features.bonds, ready: boardUsable(), control: canSerialInput(), generation: state.writeGeneration }),
+    send: (command, options) => boardSend(command, options),
     supported: value => setFeature("bonds", value),
-    supportedLabel: value => setFeature("bondLabel", value),
     beforeSelfDelete: () => { cancelAutoReconnect(); userInitiatedDisconnect = true; },
     afterSelfDelete: (token, queued) => { if (!queued && state.writeGeneration === token) userInitiatedDisconnect = false; },
   });
@@ -4565,8 +4624,10 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   const connectionChanged = state.connected !== connected;
+  flushReadingPrefix(); serialPresentation.reset();
   if (connectionChanged) {
-    for (const key of ["bonds", "bondLabel", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
+    shellIntegrationError = false;
+    for (const key of ["bonds", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
       state.features[key] = null;
     }
     state.features.wifi = connected && !isWs && state.mgmtReady
@@ -4600,6 +4661,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   if (connected && !preserveJournal) agentJournal.reset();
   agentPanel?.connectionChanged(connected);
   agentSettings?.connectionChanged();
+  renderShellIntegration();
   if (connectionChanged) {
     resetTerminalGeometrySync();
   }
@@ -4664,6 +4726,9 @@ function setConnected(connected, { preserveJournal = false } = {}) {
      * round-trips on every connect. */
     if (connected && elements.controls.dataset.settingsActive === "board") {
       refreshBoardIo();
+    } else if (connected && settingsPanelOpen() &&
+               elements.controls.dataset.settingsActive === "connection") {
+      bondUi?.query();
     }
   }
   if (elements.presetChips) {
@@ -5045,7 +5110,7 @@ function resetModifiers() {
 }
 
 function onTerminalData(data, { raw = false, userInput = true } = {}) {
-  if (!data || (!canSerialInput() && !(userInput && canAttemptUserInput()))) {
+  if (terminalReplay || !data || (!canSerialInput() && !(userInput && canAttemptUserInput()))) {
     return;
   }
   if (!userInput) {
@@ -5246,7 +5311,7 @@ function onReliableUartIndication(value) {
 function handleIncomingBytes(bytes) {
   agentJournal.append(bytes);
   agentPanel?.logsChanged();
-  appendLogBytes(bytes);
+  rawLog.append(bytes);
   state.rxBytes += bytes.length;
   updateCounters();
   const text = rxDecoder.decode(bytes, { stream: true });
@@ -5254,7 +5319,10 @@ function handleIncomingBytes(bytes) {
   if (elements.debugInput.checked) {
     appendLine(`RX ${bytes.length}: ${JSON.stringify(text)}`);
   }
-  appendOutput(bytes);
+  const reading = serialPresentation.push(bytes);
+  readingLog.append(reading); rawDisplay.append(bytes); readingDisplay.append(reading);
+  queueTerminalOutput(state.logView === "raw" ? bytes : reading);
+  scheduleShellIntegrationRender();
 }
 
 function onDisconnected({ unexpected = false } = {}) {
@@ -5924,6 +5992,9 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
       appendLine(`[error] ${error.message}`),
     );
     readBleName({ quiet: true });
+    // Labels are cosmetic: enqueue only after the ownership handshake, never
+    // from render() or while a setting is being checked for a handover.
+    bondUi?.reportHostName();
   } catch (error) {
     if (!signal?.aborted) appendLine(`[error] ${error.message}`);
     const needsReselect = error.code === "BLE_RESELECT_REQUIRED";
@@ -6027,35 +6098,119 @@ async function disconnect() {
   }
 }
 
-function clearTerminalOutput(resetTerminal) {
-  if (!state.term) {
-    elements.terminalOutput.replaceChildren();
-    return;
+function replayTerminalView() {
+  replayRevision++;
+  if (!state.term || terminalReplay) return;
+  clearTerminalGeometrySyncTimer();
+  flushTerminalWrites();
+  terminalReplay = true;
+  const disabled = state.term.options.disableStdin;
+  state.term.options.disableStdin = true;
+  elements.terminalOutput.setAttribute("aria-busy", "true");
+  function render() {
+    const revision = replayRevision;
+    const bytes = (state.logView === "raw" ? rawDisplay : readingDisplay).read();
+    replayTail = []; replayTailBytes = 0;
+    state.term.write("", () => {
+      if (revision !== replayRevision) { render(); return; }
+      state.term.reset(); state.term.options.disableStdin = true;
+      state.term.write(bytes, () => {
+        if (revision !== replayRevision || replayTailBytes > WRITE_BACKLOG_LIMIT) { render(); return; }
+        const tail = replayTail; replayTail = []; replayTailBytes = 0;
+        terminalReplay = false; state.term.options.disableStdin = disabled;
+        elements.terminalOutput.removeAttribute("aria-busy");
+        // Only the retained snapshot is historical. Live bytes arriving during
+        // replay go through normal parsing once, after protocol replies unlock.
+        for (const chunk of tail) queueTerminalOutput(chunk);
+        renderShellIntegration();
+      });
+    });
   }
-  if (resetTerminal) {
-    state.term.reset();
-  }
-  state.term.clear();
-  fitTerminal();
+  render();
 }
 
-function saveLog() {
-  const chunks = state.logBytes.length
-    ? state.logBytes
-    : [encoder.encode(redactSecrets(elements.terminalOutput.textContent))];
+function setLogView(value) {
+  flushReadingPrefix();
+  state.logView = value === "raw" ? "raw" : "reading";
+  elements.logViewSelect.value = state.logView;
+  saveSetting("linkr-log-view", state.logView);
+  replayTerminalView();
+}
+
+function clearTerminalOutput() {
+  serialPresentation.reset(); readingLog.clear(); rawDisplay.clear(); readingDisplay.clear();
+  if (writeRaf) cancelAnimationFrame(writeRaf);
+  if (writeFallbackTimer) clearTimeout(writeFallbackTimer);
+  writeRaf = writeFallbackTimer = 0; pendingWrites = []; pendingWriteBytes = droppedWriteBytes = 0;
+  if (!state.term) { elements.terminalOutput.replaceChildren(); return; }
+  replayTerminalView();
+}
+
+let shellIntegrationBusy = false;
+let shellIntegrationError = false;
+let shellIntegrationRenderTimer = null;
+function scheduleShellIntegrationRender() {
+  if (shellIntegrationRenderTimer !== null || elements.controls.dataset.settingsActive !== "terminal" ||
+      elements.controlsPanel.getAttribute("aria-hidden") === "true") return;
+  shellIntegrationRenderTimer = setTimeout(() => {
+    shellIntegrationRenderTimer = null;
+    renderShellIntegration();
+  }, 100);
+}
+function renderShellIntegration() {
+  const device = agentPanel?.getDevice();
+  if (!device) return;
+  const status = device.getStatus();
+  const ready = status.shellIntegration.status === "ready";
+  elements.shellIntegrationEnable.disabled = shellIntegrationBusy || ready || !state.connected || !canSerialInput() ||
+    terminalReplay || status.inputPending || status.console.kind !== "shell" || device.needsObservation() || agentPanel.isBusy();
+  elements.shellIntegrationDisable.disabled = shellIntegrationBusy || !ready;
+  elements.shellIntegrationStatus.textContent = t(shellIntegrationBusy ? "shellIntegrationEnabling" : ready ? "shellIntegrationReady" :
+    shellIntegrationError ? "shellIntegrationFailed" : device.needsObservation() ? "shellIntegrationPending" : "shellIntegrationDisabled");
+}
+async function enableShellIntegration() {
+  const device = agentPanel.getDevice();
+  const controller = new AbortController();
+  const session = state.writeGeneration;
+  let record;
+  shellIntegrationBusy = true; shellIntegrationError = false; renderShellIntegration();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    record = await device.enableShellIntegration(controller.signal);
+    while (!record.observationClosed && state.connected && session === state.writeGeneration && !controller.signal.aborted) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      record = device.inspectExecution(record.id);
+    }
+    if (record.executionStatus !== "completed" || session !== state.writeGeneration) throw new Error("Shell handshake unconfirmed");
+  } catch (error) {
+    if (record) device.expireShellIntegration(record.id);
+    else device.disableShellIntegration();
+    shellIntegrationError = state.connected && session === state.writeGeneration;
+    if (shellIntegrationError) toast(t("shellIntegrationFailed"), true);
+  } finally {
+    clearTimeout(timer);
+    shellIntegrationBusy = false;
+    renderShellIntegration();
+  }
+}
+
+function saveLog(view = state.logView) {
+  flushReadingPrefix();
+  const raw = view === "raw";
+  const chunks = [(raw ? rawLog : readingLog).read()];
   const blob = new Blob(chunks, { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `linkr-ble-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
+  link.download = `linkr-ble-${raw ? "raw" : "reading"}-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
   link.click();
-  // Release the blob after the browser has had time to start the download;
-  // revoking synchronously can cancel it in Firefox/Safari.
   setTimeout(() => URL.revokeObjectURL(url), 60000);
   toast(t("saved"));
 }
 
 function loadPersisted() {
+  state.logView = localStorage.getItem("linkr-log-view") === "raw" ? "raw" : "reading";
+  elements.logViewSelect.value = state.logView;
   state.uartMode = normalizeUartMode(localStorage.getItem(UART_MODE_KEY));
   renderUartMode();
   const uart = localStorage.getItem("linkr-uart");
@@ -6318,6 +6473,19 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   }
 }
 
+/* Paired devices live in Connection now: read them when that page is actually
+ * on screen, not merely as a side effect of opening the management channel. */
+function refreshVisibleSettingsPage() {
+  if (!state.board.canControl) return;
+  if (elements.controls.dataset.settingsActive === "connection") bondUi?.query();
+}
+
+function settingsPanelOpen() {
+  return usesSettingsDrawer()
+    ? elements.appShell.classList.contains("sidebar-open")
+    : !elements.appShell.classList.contains("controls-hidden");
+}
+
 function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
   if (!usesSettingsDrawer()) {
     return;
@@ -6335,6 +6503,7 @@ function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
     focusDrawer: open,
     restoreToggle: !open && restoreFocus,
   });
+  if (open) refreshVisibleSettingsPage();
 }
 
 function applySidebar() {
@@ -6355,6 +6524,7 @@ function toggleSidebar() {
     state.sidebarCollapsed = hidden;
     saveSetting("linkr-sidebar", hidden ? "collapsed" : "open");
     syncSidebarAccessibility();
+    if (!hidden) refreshVisibleSettingsPage();
   }
 }
 
@@ -6394,8 +6564,11 @@ function setSettingsPage(page) {
   const wantedTab = document.querySelector(`.settings-tab[data-settings-target="${wanted}"]`);
   const next = wantedTab && !wantedTab.hidden ? wanted : "connection";
   elements.controls.dataset.settingsActive = next;
+  if (next === "terminal") renderShellIntegration();
   if (next === "board" && state.board.canControl) {
     refreshBoardIo();
+  } else if (next === "connection" && state.board.canControl) {
+    bondUi?.query();
   } else if (next === "ai" && state.board.canControl) {
     refreshBoardPromptStatus();
   }
@@ -6510,14 +6683,20 @@ function bind() {
 
   elements.clearButton.addEventListener("click", () => {
     clearTerminalOutput(true);
-    state.logBytes = [];
-    state.logSize = 0;
+    rawLog.clear();
     agentJournal.reset();
     agentPanel?.logsCleared();
     toast(t("cleared"));
   });
 
-  elements.saveButton.addEventListener("click", saveLog);
+  elements.saveButton.addEventListener("click", () => saveLog());
+  elements.logViewSelect.addEventListener("change", () => setLogView(elements.logViewSelect.value));
+  elements.saveReadingLog.addEventListener("click", () => saveLog("reading"));
+  elements.saveRawLog.addEventListener("click", () => saveLog("raw"));
+  elements.shellIntegrationEnable.addEventListener("click", () => enableShellIntegration());
+  elements.shellIntegrationDisable.addEventListener("click", () => {
+    agentPanel.getDevice().disableShellIntegration(); shellIntegrationError = false; renderShellIntegration();
+  });
 
   // Keep the terminal textarea focused when a pointer activates an accessory
   // key. Focus synchronously on click so iOS can retain/open its soft keyboard.
@@ -7331,6 +7510,11 @@ function init() {
       deviceId: state.mode === "ws" ? state.wsHost : state.deviceId || state.device?.id,
       uart: elements.uartInput.value, receivedBytes: state.rxBytes, sentBytes: state.txBytes }),
     readLog: (options) => agentJournal.read(options),
+    readExecutionEvents: options => agentJournal.readExecutionEvents(options),
+    onExecutionRecord: record => {
+      if (record.state === "sending" && record.sessionId === state.writeGeneration) serialPresentation.register(record);
+      renderShellIntegration();
+    },
     prepareInput: ({ text, appendEnter }) => normalizeEnter(text + (appendEnter ? "\r" : "")),
     sendInput: async (payload, generation, signal, inputRevision) => {
       const operation = enqueueBytes(encoder.encode(payload), false, { generation, signal, inputRevision });
@@ -7339,6 +7523,7 @@ function init() {
       return { inputRevision: queuedRevision };
     },
   });
+  renderShellIntegration();
   initMcp();
   /* MCP is created after the first pass; add its header chevron without
    * duplicating the toggles already created for the static cards. */

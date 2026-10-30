@@ -8,21 +8,27 @@ test.beforeEach(async ({page}) => {
   await page.waitForFunction(()=>window.bondTest?.state.term);
   await page.evaluate(()=>{
     const t=window.bondTest; window.commands=[]; window.bondsReply='OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:01 self=1\nBOND 1/AA:BB:CC:DD:EE:02 self=0\n';
-    window.bondLabels={};
+    window.bondLabels={'0/AA:BB:CC:DD:EE:01':'Web','1/AA:BB:CC:DD:EE:02':'Chrome · Linux'};
     window.toHex=s=>Array.from(new TextEncoder().encode(s),b=>b.toString(16).padStart(2,'0')).join('');
     window.fromHex=h=>new TextDecoder().decode(Uint8Array.from(h.match(/../g)||[],x=>parseInt(x,16)));
     t.mock(async cmd=>{window.commands.push(cmd); if(cmd==='@linkr bonds?')return window.bondsReply;
-      if(cmd.startsWith('@linkr bonds label ')){const [id,value]=cmd.slice('@linkr bonds label '.length).split(' ');
+      if(cmd.startsWith('@linkr bonds label ')){
+        const [id,value]=cmd.slice('@linkr bonds label '.length).split(' ');
         if(!value){const l=window.bondLabels[id]||'';return l?`OK bonds label=${id} hex=${window.toHex(l)}`:`OK bonds label=${id} none`;}
         if(value==='clear'){delete window.bondLabels[id];return `OK bonds label=${id} none`;}
-        window.bondLabels[id]=window.fromHex(value);return `OK bonds label=${id} hex=${value}`;}
+        window.bondLabels[id]=window.fromHex(value);return `OK bonds label=${id} hex=${value}`;
+      }
+      if(cmd.startsWith('@linkr bonds name ')){
+        const label=cmd.slice('@linkr bonds name '.length); window.bondLabels['0/AA:BB:CC:DD:EE:01']=label; return 'OK bonds name';
+      }
+      if(cmd==='@linkr bonds name'){delete window.bondLabels['0/AA:BB:CC:DD:EE:01'];return 'OK bonds name';}
       if(cmd.startsWith('@linkr bonds remove ')) {
         if(cmd.endsWith('01'))setTimeout(()=>t.onDisconnected({unexpected:true}),50);
         else window.bondsReply='OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:01 self=1\n';
         return 'OK bonds queued';
       } return 'ERR unsupported';
     });
-    t.state.mode='ble';t.state.mgmtReady=true;t.setConnected(true);t.setSettingsPage('board');
+    t.state.mode='ble';t.state.mgmtReady=true;t.setConnected(true);t.setSettingsPage('connection');
   });
   await page.locator('#panelToggle').tap();
   await expect(page.locator('.bond-row')).toHaveCount(2);
@@ -41,73 +47,75 @@ test('deleting this host does not schedule automatic reconnect',async({page})=>{
   expect(await page.evaluate(()=>window.bondTest.autoReconnect.active)).toBe(false);
   await expect(page.locator('.bond-row')).toHaveCount(0);
 });
-test('readonly host can list but cannot delete or rename',async({page})=>{
+test('readonly host can rename itself but cannot delete or rename others',async({page})=>{
   await page.evaluate(()=>{const t=window.bondTest;t.state.serialControl={mode:'readonly',self:1,owner:2,peers:2};t.renderSerialControl()});
+  await expect(page.locator('.bond-row').first().locator('[data-bond-action="rename"]')).toBeEnabled();
   await expect(page.locator('.bond-row').first().locator('[data-bond-action="remove"]')).toBeDisabled();
-  await expect(page.locator('.bond-row').first().locator('[data-bond-action="rename"]')).toBeDisabled();
+  await expect(page.locator('.bond-row').last().locator('[data-bond-action="rename"]')).toHaveCount(0);
   await expect(page.locator('[data-bonds-refresh]')).toBeEnabled();
 });
-test('renaming stores a label and shows it above the address',async({page})=>{
+test('renaming this host uses the self-only form',async({page})=>{
   const first=page.locator('.bond-row').first();
   await first.locator('[data-bond-action="rename"]').click();
   const input=first.locator('.bond-input');
-  await expect(input).toBeVisible();
-  await input.fill('我的手机');
+  await input.fill('My Phone');
   await first.locator('[data-bond-action="save"]').click();
-  await expect(first.locator('.bond-name')).toHaveText('我的手机');
-  await expect(first.locator('.bond-meta')).toContainText('0/AA:BB:CC:DD:EE:01');
-  expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds label 0/AA:BB:CC:DD:EE:01 e68891e79a84e6898be69cba');
+  await expect(first.locator('.bond-name')).toHaveText('My Phone');
+  expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds name My Phone');
 });
-test('cancelling an edit changes nothing',async({page})=>{
-  const first=page.locator('.bond-row').first();
-  const before=await first.locator('.bond-name').textContent();
-  await page.evaluate(()=>window.commands.length=0);
-  await first.locator('[data-bond-action="rename"]').click();
-  await first.locator('.bond-input').fill('nope');
-  await first.locator('[data-bond-action="cancel"]').click();
-  await expect(first.locator('.bond-name')).toHaveText(before);
-  const sets=await page.evaluate(()=>window.commands.filter(c=>/^@linkr bonds label \S+ \S+$/.test(c)));
-  expect(sets).toEqual([]);
+test('renaming another host uses the address form and needs control',async({page})=>{
+  const last=page.locator('.bond-row').last();
+  await last.locator('[data-bond-action="rename"]').click();
+  const input=last.locator('.bond-input');
+  await input.fill('Tablet');
+  await last.locator('[data-bond-action="save"]').click();
+  await expect(last.locator('.bond-name')).toHaveText('Tablet');
+  expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds label 1/AA:BB:CC:DD:EE:02 5461626c6574');
 });
-test('clearing a label returns the row to the address only',async({page})=>{
-  const first=page.locator('.bond-row').first();
-  await first.locator('[data-bond-action="rename"]').click();
-  await first.locator('.bond-input').fill('temp');
-  await first.locator('[data-bond-action="save"]').click();
-  await expect(first.locator('.bond-name')).toHaveText('temp');
-  await first.locator('[data-bond-action="rename"]').click();
-  await first.locator('.bond-input').fill('');
-  await first.locator('[data-bond-action="save"]').click();
-  await expect(first.locator('.bond-name')).toHaveText('0/AA:BB:CC:DD:EE:01');
-  expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds label 0/AA:BB:CC:DD:EE:01 clear');
-});
-test('reports this browser name once when the board has none',async({page})=>{
-  const sets=await page.evaluate(()=>window.commands.filter(c=>c.startsWith('@linkr bonds label 0/AA:BB:CC:DD:EE:01 ')));
-  expect(sets).toHaveLength(1);
-  const first=page.locator('.bond-row').first();
-  await expect(first.locator('.bond-name')).not.toHaveText('0/AA:BB:CC:DD:EE:01');
-  await page.evaluate(()=>window.bondTest.query());
-  const again=await page.evaluate(()=>window.commands.filter(c=>c.startsWith('@linkr bonds label 0/AA:BB:CC:DD:EE:01 ')));
-  expect(again).toHaveLength(1);
-});
-
-test('firmware without labels keeps the list but hides rename',async({page})=>{
-  await page.evaluate(async()=>{
-    const t=window.bondTest;
-    t.mock(async cmd=>{
-      if(cmd==='@linkr bonds?')return 'OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:01 self=1\n';
-      if(cmd.startsWith('@linkr bonds label '))return 'ERR unknown command';
-      return 'ERR unsupported';
-    });
-    await t.query();
-  });
-  await expect(page.locator('.bond-row')).toHaveCount(1);
-  await expect(page.locator('[data-bond-action="rename"]')).toHaveCount(0);
-  await expect(page.locator('[data-bond-action="remove"]')).toHaveCount(1);
-  await expect(page.locator('#boardBondsCard')).toBeVisible();
-});
-test('unsupported firmware hides card and unavailable board section',async({page})=>{
+test('unsupported firmware hides the paired-devices card',async({page})=>{
   await page.evaluate(async()=>{window.bondsReply='ERR unknown command';await window.bondTest.query()});
   await expect(page.locator('#boardBondsCard')).toBeHidden();
-  await expect(page.locator('[data-settings-target="board"]')).toBeHidden();
+  await expect(page.locator('[data-settings-target="connection"]')).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('[data-settings-target="board"]')).toBeVisible();
+});
+
+test('a late names response cannot overwrite a new connection', async ({page}) => {
+  const result = await page.evaluate(async () => {
+    const {createBondUi} = await import('/bond_ui.js');
+    const card = document.querySelector('#boardBondsCard').cloneNode(true);
+    let generation = 1, release;
+    const oldNames = new Promise(resolve => {release = resolve});
+    const ui = createBondUi({card,
+      context: () => ({ready:true, control:true, generation, lang:'en'}),
+      supported: () => {}, beforeSelfDelete: () => {}, afterSelfDelete: () => {},
+      send: async cmd => cmd === '@linkr bonds?' ? 'OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:01 self=1\n'
+        : cmd.startsWith('@linkr bonds label ') ? 'ERR unknown command'
+        : cmd === '@linkr bonds names?' ? generation === 1 ? oldNames : 'OK bonds names\nNAME 0/AA:BB:CC:DD:EE:01 "New host"\n' : 'OK bonds name',
+    });
+    const oldQuery = ui.query();
+    await Promise.resolve();await Promise.resolve();
+    generation = 2;ui.render();await ui.query();
+    release('OK bonds names\nNAME 0/AA:BB:CC:DD:EE:01 "Old host"\n');
+    await oldQuery;ui.render();
+    return card.querySelector('.bond-row').textContent;
+  });
+  expect(result).toContain('New host');expect(result).not.toContain('Old host');
+});
+test('named hosts keep their identity visible in delete confirmation', async ({page}) => {
+  await page.evaluate(async () => {
+    window.bondTest.mock(async cmd => {
+      if (cmd === '@linkr bonds?') return window.bondsReply;
+      if (cmd.startsWith('@linkr bonds label ')) {
+        const id = cmd.slice('@linkr bonds label '.length);
+        const label = window.bondLabels[id] || '';
+        return label ? `OK bonds label=${id} hex=${window.toHex(label)}` : `OK bonds label=${id} none`;
+      }
+      return 'OK bonds name';
+    });
+    await window.bondTest.query();
+  });
+  let warning;
+  page.once('dialog', async prompt => {warning = prompt.message(); await prompt.dismiss()});
+  await page.locator('.bond-row').last().locator('[data-bond-action="remove"]').click();
+  expect(warning).toContain('Chrome · Linux (1/AA:BB:CC:DD:EE:02)');
 });

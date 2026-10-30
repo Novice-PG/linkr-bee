@@ -33,7 +33,7 @@ export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
 const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
   'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
-export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, requestUserInput = null, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 } }) {
   if (!["focused", "full"].includes(toolProfile)) throw new Error("Unknown tool profile");
   config = validateAgentConfig(config);
   const provider = PROVIDER_STREAMS[config.provider] ? config.provider : "openai-completions";
@@ -95,7 +95,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   };
   const buildSystemPrompt = () => (toolProfile === "full"
     ? serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) })
-    : focusedSystemPrompt(executionMode, toolCatalogPrompt(catalog))) + boardInstructions();
+    : focusedSystemPrompt(executionMode, toolCatalogPrompt(catalog))) + (requestUserInput ? "\nUse ask_user when a required preference or missing fact needs the user's answer. Provide 2-6 concrete options in the user's language, with brief tradeoffs, and wait for their answer. Free text is also available. Do not ask for secrets or replace command/accessory approval with this tool. A skipped question has no answer: never pick an option for the user.\n" : "") + boardInstructions();
 
   /* A completed probe_tools check is evidence about what the target can do, so a
    * digest request that check already answered "no" to must not be sent at all:
@@ -133,6 +133,31 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         pendingExecutions: taskCheckpoint().pendingExecutions } });
 
   const tools = [
+    ...(typeof requestUserInput === "function" ? [{
+      name: "ask_user", label: "Ask the user to choose", executionMode: "sequential",
+      description: "Pause for a required preference or missing fact. Show 2-6 concise options and optional free text in the user's language. No option is preselected. multiple=true permits several selections. Do not request passwords, tokens or other secrets. This does not grant permission to execute commands or replace existing approval dialogs. If cancelled, do not guess an answer.",
+      parameters: Type.Object({
+        question: Type.String({minLength: 1, maxLength: 500}),
+        options: Type.Array(Type.Object({
+          label: Type.String({minLength: 1, maxLength: 80}),
+          description: Type.Optional(Type.String({maxLength: 240})),
+        }, {additionalProperties: false}), {minItems: 2, maxItems: 6}),
+        multiple: Type.Optional(Type.Boolean()),
+      }, {additionalProperties: false}),
+      execute: async (id, args, signal) => {
+        checkSession(signal);
+        const answer = await requestUserInput({id, ...args, signal});
+        checkSession(signal);
+        if (answer?.status === "cancelled") return result({status: "cancelled", grantsPermission: false});
+        const selected = answer?.selected;
+        const text = typeof answer?.text === "string" ? answer.text.trim() : "";
+        if (answer?.status !== "answered" || !Array.isArray(selected) || selected.some(index => !Number.isInteger(index) || index < 0 || index >= args.options.length) ||
+            new Set(selected).size !== selected.length || (!args.multiple && selected.length > 1) || text.length > 1000 || (!selected.length && !text)) {
+          throw new Error("Invalid user answer");
+        }
+        return result({status: "answered", selected: selected.map(index => ({index, label: args.options[index].label})), text, grantsPermission: false});
+      },
+    }] : []),
     {
       name: "get_task_checkpoint", label: "Inspect task checkpoint",
       executionMode: "sequential",

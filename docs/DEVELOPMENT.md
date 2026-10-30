@@ -618,13 +618,16 @@ holds them all.
 | `bee` (TUI) | Network view → *Refresh paired devices* | same view → the host row | same view → *Remove this pairing* |
 | `bee-cli` | `--query-bonds` / `query bonds` | `--rename-bond <id>=<label>` / `bond <id> <label>` | `--remove-bond <id>` / `unbond <id>` |
 | `bee --serve` | `{"op":"bonds"}` | `{"op":"bond-label","id":"…","label":"…"}` | `{"op":"bond-remove","id":"…"}` |
-| Web / mobile | Board panel → *Paired devices* | *Rename* on the row | *Remove pairing* |
+| Web / mobile | Connection panel → *Paired devices* | *Rename* on the row | *Remove pairing* |
 
 Labels are display-only, at most 48 UTF-8 bytes, stored in NVS by identity
-address and deleted with the pairing. The web and phone editors report the browser's OS once when the board stores
-none; the TUI reports the local user name once for this host. Older
-firmware without the commands hides the section (web/TUI) rather than leaving a
-dead control.
+address and deleted with the pairing. The web and phone editors report the
+browser's OS once when the board stores none; the TUI reports the local user
+name once for this host. `@linkr bonds name <label>`/`@linkr bonds names?` are
+kept as the self-only compatibility form, so a host can name itself without
+console ownership; `bonds label <type>/<address>` is the management form for any
+pairing. Older firmware without the commands hides the section (web/TUI)
+rather than leaving a dead control.
 
 ### UART Commands
 

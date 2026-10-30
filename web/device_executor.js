@@ -1,3 +1,4 @@
+import { SHELL_FUNCTION, shellIntegrationCommand, shellQuote } from "./shell_integration.js";
 import { requiresInputApproval } from "./agent_execution_policy.js";
 import { parseDeviceProfile } from "./device_profile.js";
 import { inspectSerialConsole } from "./serial_console.js";
@@ -12,7 +13,7 @@ const cancelled = () => new Error("Operation cancelled. Do not retry automatical
  * so no UI path can leave the mode armed. */
 export const FULL_AUTO_WINDOW_MS = 15 * 60 * 1000;
 
-export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInput, onRecord,
+export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInput, onRecord, readExecutionEvents = null,
   getCommandPolicy = () => ({ alwaysAsk: [], allow: [] }), onModeTimeout = null,
   fullAutoWindowMs = FULL_AUTO_WINDOW_MS }) {
   let mode = "auto";
@@ -24,6 +25,56 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
   const records = [];
   let profile = null;
   let toolCapabilities = {};
+  let shellIntegration = null;
+  function shellStatus() {
+    const status = getStatus();
+    if (shellIntegration && (shellIntegration.sessionId !== status.sessionId || !status.connected)) shellIntegration = null;
+    if (shellIntegration?.status === "ready") {
+      const integration = shellIntegration;
+      const recent = readLog({after:integration.cursor, limit:1});
+      if (recent.truncated) shellIntegration = null;
+      else if (recent.latestCursor > integration.cursor) {
+        const events = readExecutionEvents?.({before:recent.latestCursor}) || [];
+        // Boot-like text inside an observed command is ordinary command output,
+        // e.g. cat /proc/version. Scan only ambient spans outside its C/D frame.
+        const ranges = records.flatMap(record => {
+          const tracking = record.shellTracking;
+          if (record.sessionId !== status.sessionId || tracking?.nonce !== integration.nonce || tracking.phase !== "command") return [];
+          const matches = events.filter(event => event.nonce === tracking.nonce && event.sequence === tracking.sequence && event.start >= record.logStart);
+          const start = record.shellStartedAt ?? matches.find(event => event.phase === "C")?.end;
+          if (start === undefined) return [];
+          const end = matches.find(event => event.phase === "D" && event.start >= start)?.end ??
+            (record.observationClosed ? record.observedEnd : recent.latestCursor);
+          return end > start ? [[start, end]] : [];
+        }).sort((left, right) => left[0] - right[0]);
+        let cursor = integration.cursor, tail = integration.healthTail || "";
+        const scan = until => {
+          while (cursor < until) {
+            const page = readLog({after:cursor, limit:Math.min(16000, until - cursor)});
+            if (page.truncated || page.cursor <= cursor) { shellIntegration = null; return false; }
+            const text = tail + page.text;
+            if (/(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(text)) { shellIntegration = null; return false; }
+            // Carry a bounded line prefix across BLE fragments and paged reads.
+            tail = text.slice(text.lastIndexOf("\n") + 1).slice(0, 512);
+            cursor = page.cursor;
+          }
+          return true;
+        };
+        for (const [start, end] of ranges) {
+          if (end <= cursor || start >= recent.latestCursor) continue;
+          if (!scan(Math.min(start, recent.latestCursor))) break;
+          cursor = Math.max(cursor, Math.min(end, recent.latestCursor));
+          tail = "";
+        }
+        if (shellIntegration && scan(recent.latestCursor)) {
+          integration.cursor = cursor;
+          integration.healthTail = tail;
+        }
+      }
+    }
+    return shellIntegration ? {status:shellIntegration.status, sequence:shellIntegration.sequence} : {status:"disabled"};
+  }
+
   const snapshot = (record) => structuredClone(record);
   const publish = (record) => { if (records.includes(record)) onRecord?.(snapshot(record)); };
   function consoleState() {
@@ -118,9 +169,40 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         if (bytes) record.download.bytes = Number(bytes[1]);
       }
       if (record.completionToken) {
-        const match = record.evidence.match(new RegExp(`(?:^|\\n)${record.completionToken}:([0-9]{1,3})\\r?\\n`));
-        if (match && Number(match[1]) <= 255) {
-          record.exitCode = Number(match[1]);
+        let exitCode;
+        if (record.shellTracking) {
+          const tracking = record.shellTracking;
+          const events = (readExecutionEvents?.({after:record.logStart, before:record.observedEnd}) || [])
+            .filter(event => event.nonce === tracking.nonce);
+          if (tracking.phase === "setup") {
+            if (events.some(event => event.sequence === 0 && event.phase === "R")) {
+              exitCode = 0;
+              shellIntegration = {status:"ready", nonce:tracking.nonce, sequence:0, sessionId:record.sessionId, cursor:record.observedEnd};
+            }
+          } else {
+            const started = events.find(event => event.sequence === tracking.sequence && event.phase === "C");
+            if (started) record.shellStartedAt ??= started.end;
+            const finished = events.filter(event => event.sequence === tracking.sequence && event.phase === "D" && event.start >= record.shellStartedAt);
+            if (finished.length === 1) exitCode = finished[0].exitCode;
+            if (exitCode === undefined && hint.kind === "shell" && record.evidence) {
+              // A prompt alone never proves completion. The helper may have
+              // disappeared or an intermediate terminal may have stripped OSC.
+              shellIntegration = null;
+              record.error = "Shell boundary unconfirmed; integration disabled for future commands. Input was not retried.";
+            }
+            if (events.some(event => event.sequence > tracking.sequence)) {
+              exitCode = undefined; shellIntegration = null;
+              record.observation = "interrupted"; record.observationClosed = true;
+              record.error = "Shell integration sequence changed; input was not retried.";
+            }
+          }
+        } else {
+          const match = record.evidence.match(new RegExp(`(?:^|\\n)${record.completionToken}:([0-9]{1,3})\\r?\\n`));
+          if (match && Number(match[1]) <= 255) exitCode = Number(match[1]);
+        }
+        if (exitCode !== undefined) {
+          if (record.error?.startsWith("Shell boundary unconfirmed")) delete record.error;
+          record.exitCode = exitCode;
           record.executionStatus = "completed";
           record.observationClosed = true;
           if (record.toolProbe && record.exitCode === 0 && !record.evidenceTruncated) {
@@ -167,7 +249,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       }
     }
   }
-  return {
+  const api = {
     get mode() { return mode; },
     setMode(value) {
       if (!["auto", "manual", "full-auto"].includes(value)) throw new Error("Unknown execution mode.");
@@ -180,9 +262,25 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       else clearModeTimer();
     },
     cancel,
+    enableShellIntegration(signal) {
+      if (!readExecutionEvents) throw new Error("This client cannot read shell integration markers.");
+      if (active || needsObservation()) throw new Error("Finish or stop observing the current execution before enabling shell integration.");
+      const nonce = crypto.randomUUID().replaceAll("-", "");
+      return api.execute({text:shellIntegrationCommand(nonce), appendEnter:true}, signal, {userApproved:true, shellSetup:nonce});
+    },
+    disableShellIntegration() { shellIntegration = null; },
+    expireShellIntegration(id) {
+      const record = records.find(item => item.id === id && item.shellTracking?.phase === "setup");
+      if (!record || record.observationClosed) return;
+      record.observationClosed = true;
+      record.error = "Shell integration handshake was not received; input was not retried.";
+      shellIntegration = null;
+      publish(record);
+    },
     forgetProfile() { profile = null; toolCapabilities = {}; },
     reset() {
       cancel();
+      shellIntegration = null;
       clearModeTimer();
       // A new conversation/session ends the unattended execution window.
       if (mode === "full-auto") mode = "auto";
@@ -203,7 +301,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           /(?:^|\n)(?:Linux version |U-Boot |.* login:)/.test(recent.text || '');
         capability.cursor = recent.cursor ?? capability.cursor;
       }
-      return { ...status, executionMode: mode, executionModeExpiresAt: mode === "full-auto" ? modeExpiresAt : 0,
+      return { ...status, shellIntegration:shellStatus(), executionMode: mode, executionModeExpiresAt: mode === "full-auto" ? modeExpiresAt : 0,
         console: consoleState(), profile, toolCapabilities:structuredClone(toolCapabilities) };
     },
     readLog(options) { return readLog(options); },
@@ -224,7 +322,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       active.rejectApproval(new Error("User rejected this input. Do not request it again."));
       return true;
     },
-    async execute(args, signal, { userApproved = false } = {}) {
+    async execute(args, signal, { userApproved = false, shellSetup = null } = {}) {
       signal?.throwIfAborted();
       if (active) throw new Error("Another serial action is still active.");
       if (typeof args?.text !== "string" || !args.text.length || args.text.length > 2048 || typeof args.appendEnter !== "boolean") {
@@ -242,18 +340,27 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       // Hash the requested operation before wrapping it with a fresh exit token.
       // A reloaded executor can reuse serial-1; executorId prevents false matches.
       const requestedInput = {text:args.text, appendEnter:args.appendEnter};
-      let completionToken;
-      if (args.trackExit) {
+      let completionToken, shellTracking;
+      shellStatus();
+      if (args.trackExit || shellSetup) {
         if (status.inputPending || consoleState().kind !== "shell" || !args.appendEnter) {
           throw new Error("Tracked commands require an idle, observed POSIX shell prompt.");
         }
-        completionToken = `LINKR_EXIT_${crypto.randomUUID().replaceAll("-", "")}`;
-        const quoted = "'" + args.text.replaceAll("'", "'\\''") + "'";
-        args = { text: `sh -c ${quoted}; printf '\\n%s:%s\\n' '${completionToken}' "$?"`, appendEnter: true };
+        if (shellSetup || shellIntegration?.status === "ready") {
+          const nonce = shellSetup || shellIntegration.nonce;
+          const sequence = shellSetup ? 0 : shellIntegration.sequence + 1;
+          if (sequence > 999999999) { shellIntegration = null; throw new Error("Shell counter exhausted; enable integration again."); }
+          shellTracking = {protocol:"osc", nonce, sequence, phase:shellSetup ? "setup" : "command"};
+          completionToken = `LINKR_OSC_${nonce}_${sequence}`;
+          if (!shellSetup) args = {text:`${SHELL_FUNCTION} ${shellQuote(args.text)}`, appendEnter:true};
+        } else {
+          completionToken = `LINKR_EXIT_${crypto.randomUUID().replaceAll("-", "")}`;
+          args = {text:`sh -c ${shellQuote(args.text)}; printf '\\n%s:%s\\n' '${completionToken}' "$?"`, appendEnter:true};
+        }
         if (args.text.length > 2048) throw new Error("Tracked command is too long after shell quoting.");
       }
-      const record = { executorId, profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
-        payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
+      const record = { executorId, profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, shellTracking, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
+        command: requestedInput.text, payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
         executionStatus: "unknown", createdAt: new Date().toISOString(), evidence: "", observation: "no-output" };
       const controller = new AbortController();
       const operation = { record, controller };
@@ -263,7 +370,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       records.push(record);
       if (records.length > 50) records.shift();
       try {
-        if (!userApproved && (requiresInputApproval(mode, args, record.payload, status.inputPending, getCommandPolicy()) || (mode === "auto" && record.console.kind !== "shell"))) {
+        if (!userApproved && (requiresInputApproval(mode, {...args, text:requestedInput.text}, record.payload, status.inputPending, getCommandPolicy()) || (mode === "auto" && record.console.kind !== "shell"))) {
           record.state = "awaiting-approval";
           await new Promise((resolve, reject) => {
             let settled = false;
@@ -285,11 +392,18 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         check(record, controller.signal);
         // Close older observations before another command can contribute output.
         observe();
+        // Observing a prior incomplete operation can invalidate the helper.
+        if (shellTracking?.phase === "command" && (shellIntegration?.status !== "ready" ||
+            shellIntegration.nonce !== shellTracking.nonce || shellIntegration.sequence + 1 !== shellTracking.sequence)) {
+          throw new Error("Shell integration changed; request a new command before sending.");
+        }
         for (const previous of records) if (previous !== record) previous.observationClosed = true;
         record.logStart = readLog({ limit: 1 }).latestCursor;
         record.observedEnd = record.logStart;
         record.state = "sending";
         record.delivery = "unknown";
+        if (shellTracking) shellIntegration = {status:shellSetup ? "enabling" : "ready", nonce:shellTracking.nonce,
+          sequence:shellTracking.sequence, sessionId:record.sessionId, cursor:record.logStart, healthTail:shellIntegration?.healthTail || ""};
         publish(record);
         const receipt = await sendInput(record.payload, record.sessionId, controller.signal, record.inputRevision);
         record.delivery = "sent";
@@ -301,6 +415,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         publish(record);
         return inspectExecution(record.id);
       } catch (error) {
+        if (shellTracking && record.delivery !== "not-sent") shellIntegration = null;
         if (record.state !== "denied") record.state = controller.signal.aborted ? "cancelled" : "failed";
         record.error = error.message;
         record.observationClosed = true;
@@ -312,4 +427,5 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       }
     },
   };
+  return api;
 }

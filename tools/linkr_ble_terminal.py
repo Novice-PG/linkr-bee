@@ -12,6 +12,7 @@ import math
 import os
 import re
 import signal
+import socket
 import struct
 import sys
 import threading
@@ -1045,6 +1046,29 @@ async def terminal_loop(client: BleakClient, cfg: TerminalConfig,
     info("terminal closed.")
 
 
+def host_label(args: argparse.Namespace) -> str | None:
+    """The name to record next to this host's pairing, or None to skip it.
+
+    Split from the send so the flag handling is testable without a radio.
+    """
+    if args.no_host_name:
+        return None
+    name = (args.host_name or socket.gethostname() or "").strip()
+    return name or None
+
+
+async def report_host_name(management, name: str) -> None:
+    """Tell the Bee which host a bond belongs to.
+
+    A label is cosmetic, so a refusal (old firmware without the command, a peer
+    that is not bonded) is a warning rather than the end of the session.
+    """
+    try:
+        await management.send(f"@linkr bonds name {name}".encode())
+    except Exception as exc:  # noqa: BLE001 - see above
+        warn(f"could not record this host's name: {exc}")
+
+
 def has_control_action(args: argparse.Namespace) -> bool:
     """True when the invocation asks for more than opening a terminal.
 
@@ -1287,6 +1311,11 @@ async def run(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         wifi_command = f"@w={ssid},{password}".encode()
 
+    if args.no_host_name and args.host_name is not None:
+        error("pass either --host-name or --no-host-name, not both")
+        return EXIT_USAGE
+    label_name = host_label(args)
+
     import_bleak()
 
     scanned = None
@@ -1458,6 +1487,11 @@ async def run(args: argparse.Namespace) -> int:
                 if name:
                     info(f"board name: {name}")
 
+            if label_name:
+                # Best effort: the bond list reads better with a name, but the
+                # session does not depend on it.
+                await report_host_name(management, label_name)
+
             if args.query_info:
                 await management.send(b"@i?")
 
@@ -1620,6 +1654,11 @@ def build_parser() -> argparse.ArgumentParser:
     # argparse renders the choices in --help on its own.
     parser.add_argument("--print-completion", choices=COMPLETION_SHELLS,
                         help="print a shell completion script and exit")
+    parser.add_argument("--host-name", metavar="NAME",
+                        help="name to record next to this host's pairing "
+                             "(default: this machine's hostname)")
+    parser.add_argument("--no-host-name", action="store_true",
+                        help="do not record a name for this host's pairing")
     parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
                         help="terminal write size; default auto; management uses at least 20")
     parser.add_argument("--write-response", action="store_true",

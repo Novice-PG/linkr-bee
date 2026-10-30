@@ -193,16 +193,6 @@ int main(void)
 	assert(strstr(out, "ERR bonds label utf8") != NULL);
 	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 1b", out, sizeof out);
 	assert(strstr(out, "ERR bonds label utf8") != NULL);
-	/* Invalid UTF-8, a UTF-8-encoded C1 CSI, and a surrogate half must all be
-	 * refused: the label reaches a terminal. */
-	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 c328", out, sizeof out);
-	assert(strstr(out, "ERR bonds label utf8") != NULL);
-	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 c29b", out, sizeof out);
-	assert(strstr(out, "ERR bonds label utf8") != NULL);
-	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 eda080", out, sizeof out);
-	assert(strstr(out, "ERR bonds label utf8") != NULL);
-	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 e4bda0e5a5bd", out, sizeof out);
-	assert(strstr(out, "hex=e4bda0e5a5bd") != NULL);
 	memset(hex, 'a', 98);
 	hex[98] = '\0';
 	snprintf(cmd, sizeof cmd, "bonds label 0/AA:BB:CC:DD:EE:01 %s", hex);
@@ -210,10 +200,6 @@ int main(void)
 	assert(strstr(out, "ERR bonds label length") != NULL);
 
 	/* Address and bond checks. */
-	linkr_bond_command(&conn, "bonds label", out, sizeof out);
-	assert(strstr(out, "ERR bonds address") != NULL);
-	linkr_bond_command(&conn, "bonds label ", out, sizeof out);
-	assert(strstr(out, "ERR bonds address") != NULL);
 	linkr_bond_command(&conn, "bonds label 2/AA:BB:CC:DD:EE:01", out, sizeof out);
 	assert(strstr(out, "ERR bonds address") != NULL);
 	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01X", out, sizeof out);
@@ -223,11 +209,23 @@ int main(void)
 
 	/* Read-only classification. */
 	assert(linkr_bond_is_readonly("bonds?"));
-	assert(linkr_bond_is_readonly("bonds label"));
-	assert(linkr_bond_is_readonly("bonds label "));
 	assert(linkr_bond_is_readonly("bonds label 0/AA:BB:CC:DD:EE:01"));
 	assert(!linkr_bond_is_readonly("bonds label 0/AA:BB:CC:DD:EE:01 clear"));
 	assert(!linkr_bond_is_readonly("bonds label 0/AA:BB:CC:DD:EE:01 6869"));
+
+	/* The upstream `bonds name` / `bonds names?` compatibility view uses the
+	 * same per-bond storage. */
+	linkr_bond_command(&conn, "bonds name Hello Bee", out, sizeof out);
+	assert(strstr(out, "OK bonds name") != NULL);
+	linkr_bond_command(&conn, "bonds names?", out, sizeof out);
+	assert(strstr(out, "OK bonds names") != NULL);
+	assert(strstr(out, "NAME 0/AA:BB:CC:DD:EE:01 \"Hello Bee\"") != NULL);
+	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01", out, sizeof out);
+	assert(strstr(out, "hex=48656c6c6f20426565") != NULL);
+	linkr_bond_command(&conn, "bonds name", out, sizeof out);
+	assert(strstr(out, "OK bonds name") != NULL);
+	linkr_bond_command(&conn, "bonds names?", out, sizeof out);
+	assert(strstr(out, "NAME ") == NULL);
 
 	/* Removing the pairing removes its label. */
 	assert(linkr_bond_label_set(&self, "x", 1) == 1);

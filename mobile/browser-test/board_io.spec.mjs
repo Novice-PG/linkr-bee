@@ -179,7 +179,7 @@ test("the board section shows the state the board reports", async ({ page }) => 
   }, names: { "0": "客厅 电源" } });
   await openBoardPage(page);
 
-  await expect(page.locator('[data-settings-page="board"]')).toHaveCount(4);
+  await expect(page.locator('[data-settings-page="board"]')).toHaveCount(3);
   await expect(page.locator('[data-settings-page="board"]:visible')).toHaveCount(3);
   await expect(page.locator('#controlsPanel [data-settings-page="connection"]:visible')).toHaveCount(0);
 

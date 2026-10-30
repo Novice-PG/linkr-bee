@@ -192,6 +192,7 @@ components:
 - **Shadow Strategy:** 唯一的面板投影（见 Elevation）
 - **Internal Padding:** 16px；卡片间距 14px
 - **Title:** Title 层级 + 信号绿 7px 圆点引导
+- **Vertical rhythm:** 一张卡内部的竖向节奏只由**一种**机制决定。`display: grid; gap` 的卡片（`.board-card`、`.bond-card`）里，标题带和子项自带的上下外边距必须清零，否则 gap 会与它们叠加（14 + 14 + 8 = 36px，而 block 卡片是 14px）——同一列的卡片看起来就对不齐。
 
 ### Inputs / Fields
 - **Style:** 输入底色（比面板更暗的嵌层）、1px 描边、圆角 10px、高 36px
@@ -218,6 +219,32 @@ components:
   parent drawer; outside clicks dismiss without changing the value.
 - Dynamic options, programmatic values, translated labels and disabled states
   must stay in sync. `[hidden]` always removes a control or overlay from layout.
+
+### Assistant transcript and composer
+
+- Keep user input and final answers in the main conversation. Group tool calls
+  and intermediate commentary in a per-task Activity disclosure, collapsed by
+  default, with a live state, item count and elapsed time. Respect manual expansion.
+- Render only reasoning supplied by the model protocol, in its own collapsed
+  disclosure. Never invent reasoning or reinterpret ordinary answer text as thought.
+- Approval requests, transfer progress, accessory confirmations and choice cards must be visible;
+  an approval opens its Activity group, and errors remain inspectable.
+- Enter sends; Shift+Enter inserts a newline. While running, Enter queues a
+  follow-up and Ctrl/Cmd+Enter steers the current task. IME composition never sends.
+- Use quiet conversation surfaces, an inset user bubble, existing focus tokens
+  and a growing composer. Hide secondary queue guidance behind a disclosure.
+
+### Assistant choices and terminal ownership
+
+- Assistant questions use an inline fieldset in the tool message: a question,
+  2–6 radio or checkbox options with short descriptions, optional free text,
+  and an explicit Continue action. Nothing is preselected or sent on selection.
+- Choices have 44 px minimum targets, wrap long text, and use existing form,
+  focus and panel tokens. Stop, close, mode changes and reconnect retire the
+  controls; restored history never reactivates a question.
+- Keep terminal ownership status/action and utility actions as separate groups.
+  Preserve the full action label; let the groups wrap when their combined width
+  exceeds the header, including with the soft keyboard open.
 
 ### Inline disclosures
 - **Usage:** 低频但相关的设置（高级参数、CLIProxy 导入）收进主卡片底部的
@@ -254,6 +281,11 @@ components:
 - 弹窗沿用 panel/line/input token，移动端按钮不低于 44px，不新增颜色或阴影。
 
 ### Terminal
+- 日志视图卡内提供可选的「本次 Shell 集成」：说明临时函数、无需 sudo/文件、子进程语义，以及连接/对话重置后需重新启用。显示握手中、已启用、普通跟踪或未确认状态；按钮使用已有 soft 控件，不再挤入终端工具栏。
+- 集成只接受本会话 nonce 和顺序匹配的 OSC 开始/结束事件，退出码仍不等于任务验证。停用只切换后续跟踪，不发送清理命令；握手或边界丢失不重发输入。原始导出/WebDAV 继续保留完整 OSC 字节。
+- 串口设置内提供「阅读 / 原始」日志视图及两种明确命名的导出按钮，不增加终端工具栏拥挤度。默认阅读视图仅替换当前连接已登记且完整匹配的 Agent 包装回显与退出标记；不确定的内容按原文显示，禁止全局删除 `LINKR_*`。
+- 视图切换只重绘本地缓存，不触发 UART 输入、VT 查询响应或窗口尺寸同步；重绘期间暂时暂停终端输入。显示缓存和接收日志各保留最近 4 MiB；执行证据与板端 WebDAV 保持原始数据。
+- Agent 执行卡片优先呈现原始命令，完整发送载荷放入默认收起的「实际发送内容」，退出码和执行日志仍保留。
 - 全站最暗表面（#05080d），xterm.js 渲染；头部工具条承载字号/全屏/滚动/复制；连接时标题旁 LED 点亮并泛绿光，输入提示条文字转信号绿。
 - 手机键栏默认是 4 列 × 2 行的收藏键网格（48px 高），≤340px 改 3 列（不缩小 44px 触控目标）；平板是 8 键单行（每键 ≤64px），桌面是单行可滚动键带并常显细滚动条；不再用“半截键”当滚动提示。触屏的 More 展开全部键，桌面全部键已在带内。
 - 滚动条、焦点环、状态文字和键栏都要在 phone/tablet/desktop 三个断点及 zh/en、light/dark 下验收；触控目标不低于 44px，桌面不低于 36px。

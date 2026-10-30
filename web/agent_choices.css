@@ -1,0 +1,23 @@
+/* Questions use the existing message surface and form tokens. */
+.agent-choice { display: grid; gap: 12px; min-width: 0; white-space: normal; }
+.agent-choice fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.agent-choice legend { padding: 0; margin-bottom: 8px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.agent-choice .field-hint { margin: 0; font-size: 12px; color: var(--muted); }
+.agent-choice-option { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 10px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); cursor: pointer; }
+.agent-choice-option:has(input:checked) { border-color: var(--accent); background: var(--panel-3); }
+.agent-choice-option:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.agent-choice-option input { flex: 0 0 auto; width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.agent-choice-option > span { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.agent-choice-option strong { font-size: 13px; font-weight: 600; }
+.agent-choice-option small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.agent-choice-other { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.agent-choice-other textarea { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--control-edge); border-radius: var(--control-radius); background: var(--control-fill); color: var(--text); font: inherit; resize: vertical; }
+.agent-choice-other textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.agent-choice .agent-actions { flex-wrap: wrap; }
+.agent-choice .btn { min-height: 44px; }
+.agent-choice fieldset:disabled .agent-choice-option { cursor: default; }
+@media (max-width: 900px) { .agent-choice-other textarea { font-size: 16px; } }
+/* While a tool is asking, the card is the input surface. Keep Stop available
+ * without spending the phone's height on a second composer and message queue. */
+.agent-awaiting-choice :is(#agentQueueControls, #agentUsage, .agent-question, #agentAsk) { display: none; }
+.agent-awaiting-choice .agent-form { justify-content: flex-end; }

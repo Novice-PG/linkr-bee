@@ -1,0 +1,70 @@
+/* A conversation first, with execution evidence one disclosure away. All
+ * surfaces inherit the workbench's palette, spacing and control tokens. */
+.agent-messages { padding: 16px 14px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.agent-message { min-width: 0; margin: 0 0 20px; padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
+.agent-message > b { margin-bottom: 8px; color: var(--muted); font-size: 11px; font-weight: 500; }
+.agent-message-text { font-size: 13.5px; line-height: 1.65; }
+.agent-user { width: fit-content; max-width: 92%; margin-inline-start: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--panel-3); }
+.agent-user > b { margin-bottom: 4px; }
+.agent-assistant:not(.agent-process-entry) { padding-block: 8px; }
+.agent-empty { max-width: 34ch; margin: 32px auto; padding-inline: 12px; font-size: 13px; line-height: 1.7; }
+.agent-console { padding: 6px 12px; font-size: 11px; }
+.agent-history { padding-inline: 12px; }
+.agent-history > summary { min-height: 32px; font-size: 12px; }
+
+.agent-activity { margin: 0 0 16px; min-width: 0; }
+.agent-activity > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 8px; border-radius: var(--control-radius); color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
+.agent-activity > summary::-webkit-details-marker { display: none; }
+.agent-activity > summary::after, .agent-reasoning > summary::after { content: ''; width: 6px; height: 6px; margin-inline-start: 4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); flex: 0 0 auto; }
+.agent-activity[open] > summary::after, .agent-reasoning[open] > summary::after { transform: rotate(45deg); }
+.agent-activity > summary:hover { color: var(--text); background: var(--panel-2); }
+.agent-activity :is(summary, button):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.agent-activity-mark { flex: 0 0 auto; width: 10px; height: 10px; border: 1.5px solid currentColor; border-radius: 50%; }
+.agent-activity[data-state='running'] .agent-activity-mark { border-top-color: var(--accent); animation: spin 1s linear infinite; }
+.agent-activity[data-state='error'] > summary { color: var(--danger); }
+.agent-activity-title { min-width: 0; overflow-wrap: anywhere; }
+.agent-activity-meta { margin-inline-start: auto; white-space: nowrap; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.agent-activity-body { min-width: 0; padding: 0 8px; }
+.agent-process-entry { margin: 0; padding: 12px 0; border-top: 1px solid var(--line); }
+.agent-process-entry .agent-message-text { color: var(--muted); font-size: 12.5px; }
+.agent-process-entry :is(pre, code) { max-width: 100%; overflow-x: auto; }
+.agent-process-entry pre { margin-block: 8px; padding: 10px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--panel-2); }
+.agent-process-entry .agent-actions { flex-wrap: wrap; }
+.agent-reasoning > summary { display: flex; align-items: center; gap: 6px; min-height: 36px; margin: 0; color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
+.agent-reasoning > summary::-webkit-details-marker { display: none; }
+.agent-reasoning .agent-message-text { padding-block: 8px; }
+.agent-reasoning-note { margin: 4px 0; color: var(--muted); font-size: 11px; }
+
+.agent-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; margin: 0; padding: 10px; align-items: end; background: var(--terminal); }
+.agent-question textarea { padding: 10px 12px; line-height: 22px; background: var(--panel-2); border-color: var(--line-strong); border-radius: var(--control-radius); caret-color: var(--accent); scrollbar-width: thin; }
+.agent-question textarea:focus-visible { border-color: var(--focus); outline: 2px solid var(--focus); outline-offset: 1px; box-shadow: none; }
+.agent-form > .agent-actions { gap: 6px; }
+.agent-form #agentAsk { width: 44px; padding: 0; }
+.agent-input-hint { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.agent-status { padding: 4px 12px; font-size: 11px; }
+.agent-usage { padding: 2px 12px 6px; font-size: 11px; }
+.agent-queue-controls { padding: 6px 12px; background: var(--terminal); }
+.agent-queue-help { color: var(--muted); font-size: 11px; }
+.agent-queue-help > summary { cursor: pointer; min-height: 28px; }
+.agent-queue-help p { padding-block: 4px; }
+.agent-queue-controls .agent-actions { gap: 6px; }
+.agent-awaiting-choice .agent-form { grid-template-columns: 1fr; }
+.agent-awaiting-choice .agent-input-hint { display: none; }
+@media (max-width: 600px) {
+  .agent-messages { padding: 12px 10px; }
+  .agent-form { padding: 8px; }
+  .agent-activity > summary { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity[data-state='running'] .agent-activity-mark { animation: none; }
+}
+
+/* With an IME taking most of a landscape screen, the hint yields its row to
+ * the input and Stop/Send controls; their labels still expose the shortcuts. */
+html.soft-keyboard-open .agent-input-hint { display: none; }
+/* A short pane must give space back as well as shrinking its scroll region:
+ * padding has a real minimum height even when a flex child has min-height:0. */
+.agent-tight .agent-messages { padding-block: 4px; }
+.agent-tight .agent-history > summary { min-height: 24px; }
+.agent-tight .agent-usage:empty { display: none; }
+html.agent-keyboard-chat .agent-tight :is(.agent-history, .agent-usage, .agent-queue-controls) { display: none; }

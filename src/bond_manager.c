@@ -300,6 +300,138 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 			 (unsigned int)address.type, address_text, hex);
 	}
 }
+
+/* ---- upstream `bonds name` / `bonds names?` compatibility ----------------
+ *
+ * The first version of this feature let a host name only its own pairing with
+ * `@linkr bonds name <label>` and listed every name with `@linkr bonds names?`.
+ * Keep both on top of the per-bond label store: existing Web/Python clients
+ * keep working, while `bonds label <type>/<address>` adds management of any
+ * bond. The listing is capped at the old 32-byte width so eight maximal NAME
+ * lines still fit the 512-byte reply; the per-address read returns the full
+ * configured label. */
+#define BONDS_NAME_MAX 32u
+struct names_listing {
+	char *reply;
+	size_t size, used;
+	bool overflow;
+};
+
+static size_t utf8_char_len(uint8_t c)
+{
+	if ((c & 0x80u) == 0u) {
+		return 1u;
+	}
+	if ((c & 0xe0u) == 0xc0u) {
+		return 2u;
+	}
+	if ((c & 0xf0u) == 0xe0u) {
+		return 3u;
+	}
+	if ((c & 0xf8u) == 0xf0u) {
+		return 4u;
+	}
+	return 1u;
+}
+
+static void list_bond_name(const struct bt_bond_info *bond, void *data)
+{
+	struct names_listing *list = data;
+	char address[BT_ADDR_STR_LEN];
+	char label[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX + 1u];
+	char safe[BONDS_NAME_MAX + 1u];
+	size_t used = 0u;
+	int length;
+
+	length = linkr_bond_label_get(&bond->addr, label, sizeof(label));
+	if (length <= 0) {
+		return;
+	}
+	/* Quotes and backslashes would end the quoted NAME field early. The
+	 * per-address command returns the stored bytes exactly; this listing is
+	 * the compatibility view, so it substitutes rather than escapes. */
+	for (size_t i = 0; i < (size_t)length && used < BONDS_NAME_MAX;) {
+		size_t width = utf8_char_len((uint8_t)label[i]);
+
+		if (used + width > BONDS_NAME_MAX) {
+			break;
+		}
+		char c = label[i];
+
+		safe[used++] = (c == '"' || c == '\\') ? '\'' : c;
+		for (size_t j = 1; j < width; j++) {
+			safe[used++] = label[i + j];
+		}
+		i += width;
+	}
+	safe[used] = '\0';
+	if (used == 0u) {
+		return;
+	}
+	bt_addr_to_str(&bond->addr.a, address, sizeof(address));
+	int written = snprintk(list->reply + list->used, list->size - list->used,
+			       "NAME %u/%s \"%s\"\n", bond->addr.type, address,
+			       safe);
+	if (written < 0 || (size_t)written >= list->size - list->used) {
+		list->overflow = true;
+		return;
+	}
+	list->used += (size_t)written;
+}
+
+static void bond_names_command(uint8_t id, char *reply, size_t size)
+{
+	struct names_listing list = { .reply = reply, .size = size };
+	int n = snprintk(reply, size, "OK bonds names\n");
+
+	if (n < 0 || (size_t)n >= size) {
+		snprintk(reply, size, "ERR bonds buffer\n");
+		return;
+	}
+	list.used = (size_t)n;
+	bt_foreach_bond(id, list_bond_name, &list);
+	if (list.overflow) {
+		snprintk(reply, size, "ERR bonds buffer\n");
+	}
+}
+
+static void bond_name_command(struct bt_conn *conn, uint8_t id,
+			      const char *value, char *reply, size_t size)
+{
+	const bt_addr_le_t *self = bt_conn_get_dst(conn);
+	size_t length;
+
+	if (value == NULL) {
+		value = "";
+	}
+	if (*value == ' ') {
+		value++;
+	}
+	length = strlen(value);
+	if (!bt_le_bond_exists(id, self)) {
+		snprintk(reply, size, "ERR bonds not found\n");
+		return;
+	}
+	if (length == 0u) {
+		(void)linkr_bond_label_clear(self);
+		snprintk(reply, size, "OK bonds name\n");
+		return;
+	}
+	if (length > CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX) {
+		snprintk(reply, size, "ERR bonds name length\n");
+		return;
+	}
+	if (!label_valid(value, length)) {
+		snprintk(reply, size, "ERR bonds name utf8\n");
+		return;
+	}
+	if (linkr_bond_label_set(self, value, length) < 0) {
+		snprintk(reply, size, "ERR bonds name save\n");
+		return;
+	}
+	snprintk(reply, size, "OK bonds name\n");
+}
+
 #else
 static void bond_label_command(uint8_t id, const char *args, char *reply,
 			       size_t size)
@@ -308,17 +440,35 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 	ARG_UNUSED(args);
 	snprintk(reply, size, "ERR bonds unsupported\n");
 }
+
+static void bond_names_command(uint8_t id, char *reply, size_t size)
+{
+	ARG_UNUSED(id);
+	snprintk(reply, size, "OK bonds names\n");
+}
+
+static void bond_name_command(struct bt_conn *conn, uint8_t id,
+			      const char *value, char *reply, size_t size)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(id);
+	ARG_UNUSED(value);
+	snprintk(reply, size, "ERR bonds unsupported\n");
+}
 #endif /* CONFIG_SETTINGS */
 
 
 bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, size_t size)
 {
 	bool query = !strcmp(command, "bonds?");
+	bool names = !strcmp(command, "bonds names?");
+	bool name = !strcmp(command, "bonds name") ||
+		    !strncmp(command, "bonds name ", 11);
 	bool label = !strncmp(command, "bonds label", 11) &&
 		     (command[11] == '\0' || command[11] == ' ');
 	bool remove = !strncmp(command, "bonds remove ", 13);
 
-	if (!query && !label && !remove) return false;
+	if (!query && !names && !name && !label && !remove) return false;
 	struct bt_conn_info info;
 	if (!conn || bt_conn_get_info(conn, &info) || bt_conn_get_security(conn) < BT_SECURITY_L2) {
 		snprintk(reply, size, "ERR bonds encrypted BLE required\n");
@@ -328,6 +478,17 @@ bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, 
 	 * beside the delayed bt_unpair() could recreate a label for a bond that
 	 * has just been deleted. The write is short; correctness wins. */
 	k_mutex_lock(&bond_lock, K_FOREVER);
+	if (names) {
+		bond_names_command(info.id, reply, size);
+		k_mutex_unlock(&bond_lock);
+		return true;
+	}
+	if (name) {
+		const char *value = command[10] == ' ' ? command + 11 : "";
+		bond_name_command(conn, info.id, value, reply, size);
+		k_mutex_unlock(&bond_lock);
+		return true;
+	}
 	if (label) {
 		bond_label_command(info.id, command + 11, reply, size);
 		k_mutex_unlock(&bond_lock);

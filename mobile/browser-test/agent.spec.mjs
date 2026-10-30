@@ -1047,6 +1047,8 @@ test("target download probes tools, reports path and hash, and blocks follow-on 
   await ask(page,'Download firmware to target /tmp/fw.bin');
   await expect(page.locator('#agentMessages')).toContainText('Awaiting your next instruction.');
   await expect(page.locator('#agentMessages')).toContainText(hash);
+  // A transfer's progress, path and checksum stay visible outside folded logs.
+  await expect(page.locator('.agent-download_to_target')).toBeVisible();
   expect(await page.evaluate(()=>window.sent.some(bytes=>new TextDecoder().decode(new Uint8Array(bytes)).includes('MUST_NOT_RUN')))).toBe(false);
 });
 
@@ -1122,7 +1124,7 @@ for (const desktop of [false, true]) test.describe(desktop ? 'desktop agent comp
     await expect(page.locator('#agentQuestion')).toBeFocused();
     expect(await page.evaluate(()=>window.sent)).toEqual([]);
     await page.locator('#agentQuestion').fill('First line');
-    await page.keyboard.press('Enter');
+    await page.keyboard.press('Shift+Enter');
     await expect(page.locator('#agentQuestion')).toHaveValue('First line\n');
     await page.locator('#agentQuestion').dispatchEvent('keydown',{key:'Enter',ctrlKey:true,isComposing:true});
     expect(requests).toBe(0);

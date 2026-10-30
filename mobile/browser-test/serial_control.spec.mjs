@@ -104,6 +104,7 @@ test("a BLE capability handshake queries and claims without invalidating itself"
     c.setConnected(false);
     Object.assign(c.state, { mode: "ble", device: null, mgmtReady: false, reliableReady: false });
     let notify, incoming = [], commands = [], uartWrites = 0;
+    window.handshakeCommands = commands;
     const encode = new TextEncoder();
     Object.assign(c.bleTransport, {
       isAvailable: () => true, initialize: async () => {},
@@ -154,6 +155,13 @@ test("a BLE capability handshake queries and claims without invalidating itself"
   expect(result.mode).toBe("control");
   expect(result.commands.slice(0, 2)).toEqual(["@c?", "@c claim"]);
   expect(result.uartWrites).toBe(0);
+  await expect.poll(() => page.evaluate(() => window.handshakeCommands.filter(command =>
+    command.startsWith("@linkr bonds name ")).length)).toBe(1);
+  await page.evaluate(() => window.__control.applySerialControl({
+    self:2, owner:1, mode:"readonly", epoch:3, peers:2, capacity:2,
+  }));
+  expect(await page.evaluate(() => window.handshakeCommands.filter(command =>
+    command.startsWith("@linkr bonds name ")).length)).toBe(1);
 });
 
 for (const width of [390, 1200]) {
@@ -172,5 +180,32 @@ for (const width of [390, 1200]) {
     expect(geometry.left).toBeGreaterThanOrEqual(geometry.titleRight);
     await expect(page.locator("#serialControlButton")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`control-${width}.png`) });
+  });
+}
+
+// Outer toolbar bounds alone miss button text squeezed into a neighbour.
+for (const width of [320, 390, 600, 844, 1200]) for (const lang of ['en','zh']) {
+  test(`ownership labels never overlap at ${width}px (${lang})`, async ({page}) => {
+    await page.setViewportSize({width,height:844});
+    if (lang === 'zh') await page.locator('#langButton').evaluate(el=>el.click());
+    for (const mode of ['readonly','control','available']) {
+      await page.evaluate(mode=>window.__control.applySerialControl({self:2,owner:mode==='available'?0:1,mode,epoch:3,peers:2}),mode);
+      for (const keyboard of [false,true]) {
+        await page.evaluate(open=>{
+          Object.defineProperty(visualViewport,'height',{configurable:true,get:()=>open?400:844});visualViewport.dispatchEvent(new Event('resize'));
+        },keyboard);
+        if (keyboard) await expect(page.locator('html')).toHaveClass(/soft-keyboard-open/);
+        else await expect(page.locator('html')).not.toHaveClass(/soft-keyboard-open/);
+        await expect.poll(()=>page.locator('.terminal-head').evaluate(header=>{
+          const r=header.getBoundingClientRect();
+          const items=[...header.querySelectorAll('.term-title,.serial-control-status,.term-tool')].filter(el=>el.getBoundingClientRect().width);
+          return items.every((el,index)=>{
+            const box=el.getBoundingClientRect(),text=new Range();text.selectNodeContents(el);const ink=text.getBoundingClientRect();
+            return box.left>=r.left && box.right<=r.right+1 && box.bottom<=r.bottom+1 && ink.left>=box.left-1 && ink.right<=box.right+1 &&
+              items.slice(index+1).every(other=>{const next=other.getBoundingClientRect();return box.right<=next.left+1 || next.right<=box.left+1 || box.bottom<=next.top+1 || next.bottom<=box.top+1;});
+          });
+        })).toBe(true);
+      }
+    }
   });
 }

@@ -21,7 +21,7 @@ export const SESSION_DEVICES = 8;
 function trimDisplay(display) {
   return (Array.isArray(display) ? display : [])
     .filter((entry) => entry && (entry.role === "user" || entry.role === "assistant") && typeof entry.text === "string" && entry.text.trim())
-    .map((entry) => ({ role: entry.role, text: entry.text.slice(0, SESSION_ENTRY_CHARS) }))
+    .map((entry) => ({ role: entry.role, text: entry.text.slice(0, SESSION_ENTRY_CHARS), ...(entry.kind === "activity" ? {kind:"activity"} : {}) }))
     .slice(-SESSION_DISPLAY);
 }
 

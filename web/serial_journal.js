@@ -1,3 +1,5 @@
+import { createShellMarkerParser } from "./shell_integration.js";
+
 // Keep received device data separate from local echo, UI messages and AI text.
 export class SerialJournal {
   constructor(capacity = 128 * 1024) {
@@ -17,11 +19,19 @@ export class SerialJournal {
     this.end = 0;
     this.updatedAt = null;
     this.control = "text";
+    this.shellMarkers = createShellMarkerParser();
+    this.executionEvents = [];
   }
 
   append(bytes) {
     const text = this.decoder.decode(bytes, { stream: true });
+    const events = this.shellMarkers.push(text, this.end);
+    if (events.length) this.executionEvents.push(...events);
     this.end += text.length;
+    const oldest = this.end - this.capacity;
+    if (this.executionEvents.length > 128 || this.executionEvents[0]?.start < oldest) {
+      this.executionEvents = this.executionEvents.filter(event => event.start >= oldest).slice(-128);
+    }
     // Mask controls as they arrive, before paging or ring eviction can split a
     // sequence. One placeholder per raw UTF-16 code unit preserves all cursors.
     let visible = "";
@@ -123,6 +133,11 @@ export class SerialJournal {
       need -= take.length;
     }
     return text.length > count ? text.slice(0, count) : text;
+  }
+
+  readExecutionEvents({ after = 0, before = this.end } = {}) {
+    return this.executionEvents.filter(event => event.start >= Math.max(after, this.end - this.length) && event.end <= before)
+      .map(event => ({...event}));
   }
 
   read({ after, limit = 12000 } = {}) {

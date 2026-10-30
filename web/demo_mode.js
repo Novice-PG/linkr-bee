@@ -12,14 +12,12 @@
  */
 
 import { hexToUtf8, utf8ToHex } from "./board_io.js";
-import { defaultHostLabel } from "./host_label.js";
 
 /* Demo board storage: names live with the simulated NVS, so a page reload
  * keeps them exactly as a real board would. */
 const DEMO_NAMES_KEY = "linkr-demo-slot-names";
 const DEMO_PROMPT_KEY = "linkr-demo-prompt";
 const DEMO_AICONF_KEY = "linkr-demo-aiconf";
-const DEMO_BOND_LABELS_KEY = "linkr-demo-bond-labels";
 
 const DEMO_DEVICE_NAME = "Linkr Bee X1.0 (demo)";
 const DEMO_DEVICE_ID = "demo-x1-0";
@@ -47,6 +45,7 @@ export function installDemoMode({
     led: { r: 0, g: 0x18, b: 0x30 },
     opto: false,
     bonds: ["0/AA:BB:CC:DD:EE:01", "1/AA:BB:CC:DD:EE:02"],
+    bondNames: { "0/AA:BB:CC:DD:EE:01": "longlong-mbp", "1/AA:BB:CC:DD:EE:02": "Chrome · macOS" },
     optoTimer: null,
     slots: new Array(DEMO_SLOTS).fill(0),
     rx: true,
@@ -58,7 +57,6 @@ export function installDemoMode({
     names: loadDemoNames(),
     prompt: loadDemoPrompt(),
     aiconf: loadDemoAiconf(),
-    bondLabels: loadDemoBondLabels(),
     aiconfStageHex: null,
   };
   demo.slots[0] = DEMO_LEARN_EDGES;
@@ -85,33 +83,6 @@ export function installDemoMode({
       return localStorage.getItem(DEMO_AICONF_KEY) || "";
     } catch {
       return "";
-    }
-  }
-
-  function loadDemoBondLabels() {
-    try {
-      const stored = JSON.parse(localStorage.getItem(DEMO_BOND_LABELS_KEY) || "null");
-      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-        return stored;
-      }
-    } catch {
-      // Fall through to the seeded labels.
-    }
-    // Seed both hosts so the demo shows the labelled layout, and derive this
-    // host's label the same way the editor would: a hard-coded "Chrome" would
-    // be wrong in Firefox, Safari or on a phone.
-    const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
-    return {
-      "0/AA:BB:CC:DD:EE:01": defaultHostLabel({ userAgent }) || "This browser",
-      "1/AA:BB:CC:DD:EE:02": "Pixel 8",
-    };
-  }
-
-  function saveDemoBondLabels() {
-    try {
-      localStorage.setItem(DEMO_BOND_LABELS_KEY, JSON.stringify(demo.bondLabels));
-    } catch {
-      // In-memory mock is enough when storage is unavailable.
     }
   }
 
@@ -201,36 +172,47 @@ export function installDemoMode({
     if (command === "@linkr bonds?") {
       return "OK bonds pending=0 result=0\n" + demo.bonds.map(id => `BOND ${id} self=${id.endsWith("01") ? 1 : 0}`).join("\n");
     }
-    if (command.startsWith("@linkr bonds remove ")) {
-      const id = command.slice(20);
-      demo.bonds = demo.bonds.filter(value => value !== id);
-      delete demo.bondLabels[id];
-      saveDemoBondLabels();
-      if (id.endsWith("01")) setTimeout(() => setConnected(false), 500);
-      return "OK bonds queued";
+    if (command === "@linkr bonds names?") {
+      return "OK bonds names\n" + demo.bonds
+        .filter(id => demo.bondNames[id])
+        .map(id => `NAME ${id} "${demo.bondNames[id]}"`)
+        .join("\n");
     }
     if (command.startsWith("@linkr bonds label ")) {
-      const [id, value] = command.slice("@linkr bonds label ".length).split(" ");
+      const rest = command.slice("@linkr bonds label ".length);
+      const space = rest.indexOf(" ");
+      const id = space < 0 ? rest : rest.slice(0, space);
+      const value = space < 0 ? null : rest.slice(space + 1);
       if (!demo.bonds.includes(id)) return "ERR bonds not found";
-      if (!value) {
-        const label = demo.bondLabels[id] || "";
-        return label
-          ? `OK bonds label=${id} hex=${utf8ToHex(label)}`
-          : `OK bonds label=${id} none`;
+      if (value === null) {
+        const label = demo.bondNames[id] || "";
+        return label ? `OK bonds label=${id} hex=${utf8ToHex(label)}` : `OK bonds label=${id} none`;
       }
       if (value === "clear") {
-        delete demo.bondLabels[id];
-        saveDemoBondLabels();
+        delete demo.bondNames[id];
         return `OK bonds label=${id} none`;
       }
       try {
         const label = hexToUtf8(value);
-        demo.bondLabels[id] = label;
-        saveDemoBondLabels();
+        demo.bondNames[id] = label;
         return `OK bonds label=${id} hex=${utf8ToHex(label)}`;
       } catch {
         return "ERR bonds label hex";
       }
+    }
+    if (command.startsWith("@linkr bonds name ")) {
+      const label = command.slice(18).trim();
+      const self = demo.bonds.find(id => id.endsWith("01"));
+      if (!self) return "ERR bonds not found";
+      demo.bondNames[self] = label;
+      return "OK bonds name";
+    }
+    if (command.startsWith("@linkr bonds remove ")) {
+      const id = command.slice(20);
+      demo.bonds = demo.bonds.filter(value => value !== id);
+      delete demo.bondNames[id];
+      if (id.endsWith("01")) setTimeout(() => setConnected(false), 500);
+      return "OK bonds queued";
     }
     if (command === "@l?") {
       return `OK led rgb=${hex(demo.led)}`;
