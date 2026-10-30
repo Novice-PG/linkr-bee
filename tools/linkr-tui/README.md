@@ -275,7 +275,9 @@ The same view carries a paired-device drawer: `@linkr bonds?` lists the saved
 identities and each label is read one address at a time, so the fixed reply
 buffer never holds them all. The drawer is read when the network view opens,
 shows the address (not just an "unnamed" word), and hides itself when the
-firmware has no pairing commands. A removal says it is queued and reads the
+firmware has no pairing commands. When the board stores no label for this
+host, the drawer reports the local user name once; an existing label is never
+replaced, and a read-only refusal is silent. A removal says it is queued and reads the
 list back after the board's delayed unpair, rather than showing the row that is
 about to disappear.
 

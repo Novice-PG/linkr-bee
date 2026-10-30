@@ -128,7 +128,7 @@ stored on the board in NVS under the bond's identity address. The label is
 display-only and is never authenticated. The web and phone editors report it once
 from the browser's user agent when the board stores none (a native shell cannot read the phone's own
 Bluetooth name; the connected accessory's name is the board's, not the host's),
-and the TUI suggests the local user name only for this host's own pairing. The
+and the TUI reports the local user name once for this host's own pairing. The
 owner can always edit or clear it. Deleting a pairing deletes its label too.
 
 The encrypted BLE management commands are `@linkr bonds?` (read-only),

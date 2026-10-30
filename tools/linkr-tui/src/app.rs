@@ -790,6 +790,11 @@ pub struct App {
     pub bonds_read_pending: bool,
     /// When a delayed removal is due to be read back; see [`App::pump`].
     pub bond_refresh_due: Option<Instant>,
+    /// Whether the label command in flight is the automatic "this host has no
+    /// label yet" report, whose refusal is not worth a notice.
+    pub bond_self_write: bool,
+    /// Whether this link has already tried to report this host's label.
+    pub bond_self_reported: bool,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -1009,6 +1014,8 @@ impl Default for App {
             bond_label_queue: VecDeque::new(),
             bonds_read_pending: false,
             bond_refresh_due: None,
+            bond_self_write: false,
+            bond_self_reported: false,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -2637,6 +2644,8 @@ impl App {
         self.bond_label_queue.clear();
         self.bonds_read_pending = false;
         self.bond_refresh_due = None;
+        self.bond_self_write = false;
+        self.bond_self_reported = false;
         self.network.bonds = None;
         self.network.bonds_pending = false;
         self.network.bonds_result = 0;
@@ -3597,6 +3606,7 @@ impl App {
     pub fn refresh_bonds(&mut self) -> Result<(), String> {
         self.bond_label_queue.clear();
         self.bond_refresh_due = None;
+        self.bond_self_write = false;
         self.ask_device(Query::Bonds)
     }
 
@@ -3623,12 +3633,48 @@ impl App {
             return;
         }
         let Some(address) = self.bond_label_queue.pop_front() else {
+            self.maybe_report_self_label();
             return;
         };
         let command = accessory::bond_label_query_command(&address);
         if let Err(why) = self.send_accessory(&command, Query::BondLabel) {
             self.network.error = Some(why);
             self.bond_label_queue.clear();
+        }
+    }
+
+    /// Report the local user name for this host's own pairing when the board
+    /// stores no label yet.
+    ///
+    /// The web client does the same with the browser's user agent. A label the
+    /// owner already stored is never touched, and a read-only refusal is
+    /// silent: this is a convenience, not a setting the user asked for.
+    fn maybe_report_self_label(&mut self) {
+        if self.bond_self_reported
+            || !self.ble_connected()
+            || !self.network.labels_supported
+            || self.waiting_on_device()
+        {
+            return;
+        }
+        let Some(bonds) = self.network.bonds.as_deref() else {
+            return;
+        };
+        let Some(own) = bonds.iter().find(|bond| bond.is_self) else {
+            return;
+        };
+        self.bond_self_reported = true;
+        if own.label.as_deref().is_some_and(|label| !label.is_empty()) {
+            return;
+        }
+        let name = crate::user::preferred_name();
+        if name.is_empty() {
+            return;
+        }
+        let address = own.id.clone();
+        match self.set_bond_label(&address, &name) {
+            Ok(()) => self.bond_self_write = true,
+            Err(why) => self.network.error = Some(why),
         }
     }
 
@@ -3728,7 +3774,7 @@ impl App {
         if let Some(previous) = self.talk.waiting() {
             self.stop_waiting(previous);
         }
-        let (id, _) = self.talk.ask(query, now);
+        let id = self.talk.ask_id(query, now);
         let frame = match crate::protocol::encode_management_request(id, command.as_bytes()) {
             Ok(frame) => frame,
             Err(why) => {
@@ -3815,6 +3861,13 @@ impl App {
                 self.network.bonds_pending = false;
                 self.network.bonds_result = 0;
                 self.bonds_read_pending = false;
+                self.network.error = None;
+                return;
+            }
+            // The automatic "this host has no label" write is best effort: a
+            // read-only refusal leaves the address showing and says nothing.
+            if reply.query == Query::BondLabel && self.bond_self_write {
+                self.bond_self_write = false;
                 self.network.error = None;
                 return;
             }
@@ -4012,6 +4065,7 @@ impl App {
             }
             Query::BondLabel => {
                 if let Some(parsed) = accessory::parse_bond_label(&text) {
+                    self.bond_self_write = false;
                     self.network.labels_supported = true;
                     if let Some(bonds) = self.network.bonds.as_mut() {
                         if let Some(entry) = bonds
@@ -4038,6 +4092,10 @@ impl App {
                     // client as invalid UTF-8). Do not re-read the list: that
                     // would loop on the same unreadable label forever.
                     self.bond_label_queue.clear();
+                    if self.bond_self_write {
+                        self.bond_self_write = false;
+                        return;
+                    }
                     self.network.error = Some(self.strings().net_paired_bad_reply.to_string());
                 }
             }
@@ -8265,6 +8323,56 @@ mod tests {
             "the shelf keeps the name the board reports, not the old one"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The TUI reports the local user name for this host when the board has no
+    /// label, and a read-only refusal is silent rather than an error.
+    #[test]
+    fn this_hosts_label_is_reported_when_the_board_has_none() {
+        let previous = std::env::var("LINKR_USER_NAME").ok();
+        std::env::set_var("LINKR_USER_NAME", "Auto Tester");
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: None,
+        }]);
+        app.ask_next_bond_label();
+        assert_eq!(app.talk.waiting(), Some(Query::BondLabel));
+        assert!(app.bond_self_write);
+        assert!(app.bond_self_reported);
+
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::BondLabel,
+                status: crate::accessory::reply_status("ERR control=readonly"),
+                lines: vec!["ERR control=readonly".to_string()],
+            },
+            "",
+        );
+        assert!(!app.bond_self_write);
+        assert!(app.network.error.is_none(), "a refusal is not an error");
+        match previous {
+            Some(value) => std::env::set_var("LINKR_USER_NAME", value),
+            None => std::env::remove_var("LINKR_USER_NAME"),
+        }
+    }
+
+    /// A label the owner already stored is never replaced by the local name.
+    #[test]
+    fn an_existing_label_is_not_overwritten() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: Some("Alice".into()),
+        }]);
+        app.ask_next_bond_label();
+        assert_eq!(app.talk.waiting(), None);
+        assert!(app.bond_self_reported);
+        assert!(!app.bond_self_write);
     }
 
     /// A removal is acknowledged before the board unpairs. The list is read

@@ -622,7 +622,7 @@ holds them all.
 
 Labels are display-only, at most 48 UTF-8 bytes, stored in NVS by identity
 address and deleted with the pairing. The web and phone editors report the browser's OS once when the board stores
-none; the TUI suggests the local user name only for this host. Older
+none; the TUI reports the local user name once for this host. Older
 firmware without the commands hides the section (web/TUI) rather than leaving a
 dead control.
 

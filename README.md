@@ -46,7 +46,7 @@ target's own UART bytes and does not replace the target shell.
   transfer counters from the diagnostics panel.
 - Give each paired host a display label (for example "Alice's phone"), stored on
   the board by identity address. The web and phone editors report the browser's
-  OS once when the board stores none, the TUI suggests the local user name only
+  OS once when the board stores none, the TUI reports the local user name once
   for this host, and the owner can always edit or clear it.
 - Join a 2.4 GHz network and keep using the console over LAN, without Bluetooth.
 - Assistant in the browser and the phone apps: searches the serial log, runs
