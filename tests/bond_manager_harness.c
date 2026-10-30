@@ -13,6 +13,8 @@
 #define BT_ADDR_STR_LEN 18
 #define snprintk snprintf
 #define CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX 48
+#define CONFIG_SETTINGS 1
+#define IS_ENABLED(x) ((x) != 0)
 struct k_work { int unused; };
 struct k_work_delayable { void (*fn)(struct k_work *); };
 #define K_WORK_DELAYABLE_DEFINE(n,f) struct k_work_delayable n = {f}

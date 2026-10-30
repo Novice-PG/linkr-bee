@@ -12,6 +12,7 @@
  */
 
 import { hexToUtf8, utf8ToHex } from "./board_io.js";
+import { defaultHostLabel } from "./host_label.js";
 
 /* Demo board storage: names live with the simulated NVS, so a page reload
  * keeps them exactly as a real board would. */
@@ -94,9 +95,16 @@ export function installDemoMode({
         return stored;
       }
     } catch {
-      // Fall through to the seeded label.
+      // Fall through to the seeded labels.
     }
-    return { "0/AA:BB:CC:DD:EE:01": "Chrome · Linux" };
+    // Seed both hosts so the demo shows the labelled layout, and derive this
+    // host's label the same way the editor would: a hard-coded "Chrome" would
+    // be wrong in Firefox, Safari or on a phone.
+    const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
+    return {
+      "0/AA:BB:CC:DD:EE:01": defaultHostLabel({ userAgent }) || "This browser",
+      "1/AA:BB:CC:DD:EE:02": "Pixel 8",
+    };
   }
 
   function saveDemoBondLabels() {

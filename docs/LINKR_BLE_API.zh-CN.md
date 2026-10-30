@@ -218,8 +218,8 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 | `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
 | `@linkr bonds?` | 列出已保存的配对，每条一行 `BOND <type>/<addr> self=0/1` |
 | `@linkr bonds remove <type>/<addr>` | 删除一个配对（需控制权）；`OK bonds queued` 表示已受理，非已完成 |
-| `@linkr bonds label <type>/<addr>` | 查询该配对的显示标签（只读），无标签时回复 `none` |
-| `@linkr bonds label <type>/<addr> <hex>` | 设置标签，值为 UTF-8 的十六进制（需控制权） |
+| `@linkr bonds label <type>/<addr>` | 查询该配对的显示标签（只读）：`OK bonds label=<addr> hex=<hex>`，无标签时 `OK bonds label=<addr> none` |
+| `@linkr bonds label <type>/<addr> <hex>` | 设置标签，值为 UTF-8 的十六进制（需控制权，最多 48 字节，拒绝控制字符和非法 UTF-8） |
 | `@linkr bonds label <type>/<addr> clear` | 清除标签（需控制权） |
 | `@l?` | 查询 RGB 状态灯颜色（仅 Linkr Bee X1.0，其他板返回 `ERR led unsupported`） |
 | `@l=<r>,<g>,<b>` | 设置常亮颜色，通道 0–255 或 `0x00`–`0xff` |

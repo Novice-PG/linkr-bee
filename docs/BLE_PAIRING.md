@@ -125,19 +125,25 @@ are preserved. Older firmware without this command hides the card.
 
 Each pairing can also carry a **display label** (for example "Alice's phone"),
 stored on the board in NVS under the bond's identity address. The label is
-display-only and is never authenticated. The web editor pre-fills it from the
-browser's user agent, the phone apps from the connected device's Bluetooth name,
-and the TUI from the host user name; the owner can always edit or clear it.
-Deleting a pairing deletes its label too.
+display-only and is never authenticated. The web and phone editors report it once
+from the browser's user agent when the board stores none (a native shell cannot read the phone's own
+Bluetooth name; the connected accessory's name is the board's, not the host's),
+and the TUI suggests the local user name only for this host's own pairing. The
+owner can always edit or clear it. Deleting a pairing deletes its label too.
 
 The encrypted BLE management commands are `@linkr bonds?` (read-only),
 `@linkr bonds remove <type>/<address>` (control owner only), for example
 `@linkr bonds remove 0/AA:BB:CC:DD:EE:01`, and
 `@linkr bonds label <type>/<address> [<hex>|clear]`. Type 0 is public, 1 is
 random. A label travels hex-encoded because it is UTF-8 text; a bare address is
-a read-only query, while writing or clearing needs the control owner. The list
+a read-only query (`OK bonds label=<address> none` or
+`OK bonds label=<address> hex=<hex>`), while writing or clearing needs the
+control owner. The firmware rejects labels that are not displayable UTF-8
+(including C0/C1 controls) and stores at most 48 bytes by default. The list
 never carries labels, because eight of them would overflow the reply: read one
-address at a time.
+address at a time. The web and TUI clients cap their own label input at 48
+bytes; a build that changes `LINKR_BLE_BRIDGE_BOND_LABEL_MAX` must change the
+clients too.
 The removal acknowledgement `OK bonds queued` means accepted, not completed;
 queries report `pending` and the last removal `result` (zero on success).
 The firmware delays removal briefly so even the current host can receive the

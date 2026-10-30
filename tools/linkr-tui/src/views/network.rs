@@ -92,13 +92,20 @@ struct Shape {
     results: usize,
     bonds: usize,
     paired: bool,
+    labels: bool,
 }
 
 /// How many rows the walk has: the fixed table, the scan results, and — when
-/// the firmware has the paired-device commands — a refresh row plus two rows
-/// per bonded host.
+/// the firmware has the paired-device commands — a refresh row, one removal
+/// per bonded host, and a rename row too when labels are supported.
 fn walk_len(shape: Shape) -> usize {
-    ROWS.len() + shape.results + if shape.paired { 1 + shape.bonds * 2 } else { 0 }
+    ROWS.len()
+        + shape.results
+        + if shape.paired {
+            1 + shape.bonds * (1 + usize::from(shape.labels))
+        } else {
+            0
+        }
 }
 
 impl NetworkRow {
@@ -110,9 +117,8 @@ impl NetworkRow {
     fn reachable(self, shape: Shape) -> bool {
         match self {
             NetworkRow::ScanResult(index) => !shape.connected && index < shape.results,
-            NetworkRow::Paired(index) | NetworkRow::PairedRemove(index) => {
-                shape.paired && index < shape.bonds
-            }
+            NetworkRow::Paired(index) => shape.paired && shape.labels && index < shape.bonds,
+            NetworkRow::PairedRemove(index) => shape.paired && index < shape.bonds,
             NetworkRow::PairedRefresh => shape.paired,
             _ => true,
         }
@@ -158,9 +164,11 @@ impl NetworkRow {
             NetworkRow::ScanResult(index) => WIFI_ROWS + index.min(results.saturating_sub(1)),
             NetworkRow::PairedRefresh => ROWS.len() + results,
             NetworkRow::Paired(index) | NetworkRow::PairedRemove(index) => {
+                let per_bond = 1 + usize::from(shape.labels);
                 let column = index.min(shape.bonds.saturating_sub(1));
-                let base = ROWS.len() + results + 1 + column * 2;
+                let base = ROWS.len() + results + 1 + column * per_bond;
                 base + usize::from(matches!(self, NetworkRow::PairedRemove(_)))
+                    * usize::from(shape.labels)
             }
             row => {
                 let base = ROWS
@@ -190,10 +198,13 @@ impl NetworkRow {
                 NetworkRow::PairedRefresh
             } else {
                 let slot = row - ROWS.len() - 1;
-                if slot.is_multiple_of(2) {
-                    NetworkRow::Paired(slot / 2)
+                let per_bond = 1 + usize::from(shape.labels);
+                let column = slot / per_bond;
+                let within = slot % per_bond;
+                if shape.labels && within == 0 {
+                    NetworkRow::Paired(column)
                 } else {
-                    NetworkRow::PairedRemove(slot / 2)
+                    NetworkRow::PairedRemove(column)
                 }
             }
         }
@@ -227,6 +238,13 @@ pub struct NetworkState {
     /// Whether the firmware knows the paired-device commands. True until it
     /// answers `unknown command`, which hides only this section.
     pub paired_supported: bool,
+    /// Whether the firmware knows `bonds label`; a board with the list but no
+    /// labels still shows the addresses and removal, just not rename.
+    pub labels_supported: bool,
+    /// The last `bonds?` header said a delayed removal is still pending.
+    pub bonds_pending: bool,
+    /// The last removal's result; non-zero means it failed.
+    pub bonds_result: i64,
     /// A read or action is in flight.
     pub loading: bool,
     /// The last failure, already worded for the reader.
@@ -245,6 +263,9 @@ impl Default for NetworkState {
             scan_results: Vec::new(),
             bonds: None,
             paired_supported: true,
+            labels_supported: true,
+            bonds_pending: false,
+            bonds_result: 0,
             loading: false,
             error: None,
             focus: NetworkRow::Ssid,
@@ -265,6 +286,7 @@ impl NetworkState {
             results: self.scan_results.len(),
             bonds: self.bonds.as_ref().map(|bonds| bonds.len()).unwrap_or(0),
             paired: self.paired_supported,
+            labels: self.labels_supported,
         }
     }
 
@@ -303,9 +325,14 @@ impl NetworkState {
                     self.focus = NetworkRow::Scan;
                 }
             }
-            NetworkRow::Paired(index) | NetworkRow::PairedRemove(index)
-                if !shape.paired || index >= shape.bonds =>
-            {
+            NetworkRow::Paired(index) if !shape.paired || !shape.labels || index >= shape.bonds => {
+                self.focus = if shape.paired {
+                    NetworkRow::PairedRefresh
+                } else {
+                    NetworkRow::Scan
+                };
+            }
+            NetworkRow::PairedRemove(index) if !shape.paired || index >= shape.bonds => {
                 self.focus = if shape.paired {
                     NetworkRow::PairedRefresh
                 } else {
@@ -717,54 +744,78 @@ fn document(
             theme,
         ));
     } else {
-        let bonds = state.bonds.as_deref().unwrap_or(&[]);
         targets.push((NetworkRow::PairedRefresh, lines.len()));
         if on(NetworkRow::PairedRefresh) {
             focused_line = lines.len();
         }
         lines.push(action_row(
             s.net_paired_refresh,
-            "",
+            s.net_ble_only,
             on(NetworkRow::PairedRefresh),
             width,
             theme,
         ));
-        if bonds.is_empty() {
-            lines.push(note(&format!("  {}", s.net_paired_empty), width, theme));
+        match state.bonds.as_deref() {
+            None => lines.push(note(&format!("  {}", s.net_paired_not_read), width, theme)),
+            Some([]) => lines.push(note(&format!("  {}", s.net_paired_empty), width, theme)),
+            Some(bonds) => {
+                for (index, bond) in bonds.iter().enumerate() {
+                    // The address is always shown: two unnamed hosts are still
+                    // two different rows, and the removal card names one.
+                    let mut word = match bond.label.as_deref().filter(|name| !name.is_empty()) {
+                        Some(label) => {
+                            format!("{label}{}{}", theme.glyphs().dot_sep(), bond.id)
+                        }
+                        None => bond.id.clone(),
+                    };
+                    if bond.is_self {
+                        word.push(' ');
+                        word.push_str(theme.glyphs().dot_sep());
+                        word.push(' ');
+                        word.push_str(s.net_paired_self);
+                    }
+                    if state.labels_supported {
+                        targets.push((NetworkRow::Paired(index), lines.len()));
+                        if on(NetworkRow::Paired(index)) {
+                            focused_line = lines.len();
+                        }
+                        lines.push(action_row(
+                            &word,
+                            "",
+                            on(NetworkRow::Paired(index)),
+                            width,
+                            theme,
+                        ));
+                    } else {
+                        lines.push(note(&format!("  {word}"), width, theme));
+                    }
+                    targets.push((NetworkRow::PairedRemove(index), lines.len()));
+                    if on(NetworkRow::PairedRemove(index)) {
+                        focused_line = lines.len();
+                    }
+                    lines.push(action_row(
+                        s.net_paired_remove,
+                        "",
+                        on(NetworkRow::PairedRemove(index)),
+                        width,
+                        theme,
+                    ));
+                }
+            }
         }
-        for (index, bond) in bonds.iter().enumerate() {
-            let name = bond.label.as_deref().unwrap_or(s.net_paired_no_label);
-            let mut word = name.to_string();
-            if bond.is_self {
-                word.push(' ');
-                word.push_str(theme.glyphs().dot_sep());
-                word.push(' ');
-                word.push_str(s.net_paired_self);
-            }
-            targets.push((NetworkRow::Paired(index), lines.len()));
-            if on(NetworkRow::Paired(index)) {
-                focused_line = lines.len();
-            }
-            lines.push(action_row(
-                &word,
-                "",
-                on(NetworkRow::Paired(index)),
+        if state.bonds_pending {
+            lines.push(note(&format!("  {}", s.net_paired_pending), width, theme));
+        } else if state.bonds_result != 0 {
+            lines.push(note(&format!("  {}", s.net_paired_failed), width, theme));
+        } else if !state.labels_supported {
+            lines.push(note(
+                &format!("  {}", s.net_paired_labels_unsupported),
                 width,
                 theme,
             ));
-            targets.push((NetworkRow::PairedRemove(index), lines.len()));
-            if on(NetworkRow::PairedRemove(index)) {
-                focused_line = lines.len();
-            }
-            lines.push(action_row(
-                s.net_paired_remove,
-                "",
-                on(NetworkRow::PairedRemove(index)),
-                width,
-                theme,
-            ));
+        } else {
+            lines.push(note(&format!("  {}", s.net_paired_hint), width, theme));
         }
-        lines.push(note(&format!("  {}", s.net_paired_hint), width, theme));
     }
 
     lines.push(Line::from(""));
@@ -909,6 +960,9 @@ fn activate(app: &mut App) {
             }
         }
         NetworkRow::Paired(index) => {
+            if !app.network.labels_supported {
+                return;
+            }
             if let Some(bond) = app
                 .network
                 .bonds
@@ -917,7 +971,7 @@ fn activate(app: &mut App) {
             {
                 let address = bond.id.clone();
                 let current = bond.label.clone();
-                dialogs::prompt_bond_label(app, &address, current.as_deref());
+                dialogs::prompt_bond_label(app, &address, current.as_deref(), bond.is_self);
             }
         }
         NetworkRow::PairedRemove(index) => {
@@ -1131,15 +1185,18 @@ mod tests {
             for results in [0usize, 1, 3] {
                 for bonds in [0usize, 1, 3] {
                     for paired in [false, true] {
-                        let shape = Shape {
-                            connected,
-                            results,
-                            bonds,
-                            paired,
-                        };
-                        for index in 0..walk_len(shape) {
-                            let row = NetworkRow::at(index, shape);
-                            assert_eq!(row.position(shape), index, "{shape:?} {row:?}");
+                        for labels in [false, true] {
+                            let shape = Shape {
+                                connected,
+                                results,
+                                bonds,
+                                paired,
+                                labels,
+                            };
+                            for index in 0..walk_len(shape) {
+                                let row = NetworkRow::at(index, shape);
+                                assert_eq!(row.position(shape), index, "{shape:?} {row:?}");
+                            }
                         }
                     }
                 }
@@ -1167,19 +1224,50 @@ mod tests {
         let text = body_text(&lines(&a, &Theme::DARK, 80));
         assert!(text.contains("Paired devices"), "{text}");
         assert!(text.contains("Alice"), "{text}");
-        assert!(text.contains("unnamed"), "{text}");
+        assert!(text.contains("0/AA:BB:CC:DD:EE:01"), "{text}");
+        assert!(text.contains("1/AA:BB:CC:DD:EE:02"), "{text}");
         assert!(text.contains("[Refresh paired devices]"), "{text}");
         assert!(text.contains("[Remove this pairing]"), "{text}");
     }
 
-    /// A firmware without the label commands says so without the refresh row.
+    /// Without label support the list and removal stay; only rename goes.
     #[test]
-    fn a_firmware_without_labels_hides_the_refresh_row() {
+    fn a_firmware_without_labels_keeps_the_list_and_removal() {
+        let mut a = app(Lang::En);
+        a.network.labels_supported = false;
+        a.network.bonds = Some(vec![BondEntry {
+            id: "1/AA:BB:CC:DD:EE:02".into(),
+            is_self: false,
+            label: Some("Alice".into()),
+        }]);
+        let text = body_text(&lines(&a, &Theme::DARK, 80));
+        assert!(text.contains("1/AA:BB:CC:DD:EE:02"), "{text}");
+        assert!(text.contains("[Remove this pairing]"), "{text}");
+        assert!(
+            text.contains("this firmware has no label command"),
+            "{text}"
+        );
+
+        let mut state = NetworkState {
+            bonds: a.network.bonds.clone(),
+            labels_supported: false,
+            focus: NetworkRow::BleNameStatus,
+            ..NetworkState::default()
+        };
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::PairedRefresh);
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::PairedRemove(0));
+    }
+
+    /// A firmware without the pairing commands hides the whole section.
+    #[test]
+    fn a_firmware_without_pairing_management_hides_the_section() {
         let mut a = app(Lang::En);
         a.network.paired_supported = false;
         let text = body_text(&lines(&a, &Theme::DARK, 80));
         assert!(text.contains("Paired devices"), "{text}");
-        assert!(text.contains("no device labels"), "{text}");
+        assert!(text.contains("no pairing management"), "{text}");
         assert!(!text.contains("[Refresh paired devices]"), "{text}");
     }
 

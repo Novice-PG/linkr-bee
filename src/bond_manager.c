@@ -23,7 +23,8 @@ static void remove_bond(struct k_work *work)
 	/* A successful unpair (or a bond that is already gone) leaves the label
 	 * orphaned, so drop it too. A transient failure keeps the bond, and with
 	 * it the label. */
-	if (last_result == 0 || last_result == -ENOENT) {
+	if ((last_result == 0 || last_result == -ENOENT) &&
+	    IS_ENABLED(CONFIG_SETTINGS)) {
 		(void)linkr_bond_label_clear(&pending_addr);
 	}
 	pending = false;
@@ -74,6 +75,7 @@ static bool parse_address(const char *value, bt_addr_le_t *out)
 				   out) == 0;
 }
 
+#if IS_ENABLED(CONFIG_SETTINGS)
 static int hex_value(char digit)
 {
 	if (digit >= '0' && digit <= '9') {
@@ -128,21 +130,72 @@ static int hex_decode(const char *text, uint8_t *out, size_t out_size)
 	return (int)bytes;
 }
 
-/* A label is free text that ends up on a terminal, so refuse NUL and the C0
- * control block as well as DEL: ESC sequences are a real injection surface in
- * the TUI and CLI. */
-static bool label_bytes_ok(const uint8_t *bytes, size_t length)
+/* A label is free text that ends up on a terminal, so it follows the same
+ * displayable-UTF-8 rules as the advertised name: no C0/C1 controls, DEL,
+ * embedded NUL, overlong forms, surrogates, or out-of-range code points. The
+ * C1 rule matters here too: U+009B is a one-byte CSI and a terminal may obey
+ * it even though the board never sends an ESC. */
+static bool label_valid(const char *label, size_t len)
 {
-	for (size_t i = 0; i < length; i++) {
-		if (bytes[i] < 0x20u || bytes[i] == 0x7fu) {
+	size_t i = 0;
+
+	if (len == 0u || len > CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX) {
+		return false;
+	}
+
+	while (i < len) {
+		uint8_t c = (uint8_t)label[i];
+		uint32_t cp;
+		size_t extra;
+
+		if (c < 0x20 || c == 0x7f) {
 			return false;
 		}
+		if (c < 0x80) {
+			i++;
+			continue;
+		}
+
+		if ((c & 0xe0) == 0xc0) {
+			extra = 1;
+			cp = c & 0x1f;
+		} else if ((c & 0xf0) == 0xe0) {
+			extra = 2;
+			cp = c & 0x0f;
+		} else if ((c & 0xf8) == 0xf0) {
+			extra = 3;
+			cp = c & 0x07;
+		} else {
+			return false;
+		}
+		if (i + extra >= len) {
+			return false;
+		}
+		for (size_t j = 1; j <= extra; j++) {
+			uint8_t continuation = (uint8_t)label[i + j];
+
+			if ((continuation & 0xc0) != 0x80) {
+				return false;
+			}
+			cp = (cp << 6) | (continuation & 0x3f);
+		}
+
+		if ((extra == 1 && cp < 0x80) ||
+		    (extra == 2 && cp < 0x800) ||
+		    (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
+		    (cp >= 0xd800 && cp <= 0xdfff) ||
+		    (cp >= 0x80 && cp <= 0x9f) ||
+		    cp == 0x2028 || cp == 0x2029) {
+			return false;
+		}
+		i += extra + 1;
 	}
-	return length > 0u;
+
+	return true;
 }
 
 /* "bonds label <type>/<addr> [<hex>|clear]". args points just past the
- * "bonds label " prefix. Labels are asked for one address at a time so the
+ * "bonds label" prefix. Labels are asked for one address at a time so the
  * fixed reply buffer never has to hold all of them. */
 static void bond_label_command(uint8_t id, const char *args, char *reply,
 			       size_t size)
@@ -151,7 +204,12 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 	bt_addr_le_t address;
 	char address_text[BT_ADDR_STR_LEN];
 	const char *value;
-	size_t args_len = strlen(args);
+	size_t args_len;
+
+	while (*args == ' ') {
+		args++;
+	}
+	args_len = strlen(args);
 
 	if (args_len < 19u) {
 		snprintk(reply, size, "ERR bonds address\n");
@@ -228,7 +286,7 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 			snprintk(reply, size, "ERR bonds label hex\n");
 			return;
 		}
-		if (!label_bytes_ok(bytes, (size_t)n)) {
+		if (!label_valid((const char *)bytes, (size_t)n)) {
 			snprintk(reply, size, "ERR bonds label utf8\n");
 			return;
 		}
@@ -242,11 +300,22 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 			 (unsigned int)address.type, address_text, hex);
 	}
 }
+#else
+static void bond_label_command(uint8_t id, const char *args, char *reply,
+			       size_t size)
+{
+	ARG_UNUSED(id);
+	ARG_UNUSED(args);
+	snprintk(reply, size, "ERR bonds unsupported\n");
+}
+#endif /* CONFIG_SETTINGS */
+
 
 bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, size_t size)
 {
 	bool query = !strcmp(command, "bonds?");
-	bool label = !strncmp(command, "bonds label ", 12);
+	bool label = !strncmp(command, "bonds label", 11) &&
+		     (command[11] == '\0' || command[11] == ' ');
 	bool remove = !strncmp(command, "bonds remove ", 13);
 
 	if (!query && !label && !remove) return false;
@@ -255,13 +324,15 @@ bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, 
 		snprintk(reply, size, "ERR bonds encrypted BLE required\n");
 		return true;
 	}
+	/* Labels are stored through the same lock as removal: a write that ran
+	 * beside the delayed bt_unpair() could recreate a label for a bond that
+	 * has just been deleted. The write is short; correctness wins. */
+	k_mutex_lock(&bond_lock, K_FOREVER);
 	if (label) {
-		/* Straight to NVS, without bond_lock: a flash write must not
-		 * stall the delayed removal. */
-		bond_label_command(info.id, command + 12, reply, size);
+		bond_label_command(info.id, command + 11, reply, size);
+		k_mutex_unlock(&bond_lock);
 		return true;
 	}
-	k_mutex_lock(&bond_lock, K_FOREVER);
 	if (query) {
 		struct listing list = { .reply = reply, .size = size, .self = bt_conn_get_dst(conn) };
 		int n = snprintk(reply, size, "OK bonds pending=%u result=%d\n", pending ? 1U : 0U, last_result);
@@ -304,9 +375,15 @@ bool linkr_bond_is_readonly(const char *command)
 	if (!strcmp(command, "bonds?")) {
 		return true;
 	}
-	if (strncmp(command, "bonds label ", 12) != 0) {
+	if (strncmp(command, "bonds label", 11) != 0) {
 		return false;
 	}
-	/* Only the bare address (no value) is a read. */
-	return strlen(command) == 12u + 19u;
+	/* A bare address is a read. So is the malformed prefix with no address:
+	 * it can only answer `ERR bonds address`, and refusing it at the control
+	 * gate would report a permission error for a syntax mistake. */
+	const char *rest = command + 11;
+	while (*rest == ' ') {
+		rest++;
+	}
+	return *rest == '\0' || strlen(rest) == 19u;
 }

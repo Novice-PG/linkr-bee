@@ -61,6 +61,7 @@ test('renaming stores a label and shows it above the address',async({page})=>{
 test('cancelling an edit changes nothing',async({page})=>{
   const first=page.locator('.bond-row').first();
   const before=await first.locator('.bond-name').textContent();
+  await page.evaluate(()=>window.commands.length=0);
   await first.locator('[data-bond-action="rename"]').click();
   await first.locator('.bond-input').fill('nope');
   await first.locator('[data-bond-action="cancel"]').click();
@@ -80,6 +81,16 @@ test('clearing a label returns the row to the address only',async({page})=>{
   await expect(first.locator('.bond-name')).toHaveText('0/AA:BB:CC:DD:EE:01');
   expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds label 0/AA:BB:CC:DD:EE:01 clear');
 });
+test('reports this browser name once when the board has none',async({page})=>{
+  const sets=await page.evaluate(()=>window.commands.filter(c=>c.startsWith('@linkr bonds label 0/AA:BB:CC:DD:EE:01 ')));
+  expect(sets).toHaveLength(1);
+  const first=page.locator('.bond-row').first();
+  await expect(first.locator('.bond-name')).not.toHaveText('0/AA:BB:CC:DD:EE:01');
+  await page.evaluate(()=>window.bondTest.query());
+  const again=await page.evaluate(()=>window.commands.filter(c=>c.startsWith('@linkr bonds label 0/AA:BB:CC:DD:EE:01 ')));
+  expect(again).toHaveLength(1);
+});
+
 test('firmware without labels keeps the list but hides rename',async({page})=>{
   await page.evaluate(async()=>{
     const t=window.bondTest;

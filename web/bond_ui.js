@@ -31,6 +31,7 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
   let editing = null;
   let draft = "";
   let labelSupported = null;
+  let selfReported = false;
   let busy = false;
   let generation = null;
   const list = card.querySelector('[data-bonds-list]');
@@ -48,6 +49,7 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
     editing = null;
     draft = "";
     labelSupported = ctx.label ?? null;
+    selfReported = false;
     busy = false;
     status.textContent = '';
   }
@@ -227,6 +229,25 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
       render();
     }
     setLabelSupported(true);
+    // A freshly paired host has no label yet; report this browser's UA once so
+    // the list shows a friendly name. A label the owner already stored is
+    // never touched, and a failed report is silent — the list still works.
+    const own = peers.find(peer => peer.self);
+    if (!own || labels.get(own.id) || selfReported || !context().control) return;
+    const name = sanitizeBondLabel(suggestion());
+    if (!name) return;
+    selfReported = true;
+    try {
+      const response = await send(bondLabelSetCommand({ id: own.id, label: name }));
+      if (!live(token)) return;
+      const parsed = parseBondLabel(response);
+      if (parsed && parsed.label) {
+        labels.set(own.id, parsed.label);
+        render();
+      }
+    } catch {
+      // The board may have become read-only; the address still identifies it.
+    }
   }
 
   async function query() {
@@ -238,7 +259,10 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
       if (/ERR.*(?:unknown command|unsupported)/i.test(response)) { supported(false); return; }
       const result = parseBonds(response); supported(true); peers = result.peers; labels = new Map();
       status.textContent = result.pending ? text('正在删除，请稍后刷新。', 'Removal pending; refresh shortly.') : result.result ? text('上次删除失败，请刷新后重试。', 'Last removal failed; refresh and retry.') : peers.length ? text(`共 ${peers.length} 个设备`, `${peers.length} paired devices`) : text('没有已配对设备。', 'No paired devices.');
-      busy = false; render();
+      // Stay busy through the label series: a row that is half-loaded must
+      // not offer an edit or a removal that the next label render would
+      // rebuild underneath the user.
+      render();
       await loadLabels(token);
     } catch (error) { if (live(token)) status.textContent = error.message; }
     finally { if (live(token)) { busy = false; render(); } }

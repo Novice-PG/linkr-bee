@@ -762,6 +762,11 @@ config LINKR_BLE_BRIDGE_BOND_LABEL_MAX
 	  travels as hex over the management channel, so 64 bytes would double
 	  to 128 characters on the wire, still inside the 512-byte reply.
 
+	  The web and TUI clients cap their own input at 48 bytes because the
+	  reply protocol does not report this value. Keep the default unless
+	  those clients are changed too: a smaller value makes their writes
+	  fail, and a larger value is unreachable from them.
+
 config LINKR_BLE_BRIDGE_IR_LEARN
 	bool "Infrared learning (capture and replay arbitrary remotes)"
 	depends on LINKR_BLE_BRIDGE_IR

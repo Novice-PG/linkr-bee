@@ -3,9 +3,11 @@
 #include <stdint.h>
 #include <zephyr/kernel.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/bluetooth/addr.h>
 #include "bond_label.h"
 
+#if IS_ENABLED(CONFIG_SETTINGS)
 /* A label lives in its own NVS key, joined to the bond table by identity
  * address: the Bluetooth stack owns bt/keys/<addr> and cannot carry extra
  * fields. Like the IR slot names, a label is only touched by the command
@@ -76,3 +78,29 @@ int linkr_bond_label_clear(const bt_addr_le_t *addr)
 	(void)settings_delete(key);
 	return 0;
 }
+#else
+/* Settings off: the label commands answer `ERR bonds unsupported` and the
+ * bond manager never calls these. The stubs keep the unconditional
+ * CMakeLists entry linkable on a minimal build. */
+int linkr_bond_label_get(const bt_addr_le_t *addr, char *out, size_t out_len)
+{
+	ARG_UNUSED(addr);
+	ARG_UNUSED(out);
+	ARG_UNUSED(out_len);
+	return 0;
+}
+
+int linkr_bond_label_set(const bt_addr_le_t *addr, const char *utf8, size_t len)
+{
+	ARG_UNUSED(addr);
+	ARG_UNUSED(utf8);
+	ARG_UNUSED(len);
+	return -ENOTSUP;
+}
+
+int linkr_bond_label_clear(const bt_addr_le_t *addr)
+{
+	ARG_UNUSED(addr);
+	return 0;
+}
+#endif /* CONFIG_SETTINGS */

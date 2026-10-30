@@ -607,6 +607,25 @@ The desktop and mobile clients ask the board first (`@n?`) and show whether the
 name is the MAC-derived default or a custom one; a write is confirmed by the
 board and read back. The C client prints the board's answer on stdout.
 
+### Paired-device labels
+
+`@linkr bonds?` lists the saved identities; each label is a separate
+`@linkr bonds label <type>/<address>` read so the fixed reply buffer never
+holds them all.
+
+| Host | List | Rename | Remove |
+| --- | --- | --- | --- |
+| `bee` (TUI) | Network view → *Refresh paired devices* | same view → the host row | same view → *Remove this pairing* |
+| `bee-cli` | `--query-bonds` / `query bonds` | `--rename-bond <id>=<label>` / `bond <id> <label>` | `--remove-bond <id>` / `unbond <id>` |
+| `bee --serve` | `{"op":"bonds"}` | `{"op":"bond-label","id":"…","label":"…"}` | `{"op":"bond-remove","id":"…"}` |
+| Web / mobile | Board panel → *Paired devices* | *Rename* on the row | *Remove pairing* |
+
+Labels are display-only, at most 48 UTF-8 bytes, stored in NVS by identity
+address and deleted with the pairing. The web and phone editors report the browser's OS once when the board stores
+none; the TUI suggests the local user name only for this host. Older
+firmware without the commands hides the section (web/TUI) rather than leaving a
+dead control.
+
 ### UART Commands
 
 | Short Form | Long Form | Description |
