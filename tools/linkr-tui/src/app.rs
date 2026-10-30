@@ -4316,9 +4316,7 @@ impl App {
             | Query::Webdav
             | Query::BleName
             | Query::Bonds
-            | Query::BondLabel => {
-                self.network.loading = false
-            }
+            | Query::BondLabel => self.network.loading = false,
             Query::Lan => self.lan_status.loading = false,
         }
     }

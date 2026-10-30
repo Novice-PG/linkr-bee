@@ -89,7 +89,9 @@ impl Query {
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
             Query::Bonds => crate::accessory::BONDS_QUERY_COMMAND,
             Query::BondLabel => {
-                unreachable!("bond label commands carry an address; send them through send_accessory")
+                unreachable!(
+                    "bond label commands carry an address; send them through send_accessory"
+                )
             }
         }
     }
