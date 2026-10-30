@@ -239,6 +239,18 @@ impl Conversation {
     /// issued: the firmware treats it as "not a request" and a frame that was
     /// silently dropped is the worst way for this to fail.
     pub fn ask(&mut self, query: Query, now: Instant) -> (u32, &'static str) {
+        let id = self.ask_id(query, now);
+        (id, query.command())
+    }
+
+    /// Ask `query` at `now` with a command supplied by the caller.
+    ///
+    /// Used for the accessory commands whose body carries a value — a UART
+    /// spec, a bond address and label — where the body is built from a `String`
+    /// and `Query::command()` cannot be the one that asked. The question and
+    /// its id are still recorded here, so an answer is correlated exactly as
+    /// for a fixed question.
+    pub fn ask_id(&mut self, query: Query, now: Instant) -> u32 {
         self.next_id = if self.next_id == u32::MAX {
             1
         } else {
@@ -253,7 +265,7 @@ impl Conversation {
             finalised: false,
             since: now,
         });
-        (id, query.command())
+        id
     }
 
     /// Offer one management response to whatever is waiting.
@@ -440,6 +452,15 @@ mod tests {
         // never both belong to one question.
         let (second, _) = talk.ask(Query::Uart, start);
         assert_ne!(id, second);
+    }
+
+    #[test]
+    fn a_value_carrying_command_is_asked_with_its_own_body() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let id = talk.ask_id(Query::BondLabel, start);
+        assert_ne!(id, 0);
+        assert_eq!(talk.waiting(), Some(Query::BondLabel));
     }
 
     #[test]
