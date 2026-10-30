@@ -2172,6 +2172,12 @@ button,
   gap: 12px;
 }
 
+/* Paired devices live in the Connection section, not the Board hardware page. */
+.bond-card {
+  display: grid;
+  gap: 12px;
+}
+
 /* The global `.field` margin is for stacked forms; inside the board rows it
  * pushes a select above the button baseline and adds phantom gaps. */
 .board-card .field {

@@ -3711,26 +3711,25 @@ function updateNetworkCardTitle() {
 
 function applyFeatureVisibility() {
   const features = state.features;
+  const bondsCard = $("boardBondsCard");
+  if (bondsCard) bondsCard.hidden = features.bonds === false;
   const cards = [
-    [$("boardBondsCard"), features.bonds],
     [elements.boardLedCard, features.led],
     [elements.boardOptoCard, features.opto],
     [elements.boardIrCard, features.ir],
   ];
-  let boardCards = 0;
   for (const [card, supported] of cards) {
     if (!card) continue;
     card.hidden = supported === false;
-    if (!card.hidden) boardCards += 1;
   }
   const learningHidden = features.ir === false || features.irLearn === false;
   if (elements.boardLearnBlock) elements.boardLearnBlock.hidden = learningHidden;
   if (elements.boardSavedBlock) elements.boardSavedBlock.hidden = learningHidden;
 
-  /* Prompts live on the AI page now, so the Board section depends on the three
-   * board devices and the pairing surface. */
+  /* Prompts live on the AI page and paired devices in Connection, so the Board
+   * section depends only on the three board devices. */
   const boardUnsupported = features.led === false && features.opto === false &&
-    features.ir === false && features.bonds === false;
+    features.ir === false;
   setTabHidden("board", boardUnsupported);
 
   if (elements.wifiBlock) elements.wifiBlock.hidden = features.wifi === false;
@@ -4437,7 +4436,6 @@ function wireBoardPromptControls() {
 
 async function refreshBoardIo() {
   if (!state.board.canControl) return;
-  await bondUi?.query();
   await refreshBoardLed();
   await refreshBoardOpto();
   await refreshBoardIr();
@@ -4728,6 +4726,9 @@ function setConnected(connected, { preserveJournal = false } = {}) {
      * round-trips on every connect. */
     if (connected && elements.controls.dataset.settingsActive === "board") {
       refreshBoardIo();
+    } else if (connected && settingsPanelOpen() &&
+               elements.controls.dataset.settingsActive === "connection") {
+      bondUi?.query();
     }
   }
   if (elements.presetChips) {
@@ -6472,6 +6473,19 @@ function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false }
   }
 }
 
+/* Paired devices live in Connection now: read them when that page is actually
+ * on screen, not merely as a side effect of opening the management channel. */
+function refreshVisibleSettingsPage() {
+  if (!state.board.canControl) return;
+  if (elements.controls.dataset.settingsActive === "connection") bondUi?.query();
+}
+
+function settingsPanelOpen() {
+  return usesSettingsDrawer()
+    ? elements.appShell.classList.contains("sidebar-open")
+    : !elements.appShell.classList.contains("controls-hidden");
+}
+
 function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
   if (!usesSettingsDrawer()) {
     return;
@@ -6489,6 +6503,7 @@ function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
     focusDrawer: open,
     restoreToggle: !open && restoreFocus,
   });
+  if (open) refreshVisibleSettingsPage();
 }
 
 function applySidebar() {
@@ -6509,6 +6524,7 @@ function toggleSidebar() {
     state.sidebarCollapsed = hidden;
     saveSetting("linkr-sidebar", hidden ? "collapsed" : "open");
     syncSidebarAccessibility();
+    if (!hidden) refreshVisibleSettingsPage();
   }
 }
 
@@ -6551,6 +6567,8 @@ function setSettingsPage(page) {
   if (next === "terminal") renderShellIntegration();
   if (next === "board" && state.board.canControl) {
     refreshBoardIo();
+  } else if (next === "connection" && state.board.canControl) {
+    bondUi?.query();
   } else if (next === "ai" && state.board.canControl) {
     refreshBoardPromptStatus();
   }

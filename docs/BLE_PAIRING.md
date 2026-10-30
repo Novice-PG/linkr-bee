@@ -114,7 +114,7 @@ Management、Reliable UART 和兼容 NUS 的特征值及 CCC 均要求加密访�
 
 ### Manage saved hosts
 
-In **Settings → Board → Paired devices**, refresh the list and remove an
+In **Settings → Connection → Paired devices**, refresh the list and remove an
 individual pairing. The list uses Bluetooth identity addresses (public/random),
 not temporary scan addresses, and marks the current host. When available, a
 self-reported host name appears alongside the identity address; names are labels,

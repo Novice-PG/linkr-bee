@@ -7,9 +7,9 @@
     <meta name="theme-color" id="themeColorMeta" content="#05080D" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20261030-glyphs" />
+    <link rel="stylesheet" href="./style.css?v=20261030-bonds-connection2" />
     <link rel="stylesheet" href="./window.css?v=20261026-safearea3" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261030-glyphs" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261030-bonds-connection2" />
     <link rel="stylesheet" href="./mobile-ui.css?v=20261029-layout" />
     <link rel="stylesheet" href="./form_controls.css?v=20261029" />
     <link rel="stylesheet" href="./ble_guidance.css?v=20261029" />
@@ -260,6 +260,14 @@
           </div>
         </section>
 
+        <section id="boardBondsCard" class="card bond-card" data-settings-page="connection" aria-label="Paired devices">
+          <div class="card-title"><span class="dot"></span><span data-bonds-title>已配对设备</span></div>
+          <p class="field-hint" data-bonds-hint></p>
+          <div class="bond-list" data-bonds-list></div>
+          <div class="btn-grid"><button class="btn btn-soft" type="button" data-bonds-refresh>刷新列表</button></div>
+          <p class="field-hint" role="status"></p>
+        </section>
+
         <section class="card" data-i18n-aria="terminalSettingsAria" aria-label="Terminal settings" data-settings-page="terminal">
           <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
           <label class="field">
@@ -426,13 +434,6 @@
           </div>
         </section>
 
-        <section id="boardBondsCard" class="card board-card" data-settings-page="board" aria-label="Paired devices">
-          <div class="card-title"><span class="dot"></span><span data-bonds-title>已配对设备</span></div>
-          <p class="field-hint" data-bonds-hint></p>
-          <div class="bond-list" data-bonds-list></div>
-          <div class="btn-grid"><button class="btn btn-soft" type="button" data-bonds-refresh>刷新列表</button></div>
-          <p class="field-hint" role="status"></p>
-        </section>
 
         <section id="boardLedCard" class="card board-card" data-settings-page="board" data-i18n-aria="boardLedAria" aria-label="Status LED">
           <div class="card-title"><span class="dot"></span><span data-i18n="boardLed">Status LED</span></div>
@@ -875,7 +876,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261030-glyphs"></script>
+    <script type="module" src="./app.js?v=20261030-bonds-connection2"></script>
     <script type="module" src="./ble_guidance.js?v=20261029"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>

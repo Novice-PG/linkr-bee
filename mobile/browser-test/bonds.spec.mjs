@@ -15,7 +15,7 @@ test.beforeEach(async ({page}) => {
         return 'OK bonds queued';
       } return 'ERR unsupported';
     });
-    t.state.mode='ble';t.state.mgmtReady=true;t.setConnected(true);t.setSettingsPage('board');
+    t.state.mode='ble';t.state.mgmtReady=true;t.setConnected(true);t.setSettingsPage('connection');
   });
   await page.locator('#panelToggle').tap();
   await expect(page.locator('.bond-row')).toHaveCount(2);
@@ -39,10 +39,13 @@ test('readonly host can list but cannot delete',async({page})=>{
   await expect(page.locator('.bond-row button').first()).toBeDisabled();
   await expect(page.locator('[data-bonds-refresh]')).toBeEnabled();
 });
-test('unsupported firmware hides card and unavailable board section',async({page})=>{
+test('unsupported firmware hides the paired-devices card',async({page})=>{
   await page.evaluate(async()=>{window.bondsReply='ERR unknown command';await window.bondTest.query()});
   await expect(page.locator('#boardBondsCard')).toBeHidden();
-  await expect(page.locator('[data-settings-target="board"]')).toBeHidden();
+  // Pairing is a connection capability; moving the card must not hide the
+  // Board section, which now only depends on the board's own hardware.
+  await expect(page.locator('[data-settings-target="connection"]')).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('[data-settings-target="board"]')).toBeVisible();
 });
 
 test('a late names response cannot overwrite a new connection', async ({page}) => {
