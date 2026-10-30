@@ -44,3 +44,36 @@ test('unsupported firmware hides card and unavailable board section',async({page
   await expect(page.locator('#boardBondsCard')).toBeHidden();
   await expect(page.locator('[data-settings-target="board"]')).toBeHidden();
 });
+
+test('a late names response cannot overwrite a new connection', async ({page}) => {
+  const result = await page.evaluate(async () => {
+    const {createBondUi} = await import('/bond_ui.js');
+    const card = document.querySelector('#boardBondsCard').cloneNode(true);
+    let generation = 1, release;
+    const oldNames = new Promise(resolve => {release = resolve});
+    const ui = createBondUi({card,
+      context: () => ({ready:true, control:true, generation, lang:'en'}),
+      supported: () => {}, beforeSelfDelete: () => {}, afterSelfDelete: () => {},
+      send: async cmd => cmd === '@linkr bonds?' ? 'OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:01 self=1\n'
+        : cmd === '@linkr bonds names?' ? generation === 1 ? oldNames : 'OK bonds names\nNAME 0/AA:BB:CC:DD:EE:01 "New host"\n' : 'OK bonds name',
+    });
+    const oldQuery = ui.query();
+    await Promise.resolve();await Promise.resolve();
+    generation = 2;ui.render();await ui.query();
+    release('OK bonds names\nNAME 0/AA:BB:CC:DD:EE:01 "Old host"\n');
+    await oldQuery;ui.render();
+    return card.querySelector('.bond-row').textContent;
+  });
+  expect(result).toContain('New host');expect(result).not.toContain('Old host');
+});
+test('named hosts keep their identity visible in delete confirmation', async ({page}) => {
+  await page.evaluate(async () => {
+    window.bondTest.mock(async cmd => cmd === '@linkr bonds?' ? window.bondsReply :
+      'OK bonds names\nNAME 1/AA:BB:CC:DD:EE:02 "Chrome · Linux"\n');
+    await window.bondTest.query();
+  });
+  let warning;
+  page.once('dialog', async prompt => {warning = prompt.message(); await prompt.dismiss()});
+  await page.locator('.bond-row button').last().click();
+  expect(warning).toContain('Chrome · Linux (1/AA:BB:CC:DD:EE:02)');
+});

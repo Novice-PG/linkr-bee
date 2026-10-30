@@ -104,6 +104,7 @@ test("a BLE capability handshake queries and claims without invalidating itself"
     c.setConnected(false);
     Object.assign(c.state, { mode: "ble", device: null, mgmtReady: false, reliableReady: false });
     let notify, incoming = [], commands = [], uartWrites = 0;
+    window.handshakeCommands = commands;
     const encode = new TextEncoder();
     Object.assign(c.bleTransport, {
       isAvailable: () => true, initialize: async () => {},
@@ -154,6 +155,13 @@ test("a BLE capability handshake queries and claims without invalidating itself"
   expect(result.mode).toBe("control");
   expect(result.commands.slice(0, 2)).toEqual(["@c?", "@c claim"]);
   expect(result.uartWrites).toBe(0);
+  await expect.poll(() => page.evaluate(() => window.handshakeCommands.filter(command =>
+    command.startsWith("@linkr bonds name ")).length)).toBe(1);
+  await page.evaluate(() => window.__control.applySerialControl({
+    self:2, owner:1, mode:"readonly", epoch:3, peers:2, capacity:2,
+  }));
+  expect(await page.evaluate(() => window.handshakeCommands.filter(command =>
+    command.startsWith("@linkr bonds name ")).length)).toBe(1);
 });
 
 for (const width of [390, 1200]) {

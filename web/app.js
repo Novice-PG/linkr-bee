@@ -4448,7 +4448,7 @@ function wireBoardIoControls() {
   bondUi = createBondUi({
     card: $("boardBondsCard"),
     context: () => ({ lang, supported: state.features.bonds, ready: boardUsable(), control: canSerialInput(), generation: state.writeGeneration }),
-    send: command => boardSend(command),
+    send: (command, options) => boardSend(command, options),
     supported: value => setFeature("bonds", value),
     beforeSelfDelete: () => { cancelAutoReconnect(); userInitiatedDisconnect = true; },
     afterSelfDelete: (token, queued) => { if (!queued && state.writeGeneration === token) userInitiatedDisconnect = false; },
@@ -5991,6 +5991,9 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
       appendLine(`[error] ${error.message}`),
     );
     readBleName({ quiet: true });
+    // Labels are cosmetic: enqueue only after the ownership handshake, never
+    // from render() or while a setting is being checked for a handover.
+    bondUi?.reportHostName();
   } catch (error) {
     if (!signal?.aborted) appendLine(`[error] ${error.message}`);
     const needsReselect = error.code === "BLE_RESELECT_REQUIRED";

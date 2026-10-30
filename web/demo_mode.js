@@ -45,6 +45,7 @@ export function installDemoMode({
     led: { r: 0, g: 0x18, b: 0x30 },
     opto: false,
     bonds: ["0/AA:BB:CC:DD:EE:01", "1/AA:BB:CC:DD:EE:02"],
+    bondNames: { "0/AA:BB:CC:DD:EE:01": "longlong-mbp", "1/AA:BB:CC:DD:EE:02": "Chrome · macOS" },
     optoTimer: null,
     slots: new Array(DEMO_SLOTS).fill(0),
     rx: true,
@@ -171,9 +172,23 @@ export function installDemoMode({
     if (command === "@linkr bonds?") {
       return "OK bonds pending=0 result=0\n" + demo.bonds.map(id => `BOND ${id} self=${id.endsWith("01") ? 1 : 0}`).join("\n");
     }
+    if (command === "@linkr bonds names?") {
+      return "OK bonds names\n" + demo.bonds
+        .filter(id => demo.bondNames[id])
+        .map(id => `NAME ${id} "${demo.bondNames[id]}"`)
+        .join("\n");
+    }
+    if (command.startsWith("@linkr bonds name ")) {
+      const label = command.slice(18).trim();
+      const self = demo.bonds.find(id => id.endsWith("01"));
+      if (!self) return "ERR bonds not found";
+      demo.bondNames[self] = label;
+      return "OK bonds name";
+    }
     if (command.startsWith("@linkr bonds remove ")) {
       const id = command.slice(20);
       demo.bonds = demo.bonds.filter(value => value !== id);
+      delete demo.bondNames[id];
       if (id.endsWith("01")) setTimeout(() => setConnected(false), 500);
       return "OK bonds queued";
     }

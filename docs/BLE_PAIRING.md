@@ -116,7 +116,9 @@ Management、Reliable UART 和兼容 NUS 的特征值及 CCC 均要求加密访�
 
 In **Settings → Board → Paired devices**, refresh the list and remove an
 individual pairing. The list uses Bluetooth identity addresses (public/random),
-not host names or temporary scan addresses, and marks the current host.
+not temporary scan addresses, and marks the current host. When available, a
+self-reported host name appears alongside the identity address; names are labels,
+not proof of identity.
 Deletion requires the current control owner and confirmation. Removing a connected
 host disconnects it; removing this host stops browser automatic reconnection.
 Forget the old pairing in the host OS before pairing again under the board's
@@ -131,3 +133,20 @@ queries report `pending` and the last removal `result` (zero on success).
 The firmware delays removal briefly so even the current host can receive the
 acknowledgement before its encrypted connection is closed. A lost acknowledgement
 does not prove failure; reconnect and refresh to verify.
+
+Hosts can send `@linkr bonds name <label>` over encrypted BLE to name **only their
+own existing pairing**; this does not require console ownership. Read names with
+`@linkr bonds names?`; the response starts with `OK bonds names` and contains
+`NAME <type>/<address> "<label>"` lines. Labels are sanitized and limited to 32 UTF-8
+bytes, saved in Bee settings, and removed with their bond. Unchanged labels do
+not write flash again. Older firmware still lists identity addresses.
+
+The Web UI reports the browser and operating system (for example `Chrome · Linux`),
+not the computer's hostname. The Python CLI reports `socket.gethostname()` by
+default; use `--host-name "workstation"` to choose a label or `--no-host-name` to
+opt out. Saved names are visible to other encrypted management clients.
+
+主机会给自己的配对记录上报名称，名称和身份地址一起展示，不能作为身份认证依据。
+网页只能识别浏览器与操作系统；Python CLI 默认上报主机名，可用 `--host-name`
+自定义，或用 `--no-host-name` 关闭上报。名称保存在 Bee 的 Flash 中，其他已建立
+加密管理连接的主机也能查看；删除配对时同时删除名称。
