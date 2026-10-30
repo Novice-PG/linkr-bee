@@ -156,6 +156,15 @@ queues and is then cancelled fails the run and holds back every other
 platform's archive. `tools/assemble_release.py` accepts a release with or
 without them and refuses one that is missing a Linux or Windows leg.
 
+Components can move on after a release is published: the APK wraps the Web
+terminal built from the same commit, and the firmware follows the firmware
+source. "Refresh release assets" (`.github/workflows/release-refresh.yml`,
+manual dispatch with the tag and the `apk` / `firmware` switches) rebuilds the
+chosen assets from the selected ref and replaces them on that release, using
+`tools/refresh_release.py` to rewrite `release-manifest.json` and
+`SHA256SUMS` for the new bytes. It replaces nothing it was not asked to
+replace.
+
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
 

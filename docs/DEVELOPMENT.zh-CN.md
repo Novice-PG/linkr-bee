@@ -137,6 +137,13 @@ dry-run，只执行组装、不修改 GitHub release。
 `tools/assemble_release.py` 接受带或不带 macOS 产物的发布，但缺少任一
 Linux 或 Windows 目标时会拒绝组装。
 
+发布之后组件还会继续前进：APK 打包的是同一提交构建的 Web 终端，固件也会跟随
+固件源码。手动触发 “Refresh release assets”
+（`.github/workflows/release-refresh.yml`，填 tag 并勾选 `apk` / `firmware`）
+会用当前 ref 重新构建选中的产物并替换到该发布上，由
+`tools/refresh_release.py` 同步改写 `release-manifest.json` 与 `SHA256SUMS`。
+没有勾选的资产不会被改动。
+
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：
