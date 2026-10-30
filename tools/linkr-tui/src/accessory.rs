@@ -912,7 +912,7 @@ fn utf8_to_hex(text: &str) -> String {
 }
 
 fn hex_to_utf8(hex: &str) -> Option<String> {
-    if hex.len() % 2 != 0 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);

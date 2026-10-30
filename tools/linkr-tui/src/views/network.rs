@@ -190,7 +190,7 @@ impl NetworkRow {
                 NetworkRow::PairedRefresh
             } else {
                 let slot = row - ROWS.len() - 1;
-                if slot % 2 == 0 {
+                if slot.is_multiple_of(2) {
                     NetworkRow::Paired(slot / 2)
                 } else {
                     NetworkRow::PairedRemove(slot / 2)
@@ -303,14 +303,14 @@ impl NetworkState {
                     self.focus = NetworkRow::Scan;
                 }
             }
-            NetworkRow::Paired(index) | NetworkRow::PairedRemove(index) => {
-                if !shape.paired || index >= shape.bonds {
-                    self.focus = if shape.paired {
-                        NetworkRow::PairedRefresh
-                    } else {
-                        NetworkRow::Scan
-                    };
-                }
+            NetworkRow::Paired(index) | NetworkRow::PairedRemove(index)
+                if !shape.paired || index >= shape.bonds =>
+            {
+                self.focus = if shape.paired {
+                    NetworkRow::PairedRefresh
+                } else {
+                    NetworkRow::Scan
+                };
             }
             _ => {}
         }
@@ -711,7 +711,11 @@ fn document(
     lines.push(Line::from(""));
     lines.push(heading(s.net_paired_section, width, theme));
     if !state.paired_supported {
-        lines.push(note(&format!("  {}", s.net_paired_unsupported), width, theme));
+        lines.push(note(
+            &format!("  {}", s.net_paired_unsupported),
+            width,
+            theme,
+        ));
     } else {
         let bonds = state.bonds.as_deref().unwrap_or(&[]);
         targets.push((NetworkRow::PairedRefresh, lines.len()));
@@ -741,7 +745,13 @@ fn document(
             if on(NetworkRow::Paired(index)) {
                 focused_line = lines.len();
             }
-            lines.push(action_row(&word, "", on(NetworkRow::Paired(index)), width, theme));
+            lines.push(action_row(
+                &word,
+                "",
+                on(NetworkRow::Paired(index)),
+                width,
+                theme,
+            ));
             targets.push((NetworkRow::PairedRemove(index), lines.len()));
             if on(NetworkRow::PairedRemove(index)) {
                 focused_line = lines.len();
@@ -774,8 +784,7 @@ pub fn target_at(app: &App, width: u16, height: u16, row: u16) -> Option<Network
     targets
         .into_iter()
         .find(|(target, index)| {
-            *index == offset + row as usize
-                && target.reachable(app.network.shape())
+            *index == offset + row as usize && target.reachable(app.network.shape())
         })
         .map(|(target, _)| target)
 }
@@ -900,14 +909,24 @@ fn activate(app: &mut App) {
             }
         }
         NetworkRow::Paired(index) => {
-            if let Some(bond) = app.network.bonds.as_ref().and_then(|bonds| bonds.get(index)) {
+            if let Some(bond) = app
+                .network
+                .bonds
+                .as_ref()
+                .and_then(|bonds| bonds.get(index))
+            {
                 let address = bond.id.clone();
                 let current = bond.label.clone();
                 dialogs::prompt_bond_label(app, &address, current.as_deref());
             }
         }
         NetworkRow::PairedRemove(index) => {
-            if let Some(bond) = app.network.bonds.as_ref().and_then(|bonds| bonds.get(index)) {
+            if let Some(bond) = app
+                .network
+                .bonds
+                .as_ref()
+                .and_then(|bonds| bonds.get(index))
+            {
                 dialogs::ask(
                     app,
                     ConfirmAction::Accessory(format!("@linkr bonds remove {}", bond.id)),
