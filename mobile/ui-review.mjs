@@ -34,7 +34,9 @@ const appearances = [
 ];
 
 await mkdir(outDir, { recursive: true });
-const browser = await chromium.launch();
+const browser = await chromium.launch(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+  ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+  : {});
 try {
   for (const viewport of viewports) {
     for (const appearance of appearances) {
