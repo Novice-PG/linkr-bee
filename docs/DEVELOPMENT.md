@@ -149,22 +149,6 @@ assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
 release dispatch can run the same assembly as a dry run from a tag without
 touching the GitHub release.
 
-The desktop matrix always builds the Linux and Windows legs. Its two macOS legs
-are optional: they run only when the repository variable `ENABLE_MACOS` is
-`true`, because hosted macOS runners are not always assigned, and a leg that
-queues and is then cancelled fails the run and holds back every other
-platform's archive. `tools/assemble_release.py` accepts a release with or
-without them and refuses one that is missing a Linux or Windows leg.
-
-Components can move on after a release is published: the APK wraps the Web
-terminal built from the same commit, and the firmware follows the firmware
-source. "Refresh release assets" (`.github/workflows/release-refresh.yml`,
-manual dispatch with the tag and the `apk` / `firmware` switches) rebuilds the
-chosen assets from the selected ref and replaces them on that release, using
-`tools/refresh_release.py` to rewrite `release-manifest.json` and
-`SHA256SUMS` for the new bytes. It replaces nothing it was not asked to
-replace.
-
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
 
@@ -708,12 +692,73 @@ fails without touching the radio. The change is persisted in the board's
 settings and survives a reboot; `--reset-ble-name` restores the
 MAC-derived `Linkr Bee XXXX`.
 
+Board I/O and one-shot commands:
+
+```sh
+python3 tools/linkr_ble_terminal.py --led 1a2b3c --no-terminal    # status LED
+python3 tools/linkr_ble_terminal.py --led off --no-terminal
+python3 tools/linkr_ble_terminal.py --opto on --no-terminal      # isolated contact
+python3 tools/linkr_ble_terminal.py --opto-pulse 500 --no-terminal
+python3 tools/linkr_ble_terminal.py --query-led --query-opto --no-terminal
+```
+
+`--cmd` sends any management command verbatim and prints the reply on stdout, so a
+script captures the answer rather than the transport's own echo. It is repeatable
+and the commands run in the order given, which is how a firmware command without a
+dedicated flag is reachable:
+
+```sh
+python3 tools/linkr_ble_terminal.py --cmd '@linkr bonds?' --no-terminal
+python3 tools/linkr_ble_terminal.py --cmd '@r slots' --cmd '@l?' --no-terminal
+```
+
+`--monitor` prints the target UART and never reads the keyboard; `--reconnect N`
+retries a dropped link N times before giving up:
+
+```sh
+python3 tools/linkr_ble_terminal.py --monitor | tee board.log
+python3 tools/linkr_ble_terminal.py --reconnect 2
+```
+
+Reconnects keep the first selected BLE address and verify the same hardware
+Device ID. Dial/setup failures use the remaining retry budget. Startup commands
+(including pulses and `--cmd`) run once; reconnecting only restores the transport.
+A refused or interrupted startup command fails the invocation and is not replayed.
+`--scan` also connects and runs when combined with a command or `--monitor`.
+
+Console control and the saved pairings belong to the board, not to this client:
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-control --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --bonds --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --opto-pulse 500 --release --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-names --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-remove 0/AA:BB:CC:DD:EE:01 --no-terminal
+```
+
+`--claim` runs before every other command and `--release` runs after them, so one
+invocation can take the console, change something and hand it back. A mutation
+from a client that does not own the console is refused by the board
+(`ERR control=readonly`), which is the same state the web terminal shows.
+
+`--scan --json` reports one record per device instead of the tab-separated
+listing, because a name may itself contain a tab:
+
+```json
+{"type": "device", "name": "Linkr Bee 1A2B", "address": "AA:BB:CC:DD:EE:01", "rssi": -52, "management": true}
+```
+
 Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
   `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
+- Every command sent from a flag also emits one `result` record that splits the
+  reply into its `key=value` pairs, e.g.
+  `{"type":"result","command":"@o?","ok":true,"text":"OK opto=closed","fields":{"opto":"closed"}}`.
+  A value that contains a comma or a space -- an SSID, a URL with a query string
+  -- is only complete in `text`.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
 - `--help` and `--version` do not need bleak installed; it is imported only
@@ -726,7 +771,7 @@ Scripting and safety notes:
 - `--rename-ble` is validated locally too: 1–29 UTF-8 bytes, no control
   characters, and the two name flags cannot both be given.
 - Exit codes: `0` ok, `1` error, `2` bad arguments, `3` device disconnected
-  during the terminal session.
+  during the terminal session, or after `--reconnect` runs out of attempts.
 
 Configuration commands use Management Service v1 binary frames with an API
 version, request ID, logical payload length, response ID, and confirmed
@@ -909,11 +954,10 @@ cd tools && make
 ./linkr_ble_terminal_c
 ```
 
-Its command line now matches the Python client, so scripts can treat both alike:
-
-- Exit codes `0` ok, `1` error, `2` bad arguments, `3` device disconnected
-  mid-session. Argument errors used to exit `1`, indistinguishable from a
-  device that would not connect.
+Its exit codes match the Python client -- `0` ok, `1` error, `2` bad arguments,
+`3` device disconnected mid-session -- so a script can tell the two apart without
+reading their output; the *flags* do not match, and the table above is the whole
+Management v1 surface it exposes.
 - `--version`; `--quiet` suppresses progress only, errors always print.
 - Long options also accept `--option=value`; a missing value reports
   `--opt requires a value` instead of the misleading `unknown option`.
@@ -1210,7 +1254,10 @@ The page can:
 - adjust line ending and BLE write chunk size
 - switch between the system monospace stack and common locally installed Nerd
   Fonts, with a Powerline/Nerd glyph preview; the selection is persisted for
-  the current browser origin, but the font files themselves are not bundled
+  the current browser origin, but the Nerd font files themselves are not
+  bundled. The only bundled face is a BabelStone Pseudographica subset for the
+  Unicode 13/16 legacy-computing blocks (`web/fonts/`), because desktop
+  monospace stacks render those ANSI-art glyphs as .notdef
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns

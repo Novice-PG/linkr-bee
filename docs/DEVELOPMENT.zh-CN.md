@@ -131,19 +131,6 @@ west build -b linkr_bee_x1_0 linkr-bee
 组装固件 ZIP、Web 包、APK 与桌面压缩包。也可以在 tag 上手动词发一次
 dry-run，只执行组装、不修改 GitHub release。
 
-桌面矩阵始终构建 Linux 与 Windows 目标。两个 macOS 目标可选：只有仓库变量
-`ENABLE_MACOS` 为 `true` 时才构建，因为托管的 macOS runner 不一定分配得到，
-而排队后被取消的目标会让整个 run 失败，并拖住其他平台的压缩包。
-`tools/assemble_release.py` 接受带或不带 macOS 产物的发布，但缺少任一
-Linux 或 Windows 目标时会拒绝组装。
-
-发布之后组件还会继续前进：APK 打包的是同一提交构建的 Web 终端，固件也会跟随
-固件源码。手动触发 “Refresh release assets”
-（`.github/workflows/release-refresh.yml`，填 tag 并勾选 `apk` / `firmware`）
-会用当前 ref 重新构建选中的产物并替换到该发布上，由
-`tools/refresh_release.py` 同步改写 `release-manifest.json` 与 `SHA256SUMS`。
-没有勾选的资产不会被改动。
-
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：
@@ -553,11 +540,67 @@ python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
 固件会拒绝的名称在接触射频之前就会失败。修改会写入板子的 settings，重启后
 仍然保留；`--reset-ble-name` 恢复由硬件 MAC 生成的 `Linkr Bee XXXX`。
 
+板载 I/O 与一次性命令：
+
+```sh
+python3 tools/linkr_ble_terminal.py --led 1a2b3c --no-terminal    # 状态灯
+python3 tools/linkr_ble_terminal.py --led off --no-terminal
+python3 tools/linkr_ble_terminal.py --opto on --no-terminal      # 隔离干接点
+python3 tools/linkr_ble_terminal.py --opto-pulse 500 --no-terminal
+python3 tools/linkr_ble_terminal.py --query-led --query-opto --no-terminal
+```
+
+`--cmd` 原样发送任意管理命令并把回复打到 stdout，脚本取到的是回复本身、
+不是传输层的回声。它可以重复给，按给出的顺序逐条执行 —— 固件里没有专用
+flag 的命令由此可达：
+
+```sh
+python3 tools/linkr_ble_terminal.py --cmd '@linkr bonds?' --no-terminal
+python3 tools/linkr_ble_terminal.py --cmd '@r slots' --cmd '@l?' --no-terminal
+```
+
+`--monitor` 只打印目标 UART、从不读键盘；`--reconnect N` 在掉线后最多重试 N 次：
+
+```sh
+python3 tools/linkr_ble_terminal.py --monitor | tee board.log
+python3 tools/linkr_ble_terminal.py --reconnect 2
+```
+
+重连会固定首次选中的 BLE 地址，并核对同一硬件 Device ID；连接和通道初始化失败
+会继续使用剩余重试次数。启动命令（包括脉冲和 `--cmd`）只执行一次，重连仅恢复通信。
+启动命令被拒绝或执行中断时会报错退出，不自动重放。
+`--scan` 与命令或 `--monitor` 组合时，扫描后会继续连接并执行。
+
+控制权与已保存的配对属于板子，不属于这个客户端：
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-control --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --bonds --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --opto-pulse 500 --release --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-names --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-remove 0/AA:BB:CC:DD:EE:01 --no-terminal
+```
+
+`--claim` 在其余所有命令之前执行、`--release` 在它们之后执行，所以一次调用就能
+"抢控制权 → 改东西 → 交还"。不持有控制权就写入时，板子会拒绝（`ERR control=readonly`），
+与 Web 终端显示的是同一份状态。
+
+`--scan --json` 把每台设备输出成一条记录，而不是制表符分隔的列表——因为设备名
+本身可能含制表符：
+
+```json
+{"type": "device", "name": "Linkr Bee 1A2B", "address": "AA:BB:CC:DD:EE:01", "rssi": -52, "management": true}
+```
+
 脚本化与安全注意事项：
 
 - `--json` 把管理响应与事件按行输出为 JSON，例如
   `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`；
   `@w=`/`@d=` 这类命令在 JSON 里的 `command` 字段始终是 `<redacted>`。
+- 由 flag 发出的每条命令还会多一行 `result` 记录，把回复里的 `key=value` 拆进
+  `fields`，例如
+  `{"type":"result","command":"@o?","ok":true,"text":"OK opto=closed","fields":{"opto":"closed"}}`。
+  值里带逗号或空格时（SSID、带查询串的 URL）只有 `text` 是完整的。
 - `--quiet` 只抑制进度信息（`linkr: …`），错误与 `loopback PASS/FAIL` 仍然输出。
 - `--help` 与 `--version` 不需要安装 bleak，只有真正访问设备时才导入它。
 - 密码不进 argv：用 `--wifi SSID --wifi-key-file PATH`，或环境变量
@@ -565,7 +608,8 @@ python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
   但会出现在 `ps` 输出里。
 - `--uart` 在本地校验（baud 300–3000000、data 5–8、parity n/o/e、stop 1/2、
   flow n/rtscts），不合法就直接报错退出，不发往设备。
-- 退出码：`0` 正常、`1` 错误、`2` 参数问题、`3` 终端会话期间设备断开。
+- 退出码：`0` 正常、`1` 错误、`2` 参数问题、`3` 终端会话期间设备断开，
+  或 `--reconnect` 的尝试次数用尽。
 
 配置命令使用 Management Service v1 二进制帧，包含 API 版本、request ID、
 逻辑长度、response ID 和 confirmed indication 分片。NUS 现在只转发原始 UART。
@@ -724,10 +768,9 @@ cd tools && make
 ./linkr_ble_terminal_c
 ```
 
-参数面与 Python 客户端对齐，脚本可以同等对待两者：
-
-- 退出码 `0` 正常、`1` 错误、`2` 参数问题、`3` 终端会话中设备断开；
-  之前的参数错误也是 `1`，与"连不上设备"没法区分。
+退出码与 Python 客户端一致 —— `0` 正常、`1` 错误、`2` 参数问题、`3` 会话中
+设备断开 —— 脚本不必读输出就能区分两者；但**参数面并不一致**，上面那张表
+就是它暴露的全部 Management v1 能力。
 - `--version`；`--quiet` 只压进度信息，错误始终输出。
 - 长短选项都接受 `--opt=value` 写法；缺值时报 `--opt requires a value`，
   不再是误导性的 `unknown option`。
@@ -965,7 +1008,10 @@ http://127.0.0.1:8765/
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
 - 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
-  字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
+  字形；所选字体会按当前浏览器来源持久化。Nerd 字体本身不内置；唯一内置的是
+  BabelStone Pseudographica 子集（`web/fonts/`），覆盖 Unicode 13/16 的
+  legacy computing 区块，因为桌面等宽字体栈会把这些 ANSI art 字形渲染成
+  `.notdef`
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
 - 识别常见 Bash/BusyBox 的 `$ ` 和 `# ` 提示符，登录后通过
