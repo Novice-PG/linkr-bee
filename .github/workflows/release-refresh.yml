@@ -23,6 +23,10 @@ on:
         description: "Replace the six firmware bundles"
         type: boolean
         default: true
+      desktop:
+        description: "Replace the host archives and .deb packages"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -34,10 +38,27 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
+  # The host client's own matrix. Its archives and Debian packages are part of
+  # the release shape, so a refresh that skipped them would leave the installers
+  # describing an older tree than the APK beside them. The called workflow's own
+  # release job only runs for a `linkr-tui-v*` tag and stays skipped here.
+  desktop:
+    name: Host matrix
+    if: inputs.desktop
+    permissions:
+      contents: write
+    uses: ./.github/workflows/linkr-tui.yml
+
   refresh:
     name: Replace the assets and their checksums
-    needs: build
-    if: inputs.apk || inputs.firmware
+    needs: [build, desktop]
+    # A refresh with the host matrix switched off still runs; a host matrix that
+    # failed is not a refresh at all, so the job stops instead of uploading a
+    # half-replaced release.
+    if: >-
+      always() && needs.build.result == 'success'
+      && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
+      && (inputs.apk || inputs.firmware || inputs.desktop)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -60,6 +81,17 @@ jobs:
           # that is not a board slug.
           pattern: linkr-bee-*
           path: assets/firmware
+
+      - name: Collect the host archives built by this run
+        if: inputs.desktop
+        uses: actions/download-artifact@v4
+        with:
+          # One artifact per target, each carrying that target's archive and,
+          # on Linux, its .deb. Merged flat: the names already say which is
+          # which, and a collision would be a bug worth failing on.
+          pattern: linkr-tui-*
+          path: assets/desktop
+          merge-multiple: true
 
       - name: Read the metadata the release carries
         env:

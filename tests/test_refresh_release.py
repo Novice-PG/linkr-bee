@@ -163,6 +163,57 @@ class RefreshReleaseTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("describes 'v0.1.3'", result.stderr)
 
+    def test_desktop_archives_and_debs_replace_their_entries(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-refresh-desktop-") as tmp:
+            root = Path(tmp)
+            names = [
+                f"linkr-bee-{VERSION}-x86_64-unknown-linux-gnu.tar.gz",
+                f"linkr-bee-cli-{VERSION}-x86_64-pc-windows-gnu.zip",
+                f"linkr-bee_{VERSION}_amd64.deb",
+            ]
+            write_metadata(root, [asset(name, b"old", "desktop")
+                                  for name in names])
+            desktop = root / "artifacts" / "desktop"
+            desktop.mkdir(parents=True)
+            for name in names:
+                (desktop / name).write_bytes(b"new " + name.encode())
+            # The matrix's own checksum file is not an asset of its own.
+            (desktop / "SHA256SUMS").write_text("ignored\n")
+
+            result = subprocess.run(
+                command_for(root, "--desktop-dir", str(desktop)),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            manifest = json.loads((root / "release-manifest.json").read_text())
+            entries = {a["name"]: a for a in manifest["assets"]}
+            sums = dict(line.split("  ")[::-1]
+                        for line in (root / "SHA256SUMS").read_text().splitlines())
+            for name in names:
+                payload = b"new " + name.encode()
+                self.assertEqual((root / "out" / name).read_bytes(), payload)
+                self.assertEqual(entries[name]["size"], len(payload))
+                self.assertEqual(entries[name]["sha256"], digest(payload))
+                self.assertEqual(entries[name]["build_run"], 42)
+                self.assertEqual(sums[name], digest(payload))
+
+    def test_a_desktop_archive_the_manifest_does_not_carry_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-refresh-unknown-") as tmp:
+            root = Path(tmp)
+            write_metadata(root, [
+                asset(f"linkr-bee-{VERSION}-x86_64-unknown-linux-gnu.tar.gz",
+                      b"old", "desktop"),
+            ])
+            desktop = root / "artifacts" / "desktop"
+            desktop.mkdir(parents=True)
+            (desktop / f"linkr-bee-{VERSION}-riscv64gc-unknown-linux-gnu.tar.gz"
+             ).write_bytes(b"new")
+            result = subprocess.run(
+                command_for(root, "--desktop-dir", str(desktop)),
+                capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not carry exactly one", result.stderr)
+
     def test_replacing_nothing_is_refused(self):
         with tempfile.TemporaryDirectory(prefix="linkr-refresh-none-") as tmp:
             root = Path(tmp)
