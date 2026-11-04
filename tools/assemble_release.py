@@ -58,6 +58,26 @@ DEB_RE = re.compile(r"^linkr-bee_([0-9]+\.[0-9]+\.[0-9]+)_([a-z0-9]+)\.deb$")
 # against SHA256SUMS and execs it). The name deliberately carries no version:
 # the release it is attached to is the version.
 RAW_CLI_RE = re.compile(r"^bee-cli-([a-z0-9_]+(?:-[a-z0-9_]+)*)(\.exe)?$")
+# The legs every release must carry: Linux and Windows always build. The two
+# macOS legs are optional (`ENABLE_MACOS` in .github/workflows/linkr-tui.yml),
+# so the expected counts are computed from the targets the artifacts name
+# rather than fixed to the full matrix: a release without macOS is complete for
+# every platform that ran, one missing a Linux or Windows leg is not.
+REQUIRED_DESKTOP_TARGETS = {
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
+    "i686-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "i686-pc-windows-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+}
+# Every target ships the interface and the CLI; a macOS leg ships a `.dmg`
+# beside each `.tar.gz`, and each Debian architecture gets one `.deb`.
+DESKTOP_ARCHIVES_PER_TARGET = 2
+MACOS_EXTRA_ARCHIVES_PER_TARGET = 2
+
 # The desktop workflow's matrix, spelled as `bee-cli-<target>[.exe]`. A target
 # added there must be added here, and the count check below says so.
 CLI_TARGETS = (
@@ -361,9 +381,32 @@ def main() -> int:
     if web_staging.exists():
         shutil.rmtree(web_staging)
 
+    present: set[str] = set()
+    for path in assets:
+        if (match := DEB_RE.match(path.name)) is not None:
+            if match.group(2) not in DEB_ARCH:
+                raise SystemExit(
+                    f"unknown Debian architecture: {match.group(2)}")
+            present.add(DEB_ARCH[match.group(2)])
+        elif (match := DESKTOP_RE.match(path.name)) is not None:
+            present.add(match.group(3))
+        elif (match := RAW_CLI_RE.match(path.name)) is not None:
+            present.add(match.group(1))
+    missing = REQUIRED_DESKTOP_TARGETS - present
+    if missing:
+        raise SystemExit(f"release is missing host targets: {sorted(missing)}")
+    unknown = present - set(CLI_TARGETS)
+    if unknown:
+        raise SystemExit(
+            f"release carries unknown host targets: {sorted(unknown)}")
+    macos = {target for target in present if target.endswith("-apple-darwin")}
     expected_counts = {
-        "desktop": 28,
-        "cli": len(CLI_TARGETS),
+        "desktop": (
+            len(present) * DESKTOP_ARCHIVES_PER_TARGET
+            + len(DEB_ARCH)
+            + len(macos) * MACOS_EXTRA_ARCHIVES_PER_TARGET
+        ),
+        "cli": len(present),
         "firmware": 6,
         "web": 1,
         "apk": 1,
