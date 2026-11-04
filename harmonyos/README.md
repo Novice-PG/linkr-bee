@@ -15,7 +15,9 @@ BLE access and exposes it through the JSON-RPC contract in
   requests `ohos.permission.ACCESS_BLUETOOTH` at runtime;
 - Management Service-filtered scan and native device picker;
 - GATT connect, service discovery, MTU 247 request, serialized reads/writes, and
-  indication subscriptions;
+  subscriptions that pick notification or indication from the characteristic's
+  declared properties (NUS TX is notify-only; Management/Reliable UART use
+  indications);
 - ArkWeb-to-ArkTS request dispatch plus notification and disconnect events;
 - shared web resource build and automatic copy into `resources/rawfile/`.
 
@@ -61,6 +63,13 @@ Enable **Support HarmonyOS** and **Automatically generate signature**, sign in
 with the project owner's HUAWEI ID, and wait for DevEco Studio to populate the
 debug signing configuration. The resulting certificates, keystore, and profile
 files are ignored by Git and must not be committed.
+
+The tree ships `build-profile.json5.template`, whose signing material is
+placeholder text: copy it to `build-profile.json5` (gitignored) and let DevEco
+Studio fill the paths and passwords on your machine, or let DevEco generate the
+file from scratch. A committed `build-profile.json5` is a mistake: it carries
+one person's absolute paths and encrypted passwords, and it makes the project
+unbuildable everywhere else.
 
 After signing is configured, use DevEco Studio's **Run** action for a simulator
 or device. The command-line build continues to produce an unsigned HAP unless

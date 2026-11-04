@@ -19,26 +19,26 @@ BOARDS = ("esp32c3-supermini", "esp32c3-devkitm", "esp32c3-devkitc",
           "esp32c5-devkitc", "esp32-wroom-32", "linkr-bee-x1-0")
 
 
-def write_fixture(root: Path, *, firmware_version: str = "0.1.2",
-                  web_version: str = "0.1.2", apk_version: str = "0.1.2",
-                  macos: bool = True) -> None:
-    """Write one artifact of each kind, carrying the versions asked for.
-
-    ``macos=False`` writes the Linux and Windows legs only, the shape a run
-    has when the ENABLE_MACOS switch is off.
-    """
+def write_fixture(root: Path, *, firmware_version: str = "1.1.4",
+                  web_version: str = "1.1.4", apk_version: str = "1.1.4") -> None:
+    """Write one artifact of each kind, carrying the versions asked for."""
     for directory in ("desktop", "firmware", "web", "apk"):
         (root / directory).mkdir()
     for target in TARGETS:
-        if not macos and "apple" in target:
-            continue
         for prefix in ("linkr-bee", "linkr-bee-cli"):
             suffix = "zip" if "windows" in target else "tar.gz"
-            (root / "desktop" / f"{prefix}-0.1.2-{target}.{suffix}").write_bytes(b"fixture")
+            (root / "desktop" / f"{prefix}-1.1.4-{target}.{suffix}").write_bytes(b"fixture")
             if "apple" in target:
-                (root / "desktop" / f"{prefix}-0.1.2-{target}.dmg").write_bytes(b"fixture")
+                (root / "desktop" / f"{prefix}-1.1.4-{target}.dmg").write_bytes(b"fixture")
     for arch in ("amd64", "arm64", "armhf", "i386"):
-        (root / "desktop" / f"linkr-bee_0.1.2_{arch}.deb").write_bytes(b"fixture")
+        (root / "desktop" / f"linkr-bee_1.1.4_{arch}.deb").write_bytes(b"fixture")
+    # The bare CLI binaries the `linkr-bee-cli` npm package downloads: no
+    # version in the name, and executable, because the launcher execs them.
+    for target in TARGETS:
+        name = f"bee-cli-{target}" + (".exe" if "windows" in target else "")
+        path = root / "desktop" / name
+        path.write_bytes(b"fixture")
+        path.chmod(0o755)
     for board in BOARDS:
         bundle = root / "firmware" / f"linkr-bee-{board}"
         bundle.mkdir()
@@ -55,7 +55,7 @@ def write_fixture(root: Path, *, firmware_version: str = "0.1.2",
 
 
 def command_for(root: Path, repo: str | None = None,
-                tag: str = "v0.1.2") -> list[str]:
+                tag: str = "v1.1.4") -> list[str]:
     command = [sys.executable, str(ROOT / "tools/assemble_release.py"),
                "--tag", tag, "--commit", "a" * 40, "--run-id", "123",
                "--desktop-dir", str(root / "desktop"),
@@ -64,14 +64,47 @@ def command_for(root: Path, repo: str | None = None,
                "--out-dir", str(root / "out"),
                "--notes-template", str(ROOT / f"docs/releases/{tag}.md"),
                "--notes-out", str(root / "notes.md"),
-               "--web-version", "0.1.2", "--firmware-version", "0.1.2",
-               "--apk-version", "0.1.2"]
+               "--web-version", "1.1.4", "--firmware-version", "1.1.4",
+               "--apk-version", "1.1.4"]
     if repo:
         command.extend(["--repo", repo])
     return command
 
 
 class ReleaseAssemblyTests(unittest.TestCase):
+    def test_raw_cli_binaries_ride_along(self):
+        """The npm launcher downloads these by name; the assembler must keep them."""
+        with tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            result = subprocess.run(command_for(root), capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((root / "out/release-manifest.json").read_text())
+            cli = [entry for entry in manifest["assets"] if entry["kind"] == "cli"]
+            self.assertEqual(len(cli), 10, cli)
+            self.assertEqual({entry["target"] for entry in cli},
+                             {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                              "armv7-unknown-linux-gnueabihf", "i686-unknown-linux-gnu",
+                              "x86_64-pc-windows-gnu", "i686-pc-windows-gnu",
+                              "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+                              "aarch64-apple-darwin", "x86_64-apple-darwin"})
+            for entry in cli:
+                self.assertNotIn("component_version", entry)
+                self.assertTrue((root / "out" / entry["name"]).is_file())
+            sums = (root / "out/SHA256SUMS").read_text()
+            for entry in cli:
+                self.assertIn(entry["name"], sums)
+
+    def test_an_unknown_cli_target_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            (root / "desktop/bee-cli-riscv64-unknown-linux-gnu").write_bytes(b"fixture")
+            result = subprocess.run(command_for(root), capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("unknown CLI target", result.stderr)
     def test_artifacts_and_notes_point_to_the_selected_repository(self):
         for repo in (None, "https://github.example/team/linkr-bee"):
             with self.subTest(repo=repo), tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
@@ -83,49 +116,18 @@ class ReleaseAssemblyTests(unittest.TestCase):
                 expected = repo or "https://github.com/radxa/linkr-bee"
                 notes = (root / "notes.md").read_text()
                 self.assertIn(f"{expected}/actions/runs/123", notes)
-                self.assertIn(f"{expected}/blob/v0.1.2/docs/DEVELOPMENT.zh-CN.md", notes)
+                self.assertIn(f"{expected}/blob/v1.1.4/docs/DEVELOPMENT.zh-CN.md", notes)
                 self.assertNotIn("{{", notes)
                 self.assertNotIn("Novice-PG/linkr-bee", notes)
-                with zipfile.ZipFile(root / "out/linkr-bee-v0.1.2-web.zip") as archive:
-                    readme = archive.read("linkr-bee-v0.1.2-web/README.txt").decode()
-                self.assertIn(f"Source: {expected}/tree/v0.1.2", readme)
-                self.assertEqual(len(list((root / "out").iterdir())), 38)
+                with zipfile.ZipFile(root / "out/linkr-bee-v1.1.4-web.zip") as archive:
+                    readme = archive.read("linkr-bee-v1.1.4-web/README.txt").decode()
+                self.assertIn(f"Source: {expected}/tree/v1.1.4", readme)
+                self.assertEqual(len(list((root / "out").iterdir())), 48)
                 manifest = json.loads((root / "out/release-manifest.json").read_text())
-                self.assertEqual(len(manifest["assets"]), 36)
+                self.assertEqual(len(manifest["assets"]), 46)
                 for asset in manifest["assets"]:
                     self.assertEqual(asset["sha256"], hashlib.sha256(
                         (root / "out" / asset["name"]).read_bytes()).hexdigest())
-
-    def test_the_desktop_matrix_may_omit_the_macos_legs(self):
-        # The workflow builds the macOS legs only when ENABLE_MACOS is true, so
-        # a release has to assemble from the Linux and Windows legs alone.
-        with tempfile.TemporaryDirectory(prefix="linkr-release-no-macos-") as tmp:
-            root = Path(tmp)
-            write_fixture(root, macos=False)
-            result = subprocess.run(command_for(root),
-                                    capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            # 20 desktop + 6 firmware + Web + APK, plus the checksums and the
-            # manifest.
-            self.assertEqual(len(list((root / "out").iterdir())), 30)
-            manifest = json.loads((root / "out/release-manifest.json").read_text())
-            self.assertEqual(len(manifest["assets"]), 28)
-            targets = {asset["target"] for asset in manifest["assets"]
-                       if asset["kind"] == "desktop"}
-            self.assertEqual(targets, set(TARGETS) - {"aarch64-apple-darwin",
-                                                      "x86_64-apple-darwin"})
-
-    def test_a_missing_linux_or_windows_leg_is_refused(self):
-        with tempfile.TemporaryDirectory(prefix="linkr-release-missing-") as tmp:
-            root = Path(tmp)
-            write_fixture(root)
-            for path in (root / "desktop").glob("*x86_64-pc-windows-gnu*"):
-                path.unlink()
-            result = subprocess.run(command_for(root),
-                                    capture_output=True, text=True, timeout=10)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("the desktop matrix is missing: x86_64-pc-windows-gnu",
-                          result.stderr)
 
     def test_component_versions_come_from_the_artifacts(self):
         cases = [
@@ -172,8 +174,8 @@ class ReleaseAssemblyTests(unittest.TestCase):
         cases.append((unexpected_desktop, "unexpected desktop artifact"))
 
         def unknown_deb_arch(root):
-            (root / "desktop/linkr-bee_0.1.2_amd64.deb").rename(
-                root / "desktop/linkr-bee_0.1.2_riscv64.deb")
+            (root / "desktop/linkr-bee_1.1.4_amd64.deb").rename(
+                root / "desktop/linkr-bee_1.1.4_riscv64.deb")
 
         cases.append((unknown_deb_arch, "unknown Debian architecture"))
 
@@ -203,7 +205,7 @@ class ReleaseAssemblyTests(unittest.TestCase):
             root = Path(tmp)
             write_fixture(root)
             for path in (root / "desktop").iterdir():
-                path.rename(path.with_name(path.name.replace("0.1.2", "0.1.1")))
+                path.rename(path.with_name(path.name.replace("1.1.4", "1.1.2")))
             result = subprocess.run(command_for(root),
                                     capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)

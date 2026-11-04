@@ -32,6 +32,17 @@
 //! next request that needs the link dials it again, and only the requests
 //! that edge touches hear about it.
 //!
+//! A frame answers a question. A *console* is the other shape, and `watch` is
+//! its mode: while it is on and the session is idle, bytes the target says go
+//! out as they arrive, as lines with no id and no frame —
+//! `{"event":"stream","data":"…","bytes":54}` — so a caller draws the board as
+//! it talks instead of asking the journal again and again. A stream line can
+//! never land inside another request's frame: the session writes them only
+//! while it is waiting for its next request, and the bytes a request caused
+//! travel inside that request's own frame. The bytes are the console's own —
+//! escape sequences and all, JSON-escaped — because the journal's copy masks
+//! control bytes, and a terminal needs them for colour and cursor movement.
+//!
 //! What this is not: a daemon, a socket, or a second protocol. It is the
 //! existing one-shot machinery with the process held open around it, which is
 //! what makes it small enough to trust with a board on the far end.
@@ -44,6 +55,7 @@ use crate::app::App;
 use crate::cli::{self, Format, Json};
 use crate::device::Query;
 use crate::exec::cli::{Ending, Run};
+use crate::serial::geometry::Geometry;
 use crate::session::Dial;
 use crate::transport::LinkKind;
 
@@ -77,6 +89,7 @@ fn request_reader(input: impl Read + Send + 'static) -> Receiver<io::Result<Stri
 fn wait_for_request(
     app: &mut App,
     requests: &Receiver<io::Result<String>>,
+    watch: &mut Watch,
 ) -> io::Result<Option<String>> {
     // Idle UART bytes belong in the bounded terminal/journal, not the last
     // command's output collector or an undrained transport queue.
@@ -84,11 +97,102 @@ fn wait_for_request(
     app.take_output();
     loop {
         app.pump();
+        // Pushed here and nowhere else: this is the only moment the session is
+        // between frames, so a caller reading it sees stream lines only
+        // between answers and never inside one.
+        if let Some(line) = watch.idle_line(app) {
+            println!("{line}");
+        }
         match requests.recv_timeout(IDLE_POLL) {
             Ok(line) => return line.map(Some),
             Err(RecvTimeoutError::Disconnected) => return Ok(None),
             Err(RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+/// The console's push stream, as a mode of the session rather than a question.
+///
+/// Armed by `watch`, it reads the raw bytes the app collected while idle and
+/// hands them to the caller between frames. A stream line carries no id and is
+/// not framed: exactly one thing is being watched, and every line between two
+/// frames is that thing.
+#[derive(Default)]
+struct Watch {
+    /// Whether this session pushes idle bytes.
+    on: bool,
+    /// At most three bytes of a UTF-8 scalar split across transport reads.
+    utf8_tail: Vec<u8>,
+}
+
+impl Watch {
+    /// Arm the stream at the console's present: `watch` subscribes, it does not
+    /// replay. What the board said before this is the journal's business.
+    fn turn_on(&mut self, app: &mut App) {
+        self.on = true;
+        self.utf8_tail.clear();
+        app.watch_stream(true);
+    }
+
+    /// Stop pushing. The bytes said from here on belong to nobody's caller.
+    fn turn_off(&mut self, app: &mut App) {
+        self.on = false;
+        self.utf8_tail.clear();
+        app.watch_stream(false);
+    }
+
+    /// Where a frame ends is where idle output begins: what a request caused
+    /// was written inside its frame, so the stream resumes after it rather
+    /// than reading it a second time.
+    fn reanchor(&mut self, app: &mut App) {
+        // `watch_stream` clears the queue as it re-arms the same mode.
+        app.watch_stream(self.on);
+        // A request owns the intervening bytes (and may reconnect the link).
+        // An unfinished character from before it must not prefix that stream.
+        self.utf8_tail.clear();
+    }
+
+    /// The line to push for whatever has arrived since the last one.
+    ///
+    /// The bytes go out as the console received them — escape sequences,
+    /// carriage returns and all — because the caller is drawing a terminal and
+    /// the journal's copy is masked for reading: a `\u001b[31m` there is a NUL.
+    /// JSON escapes the controls back out, so the line stays one line.
+    fn idle_line(&mut self, app: &mut App) -> Option<String> {
+        if !self.on {
+            return None;
+        }
+        let chunks = app.take_watch_bytes();
+        if chunks.is_empty() {
+            return None;
+        }
+        let bytes: usize = chunks.iter().map(Vec::len).sum();
+        let mut joined = std::mem::take(&mut self.utf8_tail);
+        for chunk in chunks {
+            joined.extend_from_slice(&chunk);
+        }
+        // Keep an incomplete suffix even across idle ticks. Invalid complete
+        // sequences still use the normal replacement character, but a BLE read
+        // boundary is not evidence that the device sent invalid UTF-8.
+        let mut offset = 0;
+        while offset < joined.len() {
+            match std::str::from_utf8(&joined[offset..]) {
+                Ok(_) => break,
+                Err(error) => match error.error_len() {
+                    Some(length) => offset += error.valid_up_to() + length,
+                    None => {
+                        self.utf8_tail = joined.split_off(offset + error.valid_up_to());
+                        break;
+                    }
+                },
+            }
+        }
+        let text = String::from_utf8_lossy(&joined);
+        Some(cli::json_event(&[
+            ("event", Json::Text("stream")),
+            ("data", Json::Text(&text)),
+            ("bytes", Json::Number(bytes as i64)),
+        ]))
     }
 }
 
@@ -114,6 +218,9 @@ pub const OPERATIONS: &[&str] = &[
     "bond-label",
     "bond-remove",
     "exec",
+    "send",
+    "watch",
+    "resize",
     "loopback-test",
     "state",
     "quit",
@@ -225,8 +332,9 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration, program: &str) 
     );
 
     let requests = request_reader(std::io::stdin());
+    let mut watch = Watch::default();
     loop {
-        let line = match wait_for_request(app, &requests) {
+        let line = match wait_for_request(app, &requests, &mut watch) {
             // End of input: the caller stopped listening. That is the
             // session's own hang-up — a caller that wanted an answer would
             // have kept the pipe open — and the link goes down with it.
@@ -292,11 +400,13 @@ pub fn run(app: &mut App, dial: Option<Dial>, connect: Duration, program: &str) 
                 if needs_link(&action) && ensure_link(app, dial.as_ref(), connect, id).is_err() {
                     255
                 } else {
-                    handle(app, action, format, connect)
+                    handle(app, action, format, connect, &mut watch)
                 }
             }
         };
         frame_end(id, code);
+        // The frame owned what it caused; the stream resumes after it.
+        watch.reanchor(app);
     }
     app.session.close();
     0
@@ -309,6 +419,12 @@ enum Action {
     Requests(cli::Requests),
     /// One command on the target, with the terms the request set.
     Exec(Run),
+    /// Raw bytes typed at the console, sent as they are.
+    Send { data: String },
+    /// Turn the console's push stream on or off.
+    Watch { on: bool },
+    /// Tell the target how big the caller's terminal is.
+    Resize { cols: u16, rows: u16 },
     /// The wire test, with its payload and its window.
     Loopback { data: String, timeout: Duration },
     /// What the session and its link are doing.
@@ -323,7 +439,7 @@ enum Action {
 /// board is off asks this to find out that it is, and an answer that
 /// required a board would be no answer.
 fn needs_link(action: &Action) -> bool {
-    !matches!(action, Action::State | Action::Quit)
+    !matches!(action, Action::State | Action::Quit | Action::Watch { .. })
 }
 
 /// Make sure there is a link before a request that needs one.
@@ -358,7 +474,13 @@ fn ensure_link(
 }
 
 /// Answer one request with the machinery the one-shot modes use.
-fn handle(app: &mut App, action: Action, format: Format, connect: Duration) -> i32 {
+fn handle(
+    app: &mut App,
+    action: Action,
+    format: Format,
+    connect: Duration,
+    watch: &mut Watch,
+) -> i32 {
     match action {
         Action::Requests(requests) => {
             let failed = cli::run_requests(app, &requests, format, connect);
@@ -369,6 +491,67 @@ fn handle(app: &mut App, action: Action, format: Format, connect: Duration) -> i
             }
         }
         Action::Exec(run) => crate::exec::cli::run(app, &run, format),
+        Action::Send { data } => {
+            let sent = app.send_bytes(data.as_bytes());
+            match format {
+                Format::Text => println!(
+                    "send: {} bytes {}",
+                    data.len(),
+                    if sent { "sent" } else { "not sent (no link)" }
+                ),
+                Format::Json => println!(
+                    "{}",
+                    cli::json_event(&[
+                        ("event", Json::Text("result")),
+                        ("what", Json::Text("send")),
+                        ("ok", Json::Bool(sent)),
+                        ("bytes", Json::Number(data.len() as i64)),
+                    ])
+                ),
+            }
+            if sent {
+                0
+            } else {
+                1
+            }
+        }
+        Action::Watch { on } => {
+            if on {
+                watch.turn_on(app);
+            } else {
+                watch.turn_off(app);
+            }
+            match format {
+                Format::Text => println!("watch: {}", if on { "on" } else { "off" }),
+                Format::Json => println!(
+                    "{}",
+                    cli::json_event(&[
+                        ("event", Json::Text("result")),
+                        ("what", Json::Text("watch")),
+                        ("ok", Json::Bool(true)),
+                        ("on", Json::Bool(on)),
+                    ])
+                ),
+            }
+            0
+        }
+        Action::Resize { cols, rows } => {
+            let geometry = resize(app, cols, rows);
+            match format {
+                Format::Text => println!("resize: {}x{}", geometry.cols, geometry.rows),
+                Format::Json => println!(
+                    "{}",
+                    cli::json_event(&[
+                        ("event", Json::Text("result")),
+                        ("what", Json::Text("resize")),
+                        ("ok", Json::Bool(true)),
+                        ("cols", Json::Number(i64::from(geometry.cols))),
+                        ("rows", Json::Number(i64::from(geometry.rows))),
+                    ])
+                ),
+            }
+            0
+        }
         Action::Loopback { data, timeout } => {
             if cli::loopback_test(app, data.as_bytes(), timeout, format) {
                 0
@@ -383,6 +566,27 @@ fn handle(app: &mut App, action: Action, format: Format, connect: Duration) -> i
         // Answered before `handle` is reached; kept for exhaustiveness.
         Action::Quit => 0,
     }
+}
+
+/// Tell the target how big the caller's terminal is.
+///
+/// The session's idea of the pane moves first, so the housekeeping line that
+/// follows a resize is never a size the caller has left behind; the line is
+/// sent straight down the session, the way [`App::sync_terminal_geometry`]
+/// sends it, and confirmed so a shell reprinting its prompt does not ask for
+/// the same size again.
+fn resize(app: &mut App, cols: u16, rows: u16) -> Geometry {
+    app.geometry.set_size(cols, rows);
+    let geometry = app.geometry.geometry();
+    let Some(command) = app.geometry.take_pending_command() else {
+        return geometry;
+    };
+    if app.session.send(command.as_bytes()) {
+        app.geometry.confirm_sent();
+    } else {
+        app.geometry.abort_sent();
+    }
+    geometry
 }
 
 /// What the session and its link are doing, for the one request that is
@@ -450,6 +654,9 @@ fn accepted_fields(op: &str) -> Option<&'static [&'static str]> {
         "webdav" => Some(&["url"]),
         "ble-name" => Some(&["name", "default"]),
         "exec" => Some(&["cmd", "timeout_ms", "idle_ms", "retry"]),
+        "send" => Some(&["data"]),
+        "watch" => Some(&["on"]),
+        "resize" => Some(&["cols", "rows"]),
         "loopback-test" => Some(&["data", "timeout_ms"]),
         _ => None,
     }
@@ -622,6 +829,38 @@ fn action_for(request: &Request) -> Result<Action, String> {
                 .unwrap_or(DEFAULT_LOOPBACK_TIMEOUT);
             return Ok(Action::Loopback { data, timeout });
         }
+        // A keystroke path: the bytes go to the console exactly as typed, with
+        // no `sh -c` around them and no answer to wait for.
+        "send" => {
+            let data = request.string_wanted("data")?.to_string();
+            if data.is_empty() {
+                return Err("send wants the bytes to type".to_string());
+            }
+            return Ok(Action::Send { data });
+        }
+        // The console as it arrives: armed by name, one field, a mode rather
+        // than a question.
+        "watch" => {
+            return match request.value("on") {
+                Some(Value::Bool(on)) => Ok(Action::Watch { on: *on }),
+                Some(_) => Err("watch wants \"on\": true or false".to_string()),
+                None => Err("watch wants \"on\": true or false".to_string()),
+            }
+        }
+        "resize" => {
+            let cols = request.count_wanted("cols")?;
+            let rows = request.count_wanted("rows")?;
+            if !(2..=500).contains(&cols) {
+                return Err("cols must be between 2 and 500".to_string());
+            }
+            if !(1..=200).contains(&rows) {
+                return Err("rows must be between 1 and 200".to_string());
+            }
+            return Ok(Action::Resize {
+                cols: cols as u16,
+                rows: rows as u16,
+            });
+        }
         "state" => return Ok(Action::State),
         "quit" => return Ok(Action::Quit),
         other => {
@@ -710,6 +949,14 @@ impl Request {
         match self.value(key) {
             Some(Value::Text(text)) => Some(text),
             _ => None,
+        }
+    }
+
+    fn count_wanted(&self, key: &str) -> Result<i64, String> {
+        match self.value(key) {
+            None => Err(format!("{key} is missing")),
+            Some(Value::Number(number)) => Ok(*number),
+            Some(_) => Err(format!("{key} must be a number")),
         }
     }
 
@@ -1001,7 +1248,7 @@ mod tests {
                 .send(Ok("{\"op\":\"state\"}\n".to_string()))
                 .expect("request");
         });
-        let line = wait_for_request(&mut app, &requests)
+        let line = wait_for_request(&mut app, &requests, &mut Watch::default())
             .expect("read request")
             .expect("one line");
         assert!(line.contains("state"));
@@ -1357,7 +1604,81 @@ mod tests {
             operations_json(),
             "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"webdav\",\
              \"webdav-off\",\"ble-name\",\"lan\",\"bonds\",\"bond-label\",\
-             \"bond-remove\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
+             \"bond-remove\",\"exec\",\"send\",\"watch\",\"resize\",\
+             \"loopback-test\",\"state\",\"quit\"]"
+        );
+    }
+
+    fn watch_text(watch: &mut Watch, app: &mut App, chunks: &[&[u8]]) -> (String, i64) {
+        for chunk in chunks {
+            app.watch_bytes.push_back(chunk.to_vec());
+        }
+        let line = watch
+            .idle_line(app)
+            .expect("received bytes produce a stream event");
+        // Reuse the flat JSON reader, whose only request-specific requirement
+        // is an op field. A stream event itself deliberately has no op/id.
+        let event = request(&line.replacen('{', "{\"op\":\"state\",", 1));
+        (
+            event.string_wanted("data").unwrap().to_string(),
+            event.count_wanted("bytes").unwrap(),
+        )
+    }
+
+    #[test]
+    fn watch_preserves_unicode_split_between_chunks_and_idle_ticks() {
+        let source = "prefix 中🙂\r\n";
+        for split in 1..source.len() {
+            let mut app = App::default();
+            let mut watch = Watch::default();
+            watch.turn_on(&mut app);
+            let (first, a) = watch_text(&mut watch, &mut app, &[&source.as_bytes()[..split]]);
+            let (last, b) = watch_text(&mut watch, &mut app, &[&source.as_bytes()[split..]]);
+            assert_eq!(first + &last, source, "split at byte {split}");
+            assert_eq!(a + b, source.len() as i64);
+            assert!(watch.utf8_tail.is_empty());
+        }
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        let (text, bytes) = watch_text(&mut watch, &mut app, &[&[0xe4], &[0xb8], &[0xad]]);
+        assert_eq!(text, "中");
+        assert_eq!(bytes, 3);
+    }
+
+    #[test]
+    fn watch_keeps_only_the_incomplete_scalar_and_recovers_after_invalid_bytes() {
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        let source = "中🙂";
+        let mut text = String::new();
+        for byte in source.bytes() {
+            text.push_str(&watch_text(&mut watch, &mut app, &[&[byte]]).0);
+            assert!(watch.utf8_tail.len() <= 3);
+        }
+        assert_eq!(text, source);
+        let (text, _) = watch_text(&mut watch, &mut app, &[&[0xff, 0xe4]]);
+        assert_eq!(text, "\u{fffd}");
+        let (text, _) = watch_text(&mut watch, &mut app, &[b"OK"]);
+        assert_eq!(text, "\u{fffd}OK");
+        assert!(watch.utf8_tail.is_empty());
+    }
+
+    #[test]
+    fn watch_does_not_join_unicode_across_stop_or_request_boundaries() {
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xe4]]).0, "");
+        watch.turn_off(&mut app);
+        watch.turn_on(&mut app);
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xb8, 0xad]]).0, "��");
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xe4]]).0, "");
+        watch.reanchor(&mut app);
+        assert_eq!(
+            watch_text(&mut watch, &mut app, &[b"new link"]).0,
+            "new link"
         );
     }
 }

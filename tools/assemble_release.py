@@ -12,15 +12,15 @@ GitHub Actions downloaded; the script never reaches the network.
 
 Usage:
     tools/assemble_release.py \
-        --tag v0.1.2 --commit <sha> --run-id 123 \
+        --tag v1.1.4 --commit <sha> --run-id 123 \
         --desktop-dir artifacts/desktop \
         --firmware-dir artifacts/firmware \
         --apk-dir artifacts/apk \
         --web-dir artifacts/web \
         --out-dir release \
-        --notes-template docs/releases/v0.1.2.md \
+        --notes-template docs/releases/v1.1.4.md \
         --notes-out release-notes.md \
-        --web-version 0.1.2 --firmware-version 0.1.2 --apk-version 0.1.2
+        --web-version 1.1.4 --firmware-version 1.1.4 --apk-version 1.1.4
 """
 
 from __future__ import annotations
@@ -53,16 +53,14 @@ DEB_ARCH = {
 
 DESKTOP_RE = re.compile(r"^(linkr-bee(?:-cli)?)-([0-9]+\.[0-9]+\.[0-9]+)-(.+)\.(?:tar\.gz|zip|dmg)$")
 DEB_RE = re.compile(r"^linkr-bee_([0-9]+\.[0-9]+\.[0-9]+)_([a-z0-9]+)\.deb$")
-FIRMWARE_RE = re.compile(r"^linkr-bee-(.+)-firmware-([a-z0-9-]+)\.zip$")
-WEB_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-web\.zip$")
-APK_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-android-debug\.apk$")
-
-# The desktop matrix always builds the Linux and Windows legs; the two macOS
-# legs are optional because the hosted macOS runners are not always assignable
-# and the workflow only builds them when the ENABLE_MACOS repository variable
-# is true. A release without them is complete for every platform that ran; a
-# release missing a Linux or Windows leg is a broken build, not a variant.
-REQUIRED_DESKTOP_TARGETS = {
+# The desktop workflow also publishes the bare `bee-cli` binary per target, and
+# the `linkr-bee-cli` npm package downloads exactly that file (then verifies it
+# against SHA256SUMS and execs it). The name deliberately carries no version:
+# the release it is attached to is the version.
+RAW_CLI_RE = re.compile(r"^bee-cli-([a-z0-9_]+(?:-[a-z0-9_]+)*)(\.exe)?$")
+# The desktop workflow's matrix, spelled as `bee-cli-<target>[.exe]`. A target
+# added there must be added here, and the count check below says so.
+CLI_TARGETS = (
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "armv7-unknown-linux-gnueabihf",
@@ -71,14 +69,12 @@ REQUIRED_DESKTOP_TARGETS = {
     "i686-pc-windows-gnu",
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
-}
-OPTIONAL_DESKTOP_TARGETS = {
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
-}
-# Per target: the interface and the CLI. macOS adds the same pair again as
-# `.dmg`; each Debian architecture adds one package.
-DESKTOP_ARCHIVES_PER_TARGET = 2
+)
+FIRMWARE_RE = re.compile(r"^linkr-bee-(.+)-firmware-([a-z0-9-]+)\.zip$")
+WEB_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-web\.zip$")
+APK_RE = re.compile(r"^linkr-bee-(v[0-9]+\.[0-9]+\.[0-9]+)-android-debug\.apk$")
 
 
 def sha256(path: Path) -> str:
@@ -124,6 +120,17 @@ def collect_desktop(source: Path, out: Path) -> list[Path]:
         if path.name == "SHA256SUMS":
             continue
         if DESKTOP_RE.match(path.name) or DEB_RE.match(path.name):
+            destination = out / path.name
+            copy_file(path, destination)
+            files.append(destination)
+        elif (raw := RAW_CLI_RE.match(path.name)) is not None:
+            target = raw.group(1)
+            if target not in CLI_TARGETS:
+                raise SystemExit(
+                    f"unknown CLI target {target!r} in {path.name}; "
+                    "add it to CLI_TARGETS as well as the workflow matrix")
+            # The npm launcher downloads this file and execs it, so the
+            # executable bit is part of the artifact.
             destination = out / path.name
             copy_file(path, destination)
             files.append(destination)
@@ -243,6 +250,19 @@ def asset_entry(path: Path, tag: str, run_id: int, web_version: str,
             "component_version": match.group(2),
             "build_run": run_id,
         }
+    match = RAW_CLI_RE.match(name)
+    if match:
+        # No `component_version`: the asset's name deliberately carries none —
+        # the release it belongs to is the version. Desktop/DEB entries stay the
+        # only source the tag consistency check reads.
+        return {
+            "name": name,
+            "size": size,
+            "sha256": digest,
+            "kind": "cli",
+            "target": match.group(1),
+            "build_run": run_id,
+        }
     match = DEB_RE.match(name)
     if match:
         arch = DEB_ARCH.get(match.group(2))
@@ -341,35 +361,9 @@ def main() -> int:
     if web_staging.exists():
         shutil.rmtree(web_staging)
 
-    # Which desktop targets arrived decides the expected total, so the macOS
-    # legs can be absent without weakening the check on the others: every
-    # Linux/Windows target must be there, with its two archives (and its .deb),
-    # and the count must match exactly what those targets add up to.
-    desktop_targets: set[str] = set()
-    for path in assets:
-        match = DESKTOP_RE.match(path.name)
-        if match:
-            desktop_targets.add(match.group(3))
-            continue
-        match = DEB_RE.match(path.name)
-        if match:
-            arch = DEB_ARCH.get(match.group(2))
-            if not arch:
-                raise SystemExit(f"unknown Debian architecture: {match.group(2)}")
-            desktop_targets.add(arch)
-    missing = REQUIRED_DESKTOP_TARGETS - desktop_targets
-    if missing:
-        raise SystemExit(
-            "the desktop matrix is missing: " + ", ".join(sorted(missing)))
-    macos = desktop_targets & OPTIONAL_DESKTOP_TARGETS
-
     expected_counts = {
-        "desktop": (
-            (len(REQUIRED_DESKTOP_TARGETS) + len(macos))
-            * DESKTOP_ARCHIVES_PER_TARGET
-            + len(DEB_ARCH)
-            + len(macos) * DESKTOP_ARCHIVES_PER_TARGET
-        ),
+        "desktop": 28,
+        "cli": len(CLI_TARGETS),
         "firmware": 6,
         "web": 1,
         "apk": 1,
@@ -378,6 +372,8 @@ def main() -> int:
     for path in assets:
         if DESKTOP_RE.match(path.name) or DEB_RE.match(path.name):
             counts["desktop"] += 1
+        elif RAW_CLI_RE.match(path.name):
+            counts["cli"] += 1
         elif FIRMWARE_RE.match(path.name):
             counts["firmware"] += 1
         elif WEB_RE.match(path.name):
