@@ -1,15 +1,23 @@
-name: Deploy the firmware flasher to GitHub Pages
+name: Deploy the web terminal and the firmware flasher to GitHub Pages
 
 # Fork-only deployment.
 #
-# The published site is the browser flasher, which lives on the long-lived
-# fork/web-flasher branch. This workflow checks that branch out explicitly so a
-# push to main (upstream's plain web terminal) can never replace the flasher,
-# and a release publication still refreshes the staged firmware automatically.
+# The published site is this branch's `web/`: the Web terminal at the root and
+# the browser flasher at `flash.html`, both built from the fork's own tree. The
+# workflow checks the branch out explicitly, so a push to main (which carries a
+# different Pages policy) can never replace the deployed site, and a release
+# publication still refreshes the staged firmware automatically.
 #
 # Requires Settings -> Pages -> Source: "GitHub Actions" once.
 
 on:
+  push:
+    branches:
+      - fork/web-flasher
+    paths:
+      - "web/**"
+      - "tools/build_firmware_manifest.py"
+      - ".github/workflows/pages.yml"
   release:
     types:
       - published
