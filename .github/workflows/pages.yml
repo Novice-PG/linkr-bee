@@ -133,6 +133,32 @@ jobs:
             --tag "${tag}" \
             --repo "${GITHUB_REPOSITORY}"
 
+          # The release does not carry the self-maintained ZIP, so give that
+          # entry its own staged archive. Without this the "下载固件 ZIP"
+          # button would fall back to a release URL that does not exist.
+          self_zip="$(find .firmware-release -maxdepth 1 \
+            -name '*-firmware-esp32-wroom-32-self.zip' -print -quit)"
+          if [ -n "${self_zip}" ]; then
+            cp "${self_zip}" web/firmware/esp32-wroom-32-self/
+            python3 - "${self_zip}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          archive = pathlib.Path(sys.argv[1])
+          manifest_path = pathlib.Path("web/firmware/manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          for board in manifest["boards"]:
+              if board["slug"] == "esp32-wroom-32-self":
+                  board["zip_url"] = f"firmware/esp32-wroom-32-self/{archive.name}"
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(f"staged download archive {archive.name}")
+          PY
+          fi
+
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.
       - name: Mark the site as plain static files
