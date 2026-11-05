@@ -190,9 +190,10 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
 
 > **Novice-PG 自维护构建**：本仓库的 `fork/self-maintained` 分支在官方
 > 配置之上把 BLE peer TX 队列从 4 增到 8、每客户端 WS TX 环从 1024 增到
-> 2048，并把 `ZVFS_POLL_MAX` 从 3 增到 5，合计约 +3,984 B DRAM0。改动只
-> 影响 WROOM-32，版本号仍与上游一致。差异、预算与被拒绝的项目见
-> [`SELF-MAINTAINED.md`](SELF-MAINTAINED.md)；官方构建以 radxa 发布为准。
+> 2048，并把 `ZVFS_POLL_MAX` 从 3 增到 5，合计 +3,984 B DRAM0；CI 链接后
+> `dram0_0_seg` 剩余 4,904 B。改动只影响 WROOM-32，版本号仍与上游一致。
+> 差异、预算与被拒绝的项目见 [`SELF-MAINTAINED.md`](SELF-MAINTAINED.md)；
+> 官方构建以 radxa 发布为准。
 
 **功能差异：**
 
