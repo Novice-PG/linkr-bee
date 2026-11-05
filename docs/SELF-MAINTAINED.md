@@ -90,8 +90,9 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 ## 如何分辨这是自维护固件
 
 - 版本号仍然是 `1.1.4`，与上游一致，便于客户端和发布流程继续工作。
-- 烧录页有两个 WROOM-32 条目：官方 `esp32-wroom-32`，以及带
-  `Novice-PG 自维护` 标注的 `esp32-wroom-32-self`，选择后状态栏会说明差异。
+- 烧录页 <https://novice-pg.github.io/linkr-bee/flash.html> 有两个 WROOM-32
+  条目：官方 `esp32-wroom-32`，以及带 `Novice-PG 自维护` 标注的
+  `esp32-wroom-32-self`，选择后状态栏会说明差异。
 - `firmware.json` 里的 `git_commit` 指向本分支的提交，而不是 radxa 的 tag。
 - 官方固件仍然从 <https://github.com/radxa/linkr-bee/releases> 获取；
   官方 WROOM 构建不带上述三项改动。
