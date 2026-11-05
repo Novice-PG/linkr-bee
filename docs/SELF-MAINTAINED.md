@@ -76,6 +76,19 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 `LINKR_BLE_BRIDGE_WS_BRIDGE` 生效）修复，并加了编译期断言；本分支自 1.1.5
 起直接使用上游定义，不再维护重复条目。
 
+## 跟随上游
+
+`fork/self-maintained` 始终以 radxa `main` 为基础：上游发版或调整配置后，先
+`git merge upstream/main` 吸收，再只保留本文列出的两项缓冲改动。上游已经自己
+修好的项（例如 `ZVFS_POLL_MAX`）直接删掉 fork 的重复实现，不另立版本号。
+每次对齐后重新跑 `Build and test`，确认产物里的 `firmware.config` 仍包含：
+
+```text
+CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=8
+CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=2048
+CONFIG_ZVFS_POLL_MAX=5
+```
+
 ## 明确不加大
 
 | 项 | 原因 |
