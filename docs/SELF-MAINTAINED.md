@@ -2,21 +2,22 @@
 
 > 状态：**Novice-PG fork 自维护**，不属于 radxa 官方固件，也不进入上游 PR。
 > 适用板型：仅 `esp32_devkitc/esp32/procpu`（ESP32-WROOM-32 DevKitC）。
-> 固件版本：`1.1.5`（与 radxa 上游对齐，见下文“如何分辨”）。
+> 固件版本：`1.1.4`（与官方发布保持一致；代码基于上游 1.1.5 main，见下文“如何分辨”）。
 > 分支：`fork/self-maintained`。
 
 ## 为什么单独维护
 
-radxa 官方 v1.1.5 的 WROOM-32 构建在 Zephyr 4.5 下把 BLE 队列压到 4、WS
-缓冲压到 1,024 B 以节省 SRAM。本分支只把这两项恢复到能直接改善终端体验的
-水平，其余配置跟随上游。诊断日志、吞吐余量、内部堆余量都不属于这个标准，
-因此不加大。
+radxa 上游 1.1.5 把 WROOM-32 的 BLE 队列压到 4、WS 缓冲压到 1,024 B 以
+节省 SRAM。本分支在 1.1.5 代码基础上只把这两项恢复到能直接改善终端体验的
+水平，版本号仍保持 `1.1.4`，以便烧录页和客户端把自维护包与官方 1.1.4 放在
+同一条发布线上。其余配置跟随上游。诊断日志、吞吐余量、内部堆余量都不属于
+这个标准，因此不加大。
 
 其他板型（C3 / C5 / X1.0）不在这个分支的改动范围内，仍然跟随上游配置。
 
 ## 与官方 WROOM 构建的差别
 
-| 配置 | 官方 v1.1.5 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
+| 配置 | 上游 1.1.5 配置 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
 |---|---|---:|---:|---|
 | `LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH` | 4 | **8** | +1,920 B | BLE 终端每个 peer 的突发窗口约 0.7 s → 1.4 s；手机 / Windows 主机短暂停顿时少丢一段输出 |
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
@@ -73,8 +74,8 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 
 这不是缓冲放大，但同样属于“花配置空间换体验”，而且 C3 / C5 也有同样的
 风险。上游已在 `7c4922ac` 用相同的顶层 `Kconfig` 默认值（按
-`LINKR_BLE_BRIDGE_WS_BRIDGE` 生效）修复，并加了编译期断言；本分支自 1.1.5
-起直接使用上游定义，不再维护重复条目。
+`LINKR_BLE_BRIDGE_WS_BRIDGE` 生效）修复，并加了编译期断言；本分支直接使用
+上游定义，不再维护重复条目。
 
 ## 跟随上游
 
@@ -102,7 +103,7 @@ CONFIG_ZVFS_POLL_MAX=5
 
 ## 如何分辨这是自维护固件
 
-- 版本号仍然是 `1.1.5`，与上游一致，便于客户端和发布流程继续工作。
+- 版本号仍然是 `1.1.4`，与官方发布一致，便于客户端和发布流程继续工作。
 - 烧录页 <https://novice-pg.github.io/linkr-bee/flash.html> 有两个 WROOM-32
   条目：官方 `esp32-wroom-32`，以及带 `Novice-PG 自维护` 标注的
   `esp32-wroom-32-self`，选择后状态栏会说明差异。
@@ -145,14 +146,15 @@ west build -b esp32_devkitc/esp32/procpu .
 ## English summary
 
 This branch carries Novice-PG's self-maintained ESP32-WROOM-32 firmware. It
-tracks radxa's version number (`1.1.5`) and is rebased on upstream `main`, but
-differs from the official build in two buffers: the BLE peer TX queue is 8
-chunks instead of 4 and the per-client WebSocket TX ring is 2,048 B instead of
-1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream 1.1.5, which adopted the same
-default and added a build-time assertion; the fork relies on that upstream
-definition instead of carrying its own. Total added DRAM0 over 1.1.5 is
-3,968 B; the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly 4,904 B
-free.
+keeps the `1.1.4` version line for the flasher and clients while its code is
+based on upstream 1.1.5 `main`, and it differs from the upstream 1.1.5
+configuration in two buffers: the BLE peer TX queue is 8 chunks instead of 4
+and the per-client WebSocket TX ring is 2,048 B instead of 1,024 B.
+`ZVFS_POLL_MAX` is 5, matching upstream 1.1.5, which adopted the same default
+and added a build-time assertion; the fork relies on that upstream definition
+instead of carrying its own. Total added DRAM0 over the upstream 1.1.5
+configuration is 3,968 B; the CI link (Zephyr 4.5, commit `4a23bf0`) leaves
+exactly 4,904 B free.
 UART RX, the log buffer, the system heap, WiFi/network pools and thread stacks
 are deliberately not enlarged: their benefit is diagnostics, throughput or
 internal headroom, not a better console.
