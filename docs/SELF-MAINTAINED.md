@@ -2,27 +2,26 @@
 
 > 状态：**Novice-PG fork 自维护**，不属于 radxa 官方固件，也不进入上游 PR。
 > 适用板型：仅 `esp32_devkitc/esp32/procpu`（ESP32-WROOM-32 DevKitC）。
-> 固件版本：`1.1.4`（与 radxa 上游对齐，见下文“如何分辨”）。
+> 固件版本：`1.1.5`（与 radxa 上游对齐，见下文“如何分辨”）。
 > 分支：`fork/self-maintained`。
 
 ## 为什么单独维护
 
-radxa 官方 v1.1.4 的 WROOM-32 构建在 Zephyr 4.5 下还剩 **8,888 B DRAM0**。
-这些空间不是“必须用掉”，只用于能直接改善终端体验的地方：少丢用户正在看的
-串口字节、少让并发连接把 WebSocket 服务打崩。诊断日志、吞吐余量、内部堆
-余量都不属于这个标准，因此不加大。
+radxa 官方 v1.1.5 的 WROOM-32 构建在 Zephyr 4.5 下把 BLE 队列压到 4、WS
+缓冲压到 1,024 B 以节省 SRAM。本分支只把这两项恢复到能直接改善终端体验的
+水平，其余配置跟随上游。诊断日志、吞吐余量、内部堆余量都不属于这个标准，
+因此不加大。
 
 其他板型（C3 / C5 / X1.0）不在这个分支的改动范围内，仍然跟随上游配置。
 
 ## 与官方 WROOM 构建的差别
 
-| 配置 | 官方 v1.1.4 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
+| 配置 | 官方 v1.1.5 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
 |---|---|---:|---:|---|
 | `LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH` | 4 | **8** | +1,920 B | BLE 终端每个 peer 的突发窗口约 0.7 s → 1.4 s；手机 / Windows 主机短暂停顿时少丢一段输出 |
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
-| `ZVFS_POLL_MAX` | 3（v1.1.4） | **5**（上游 1.1.5 同值） | +16 B | 两个 HTTP/WS 连接同时握手时，`poll()` 不再因事件表不足而关掉监听器并重启服务；本分支直接复用上游定义 |
 
-合计占用 **3,984 B**（其中 3,968 B 来自两项缓冲放大，16 B 为上游 1.1.5 已带的 poll 预算）。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
+合计占用 **3,968 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
 `dram0_0_seg` 已用 **135,548 / 140,452 B**，**剩余 4,904 B**；`dram1_0_seg`
 仍为 94,424 / 95,232 B（剩余 808 B），没有被这次改动占用。符号大小与预算一致：
 `peer_storage` 3,840 B、`ws_tx_bufs` 4,096 B。
@@ -42,7 +41,7 @@ BLE 是整条链路最慢的一段（实测可靠模式约 1.0–1.4 KiB/s），
 后台节流或 TCP 窗口暂时关闭时能多保留约 89 ms 的串口输出。它不会让一个
 休眠数秒的标签页“不丢”，只是把丢的位置推迟。
 
-### 3. `ZVFS_POLL_MAX` 3 → 5（上游 1.1.5 已采用）
+### 补充：`ZVFS_POLL_MAX` 已由上游修复
 
 Zephyr 4.5 的 HTTP 服务器固定这样轮询（`http_server_core.c`）：
 
@@ -90,13 +89,13 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 
 ## 如何分辨这是自维护固件
 
-- 版本号仍然是 `1.1.4`，与上游一致，便于客户端和发布流程继续工作。
+- 版本号仍然是 `1.1.5`，与上游一致，便于客户端和发布流程继续工作。
 - 烧录页 <https://novice-pg.github.io/linkr-bee/flash.html> 有两个 WROOM-32
   条目：官方 `esp32-wroom-32`，以及带 `Novice-PG 自维护` 标注的
   `esp32-wroom-32-self`，选择后状态栏会说明差异。
 - `firmware.json` 里的 `git_commit` 指向本分支的提交，而不是 radxa 的 tag。
 - 官方固件仍然从 <https://github.com/radxa/linkr-bee/releases> 获取；
-  官方 WROOM 构建不带上述三项改动。
+  官方 WROOM 构建不带上述两项缓冲改动。
 
 ## 更新烧录页
 
@@ -133,14 +132,14 @@ west build -b esp32_devkitc/esp32/procpu .
 ## English summary
 
 This branch carries Novice-PG's self-maintained ESP32-WROOM-32 firmware. It
-tracks radxa's version number (`1.1.4`) but differs from the official build:
-the BLE peer TX queue is 8 chunks instead of 4 and the per-client WebSocket TX
-ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream
-1.1.5, which adopted the same default and added a build-time assertion; the
-fork now relies on that upstream definition instead of carrying its own.
-Total added DRAM0 over 1.1.4 is 3,984 B (3,968 B of buffers plus 16 B for the
-poll budget); the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly
-4,904 B free.
+tracks radxa's version number (`1.1.5`) and is rebased on upstream `main`, but
+differs from the official build in two buffers: the BLE peer TX queue is 8
+chunks instead of 4 and the per-client WebSocket TX ring is 2,048 B instead of
+1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream 1.1.5, which adopted the same
+default and added a build-time assertion; the fork relies on that upstream
+definition instead of carrying its own. Total added DRAM0 over 1.1.5 is
+3,968 B; the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly 4,904 B
+free.
 UART RX, the log buffer, the system heap, WiFi/network pools and thread stacks
 are deliberately not enlarged: their benefit is diagnostics, throughput or
 internal headroom, not a better console.
