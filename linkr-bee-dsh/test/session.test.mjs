@@ -16,9 +16,13 @@ const emit = item => process.stdout.write(JSON.stringify(item)+'\n');
 const args = process.argv.slice(2);
 if (args.includes('--scan')) {
   note({mode:'scan'});
-  setTimeout(()=>{emit({event:'device',board:true,name:'Linkr Bee Mock'});},250);
+  setTimeout(()=>{emit({event:'device',board:true,name:config.scanName||'Linkr Bee Mock'});},250);
 } else if (args.includes('--serve')) {
-  note({mode:'serve'});
+  note({mode:'serve',args});
+  if(config.scenario==='serve-fail-once'&&!fs.existsSync(__dirname+'/attempted')){
+    fs.writeFileSync(__dirname+'/attempted','1');
+    process.exit(1);
+  }
   const ready = () => emit({event:'ready',ops:config.scenario==='old-cli'?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
   if(config.scenario==='slow-start')setTimeout(ready,250);else ready();
   readline.createInterface({input:process.stdin}).on('line', line => {
@@ -51,8 +55,9 @@ if (args.includes('--scan')) {
 async function fixture(t, scenario = 'ok', extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'linkr-plugin-session-'));
   const executable = join(dir, 'bee-cli.cjs');
+  const { cli = {}, ...configExtra } = extra;
   await writeFile(executable, fakeCli, { mode: 0o755 });
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario }));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario, ...cli }));
   await writeFile(join(dir, 'calls.jsonl'), '');
   const { apply } = await import(`../index.js?session-test=${++nextImport}`);
   const tools = new Map();
@@ -64,7 +69,7 @@ async function fixture(t, scenario = 'ok', extra = {}) {
     tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } },
     webServer: { register(options) { handler = options.handler; return () => {}; } },
   };
-  const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...extra };
+  const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...configExtra };
   apply(ctx, config);
   const dispose = () => {
     if (disposed) return;
@@ -372,4 +377,47 @@ test('the line input route also rejects a failed one-shot send', async t => {
   const result = await f.route('/console/input', {text:'hello',mode:'line'});
   assert.equal(result.ok, false);
   assert.equal(typeof result.error, 'string');
+});
+
+test('auto-discovery is reused while fresh and scanned again once it expires', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble',bleName:'',bleAddress:''});
+  const scans = async () => (await f.calls()).filter(c => c.mode === 'scan').length;
+
+  await f.call('linkr_bee_query', {target:'state'});
+  assert.equal(await scans(), 1);
+  const dialled = (await f.calls()).find(c => c.mode === 'one-shot' && c.args.includes('--ble-name'));
+  assert.ok(dialled, 'the board found by the scan is dialled by name');
+  assert.equal(dialled.args[dialled.args.indexOf('--ble-name') + 1], 'Linkr Bee Mock');
+
+  // Inside the TTL the remembered name is used without touching the radio.
+  await f.call('linkr_bee_query', {target:'state'});
+  assert.equal(await scans(), 1, 'a fresh discovery is reused, not rescanned');
+
+  // Past the TTL it is a hint only: scan again, so a renamed or swapped board
+  // is found instead of dialling the old name forever.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 6 * 60_000;
+  try {
+    await f.call('linkr_bee_query', {target:'state'});
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(await scans(), 2, 'a discovery older than the TTL is rescanned');
+});
+
+test('a failed dial forgets the discovered name and scans again', async t => {
+  const f = await fixture(t, 'serve-fail-once', {transport:'ble',bleName:'',bleAddress:''});
+  await f.call('linkr_bee_exec', {cmd:'true'});
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'scan').length, 2,
+    'the start that never became a session must not pin the old name');
+  assert.equal(calls.filter(c => c.mode === 'serve').length, 1);
+  assert.equal(calls.filter(c => c.mode === 'one-shot').length, 1,
+    'the exec falls back to the one-shot path after the failed session start');
+});
+
+test('the Host half carries no hard-coded Chinese UI text', async () => {
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+  assert.equal(/[\u3400-\u9fff]/.test(source), false,
+    'Host messages are language-neutral; the panel localises its own labels');
 });

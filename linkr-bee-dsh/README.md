@@ -78,10 +78,10 @@ The panel's ⚙ writes these fields; they can also be set by hand in the profile
 | Field | Meaning |
 | --- | --- |
 | `transport` | `ble` (a nearby board over Bluetooth), `lan` (the bridge's WebSocket), or `loopback` (offline simulator, no hardware) |
-| `bleName` | name fragment to dial; empty = the plugin scans once, then dials the one board it finds **by name** (macOS hides real MACs, so address redials do not connect) |
+| `bleName` | name fragment to dial; empty = the plugin scans, then dials the board it finds **by name** (macOS hides real MACs, so address redials do not connect). The name is remembered for five minutes and forgotten after a failed dial, so a renamed or swapped board is found again instead of being dialled forever |
 | `bleAddress` | board MAC, e.g. `EE:C7:42:34:48:CF`; empty = discover by name |
 | `lanHost` / `lanToken` | bridge WebSocket address (`host`, `host:port` or `ws://…`) and its 32-hex token, sent through `LINKR_LAN_TOKEN` |
-| `cliPath` | `bee-cli` binary; empty = auto-detect as described above |
+| `cliPath` | `bee-cli` binary (on Windows a real `.exe`, not the npm `.cmd` shim); empty = auto-detect as described above |
 | `timeoutMs` | per-call budget for one `bee-cli` request (default 30000) |
 | `sendCaptureMs` | how long `linkr_bee_send` keeps the link open to capture the reply (default 1500) |
 

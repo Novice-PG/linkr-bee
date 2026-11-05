@@ -107,7 +107,17 @@ function killStrayChildren() {
  */
 function resolveCli(config) {
   for (const candidate of [config?.cliPath, process.env.LINKR_BEE_CLI]) {
-    if (candidate && existsSync(candidate)) return { command: candidate, args: [] };
+    if (!candidate || !existsSync(candidate)) continue;
+    // Windows ships the npm launcher as a .cmd shim, which Node refuses to
+    // spawn without a shell (and a shell would re-parse the target command).
+    // Say what to point at instead of failing later with a bare EINVAL.
+    if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(candidate)) {
+      throw new Error(
+        'cliPath points at a Windows .cmd shim; point it at bee-cli.exe instead ' +
+        '(the linkr-bee-cli launcher caches one under %LOCALAPPDATA%\\bee-cli), ' +
+        'or leave cliPath empty to use the bundled launcher.');
+    }
+    return { command: candidate, args: [] };
   }
   // A launcher is JavaScript: it forwards its arguments and stdio to the real
   // binary, so the session speaks to the same pipes either way. A package
@@ -153,18 +163,51 @@ function connectionArgs(config) {
  * BLE auto-discovery cannot just dial the scanned board: on macOS CoreBluetooth
  * hides real MACs (scans report a placeholder address) and the redial comes up
  * with no session. Discover the board's name first, then dial by name.
+ *
+ * The name is a hint, not a binding. It is only reused while the connection
+ * settings it was found under are unchanged and it is younger than
+ * DISCOVERY_TTL_MS, so renaming a board, swapping in another one or walking
+ * back into range all recover by scanning again. A failed dial forgets it
+ * immediately (see `ensureSession` and `scheduleWatchReconnect`).
  */
-let discoveredBleName = '';
+let discovered = null; // { name, key, at }
+const DISCOVERY_TTL_MS = 5 * 60_000;
+
+/** The settings a discovered name belongs to; change one and it is stale. */
+function discoveryKey(config) {
+  return [
+    config?.transport || 'ble',
+    config?.bleName || '',
+    config?.bleAddress || '',
+    config?.lanHost || '',
+    config?.lanToken || '',
+  ].join('\u0000');
+}
+
+/** Forget the discovered board: the next dial scans again. */
+function forgetDiscoveredName() {
+  discovered = null;
+}
+
+/** The board name to dial, or '' when discovery has not settled on one. */
+function discoveredBleName() {
+  return discovered === null ? '' : discovered.name;
+}
 
 async function dialArgs(config, signal, sessionStart = null) {
   const args = connectionArgs(config);
-  if (args.length > 0 || config.transport !== 'ble') return args;
-  if (discoveredBleName) return ['--ble-name', discoveredBleName];
+  if (args.length > 0 || (config?.transport || 'ble') !== 'ble') return args;
+  const key = discoveryKey(config);
+  if (discovered !== null && discovered.key === key &&
+      Date.now() - discovered.at < DISCOVERY_TTL_MS) {
+    return ['--ble-name', discovered.name];
+  }
+  discovered = null;
   const run = await runBee(config, ['--scan', '--json'], { signal, sessionStart });
   const device = run.events.find((event) => event.event === 'device' && event.board && event.name);
   if (!device) return []; // No board to name: let the dial report its own error.
-  discoveredBleName = device.name;
-  return ['--ble-name', discoveredBleName];
+  discovered = { name: device.name, key, at: Date.now() };
+  return ['--ble-name', discovered.name];
 }
 
 /**
@@ -268,7 +311,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
       if (!ownerSignal.aborted && ownerSignal === lifecycle.signal) {
         linkState.transport = config?.transport || 'ble';
         linkState.target =
-          discoveredBleName || config?.bleAddress || config?.lanHost || (config?.transport === 'loopback' ? 'loopback' : '');
+          discoveredBleName() || config?.bleAddress || config?.lanHost || (config?.transport === 'loopback' ? 'loopback' : '');
         linkState.connected = code === 0 && !signal.aborted;
         linkState.lastError = code === 0 ? '' : stderr.trim().split('\n').pop() || '';
         linkState.at = Date.now();
@@ -636,7 +679,7 @@ async function runConsoleInput(config, body, signal) {
       );
       requireSuccess(run, 'send');
       const output = consoleOutputOf(run);
-      publishConsole({ type: 'output', text: output || '(已发送，捕获窗口内无回显)' });
+      publishConsole({ type: 'output', text: output || '(sent; no echo within the capture window)' });
       return { ok: true };
     }
     // The console's own command line runs exactly what the exec tool runs:
@@ -646,7 +689,7 @@ async function runConsoleInput(config, body, signal) {
     return { ok: answer.ok, exit: answer.exit };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    publishConsole({ type: 'meta', text: `错误：${message}` });
+    publishConsole({ type: 'meta', text: `error: ${message}` });
     return { ok: false, error: message };
   }
 }
@@ -758,7 +801,7 @@ function makeSession(child, ready, config) {
     failAll(new Error('bee-cli serve exited; dispatched input outcome is unknown. Do not resend automatically.'));
     detach();
     if (wanted && !ownerSignal.aborted) {
-      publishConsole({ type: 'meta', text: '（与开发板的连接已断开，正在重连…）', source: 'monitor' });
+      publishConsole({ type: 'meta', text: '(link to the board lost; reconnecting...)', source: 'monitor' });
       scheduleWatchReconnect(config, ownerSignal);
     }
   });
@@ -916,14 +959,20 @@ async function ensureSession(config, signal) {
         throw new Error(OLD_CLI_HINT);
       }
       linkState.transport = config?.transport || 'ble';
-      linkState.target = discoveredBleName || config?.bleAddress || config?.lanHost ||
+      linkState.target = discoveredBleName() || config?.bleAddress || config?.lanHost ||
         (config?.transport === 'loopback' ? 'loopback' : '');
       linkState.connected = true;
       linkState.lastError = '';
       linkState.at = Date.now();
       session = makeSession(child, ready, config);
       return session;
-    })().finally(() => {
+    })().catch(error => {
+      // A start that never became a session may have dialled a stale name: the
+      // board was renamed, replaced or is out of range. Scan again next time
+      // instead of repeating the same wrong name until the process restarts.
+      forgetDiscoveredName();
+      throw error;
+    }).finally(() => {
       if (sessionStarting === start) sessionStarting = null;
     });
     sessionStarting = start;
@@ -1060,9 +1109,12 @@ function scheduleWatchReconnect(config, ownerSignal = lifecycle.signal) {
   if (watchTimer !== null) return;
   watchAttempts += 1;
   if (watchAttempts > MAX_WATCH_RECONNECTS) {
+    // Give discovery another go: the next keystroke may be aimed at a board
+    // that was renamed or swapped while this one went quiet.
+    forgetDiscoveredName();
     publishConsole({
       type: 'meta',
-      text: '（自动重连已放弃：检查开发板是否在范围内，再次输入会重试）',
+      text: '(auto-reconnect gave up: check the board is in range; typing again will retry)',
       source: 'monitor',
     });
     return;
@@ -1227,7 +1279,7 @@ async function runExec(config, options, signal) {
     if (options.retry !== undefined) fields.retry = Math.max(0, Math.round(options.retry));
     const answer = await active.request('exec', fields, streamToPanel, owned);
     monitorCursor = null;
-    publishConsole({ type: 'meta', text: `(退出码 ${answer.code})`, source });
+    publishConsole({ type: 'meta', text: `(exit code ${answer.code})`, source });
     const results = answer.events.filter(event => event.event === 'result');
     const output = consoleOutputOf(answer);
     const rendered = [results.map(event => JSON.stringify(event)).join('\n'),
@@ -1244,7 +1296,7 @@ async function runExec(config, options, signal) {
   else if (options.idleMs !== undefined) argv.push('--idle', String(Math.max(1, Math.round(options.idleMs / 1000))));
   if (options.retry !== undefined) argv.push('--retry', String(options.retry));
   const run = await runBee(callConfig, argv, { signal: current, onEvent: streamToPanel });
-  publishConsole({ type: 'meta', text: `(退出码 ${run.code})`, source });
+  publishConsole({ type: 'meta', text: `(exit code ${run.code})`, source });
   return { ok: run.code === 0, exit: run.code, output: report(run) };
 }
 
@@ -1957,7 +2009,7 @@ export function apply(ctx, rawConfig) {
         execute: async (args, exec) => {
           const flag = QUERY_FLAGS[args.target];
           if (!flag) throw new Error(`unknown query target: ${args.target}`);
-          publishConsole({ type: 'meta', text: `agent: 读取 ${args.target}`, source: 'agent' });
+          publishConsole({ type: 'meta', text: `agent: read ${args.target}`, source: 'agent' });
           const run = await runBee(config, [...(await baseArgs(taskSignal(exec))), flag], { signal: taskSignal(exec) });
           return report(run);
         },
@@ -2012,7 +2064,7 @@ export function apply(ctx, rawConfig) {
               },
             },
           );
-          if (!consoleOutputOf(run)) publishConsole({ type: 'meta', text: '(已投递，捕获窗口内无回显)' });
+          if (!consoleOutputOf(run)) publishConsole({ type: 'meta', text: '(delivered; no echo within the capture window)' });
           return report(run);
         },
       }),
@@ -2050,9 +2102,9 @@ export function apply(ctx, rawConfig) {
           if (!flag) throw new Error(`unknown set target: ${args.target}`);
           const argv = [...(await baseArgs(taskSignal(exec))), flag];
           if (args.value !== undefined) argv.push(String(args.value));
-          publishConsole({ type: 'meta', text: `agent: 设置 ${args.target}`, source: 'agent' });
+          publishConsole({ type: 'meta', text: `agent: set ${args.target}`, source: 'agent' });
           const run = await runBee(config, argv, { signal: taskSignal(exec) });
-          publishConsole({ type: 'output', text: consoleOutputOf(run) || `(${args.target} 已提交)` });
+          publishConsole({ type: 'output', text: consoleOutputOf(run) || `(${args.target} submitted)` });
           return report(run);
         },
       }),

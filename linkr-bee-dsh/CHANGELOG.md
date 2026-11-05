@@ -2,6 +2,22 @@
 
 ## Unreleased (not published; version stays 1.1.4 until confirmed)
 
+- BLE auto-discovery is a hint, not a binding. The name found by the scan used
+  to be cached for the whole process lifetime, so a renamed board, a swapped
+  board or a board that came back after being out of range kept being dialled
+  by the old name until the plugin restarted. It is now reused only while the
+  connection settings are unchanged and it is younger than five minutes, and
+  any failed dial (a start that never became a session, or reconnect giving
+  up) forgets it so the next attempt scans again. A missing config no longer
+  crashes the dial either (`config?.transport`).
+- Windows `cliPath`: pointing it at the npm `bee-cli.cmd` shim now says why
+  Node cannot spawn it and what to use instead (a real `bee-cli.exe`, or an
+  empty `cliPath` so the bundled launcher runs), rather than failing later
+  with a bare `spawn EINVAL`.
+- Host messages are language-neutral English. The console's meta lines mixed
+  hard-coded Chinese (`已发送`, `退出码`, `agent: 读取 …`) into an otherwise
+  English terminal, including for users running the English UI; the panel's
+  own labels stay localised through its `en`/`zh` dictionaries.
 - Execution safety: cancellation covers connection startup and queued requests.
   An operation whose delivery or result is uncertain is never automatically
   replayed, and a failed send is reported as a failure rather than as delivery.
