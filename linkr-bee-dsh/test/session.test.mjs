@@ -16,6 +16,8 @@ const emit = item => process.stdout.write(JSON.stringify(item)+'\n');
 const args = process.argv.slice(2);
 if (args.includes('--scan')) {
   note({mode:'scan'});
+  if(config.scenario==='scan-fail') {process.stderr.write('bluetooth adapter unavailable\n');process.exit(2);}
+  if(config.scenario==='scan-empty') process.exit(0);
   setTimeout(()=>{emit({event:'device',board:true,name:config.scanName||'Linkr Bee Mock'});},250);
 } else if (args.includes('--serve')) {
   note({mode:'serve',args});
@@ -30,6 +32,12 @@ if (args.includes('--scan')) {
     note({mode:'request',...request});
     if(request.op==='quit')process.exit(0);
     emit({event:'begin',id:request.id});
+    if(config.scenario==='not-connected-once'&&request.op==='exec'&&!fs.existsSync(__dirname+'/nc-used')){
+      fs.writeFileSync(__dirname+'/nc-used','1');
+      emit({event:'error',id:request.id,code:'not_connected',message:'the board is not reachable'});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
     if(config.scenario==='drop-exec'&&request.op==='exec')process.exit(1);
     if(config.scenario==='drop-send'&&request.op==='send')process.exit(1);
     const finish=()=>{
@@ -48,6 +56,13 @@ if (args.includes('--scan')) {
   if(config.scenario==='uart-rejected'){emit({event:'result',what:'uart',ok:false,detail:'UART refused'});process.exit(0);}
   if(config.scenario==='uart-ok'){emit({event:'result',what:'uart',ok:true,detail:'OK uart=115200,8,n,1,none'});process.exit(0);}
   const finish=()=>{note({mode:'finished-one-shot'});emit({event:'result',what:'exec',ok:true});};
+  if(args.includes('--send')){
+    let stdin='';
+    process.stdin.on('data',chunk=>{stdin+=chunk;});
+    process.stdin.on('end',()=>{note({mode:'send-stdin',stdin});finish();});
+    process.stdin.resume();
+    return;
+  }
   if(config.scenario==='slow-query')setTimeout(finish,200);else finish();
 }
 `;
@@ -420,4 +435,99 @@ test('the Host half carries no hard-coded Chinese UI text', async () => {
   const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
   assert.equal(/[\u3400-\u9fff]/.test(source), false,
     'Host messages are language-neutral; the panel localises its own labels');
+});
+
+test('a not_connected exec says nothing was dispatched and the next call rescans', async t => {
+  const f = await fixture(t, 'not-connected-once', {transport:'ble',bleName:'',bleAddress:''});
+  await assert.rejects(
+    f.call('linkr_bee_exec', {cmd:'echo hi'}),
+    /not dispatched.*not reachable/,
+  );
+  // The failed dial marked the session dirty: the next call stops it and scans
+  // again instead of reusing the board name that just failed.
+  const answer = await f.call('linkr_bee_exec', {cmd:'echo hi'});
+  assert.match(answer, /result/);
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'scan').length, 2);
+  assert.equal(calls.filter(c => c.mode === 'serve').length, 2);
+});
+
+test('a line send frames the text with a newline before the capture window', async t => {
+  const f = await fixture(t, 'ok');
+  await f.call('linkr_bee_send', {text:'hello', mode:'line', captureMs:0});
+  const sent = (await f.calls()).find(c => c.mode === 'send-stdin');
+  assert.ok(sent, 'the fake CLI saw stdin');
+  assert.equal(sent.stdin, 'hello\n');
+});
+
+test('a line send does not double the newline the caller already typed', async t => {
+  const f = await fixture(t, 'ok');
+  await f.call('linkr_bee_send', {text:'hello\n', mode:'line', captureMs:0});
+  const sent = (await f.calls()).find(c => c.mode === 'send-stdin');
+  assert.equal(sent.stdin, 'hello\n');
+});
+
+test('an inherited property is not a named key', async t => {
+  const f = await fixture(t, 'ok');
+  await assert.rejects(
+    f.call('linkr_bee_console', {action:'key', key:'constructor'}),
+    /unknown key "constructor"/,
+  );
+});
+
+test('LAN transport without a host says so instead of falling back to BLE', async t => {
+  const f = await fixture(t, 'ok', {transport:'lan', lanHost:''});
+  await assert.rejects(
+    f.call('linkr_bee_query', {target:'state'}),
+    /LAN transport needs lanHost/,
+  );
+});
+
+test('a failed scan is an error, not an empty result', async t => {
+  const f = await fixture(t, 'scan-fail', {transport:'ble', bleName:'', bleAddress:''});
+  const result = await f.route('/scan', {});
+  assert.equal(result.ok, false);
+  assert.match(result.error, /adapter unavailable/);
+});
+
+test('the scan tool does not require a board to already connect to', async t => {
+  const f = await fixture(t, 'scan-empty', {transport:'ble', bleName:'', bleAddress:''});
+  const answer = await f.call('linkr_bee_query', {target:'scan'});
+  assert.equal(answer, 'No Linkr Bee boards found nearby.');
+  assert.equal((await f.calls()).filter(c => c.mode === 'scan').length, 1);
+});
+
+test('linkr_bee_set validates before it dials', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble', bleName:'Mock'});
+  await assert.rejects(f.call('linkr_bee_set', {target:'uart', value:'not-a-format'}),
+    /baud,data,parity,stop,flow/);
+  await assert.rejects(f.call('linkr_bee_set', {target:'rename-ble', value:'x'.repeat(30)}),
+    /1-29 UTF-8 bytes/);
+  await assert.rejects(f.call('linkr_bee_set', {target:'wifi'}),
+    /wifi needs a value/);
+  assert.deepEqual(await f.calls(), []);
+});
+
+test('a spawn that cannot start gives the link back instead of wedging every caller', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'linkr-cmd-'));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const shim = join(dir, 'bee-cli.cmd');
+  await writeFile(shim, '');
+  const f = await fixture(t, 'ok', {cliPath: shim, transport:'loopback'});
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', {value:'win32', configurable:true});
+  try {
+    await assert.rejects(f.call('linkr_bee_exec', {cmd:'x'}), /\.cmd shim/);
+    // A leaked borrow would park this call until its timeout; rejecting with
+    // the same message quickly is what proves the link was released.
+    await assert.rejects(
+      Promise.race([
+        f.call('linkr_bee_exec', {cmd:'x'}),
+        pause(3000).then(() => { throw new Error('the second call was wedged'); }),
+      ]),
+      /\.cmd shim/,
+    );
+  } finally {
+    Object.defineProperty(process, 'platform', real);
+  }
 });

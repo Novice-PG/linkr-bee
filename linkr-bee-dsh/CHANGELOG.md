@@ -14,6 +14,40 @@
   Node cannot spawn it and what to use instead (a real `bee-cli.exe`, or an
   empty `cliPath` so the bundled launcher runs), rather than failing later
   with a bare `spawn EINVAL`.
+- A dial that fails inside the resident session is now visible and recoverable.
+  A request that answers `not_connected` reports that nothing was dispatched
+  (with the reason), marks the session stale, tells an open panel the link is
+  lost, and the next call stops the session and scans again — instead of
+  reusing the same board name until the process restarts. The request budget
+  also follows `timeoutMs`/the per-call override instead of a fixed 60 s.
+- A run that cannot even start (a rejected `.cmd` `cliPath`, a bad argument)
+  now returns the link it borrowed. Previously that counter stayed raised and
+  every later call waited for a link nobody held.
+- `linkr_bee_send` and the console line input frame their text with a newline.
+  `--send line` reads until newline, so the text used to sit in stdin until the
+  capture window closed: the window captured the answer to a command that had
+  not been sent yet. Replies that the CLI prints as `text` (rather than `data`)
+  now reach the shared console too.
+- Discovery/transport errors are explicit: a scan that finds nothing says so
+  (and `--serve`'s own stderr is surfaced instead of "exited before ready"),
+  `POST /linkr-bee/scan` reports a failed scan instead of an empty list, the
+  scan tool no longer needs an existing connection first, and `transport: lan`
+  without `lanHost` is refused rather than silently dialling BLE.
+- Argument validation: dry runs pass the same normalised `cmd`/`idle`/`retry`
+  values as real runs; named console keys only resolve own properties (so
+  `constructor` is not a key); `linkr_bee_set` validates the UART spec, requires
+  a value for wifi/webdav/uart/rename-ble and enforces 1-29 UTF-8 bytes for a
+  BLE name before dialling.
+- A saved config now applies to the running plugin: the new values are used by
+  `GET /config` and the next dial, and an open panel follows a connection change
+  without a reload. Captured output is bounded (1 MiB per run/request) so a
+  runaway command cannot grow the plugin's heap; a console stream whose peer
+  stopped reading is dropped (the panel reconnects from its cursor) instead of
+  buffered without bound, and the panel's control backlog is only replayed
+  while it is fresh (60 s), not on every page reload.
+- The panel recognises the Host's English lost-link notices (`link to the board
+  lost` / `auto-reconnect gave up`) as a link state, not just the older Chinese
+  ones, so the banner still replaces the raw sentence.
 - Host messages are language-neutral English. The console's meta lines mixed
   hard-coded Chinese (`已发送`, `退出码`, `agent: 读取 …`) into an otherwise
   English terminal, including for users running the English UI; the panel's

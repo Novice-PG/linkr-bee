@@ -126,7 +126,9 @@ function resolveCli(config) {
   for (const launcher of launcherCandidates()) {
     if (launcher !== null) return { command: process.execPath, args: [launcher] };
   }
-  return { command: 'bee-cli', args: [] };
+  // libuv does not resolve `.cmd` without a shell, so name the executable
+  // explicitly on Windows; the bundled launcher above is the normal path.
+  return { command: process.platform === 'win32' ? 'bee-cli.exe' : 'bee-cli', args: [] };
 }
 
 /** The installed `linkr-bee-cli` launcher, or null when this profile has none. */
@@ -152,7 +154,13 @@ function connectionArgs(config) {
   const transport = config?.transport || 'ble';
   if (transport === 'loopback') return ['--bridge', '-'];
   if (transport === 'lan') {
-    return config?.lanHost ? ['--lan-host', config.lanHost] : [];
+    // Falling through to BLE (the CLI's default when no transport flag is
+    // given) would silently drive a nearby board over Bluetooth for a user who
+    // asked for the network.
+    if (!config?.lanHost) {
+      throw new Error('LAN transport needs lanHost; set it in the plugin config (or switch transport to ble/loopback).');
+    }
+    return ['--lan-host', config.lanHost];
   }
   if (config?.bleAddress) return ['--ble-address', config.bleAddress];
   if (config?.bleName) return ['--ble-name', config.bleName];
@@ -205,10 +213,18 @@ async function dialArgs(config, signal, sessionStart = null) {
   discovered = null;
   const run = await runBee(config, ['--scan', '--json'], { signal, sessionStart });
   const device = run.events.find((event) => event.event === 'device' && event.board && event.name);
-  if (!device) return []; // No board to name: let the dial report its own error.
+  if (!device) {
+    // A dial with no name would make `--serve` refuse to start with a stderr
+    // line nobody reads, and a one-shot would silently fall back to the CLI's
+    // own "any board" dial. Say what is actually missing instead.
+    throw new Error('No Linkr Bee board found: power it on and keep it in range, or set bleName/bleAddress in the plugin config.');
+  }
   discovered = { name: device.name, key, at: Date.now() };
   return ['--ble-name', discovered.name];
 }
+
+/** Per-run/per-request memory ceiling for captured output (1 MiB). */
+const MAX_CAPTURE_BYTES = 1024 * 1024;
 
 /**
  * Run one bee-cli request. Resolves with the parsed JSON Lines events plus the
@@ -243,29 +259,49 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     stopMonitor();
     stopSession();
   }
+  // Giving the link back is the one thing every exit path owes: a rejected
+  // spawn or an abort while still in the executor would otherwise leave the
+  // counter raised, and every later call would wait for a link nobody holds.
+  const releaseLink = () => {
+    streamBorrows -= 1;
+    // The one-shot had the link; the panel gets its stream back once the
+    // last borrowing run is done (a redial here would steal it back).
+    if (resumeStream && streamBorrows <= 0 && !ownerSignal.aborted) {
+      setTimeout(() => { if (!ownerSignal.aborted) resumeStreaming(config, ownerSignal); }, 300);
+    }
+  };
   return new Promise((resolve, reject) => {
-    const cli = resolveCli(config);
-    const env = { ...process.env };
-    if (config?.lanToken) env.LINKR_LAN_TOKEN = config.lanToken;
-    const child = trackChild(spawn(cli.command, [...cli.args, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env }));
+    let child;
+    try {
+      const cli = resolveCli(config);
+      const env = { ...process.env };
+      if (config?.lanToken) env.LINKR_LAN_TOKEN = config.lanToken;
+      // windowsHide: a one-shot run must not flash a console window under the
+      // desktop app once per command.
+      child = trackChild(spawn(cli.command, [...cli.args, ...args], {
+        stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true,
+      }));
+    } catch (error) {
+      releaseLink();
+      reject(error);
+      return;
+    }
 
     let stdout = '';
     let stderr = '';
     let pending = '';
     let settled = false;
     let captureTimer;
+    // Parsed once, as lines arrive: the answer is this list, not a copy of the
+    // whole stream, so a runaway command cannot grow the heap without bound.
+    const events = [];
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(captureTimer);
       signal.removeEventListener('abort', abort);
-      streamBorrows -= 1;
-      // The one-shot had the link; the panel gets its stream back once the
-      // last borrowing run is done (a redial here would steal it back).
-      if (resumeStream && streamBorrows <= 0 && !ownerSignal.aborted) {
-        setTimeout(() => { if (!ownerSignal.aborted) resumeStreaming(config, ownerSignal); }, 300);
-      }
+      releaseLink();
       fn(value);
     };
 
@@ -285,8 +321,8 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
       if (settled || ownerSignal.aborted) return;
-      stdout += chunk;
-      if (onEvent === undefined) return;
+      // Bounded diagnostic tail only; the events are collected separately.
+      stdout = (stdout + chunk).slice(-MAX_CAPTURE_BYTES);
       // Hand every complete JSON line over as it arrives, so a long command's
       // console bytes reach the panel while it runs instead of after it exits.
       pending += chunk;
@@ -297,13 +333,19 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
         if (!line) continue;
         try {
           const event = JSON.parse(line);
-          if (event && typeof event === 'object') onEvent(event);
+          if (event && typeof event === 'object') {
+            events.push(event);
+            onEvent?.(event);
+          }
         } catch {
           /* a non-JSON progress line stays in stdout only */
         }
       }
+      if (pending.length > MAX_CAPTURE_BYTES) pending = pending.slice(-MAX_CAPTURE_BYTES);
     });
-    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-MAX_CAPTURE_BYTES);
+    });
     child.on('error', (error) => {
       finish(reject, error.code === 'ENOENT' ? new Error(BUILD_HINT) : error);
     });
@@ -316,34 +358,30 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
         linkState.lastError = code === 0 ? '' : stderr.trim().split('\n').pop() || '';
         linkState.at = Date.now();
       }
-      const events = [];
-      for (const line of stdout.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const event = JSON.parse(trimmed);
-          if (event && typeof event === 'object') events.push(event);
-        } catch {
-          // Non-JSON chatter (e.g. --json off) stays in stdout only.
-        }
-      }
       finish(resolve, { code, signalName, events, stdout, stderr });
     });
 
-    if (stdinText !== undefined) {
-      signal.throwIfAborted();
-      child.stdin.write(stdinText);
-      if (keepStdinOpenMs > 0) {
-        captureTimer = setTimeout(() => {
-          try {
-            child.stdin.end();
-          } catch {}
-        }, keepStdinOpenMs);
+    // The executor runs synchronously to here, so a throw would reject the
+    // promise without `finish` ever releasing the link.
+    try {
+      if (stdinText !== undefined) {
+        signal.throwIfAborted();
+        child.stdin.write(stdinText);
+        if (keepStdinOpenMs > 0) {
+          captureTimer = setTimeout(() => {
+            try {
+              child.stdin.end();
+            } catch {}
+          }, keepStdinOpenMs);
+        } else {
+          child.stdin.end();
+        }
       } else {
         child.stdin.end();
       }
-    } else {
-      child.stdin.end();
+    } catch (error) {
+      child.kill('SIGKILL');
+      finish(reject, signal.aborted ? aborted(signal, 'not-sent') : error);
     }
   });
 }
@@ -405,6 +443,8 @@ const TEXT_OUTPUT = {
 /* ---------------- shared console: one board, two callers ---------------- */
 
 const CONSOLE_LIMIT = 400;
+/** Drop a stream whose peer stopped reading rather than buffer without bound. */
+const MAX_SSE_BACKLOG = 4 * 1024 * 1024;
 const consoleState = { epoch: randomUUID(), seq: 0, events: [], subscribers: new Set() };
 
 /**
@@ -483,6 +523,14 @@ function publishConsole(event) {
   }
   const frame = `data: ${JSON.stringify(record)}\n\n`;
   for (const response of consoleState.subscribers) {
+    // A backgrounded tab stops draining its socket; unbounded buffering there
+    // is how a console stream turns into an out-of-memory. Drop it instead —
+    // the panel reconnects and replays from its cursor.
+    if (response.writableLength > MAX_SSE_BACKLOG) {
+      consoleState.subscribers.delete(response);
+      try { response.end(); } catch { /* already gone */ }
+      continue;
+    }
     try {
       response.write(frame);
     } catch {
@@ -528,6 +576,8 @@ function openConsoleStream(req, res) {
  * it would be drawn into the terminal as if the board had said it.
  */
 const PANEL_LIMIT = 16;
+/** A control action older than this is history, not a message for a new panel. */
+const PANEL_BACKLOG_MS = 60_000;
 const PANEL_ACTIONS = ['open', 'focus', 'clear'];
 const panelState = { events: [], subscribers: new Set(), last: null };
 
@@ -578,8 +628,13 @@ function openPanelStream(req, res) {
   });
   res.write(': linkr-bee panel stream\n\n');
   // The backlog is small and control-shaped, so a panel that mounts after the
-  // agent said "open" still gets the message.
-  for (const event of panelState.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  // agent said "open" still gets the message. It is also short-lived: an action
+  // from hours ago must not re-open the console tab on every page reload.
+  const cutoff = Date.now() - PANEL_BACKLOG_MS;
+  for (const event of panelState.events) {
+    if (typeof event.at === 'number' && event.at < cutoff) continue;
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
   panelState.subscribers.add(res);
   const ping = setInterval(() => {
     try {
@@ -675,7 +730,13 @@ async function runConsoleInput(config, body, signal) {
       const run = await runBee(
         config,
         [...(await dialArgs(config, signal)), '--json', '--send', 'line'],
-        { stdinText: text, keepStdinOpenMs: config.sendCaptureMs, signal },
+        {
+          // The CLI frames a line on a newline; without one the text waits in
+          // stdin until the capture window ends.
+          stdinText: `${text.replace(/\r?\n$/, '')}\n`,
+          keepStdinOpenMs: config.sendCaptureMs,
+          signal,
+        },
       );
       requireSuccess(run, 'send');
       const output = consoleOutputOf(run);
@@ -746,6 +807,25 @@ function makeSession(child, ready, config) {
   let closed = false;
   let queue = Promise.resolve();
   let requestCount = 0;
+  // Set when a request proved the link is gone. The process keeps running
+  // (serve dials lazily), but the next caller must re-dial — and re-scan,
+  // because the remembered board name may be the stale part.
+  let dirty = false;
+
+  const markDirty = (message) => {
+    const first = !dirty;
+    dirty = true;
+    linkState.connected = false;
+    if (typeof message === 'string' && message !== '') linkState.lastError = message;
+    linkState.at = Date.now();
+    forgetDiscoveredName();
+    // Unlike an exited process, a failed dial leaves the session running, so
+    // nothing else tells the open panel the link is down. Say it once; the
+    // next keystroke or command reconnects and rescans.
+    if (first && watchWanted && !ownerSignal.aborted) {
+      publishConsole({ type: 'meta', text: '(link to the board lost)', source: 'monitor' });
+    }
+  };
 
   const failAll = (error) => {
     for (const entry of [...pending.values()]) entry.finish(error);
@@ -783,11 +863,24 @@ function makeSession(child, ready, config) {
       }
       const entry = event.id !== undefined ? pending.get(event.id) : pending.values().next().value;
       if (entry === undefined || event.event === 'begin') continue;
+      // The frame's own error is the first place a dial failure shows up: the
+      // process stays alive, but the remembered board name may be exactly what
+      // no longer connects. Remember that so the next caller re-dials.
+      if (event.event === 'error' && event.code === 'not_connected') markDirty(event.message);
       if (event.event === 'end') {
         entry.finish(null, { code: event.code, events: entry.events });
         continue;
       }
-      entry.events.push(event);
+      // Keep the stored answer bounded. The panel still receives every chunk
+      // through onEvent; only the copy that would be rendered back to the
+      // caller is capped.
+      if (event.event === 'output') {
+        const text = event.data ?? event.text ?? '';
+        entry.bytes = (entry.bytes || 0) + String(text).length;
+        if (entry.bytes <= MAX_CAPTURE_BYTES) entry.events.push(event);
+      } else {
+        entry.events.push(event);
+      }
       try { entry.onEvent?.(event); } catch { /* a subscriber cannot end the session */ }
     }
   });
@@ -806,7 +899,7 @@ function makeSession(child, ready, config) {
     }
   });
 
-  const request = (op, fields = {}, onEvent, signal) => {
+  const request = (op, fields = {}, onEvent, signal, timeoutMs = SESSION_TIMEOUT_MS) => {
     signal = operationSignal(signal);
     requestCount += 1; // includes queued calls, not just the one on the wire
     let settled = false;
@@ -842,7 +935,7 @@ function makeSession(child, ready, config) {
           const error = new Error(`bee-cli serve did not answer "${op}" in time; delivery or completion is unknown. Do not resend automatically.`);
           finish(error);
           retire(error);
-        }, SESSION_TIMEOUT_MS);
+        }, Math.max(1000, timeoutMs));
         try {
           // Crossing this boundary makes delivery uncertain even if the write
           // callback later fails: no caller may automatically replay it.
@@ -868,12 +961,13 @@ function makeSession(child, ready, config) {
 
   const ops = Array.isArray(ready?.ops) ? ready.ops : [];
   return {
-    child, ready, request,
+    child, ready, request, markDirty,
     supports: { watch: ops.includes('watch'), resize: ops.includes('resize'), monitor: ops.includes('monitor') },
     watching: false,
     watchBorrowers: 0,
     get busy() { return requestCount; },
     get closed() { return closed; },
+    get dirty() { return dirty; },
     stop() {
       if (closed) return;
       closed = true;
@@ -897,8 +991,12 @@ async function ensureSession(config, signal) {
     signal.throwIfAborted();
   }
   if (session !== null) {
-    if (!session.closed && session.child.exitCode === null && session.child.signalCode === null) return session;
-    stopSession();
+    // A session that answered `not_connected` still runs, but its dial is
+    // stale: stop it so the start below scans again (a renamed board is
+    // exactly the case the remembered name cannot recover from).
+    if (session.dirty) stopSession();
+    else if (!session.closed && session.child.exitCode === null && session.child.signalCode === null) return session;
+    else stopSession();
   }
   if (sessionStarting === null) {
     const start = { controller: new AbortController(), promise: null };
@@ -910,13 +1008,20 @@ async function ensureSession(config, signal) {
       const env = { ...process.env };
       if (config?.lanToken) env.LINKR_LAN_TOKEN = config.lanToken;
       const child = trackChild(spawn(cli.command, [...cli.args, ...dial, '--json', '--serve'],
-        { stdio: ['pipe', 'pipe', 'pipe'], env }));
+        { stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true }));
       const ready = await new Promise((resolve, reject) => {
         let settled = false;
         let buffer = '';
+        let readyStderr = '';
+        const onStderr = chunk => {
+          readyStderr += chunk;
+          // Keep only the tail: a dial failure is printed on the last line.
+          if (readyStderr.length > 8192) readyStderr = readyStderr.slice(-4096);
+        };
         const cleanup = () => {
           clearTimeout(timer);
           child.stdout.removeListener('data', onData);
+          child.stderr.removeListener('data', onStderr);
           child.removeListener('error', onError);
           child.removeListener('exit', onExit);
           startSignal.removeEventListener('abort', onAbort);
@@ -936,7 +1041,9 @@ async function ensureSession(config, signal) {
           catch (error) { finish(new Error(`bee-cli serve sent an unreadable ready line: ${error.message}`)); }
         };
         const onError = error => finish(error.code === 'ENOENT' ? new Error(BUILD_HINT) : error);
-        const onExit = () => finish(new Error('bee-cli serve exited before it was ready'));
+        const onExit = () => finish(new Error(
+          `bee-cli serve exited before it was ready${readyStderr.trim() ? `: ${readyStderr.trim().split('\n').pop()}` : ''}`,
+        ));
         const onAbort = () => finish(aborted(startSignal));
         const timer = setTimeout(() => finish(new Error('bee-cli serve did not report ready within 20 s (is the board in range?)')), 20000);
         // Guard startup pipe failures too: cancellation or a failed exec may
@@ -944,6 +1051,8 @@ async function ensureSession(config, signal) {
         child.stdin.on('error', () => {});
         child.stdout.setEncoding('utf8');
         child.stdout.on('data', onData);
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', onStderr);
         child.on('error', onError);
         child.on('exit', onExit);
         startSignal.addEventListener('abort', onAbort, { once: true });
@@ -1258,8 +1367,11 @@ async function runExec(config, options, signal) {
   const callConfig = options.timeoutMs !== undefined ? { ...config, timeoutMs: options.timeoutMs } : config;
   if (options.announce !== false) publishConsole({ type: 'cmd', text: cmd, source });
   const streamToPanel = event => {
-    if (event.event === 'output' && typeof event.data === 'string') {
-      publishConsole({ type: 'stream', text: event.data, source });
+    if (event.event === 'output') {
+      const text = event.data ?? event.text;
+      if (typeof text === 'string' && text !== '') {
+        publishConsole({ type: 'stream', text, source });
+      }
     }
   };
   const result = await withSessionLease(current, async owned => {
@@ -1277,7 +1389,8 @@ async function runExec(config, options, signal) {
     if (options.idleSec !== undefined) fields.idle_ms = Math.max(1, Math.round(options.idleSec * 1000));
     else if (options.idleMs !== undefined) fields.idle_ms = Math.max(1, Math.round(options.idleMs));
     if (options.retry !== undefined) fields.retry = Math.max(0, Math.round(options.retry));
-    const answer = await active.request('exec', fields, streamToPanel, owned);
+    const answer = await active.request('exec', fields, streamToPanel, owned,
+      Math.max(SESSION_TIMEOUT_MS, (callConfig.timeoutMs || 30000) + 15000));
     monitorCursor = null;
     publishConsole({ type: 'meta', text: `(exit code ${answer.code})`, source });
     const results = answer.events.filter(event => event.event === 'result');
@@ -1285,6 +1398,17 @@ async function runExec(config, options, signal) {
     const rendered = [results.map(event => JSON.stringify(event)).join('\n'),
       output ? `--- target output ---\n${output}` : ''].filter(Boolean).join('\n');
     if (answer.code !== 0 && results.length === 0) {
+      const failure = answer.events.find(event => event.event === 'error');
+      if (failure) {
+        const detail = typeof failure.message === 'string' && failure.message ? failure.message : 'no reason given';
+        // `not_connected`/`bad_request` are refused before anything reaches
+        // the board, so retrying is safe and the caller should be told so.
+        const notSent = failure.still_running === false ||
+          failure.code === 'not_connected' || failure.code === 'bad_request';
+        throw new Error(notSent
+          ? `bee-cli exec was not dispatched (${failure.code}): ${detail}`
+          : `bee-cli exec failed (${failure.code}): ${detail}`);
+      }
       throw new Error(`bee-cli exec failed (exit ${answer.code}); completion is unknown. Do not resend automatically.`);
     }
     return { ok: answer.code === 0, exit: answer.code, output: rendered || '(no output)' };
@@ -1414,11 +1538,27 @@ async function saveConfig(ctx, config, body, signal) {
   if (issues.length > 0) return { ok: false, error: issues.map((issue) => issue.message).join('; ') };
   const entry = ctx.fiber?.entry;
   const editor = ctx.get?.('configEditor');
+  // Whether the write lands in the profile or only in memory, the running
+  // plugin must stop using the settings it was dialling with: otherwise
+  // GET /config keeps reporting the old values and an open session keeps the
+  // old board/transport until the shell reloads the plugin.
+  const changed = ['transport', 'bleName', 'bleAddress', 'lanHost', 'lanToken']
+    .some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
+  const applyLocally = () => {
+    Object.assign(config, next);
+    if (changed) {
+      forgetDiscoveredName();
+      stopSession();
+      // An open panel should follow the new settings without a reload.
+      if (watchWanted) resumeStreaming(config, lifecycle.signal);
+    }
+  };
   if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
     await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));
+    applyLocally();
     return { ok: true, applied: 'profile', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
   }
-  Object.assign(config, next);
+  applyLocally();
   return { ok: true, applied: 'memory', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
 }
 
@@ -1770,6 +1910,15 @@ export function apply(ctx, rawConfig) {
           if (req.method === 'POST' && path === '/scan') {
             try {
               const run = await runBee(config, ['--scan', '--json'], { signal: instanceSignal });
+              const failure = run.events.find((event) => event.event === 'error');
+              if (run.code !== 0 || failure) {
+                // "No boards nearby" is an empty list; a failed scan is not.
+                sendJson(res, 400, {
+                  ok: false,
+                  error: failure?.message || run.stderr.trim() || `scan failed (exit ${run.code})`,
+                });
+                return;
+              }
               const boards = run.events
                 .filter((event) => event.event === 'device' && event.board && event.name)
                 .map((event) => ({ name: String(event.name), rssi: Number(event.rssi) || 0 }));
@@ -1822,13 +1971,19 @@ export function apply(ctx, rawConfig) {
         output: TEXT_OUTPUT,
         isConcurrencySafe: () => false,
         execute: async (args, exec) => {
+          if (typeof args.cmd !== 'string' || args.cmd.trim() === '') {
+            throw new Error('cmd must be a non-empty string');
+          }
+          const cmd = args.cmd;
+          const idleSec = args.idleSec === undefined ? undefined : Math.max(0, Number(args.idleSec) || 0);
+          const retry = args.retry === undefined ? undefined : Math.max(0, Math.round(Number(args.retry) || 0));
           if (args.dryRun) {
             // A dry run is a question to bee-cli, not a command on the target:
             // it prints the bytes that would have gone out, and dials nothing.
-            publishConsole({ type: 'cmd', text: args.cmd, source: 'agent' });
-            const argv = [...(await baseArgs(taskSignal(exec))), '--exec', args.cmd, '--dry-run'];
-            if (args.idleSec !== undefined) argv.push('--idle', String(args.idleSec));
-            if (args.retry !== undefined) argv.push('--retry', String(args.retry));
+            publishConsole({ type: 'cmd', text: cmd, source: 'agent' });
+            const argv = [...(await baseArgs(taskSignal(exec))), '--exec', cmd, '--dry-run'];
+            if (idleSec !== undefined) argv.push('--idle', String(idleSec));
+            if (retry !== undefined) argv.push('--retry', String(retry));
             const callConfig =
               args.timeoutMs !== undefined ? { ...config, timeoutMs: args.timeoutMs } : config;
             return report(await runBee(callConfig, argv, { signal: taskSignal(exec) }));
@@ -1838,10 +1993,10 @@ export function apply(ctx, rawConfig) {
           const answer = await runExec(
             config,
             {
-              cmd: args.cmd,
+              cmd,
               timeoutMs: args.timeoutMs,
-              idleSec: args.idleSec,
-              retry: args.retry,
+              idleSec,
+              retry,
               source: 'agent',
             },
             taskSignal(exec),
@@ -1930,7 +2085,9 @@ export function apply(ctx, rawConfig) {
           }
           if (action === 'type' || action === 'key') {
             const data =
-              action === 'type' ? (typeof args.text === 'string' ? args.text : '') : NAMED_KEYS[args.key];
+              action === 'type'
+                ? (typeof args.text === 'string' ? args.text : '')
+                : (Object.hasOwn(NAMED_KEYS, args.key) ? NAMED_KEYS[args.key] : undefined);
             if (action === 'type' && data === '') throw new Error('action "type" needs text');
             if (action === 'key' && data === undefined) {
               throw new Error(
@@ -2010,6 +2167,24 @@ export function apply(ctx, rawConfig) {
           const flag = QUERY_FLAGS[args.target];
           if (!flag) throw new Error(`unknown query target: ${args.target}`);
           publishConsole({ type: 'meta', text: `agent: read ${args.target}`, source: 'agent' });
+          if (args.target === 'scan') {
+            // No link is needed to scan, and asking dialArgs for one first would
+            // fail with "no board found" precisely when the nearest board is
+            // what the caller wanted to discover.
+            const run = await runBee(config, ['--scan', '--json'], { signal: taskSignal(exec) });
+            const failure = run.events.find((event) => event.event === 'error');
+            if (run.code !== 0 || failure) {
+              throw new Error(failure?.message || run.stderr.trim() || `scan failed (exit ${run.code})`);
+            }
+            const boards = run.events.filter((event) => event.event === 'device' && event.board && event.name);
+            if (boards.length === 0) return 'No Linkr Bee boards found nearby.';
+            return boards
+              .map((board) => {
+                const rssi = Number(board.rssi);
+                return `${board.name}${board.rssi !== undefined && Number.isFinite(rssi) ? ` (RSSI ${rssi})` : ''}`;
+              })
+              .join('\n');
+          }
           const run = await runBee(config, [...(await baseArgs(taskSignal(exec))), flag], { signal: taskSignal(exec) });
           return report(run);
         },
@@ -2050,16 +2225,27 @@ export function apply(ctx, rawConfig) {
               ? Math.max(0, Math.min(60000, args.captureMs))
               : config.sendCaptureMs ?? 1500;
           publishConsole({ type: 'user', text: args.text, source: 'agent' });
+          const framing = args.mode === 'raw' ? 'raw' : 'line';
+          // `--send line` frames on a newline (`read_until(b'\n')`), so the
+          // bytes only leave the CLI as this line ends. Without it the text sat
+          // in stdin until the capture window closed — the window captured the
+          // reply to a command that had not been sent yet.
+          const stdinText = framing === 'line'
+            ? String(args.text).replace(/\r?\n$/, '') + '\n'
+            : String(args.text);
           const run = await runBee(
             config,
-            [...(await baseArgs(taskSignal(exec))), '--send', args.mode === 'raw' ? 'raw' : 'line'],
+            [...(await baseArgs(taskSignal(exec))), '--send', framing],
             {
-              stdinText: args.text,
+              stdinText,
               keepStdinOpenMs: captureMs,
               signal: taskSignal(exec),
               onEvent: (event) => {
-                if (event.event === 'output' && typeof event.data === 'string') {
-                  publishConsole({ type: 'stream', text: event.data, source: 'agent' });
+                if (event.event === 'output') {
+                  const text = event.data ?? event.text;
+                  if (typeof text === 'string' && text !== '') {
+                    publishConsole({ type: 'stream', text, source: 'agent' });
+                  }
                 }
               },
             },
@@ -2100,8 +2286,24 @@ export function apply(ctx, rawConfig) {
         execute: async (args, exec) => {
           const flag = SET_FLAGS[args.target];
           if (!flag) throw new Error(`unknown set target: ${args.target}`);
+          const needsValue = args.target === 'uart' || args.target === 'wifi' ||
+            args.target === 'webdav' || args.target === 'rename-ble';
+          let value = typeof args.value === 'string' ? args.value : '';
+          if (needsValue && value === '') throw new Error(`${args.target} needs a value`);
+          if (args.target === 'uart') {
+            // Same normalisation the panel's UART control uses, so the tool
+            // cannot hand the CLI a shape it will only reject later.
+            const fields = parseUartSpec(value);
+            value = `${fields.baud},${fields.dataBits},${fields.parity},${fields.stopBits},${fields.flow}`;
+          }
+          if (args.target === 'rename-ble') {
+            const bytes = Buffer.byteLength(value, 'utf8');
+            if (bytes < 1 || bytes > 29) {
+              throw new Error('rename-ble needs a name of 1-29 UTF-8 bytes');
+            }
+          }
           const argv = [...(await baseArgs(taskSignal(exec))), flag];
-          if (args.value !== undefined) argv.push(String(args.value));
+          if (needsValue) argv.push(value);
           publishConsole({ type: 'meta', text: `agent: set ${args.target}`, source: 'agent' });
           const run = await runBee(config, argv, { signal: taskSignal(exec) });
           publishConsole({ type: 'output', text: consoleOutputOf(run) || `(${args.target} submitted)` });
