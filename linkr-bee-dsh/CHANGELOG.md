@@ -23,11 +23,8 @@
 - A run that cannot even start (a rejected `.cmd` `cliPath`, a bad argument)
   now returns the link it borrowed. Previously that counter stayed raised and
   every later call waited for a link nobody held.
-- `linkr_bee_send` and the console line input frame their text with a newline.
-  `--send line` reads until newline, so the text used to sit in stdin until the
-  capture window closed: the window captured the answer to a command that had
-  not been sent yet. Replies that the CLI prints as `text` (rather than `data`)
-  now reach the shared console too.
+- Replies that the CLI prints as `text` (rather than `data`) now reach the
+  shared console too.
 - Discovery/transport errors are explicit: a scan that finds nothing says so
   (and `--serve`'s own stderr is surfaced instead of "exited before ready"),
   `POST /linkr-bee/scan` reports a failed scan instead of an empty list, the
@@ -40,11 +37,13 @@
   BLE name before dialling.
 - A saved config now applies to the running plugin: the new values are used by
   `GET /config` and the next dial, and an open panel follows a connection change
-  without a reload. Captured output is bounded (1 MiB per run/request) so a
-  runaway command cannot grow the plugin's heap; a console stream whose peer
-  stopped reading is dropped (the panel reconnects from its cursor) instead of
-  buffered without bound, and the panel's control backlog is only replayed
-  while it is fresh (60 s), not on every page reload.
+  without a reload. A connection change is refused while a command is active or
+  queued, so it cannot redirect work accepted for the old board. Captured output
+  is bounded (1 MiB per run/request) so a runaway command cannot grow the
+  plugin's heap; a console stream whose peer stopped reading is dropped (the
+  panel reconnects from its cursor) instead of buffered without bound, and the
+  panel's control backlog is only replayed while it is fresh (60 s), not on
+  every page reload.
 - The panel recognises the Host's English lost-link notices (`link to the board
   lost` / `auto-reconnect gave up`) as a link state, not just the older Chinese
   ones, so the banner still replaces the raw sentence.
@@ -52,6 +51,14 @@
   hard-coded Chinese (`已发送`, `退出码`, `agent: 读取 …`) into an otherwise
   English terminal, including for users running the English UI; the panel's
   own labels stay localised through its `en`/`zh` dictionaries.
+- Connection changes retire the old process before dialing the new target;
+  active and queued work must finish before an in-memory target change.
+- Reading/Raw views keep both histories locally, restore snapshots once, and
+  publish idle reading flushes in stream order. Only CLI-registered exact
+  echoes and markers are filtered; legacy CLI output passes through unchanged.
+- CLI UART reads retain all five confirmed fields. Exec guards honour longer
+  per-attempt budgets, and line sends start their capture window after framing
+  the input. Both CLI output field spellings reach the shared console.
 - Execution safety: cancellation covers connection startup and queued requests.
   An operation whose delivery or result is uncertain is never automatically
   replayed, and a failed send is reported as a failure rather than as delivery.
@@ -71,6 +78,33 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- Clear erases the active screen, prompt and scrollback through xterm's write
+  queue, preserving the target's negotiated modes and current buffer. Queued
+  old output cannot repaint the cleared screen, and incomplete control strings
+  cannot swallow the clear. Explicit Host resets still restore default modes,
+  ordered after old output. Console/panel clears share one ordered cutoff.
+- Reading filter hardened on a real board: at narrow terminal widths the
+  exec wrapper echo is wrapped by readline (`LINKR_ \rRC_...`), which the
+  line-based matcher missed. Echo matching now normalises ANSI, CR and the
+  spaces around a wrap before recognising the registered wrapper/marker, so
+  a `fastfetch` run on the live BLE board hides the plumbing and keeps the
+  colour logo and OS output.
+- View switch contrast: the unselected Reading/Raw button used the same
+  secondary label colour as normal text, so it read as almost black. It now
+  uses the tertiary label token at 75% opacity, while the selected one keeps
+  the primary colour, a layer-2 background and a 600 weight — measured in both
+  light and dark themes.
+- Reading / Raw console views: matching the Web terminal, the panel now has
+  a Reading view (default) that hides agent probe/setup echoes and replaces
+  `LINKR_RC_<nonce>:<code>` completion markers with `[Agent] exit=N`, while
+  keeping all device output; Raw shows every byte. The Host keeps two separate
+  64 KiB histories, streams both texts, and the view switch replays the chosen
+  history without sending serial input. The filter is best-effort and fail-open.
+- UART card compacted: the settings card was ~241px tall (a 2-column grid of
+  tall controls plus a separate button row). The five fields now sit in one
+  row, with the Read/Apply buttons and the current spec sharing the title row,
+  smaller labels and tighter spacing. Measured 90px tall, with every control
+  still at the 36px touch-target floor and no text overflow.
 - UART panel alignment: the five UART selects inherited `.lb-mode`'s
   `flex: 0 0 84px`, which stretched them to 84px (much taller than the other
   settings controls). They now use a 2-column grid with the same 36px height,

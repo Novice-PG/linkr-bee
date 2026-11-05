@@ -270,6 +270,13 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
       setTimeout(() => { if (!ownerSignal.aborted) resumeStreaming(config, ownerSignal); }, 300);
     }
   };
+  // A session that is still retiring holds the radio until its own process
+  // exits; spawning now would race it for the board.
+  try { await waitWithSignal(sessionRetiring, signal); signal.throwIfAborted(); }
+  catch (error) {
+    releaseLink();
+    throw error;
+  }
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -305,7 +312,10 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
       fn(value);
     };
 
-    const timeoutMs = Math.max(5000, (config?.timeoutMs || 30000) + 15000);
+    const retryAt = args.indexOf('--retry');
+    const attempts = retryAt < 0 ? 1 : 1 + Math.max(0, Number(args[retryAt + 1]) || 0);
+    const timeoutMs = Math.min(2147483647, Math.max(5000,
+      ((config?.timeoutMs || 30000) + (args.includes('--exec') ? 3000 : 0)) * attempts + 15000));
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish(reject, new Error(`bee-cli timed out after ${timeoutMs} ms`));
@@ -353,7 +363,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
       if (!ownerSignal.aborted && ownerSignal === lifecycle.signal) {
         linkState.transport = config?.transport || 'ble';
         linkState.target =
-          discoveredBleName() || config?.bleAddress || config?.lanHost || (config?.transport === 'loopback' ? 'loopback' : '');
+          discoveredBleName() || config?.bleAddress || config?.bleName || config?.lanHost || (config?.transport === 'loopback' ? 'loopback' : '');
         linkState.connected = code === 0 && !signal.aborted;
         linkState.lastError = code === 0 ? '' : stderr.trim().split('\n').pop() || '';
         linkState.at = Date.now();
@@ -366,7 +376,12 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     try {
       if (stdinText !== undefined) {
         signal.throwIfAborted();
-        child.stdin.write(stdinText);
+        // Line mode reads until LF or EOF. Frame the final line now so the
+        // capture budget begins after delivery, rather than delaying delivery.
+        const sendAt = args.indexOf('--send');
+        const input = sendAt >= 0 && args[sendAt + 1] === 'line' && stdinText && !stdinText.endsWith('\n')
+          ? stdinText + '\n' : stdinText;
+        child.stdin.write(input);
         if (keepStdinOpenMs > 0) {
           captureTimer = setTimeout(() => {
             try {
@@ -508,6 +523,118 @@ function ringRead(since) {
 /** Forget the text; the counter keeps counting, so old cursors stay old. */
 function ringClear() {
   ring.text = '';
+  readingRing.text = '';
+  readingState.pending = '';
+  if (readingState.timer !== null) clearTimeout(readingState.timer);
+  readingState.timer = null;
+}
+
+/* The reading view is display-only. An agent command goes to the board wrapped
+ * in `sh -c '<cmd>'; printf ... 'LINKR_RC_<nonce>' "$?"`; the console echoes
+ * that wrapper and prints the completion marker. Those are plumbing, not what
+ * the board said, so the reading view hides them and replaces the marker with
+ * one short `[Agent] exit=N` line — exactly what the Web terminal's reading
+ * view does. The raw view keeps every byte. Both histories are independent;
+ * switching views is local and never sends serial input.
+ *
+ * This is a best-effort, fail-open filter: it only recognises markers this
+ * plugin's own exec path emits, and any byte it cannot classify is passed
+ * through untouched so device output is never lost. */
+const readingRing = { text: '', told: 0 };
+
+function ringAppendTo(store, text) {
+  if (text === '') return;
+  store.text += text;
+  store.told += Buffer.byteLength(text, 'utf8');
+  let size = Buffer.byteLength(store.text, 'utf8');
+  if (size <= RING_LIMIT_BYTES) return;
+  let cut = 0;
+  while (size > RING_LIMIT_BYTES && cut < store.text.length) {
+    const step = Math.max(1, Math.ceil((size - RING_LIMIT_BYTES) / 4));
+    cut += Math.min(step, store.text.length - cut);
+    size = Buffer.byteLength(store.text.slice(cut), 'utf8');
+  }
+  store.text = store.text.slice(cut);
+}
+
+function ringReadFrom(store, since) {
+  if (!Number.isFinite(since)) return store.text;
+  const first = store.told - Buffer.byteLength(store.text, 'utf8');
+  if (since <= first) return store.text;
+  if (since >= store.told) return '';
+  return sliceFromBytes(store.text, since - first);
+}
+
+// Only the CLI's explicit dispatch metadata can register a presentation rule.
+// A legacy CLI without that event stays readable by passing every byte through.
+const readingCommands = new Map();
+function registerReadingCommand(event) {
+  if (event.event !== 'dispatch' || !/^LINKR_RC_[a-f0-9]{32}$/.test(event.marker) ||
+      typeof event.wire !== 'string' || event.wire.length > RING_LIMIT_BYTES) return;
+  readingCommands.set(event.marker, normaliseEcho(event.wire.replace(/\r$/, '')));
+  if (readingCommands.size > 128) readingCommands.delete(readingCommands.keys().next().value);
+}
+
+// Readline may insert CR and spaces at a narrow terminal's wrap boundary.
+function normaliseEcho(line) {
+  return line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[ ]*\r[ ]*/g, '');
+}
+
+const readingState = { pending: '', timer: null };
+function flushReadingPending() {
+  if (readingState.timer !== null) clearTimeout(readingState.timer);
+  readingState.timer = null;
+  const held = readingState.pending;
+  readingState.pending = '';
+  // Flushes have their own ordered record. Raw clients have already seen the
+  // bytes; reading clients must receive them even if the device stays silent.
+  if (held) publishConsole({ type: 'stream', text: '', reading: held, source: 'presentation' });
+}
+
+function presentForReading(text) {
+  if (typeof text !== 'string' || text === '') return '';
+  if (readingState.timer !== null) clearTimeout(readingState.timer);
+  readingState.timer = null;
+  const buffer = readingState.pending + text;
+  readingState.pending = '';
+  let out = '', start = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    if (buffer[i] !== '\n') continue;
+    const line = buffer.slice(start, i + 1);
+    start = i + 1;
+    const flat = normaliseEcho(line.replace(/\r?\n$/, ''));
+    let hidden = false;
+    for (const [marker, wire] of readingCommands) {
+      if (flat === wire) { hidden = true; break; }
+      if (flat.startsWith(marker + ':')) {
+        const code = flat.slice(marker.length + 1);
+        if (/^[0-9]{1,3}$/.test(code) && Number(code) <= 255) {
+          out += `[Agent] exit=${code}\r\n`;
+          readingCommands.delete(marker);
+          hidden = true;
+          break;
+        }
+      }
+    }
+    if (!hidden) out += line;
+  }
+  const tail = buffer.slice(start);
+  const flat = normaliseEcho(tail);
+  const candidate = flat !== '' && [...readingCommands].some(([marker, wire]) =>
+    wire.startsWith(flat) || (marker + ':').startsWith(flat) ||
+    (flat.startsWith(marker + ':') && /^[0-9]{0,3}$/.test(flat.slice(marker.length + 1))));
+  if (candidate) {
+    readingState.pending = tail;
+    readingState.timer = setTimeout(flushReadingPending, 300);
+    readingState.timer?.unref?.();
+  } else out += tail;
+  return out;
+}
+
+/** What one stream record looks like in the reading view. */
+function readingTextOf(record) {
+  if (record.type !== 'stream' || typeof record.text !== 'string') return null;
+  return presentForReading(record.text);
 }
 
 /** Publish one console record to the backlog and every open SSE stream. */
@@ -516,7 +643,16 @@ function publishConsole(event) {
   // Every byte the target said passes through here, whichever door brought it
   // (push stream, poll fallback, exec frame): the ring is filled here so the
   // panel, the reader route and the agent's tool all see one console.
-  if (record.type === 'stream' && typeof record.text === 'string') ringAppend(record.text);
+  if (record.type === 'stream' && typeof record.text === 'string') {
+    ringAppend(record.text);
+    const reading = typeof event.reading === 'string' ? event.reading : readingTextOf(record);
+    if (reading !== null) {
+      ringAppendTo(readingRing, reading);
+      // Optional field: old panels keep drawing `text`, new panels pick the
+      // view they are in without a second request.
+      record.reading = reading;
+    }
+  }
   consoleState.events.push(record);
   if (consoleState.events.length > CONSOLE_LIMIT) {
     consoleState.events.splice(0, consoleState.events.length - CONSOLE_LIMIT);
@@ -550,7 +686,8 @@ function openConsoleStream(req, res) {
   res.write(': linkr-bee console stream\n\n');
   res.write(`data: ${JSON.stringify({ type: 'snapshot', epoch: consoleState.epoch, seq: consoleState.seq,
     firstSeq: consoleState.events[0]?.seq ?? (consoleState.seq + 1),
-    ts: Date.now(), text: ringRead(), bytes: ring.told, link: linkState, session: sessionInfo() })}\n\n`);
+    ts: Date.now(), text: ringRead(), reading: ringReadFrom(readingRing),
+    bytes: ring.told, link: linkState, session: sessionInfo() })}\n\n`);
   for (const event of consoleState.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
   consoleState.subscribers.add(res);
   const ping = setInterval(() => {
@@ -688,11 +825,12 @@ async function queryUart(config, signal) {
   const reply = result?.reply || result?.detail || '';
   const match = /uart\s*=\s*([^\s,]+(?:,[^\s,]+){4})/.exec(reply) ||
     /(\d{3,7},[5-8],[nNeEoO],[12],(?:none|rtscts))/.exec(reply);
-  if (run.code !== 0 || result?.ok !== true || !match) {
+  const baud = /(?:^|\s)uart\s*=\s*(\d{3,7})(?:$|\s)/.exec(reply);
+  if (run.code !== 0 || result?.ok !== true || (!match && !baud)) {
     return { ok: false, error: result?.detail || reply || run.stderr.trim() ||
       'the bridge did not return confirmed UART settings', reply, raw: renderRun(run) };
   }
-  return { ok: true, spec: match ? match[1] : null, reply, raw: renderRun(run) };
+  return { ok: true, spec: match ? match[1] : null, baud: Number(match ? match[1].split(',')[0] : baud[1]), reply, raw: renderRun(run) };
 }
 
 /** Apply UART settings over the BLE management channel and read them back. */
@@ -765,6 +903,7 @@ const MAX_WATCH_RECONNECTS = 6;
 /** The live `bee-cli --serve` process, or null when nothing holds the link. */
 let session = null;
 let sessionStarting = null;
+let sessionRetiring = Promise.resolve();
 let sessionBorrows = 0;
 let oneShotWaiters = 0;
 /** The panel wants the target's bytes: pushed by `watch`, or polled on an old CLI. */
@@ -848,6 +987,7 @@ function makeSession(child, ready, config) {
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
+    if (closed || ownerSignal.aborted) return;
     buffer += chunk;
     let index;
     while ((index = buffer.indexOf('\n')) >= 0) {
@@ -899,7 +1039,7 @@ function makeSession(child, ready, config) {
     }
   });
 
-  const request = (op, fields = {}, onEvent, signal, timeoutMs = SESSION_TIMEOUT_MS) => {
+  const request = (op, fields = {}, onEvent, signal) => {
     signal = operationSignal(signal);
     requestCount += 1; // includes queued calls, not just the one on the wire
     let settled = false;
@@ -931,11 +1071,16 @@ function makeSession(child, ready, config) {
         const id = nextId++;
         entry = { id, events: [], onEvent, finish };
         pending.set(id, entry);
+        // Exec's budget is per attempt; retries and their state probes also
+        // consume time. The host guard must outlive the CLI's own deadline.
+        const requestTimeout = op === 'exec' && Number.isFinite(fields.timeout_ms) && fields.timeout_ms > 0
+          ? Math.max(SESSION_TIMEOUT_MS, (fields.timeout_ms + 3000) * (1 + (fields.retry ?? 0)) + 15000)
+          : SESSION_TIMEOUT_MS;
         timer = setTimeout(() => {
           const error = new Error(`bee-cli serve did not answer "${op}" in time; delivery or completion is unknown. Do not resend automatically.`);
           finish(error);
           retire(error);
-        }, Math.max(1000, timeoutMs));
+        }, Math.min(2147483647, requestTimeout));
         try {
           // Crossing this boundary makes delivery uncertain even if the write
           // callback later fails: no caller may automatically replay it.
@@ -1002,6 +1147,7 @@ async function ensureSession(config, signal) {
     const start = { controller: new AbortController(), promise: null };
     const startSignal = AbortSignal.any([lifecycle.signal, start.controller.signal]);
     start.promise = (async () => {
+      await waitWithSignal(sessionRetiring, startSignal);
       const dial = await dialArgs(config, startSignal, start);
       startSignal.throwIfAborted();
       const cli = resolveCli(config);
@@ -1068,7 +1214,7 @@ async function ensureSession(config, signal) {
         throw new Error(OLD_CLI_HINT);
       }
       linkState.transport = config?.transport || 'ble';
-      linkState.target = discoveredBleName() || config?.bleAddress || config?.lanHost ||
+      linkState.target = discoveredBleName() || config?.bleAddress || config?.bleName || config?.lanHost ||
         (config?.transport === 'loopback' ? 'loopback' : '');
       linkState.connected = true;
       linkState.lastError = '';
@@ -1122,6 +1268,11 @@ function stopSession() {
     // died unasked, so the deliberate stop says the link is gone itself.
     linkState.connected = false;
     linkState.at = Date.now();
+    const retired = new Promise(resolve => {
+      if (active.child.exitCode !== null || active.child.signalCode !== null) resolve();
+      else active.child.once('close', resolve);
+    });
+    sessionRetiring = Promise.all([sessionRetiring, retired]).then(() => {});
     active.stop();
   }
 }
@@ -1367,6 +1518,7 @@ async function runExec(config, options, signal) {
   const callConfig = options.timeoutMs !== undefined ? { ...config, timeoutMs: options.timeoutMs } : config;
   if (options.announce !== false) publishConsole({ type: 'cmd', text: cmd, source });
   const streamToPanel = event => {
+    registerReadingCommand(event);
     if (event.event === 'output') {
       const text = event.data ?? event.text;
       if (typeof text === 'string' && text !== '') {
@@ -1389,10 +1541,11 @@ async function runExec(config, options, signal) {
     if (options.idleSec !== undefined) fields.idle_ms = Math.max(1, Math.round(options.idleSec * 1000));
     else if (options.idleMs !== undefined) fields.idle_ms = Math.max(1, Math.round(options.idleMs));
     if (options.retry !== undefined) fields.retry = Math.max(0, Math.round(options.retry));
-    const answer = await active.request('exec', fields, streamToPanel, owned,
-      Math.max(SESSION_TIMEOUT_MS, (callConfig.timeoutMs || 30000) + 15000));
+    const answer = await active.request('exec', fields, streamToPanel, owned);
     monitorCursor = null;
-    publishConsole({ type: 'meta', text: `(exit code ${answer.code})`, source });
+    // The exit status is already on the wire as the LINKR_RC_ completion marker
+    // (the Reading view turns it into `[Agent] exit=N`), and in the tool/route
+    // return value. Printing a second `(exit code N)` line only cluttered the pane.
     const results = answer.events.filter(event => event.event === 'result');
     const output = consoleOutputOf(answer);
     const rendered = [results.map(event => JSON.stringify(event)).join('\n'),
@@ -1415,12 +1568,12 @@ async function runExec(config, options, signal) {
   });
   if (result !== null) return result;
   current.throwIfAborted();
-  const argv = [...(await jsonArgs(callConfig, current)), '--exec', cmd];
+  const argv = [...(await jsonArgs(callConfig, current)), '--timeout', String(Math.max(1, Math.ceil(callConfig.timeoutMs / 1000))), '--exec', cmd];
   if (options.idleSec !== undefined) argv.push('--idle', String(options.idleSec));
   else if (options.idleMs !== undefined) argv.push('--idle', String(Math.max(1, Math.round(options.idleMs / 1000))));
   if (options.retry !== undefined) argv.push('--retry', String(options.retry));
   const run = await runBee(callConfig, argv, { signal: current, onEvent: streamToPanel });
-  publishConsole({ type: 'meta', text: `(exit code ${run.code})`, source });
+  // See the resident-session path: the status is on the wire and in `exit`.
   return { ok: run.code === 0, exit: run.code, output: report(run) };
 }
 
@@ -1431,11 +1584,18 @@ async function runExec(config, options, signal) {
  * hung up again: a keystroke must not hold the radio open, but the agent that
  * just typed can still read what came back.
  */
-async function typeIntoConsole(config, data, captureMs, waitForEcho = false, signal) {
+async function typeIntoConsole(config, data, captureMs, waitForEcho = false, signal, options = {}) {
   return withSessionLease(signal, async current => {
     const windowMs = Math.max(0, captureMs ?? 0);
-    const active = await ensureSession(config, current);
+    let active;
+    try { active = await ensureSession(config, current); }
+    catch (error) {
+      current.throwIfAborted();
+      if (options.compatibilityFallback && error?.name !== 'AbortError') return null;
+      throw error;
+    }
     current.throwIfAborted();
+    if (options.compatibilityFallback && (!active.supports.watch || !active.ready.ops.includes('send'))) return null;
     let borrowed = false;
     try {
       if (windowMs > 0 && (waitForEcho || !watchWanted) && active.supports.watch) {
@@ -1454,8 +1614,14 @@ async function typeIntoConsole(config, data, captureMs, waitForEcho = false, sig
       if (windowMs > 0 && (borrowed || waitForEcho)) {
         const deadline = Date.now() + windowMs;
         while (Date.now() < deadline) {
-          await waitWithSignal(sleep(Math.min(50, deadline - Date.now())), current);
-          if (ringRead(before).includes(data)) break;
+          try { await waitWithSignal(sleep(Math.min(50, deadline - Date.now())), current); }
+          catch (error) {
+            // The send was acknowledged already. Cancelling observation must
+            // never claim that the input was not sent and invite a replay.
+            if (current.aborted) throw aborted(current, 'unknown');
+            throw error;
+          }
+          if (!options.fullCapture && ringRead(before).includes(data)) break;
         }
       }
       return { echoed: ringRead(before) };
@@ -1543,18 +1709,31 @@ async function saveConfig(ctx, config, body, signal) {
   // plugin must stop using the settings it was dialling with: otherwise
   // GET /config keeps reporting the old values and an open session keeps the
   // old board/transport until the shell reloads the plugin.
-  const changed = ['transport', 'bleName', 'bleAddress', 'lanHost', 'lanToken']
-    .some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
+  const connectionKeys = ['cliPath', 'transport', 'bleName', 'bleAddress', 'lanHost', 'lanToken'];
+  const changed = connectionKeys.some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
+  // A connection change must not redirect work that is already in flight (or
+  // queued behind it): those commands were accepted for the old board.
+  if (changed && (sessionBorrows > 0 || streamBorrows > 0 || oneShotWaiters > 0 || sessionStarting || session?.busy)) {
+    return { ok: false, error: 'The console is busy. Wait for the active operation before changing the connection.' };
+  }
   const applyLocally = () => {
     Object.assign(config, next);
     // The editor may have reloaded the plugin: do not let this instance tear
     // down or redial a link that now belongs to its replacement.
     const sameInstance = signal === undefined || signal === lifecycle.signal;
     if (!changed || ownerSignal.aborted || !sameInstance) return;
-    forgetDiscoveredName();
+    if (watchTimer !== null) clearTimeout(watchTimer);
+    watchTimer = null;
+    stopMonitor();
     stopSession();
+    flushReadingPending();
+    readingCommands.clear();
+    forgetDiscoveredName();
+    linkState.transport = config.transport;
+    linkState.target = config.bleAddress || config.bleName || config.lanHost || '';
+    linkState.connected = false;
     // An open panel should follow the new settings without a reload.
-    if (watchWanted) resumeStreaming(config, signal ?? lifecycle.signal);
+    if (watchWanted) resumeStreaming(config);
   };
   if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
     await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));
@@ -1658,6 +1837,8 @@ export function apply(ctx, rawConfig) {
     () => () => {
       // Disposing must leave nothing behind: no stream wanted, no poll timer,
       // no redial, and no bee-cli process still holding the board.
+      flushReadingPending();
+      readingCommands.clear();
       instanceController.abort(new Error('Plugin disposed'));
       watchWanted = false;
       if (sessionStarting !== null) {
@@ -1716,10 +1897,13 @@ export function apply(ctx, rawConfig) {
           if (req.method === 'GET' && path === '/console/read') {
             const raw = url.searchParams.get('since');
             const since = raw === null || raw.trim() === '' ? undefined : Number(raw);
+            const view = url.searchParams.get('view') === 'raw' ? 'raw' : 'reading';
+            const store = view === 'raw' ? ring : readingRing;
             sendJson(res, 200, {
               ok: true,
-              text: ringRead(since),
-              bytes: ring.told,
+              view,
+              text: ringReadFrom(store, since),
+              bytes: store.told,
               epoch: consoleState.epoch,
               seq: consoleState.seq,
               firstSeq: consoleState.events[0]?.seq ?? (consoleState.seq + 1),
@@ -2228,31 +2412,31 @@ export function apply(ctx, rawConfig) {
               ? Math.max(0, Math.min(60000, args.captureMs))
               : config.sendCaptureMs ?? 1500;
           publishConsole({ type: 'user', text: args.text, source: 'agent' });
-          const framing = args.mode === 'raw' ? 'raw' : 'line';
-          // `--send line` frames on a newline (`read_until(b'\n')`), so the
-          // bytes only leave the CLI as this line ends. Without it the text sat
-          // in stdin until the capture window closed — the window captured the
-          // reply to a command that had not been sent yet.
-          const stdinText = framing === 'line'
-            ? String(args.text).replace(/\r?\n$/, '') + '\n'
-            : String(args.text);
+          if (!args.text) throw new Error('nothing to send');
+          const data = args.mode === 'raw' ? args.text : args.text.replace(/\r?\n/g, '\n').replace(/\r$/, '').replace(/\n?$/, '\n');
+          // Start observing on the resident link before sending, then price the
+          // full capture window after its send acknowledgement. Connection
+          // startup can take longer than the window and must not consume it.
+          const sent = await typeIntoConsole(config, data, captureMs, true, taskSignal(exec),
+            { fullCapture: true, compatibilityFallback: true });
+          if (sent !== null) return JSON.stringify({ event: 'result', what: 'send', ok: true }) +
+            (sent.echoed ? `\n--- target output ---\n${sent.echoed}` : '\n(delivered; no reply in the capture window)');
           const run = await runBee(
             config,
-            [...(await baseArgs(taskSignal(exec))), '--send', framing],
+            [...(await baseArgs(taskSignal(exec))), '--send', args.mode === 'raw' ? 'raw' : 'line'],
             {
-              stdinText,
+              stdinText: args.text,
               keepStdinOpenMs: captureMs,
               signal: taskSignal(exec),
               onEvent: (event) => {
-                if (event.event === 'output') {
-                  const text = event.data ?? event.text;
-                  if (typeof text === 'string' && text !== '') {
-                    publishConsole({ type: 'stream', text, source: 'agent' });
-                  }
+                const text = event.data ?? event.text;
+                if (event.event === 'output' && typeof text === 'string' && text !== '') {
+                  publishConsole({ type: 'stream', text, source: 'agent' });
                 }
               },
             },
           );
+          requireSuccess(run, 'send');
           if (!consoleOutputOf(run)) publishConsole({ type: 'meta', text: '(delivered; no echo within the capture window)' });
           return report(run);
         },
