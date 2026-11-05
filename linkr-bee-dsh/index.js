@@ -1524,7 +1524,8 @@ const MASKED_TOKEN = /^[\u2022*]+$/;
  * service still lets the change apply for this run.
  */
 async function saveConfig(ctx, config, body, signal) {
-  operationSignal(signal).throwIfAborted();
+  const ownerSignal = operationSignal(signal);
+  ownerSignal.throwIfAborted();
   const patch = {};
   for (const key of WRITABLE_KEYS) {
     const value = body?.[key];
@@ -1546,12 +1547,14 @@ async function saveConfig(ctx, config, body, signal) {
     .some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
   const applyLocally = () => {
     Object.assign(config, next);
-    if (changed) {
-      forgetDiscoveredName();
-      stopSession();
-      // An open panel should follow the new settings without a reload.
-      if (watchWanted) resumeStreaming(config, lifecycle.signal);
-    }
+    // The editor may have reloaded the plugin: do not let this instance tear
+    // down or redial a link that now belongs to its replacement.
+    const sameInstance = signal === undefined || signal === lifecycle.signal;
+    if (!changed || ownerSignal.aborted || !sameInstance) return;
+    forgetDiscoveredName();
+    stopSession();
+    // An open panel should follow the new settings without a reload.
+    if (watchWanted) resumeStreaming(config, signal ?? lifecycle.signal);
   };
   if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
     await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));

@@ -508,6 +508,16 @@ test('linkr_bee_set validates before it dials', async t => {
   assert.deepEqual(await f.calls(), []);
 });
 
+test('a saved config is what the next read and dial use', async t => {
+  const f = await fixture(t, 'ok');
+  const saved = await f.route('/config', {transport:'loopback', bleName:'New Name', timeoutMs:12000});
+  assert.equal(saved.ok, true);
+  assert.equal(saved.applied, 'memory');
+  const read = await f.route('/config');
+  assert.equal(read.config.bleName, 'New Name');
+  assert.equal(read.config.timeoutMs, 12000);
+});
+
 test('a spawn that cannot start gives the link back instead of wedging every caller', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'linkr-cmd-'));
   t.after(() => rm(dir, {recursive:true, force:true}));
