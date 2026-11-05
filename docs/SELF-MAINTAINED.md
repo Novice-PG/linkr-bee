@@ -2,16 +2,16 @@
 
 > 状态：**Novice-PG fork 自维护**，不属于 radxa 官方固件，也不进入上游 PR。
 > 适用板型：仅 `esp32_devkitc/esp32/procpu`（ESP32-WROOM-32 DevKitC）。
-> 固件版本：`1.1.4`（与官方发布保持一致；代码基于上游 1.1.5 main，见下文“如何分辨”）。
+> 固件版本：`1.1.5`（与 radxa 上游对齐，见下文“如何分辨”）。
 > 分支：`fork/self-maintained`。
 
 ## 为什么单独维护
 
 radxa 上游 1.1.5 把 WROOM-32 的 UART 接收环压到 4,096 B、BLE 队列压到 4、
 WS 缓冲压到 1,024 B 以节省 SRAM。本分支在 1.1.5 代码基础上把这三项恢复到
-上游缩减前的大小，版本号仍保持 `1.1.4`，以便烧录页和客户端把自维护包与
-官方 1.1.4 放在同一条发布线上。其余配置跟随上游。诊断日志、吞吐余量、
-内部堆余量都不属于这个标准，因此不加大。
+上游缩减前的大小，版本号与上游一致，烧录页可以把自维护包和官方 1.1.5 放在
+同一条发布线上。其余配置跟随上游。诊断日志、吞吐余量、内部堆余量都不属于
+这个标准，因此不加大。
 
 其他板型（C3 / C5 / X1.0）不在这个分支的改动范围内，仍然跟随上游配置。
 
@@ -111,7 +111,7 @@ CONFIG_ZVFS_POLL_MAX=5
 
 ## 如何分辨这是自维护固件
 
-- 版本号仍然是 `1.1.4`，与官方发布一致，便于客户端和发布流程继续工作。
+- 版本号仍然是 `1.1.5`，与上游一致，便于客户端和发布流程继续工作。
 - 烧录页 <https://novice-pg.github.io/linkr-bee/flash.html> 有两个 WROOM-32
   条目：官方 `esp32-wroom-32`，以及带 `Novice-PG 自维护` 标注的
   `esp32-wroom-32-self`，选择后状态栏会说明差异。
@@ -156,11 +156,10 @@ west build -b esp32_devkitc/esp32/procpu .
 ## English summary
 
 This branch carries Novice-PG's self-maintained ESP32-WROOM-32 firmware. It
-keeps the `1.1.4` version line for the flasher and clients while its code is
-based on upstream 1.1.5 `main`, and it differs from the upstream 1.1.5
-configuration in three buffers: the UART RX ring is 8,192 B instead of 4,096,
-the BLE peer TX queue is 8 chunks instead of 4, and the per-client WebSocket
-TX ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream
+tracks radxa's `1.1.5` version and is based on upstream `main`, but it differs
+from the upstream 1.1.5 configuration in three buffers: the UART RX ring is
+8,192 B instead of 4,096, the BLE peer TX queue is 8 chunks instead of 4, and
+the per-client WebSocket TX ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream
 1.1.5, which adopted the same default and added a build-time assertion; the
 fork relies on that upstream definition instead of carrying its own. Total
 added DRAM0 over the upstream 1.1.5 configuration is 8,064 B; the CI link
