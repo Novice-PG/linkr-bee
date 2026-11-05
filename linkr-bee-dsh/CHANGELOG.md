@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased (not published; version stays 1.1.4 until confirmed)
+## 1.1.5
+
+The published cut of the Harness plugin after the 1.1.4 baseline. Versions
+continue to follow the Linkr Bee main line.
 
 - BLE auto-discovery is a hint, not a binding. The name found by the scan used
   to be cached for the whole process lifetime, so a renamed board, a swapped
