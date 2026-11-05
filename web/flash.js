@@ -313,7 +313,7 @@ function selectBoard(slug) {
       isCam
         ? `已选择 ${board.name}。烧录前把 GPIO0 接 GND 并重新上电；失败时点“已进入下载模式，重试连接”。`
         : isSelfMaintained
-          ? `已选择 ${board.name}。这是 Novice-PG 自维护固件：BLE/WebSocket 缓冲更大，并修复了 HTTP 握手时 poll() 失败的问题。官方固件请选“ESP32-WROOM-32 DevKitC”。`
+          ? `已选择 ${board.name}。这是 Novice-PG 自维护固件：UART / BLE / WebSocket 缓冲恢复到上游 1.1.5 缩减前的大小，并包含 HTTP 握手时 poll() 失败的修复。官方固件请选“ESP32-WROOM-32 DevKitC”。`
           : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
     );
   }

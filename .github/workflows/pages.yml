@@ -96,6 +96,7 @@ jobs:
           if not (source / image).is_file():
               raise SystemExit(f"self-maintained artifact has no {image}")
           expected = {
+              "CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192",
               "CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=8",
               "CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=2048",
               "CONFIG_ZVFS_POLL_MAX=5",
