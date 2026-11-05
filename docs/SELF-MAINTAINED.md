@@ -22,8 +22,10 @@ radxa 官方 v1.1.4 的 WROOM-32 构建在 Zephyr 4.5 下还剩 **8,888 B DRAM0*
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
 | `ZVFS_POLL_MAX` | 3 | **5** | +16 B | 两个 HTTP/WS 连接同时处于握手阶段时，`poll()` 不再因事件表不足而关掉监听器并重启服务 |
 
-合计占用 **3,984 B**，预计剩余 **4,904 B** DRAM0（以 CI 的 Zephyr 4.5
-链接结果为准；本地工作区是 4.4.1，不能作为最终数字）。
+合计占用 **3,984 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
+`dram0_0_seg` 已用 **135,548 / 140,452 B**，**剩余 4,904 B**；`dram1_0_seg`
+仍为 94,424 / 95,232 B（剩余 808 B），没有被这次改动占用。符号大小与预算一致：
+`peer_storage` 3,840 B、`ws_tx_bufs` 4,096 B。
 
 ### 1. BLE 输出队列 4 → 8
 
@@ -119,8 +121,8 @@ west build -b esp32_devkitc/esp32/procpu .
 
 提交前检查：
 
-1. 链接后 `dram0_0_seg` 空闲应约为 4.9 KB；`peer_storage` 应为 3,840 B，
-   `ws_tx_bufs` 应为 4,096 B。
+1. 链接后 `dram0_0_seg` 空闲应为 **4,904 B**；`peer_storage` 应为 3,840 B，
+   `ws_tx_bufs` 应为 4,096 B。2026-11-05 已在 CI 构建（提交 `4a23bf0`）中核对。
 2. BLE 连接下跑一段突发输出，对比 `@i?` 的 `peer dropped`。
 3. 同时打开两个 WS 连接（或一个握手 + 一个预连接），确认 HTTP 服务不再整段
    重启；把 `CONFIG_NET_HTTP_SERVER_LOG_LEVEL` 临时设为 3 可以看到
@@ -133,9 +135,10 @@ tracks radxa's version number (`1.1.4`) but differs from the official build:
 the BLE peer TX queue is 8 chunks instead of 4, the per-client WebSocket TX
 ring is 2,048 B instead of 1,024 B, and `ZVFS_POLL_MAX` is 5 instead of 3 to
 stop a second in-flight HTTP/WebSocket handshake from making the Zephyr HTTP
-server fail `poll()` with `-ENOMEM` and restart. Total added DRAM0 is expected
-to be 3,984 B, leaving about 4,904 B free. UART RX, the log buffer, the system
-heap, WiFi/network pools and thread stacks are deliberately not enlarged: their
-benefit is diagnostics, throughput or internal headroom, not a better console.
+server fail `poll()` with `-ENOMEM` and restart. Total added DRAM0 is 3,984 B;
+the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly 4,904 B free.
+UART RX, the log buffer, the system heap, WiFi/network pools and thread stacks
+are deliberately not enlarged: their benefit is diagnostics, throughput or
+internal headroom, not a better console.
 Other boards are unchanged and still follow upstream. Official firmware:
 <https://github.com/radxa/linkr-bee/releases>.
