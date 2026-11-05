@@ -25,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -56,20 +57,81 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .firmware-release
-          if gh release download \
+          if ! gh release download \
               --repo "${GITHUB_REPOSITORY}" \
               --pattern '*firmware-*.zip' \
               --dir .firmware-release; then
-            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)"
-            python3 tools/build_firmware_manifest.py \
-              --source .firmware-release \
-              --output web/firmware \
-              --tag "${tag}" \
-              --repo "${GITHUB_REPOSITORY}"
-          else
             echo "No released firmware yet; publishing without a staged manifest."
             rm -rf .firmware-release
+            exit 0
           fi
+          tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)"
+
+          # Add the self-maintained WROOM build from the branch's last green
+          # Build and test run. It is deliberately not a release asset: the
+          # release keeps the official board set, while this page offers the
+          # fork's larger-buffer variant as a second WROOM entry. Both carry
+          # the same version, so the manifest keeps them together.
+          run_id="$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build.yml \
+            --branch fork/self-maintained \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')"
+          rm -rf .self-wroom
+          if [ -n "${run_id}" ] && gh run download "${run_id}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name linkr-bee-esp32-wroom-32 \
+              --dir .self-wroom; then
+            python3 - <<'PY'
+          import json
+          import pathlib
+          import zipfile
+
+          source = pathlib.Path(".self-wroom")
+          metadata = json.loads((source / "firmware.json").read_text(encoding="utf-8"))
+          image = metadata["image"]
+          if not (source / image).is_file():
+              raise SystemExit(f"self-maintained artifact has no {image}")
+          expected = {
+              "CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=8",
+              "CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=2048",
+              "CONFIG_ZVFS_POLL_MAX=5",
+          }
+          config = (source / "firmware.config").read_text(encoding="utf-8").splitlines()
+          missing = sorted(expected.difference(config))
+          if missing:
+              raise SystemExit(
+                  "self-maintained artifact is not the expected build: "
+                  + ", ".join(missing)
+              )
+          map_file = source / "linkr-bee-esp32-wroom-32.map"
+          if map_file.is_file():
+              for line in map_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                  if "dram0_0_seg" in line:
+                      print(line.strip())
+          target = pathlib.Path(".firmware-release") / (
+              f"linkr-bee-v{metadata['version']}-firmware-esp32-wroom-32-self.zip"
+          )
+          prefix = pathlib.Path("linkr-bee-esp32-wroom-32-self")
+          with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(source.rglob("*")):
+                  if path.is_file():
+                      archive.write(path, prefix / path.relative_to(source))
+          print(f"staged {target}")
+          PY
+          else
+            echo "No self-maintained WROOM artifact; publishing the official set only."
+            rm -rf .self-wroom
+          fi
+
+          python3 tools/build_firmware_manifest.py \
+            --source .firmware-release \
+            --output web/firmware \
+            --tag "${tag}" \
+            --repo "${GITHUB_REPOSITORY}"
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.

@@ -26,6 +26,7 @@ ARCHIVE_RE = re.compile(r"^linkr-bee-(?P<version>[^-]+)-firmware-(?P<slug>.+)\.z
 
 BOARD_NAMES = {
     "esp32-wroom-32": "ESP32-WROOM-32 DevKitC",
+    "esp32-wroom-32-self": "ESP32-WROOM-32 DevKitC（Novice-PG 自维护）",
     "esp32-cam": "ESP32-CAM (ESP32-S module, UART0)",
     "esp32c3-devkitc": "ESP32-C3 DevKitC",
     "linkr-bee-x1-0": "Linkr Bee X1.0 (MV013)",

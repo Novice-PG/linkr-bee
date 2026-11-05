@@ -65,6 +65,23 @@ class FirmwareManifestTests(unittest.TestCase):
             self.assertEqual(stored["boards"][0]["flash_address"], "0x1000")
             self.assertEqual(stored["boards"][1]["flash_address"], "0x0")
 
+    def test_stages_official_and_self_maintained_wroom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "zips"
+            output = Path(tmp) / "web" / "firmware"
+            source.mkdir()
+            write_bundle(source, "esp32-wroom-32")
+            write_bundle(source, "esp32-wroom-32-self")
+
+            manifest = MANIFEST.stage(source, output, "v0.1.3")
+
+            self.assertEqual([b["slug"] for b in manifest["boards"]],
+                             ["esp32-wroom-32", "esp32-wroom-32-self"])
+            self.assertEqual(manifest["boards"][1]["name"],
+                             "ESP32-WROOM-32 DevKitC（Novice-PG 自维护）")
+            self.assertEqual(manifest["boards"][0]["version"], "0.1.3")
+            self.assertEqual(manifest["boards"][1]["version"], "0.1.3")
+
     def test_keeps_only_the_newest_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "zips"

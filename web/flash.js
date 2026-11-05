@@ -3,6 +3,7 @@ import { ESPLoader, Transport } from "./vendor/esptool-js/bundle.js";
 const DEFAULT_REPO = "Novice-PG/linkr-bee";
 const BOARD_NAMES = {
   "esp32-wroom-32": "ESP32-WROOM-32 DevKitC",
+  "esp32-wroom-32-self": "ESP32-WROOM-32 DevKitC（Novice-PG 自维护）",
   "esp32-cam": "ESP32-CAM (ESP32-S module, UART0)",
   "esp32c3-devkitc": "ESP32-C3 DevKitC",
   "linkr-bee-x1-0": "Linkr Bee X1.0 (MV013)",
@@ -301,6 +302,7 @@ function selectBoard(slug) {
   connectButton.disabled = !board;
   downloadButton.disabled = !board;
   const isCam = board?.slug === "esp32-cam";
+  const isSelfMaintained = board?.slug === "esp32-wroom-32-self";
   camPrep.hidden = !isCam;
   // ESP32-CAM baseboards often use a CH340 without auto-download wiring. Start
   // slow so a marginal USB cable or power rail still completes the handshake.
@@ -310,7 +312,9 @@ function selectBoard(slug) {
     setStatus(
       isCam
         ? `已选择 ${board.name}。烧录前把 GPIO0 接 GND 并重新上电；失败时点“已进入下载模式，重试连接”。`
-        : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
+        : isSelfMaintained
+          ? `已选择 ${board.name}。这是 Novice-PG 自维护固件：BLE/WebSocket 缓冲更大，并修复了 HTTP 握手时 poll() 失败的问题。官方固件请选“ESP32-WROOM-32 DevKitC”。`
+          : `已选择 ${board.name}。点击“连接串口并烧录”开始。`,
     );
   }
 }
