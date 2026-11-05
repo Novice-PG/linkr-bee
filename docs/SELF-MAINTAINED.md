@@ -22,7 +22,7 @@ radxa 上游 1.1.5 把 WROOM-32 的 BLE 队列压到 4、WS 缓冲压到 1,024 B
 | `LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH` | 4 | **8** | +1,920 B | BLE 终端每个 peer 的突发窗口约 0.7 s → 1.4 s；手机 / Windows 主机短暂停顿时少丢一段输出 |
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
 
-合计占用 **3,968 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
+合计占用 **3,968 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `bcf0cb0`）链接结果为
 `dram0_0_seg` 已用 **135,548 / 140,452 B**，**剩余 4,904 B**；`dram1_0_seg`
 仍为 94,424 / 95,232 B（剩余 808 B），没有被这次改动占用。符号大小与预算一致：
 `peer_storage` 3,840 B、`ws_tx_bufs` 4,096 B。
@@ -137,7 +137,7 @@ west build -b esp32_devkitc/esp32/procpu .
 提交前检查：
 
 1. 链接后 `dram0_0_seg` 空闲应为 **4,904 B**；`peer_storage` 应为 3,840 B，
-   `ws_tx_bufs` 应为 4,096 B。2026-11-05 已在 CI 构建（提交 `4a23bf0`）中核对。
+   `ws_tx_bufs` 应为 4,096 B。2026-11-05 已在 CI 构建（提交 `bcf0cb0`）中核对。
 2. BLE 连接下跑一段突发输出，对比 `@i?` 的 `peer dropped`。
 3. 同时打开两个 WS 连接（或一个握手 + 一个预连接），确认 HTTP 服务不再整段
    重启；把 `CONFIG_NET_HTTP_SERVER_LOG_LEVEL` 临时设为 3 可以看到
@@ -153,7 +153,7 @@ and the per-client WebSocket TX ring is 2,048 B instead of 1,024 B.
 `ZVFS_POLL_MAX` is 5, matching upstream 1.1.5, which adopted the same default
 and added a build-time assertion; the fork relies on that upstream definition
 instead of carrying its own. Total added DRAM0 over the upstream 1.1.5
-configuration is 3,968 B; the CI link (Zephyr 4.5, commit `4a23bf0`) leaves
+configuration is 3,968 B; the CI link (Zephyr 4.5, commit `bcf0cb0`) leaves
 exactly 4,904 B free.
 UART RX, the log buffer, the system heap, WiFi/network pools and thread stacks
 are deliberately not enlarged: their benefit is diagnostics, throughput or
