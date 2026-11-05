@@ -30,6 +30,13 @@ a network that will not come up, recovery. Linkr Bee keeps that console reachabl
 without a USB serial cable and a computer parked next to the target. It carries the
 target's own UART bytes and does not replace the target shell.
 
+> **ESP32-WROOM-32 self-maintained build.** This fork keeps a separate
+> `fork/self-maintained` branch for the WROOM-32 only: it tracks radxa's version
+> number but ships larger BLE/WebSocket buffers and the `ZVFS_POLL_MAX` fix, so
+> its firmware differs from the official build. Other boards are unchanged.
+> See [`docs/SELF-MAINTAINED.md`](docs/SELF-MAINTAINED.md) for the exact
+> differences and the official firmware link.
+
 ## What it does
 
 - Terminal in the browser, in the phone apps, or on the command line, with ANSI and

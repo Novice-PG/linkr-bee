@@ -182,10 +182,17 @@ autobaud 与 GPIO4 授权均为 `n`。
 ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
 
 - `CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n` — 关闭 WebDAV 节省 ~12KB noinit
-- `CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=16384` — 保留 C3 基线的接收缓冲
+- `CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=4096` — 4 KiB 接收缓冲；
+  fan-out 不随 BLE/WS 阻塞，继续加大会浪费 DRAM0 而不改善持续丢包
 - BT ACL TX buffer 为 10，与控制器上报数量一致
 - 线程栈：main=4096，system workqueue=4096，WiFi connect=2048
-- HTTP server 允许 2 个客户端，WS 每客户端栈 4096
+- HTTP server 允许 2 个客户端，WS 每客户端栈 3072
+
+> **Novice-PG 自维护构建**：本仓库的 `fork/self-maintained` 分支在官方
+> 配置之上把 BLE peer TX 队列从 4 增到 8、每客户端 WS TX 环从 1024 增到
+> 2048，并把 `ZVFS_POLL_MAX` 从 3 增到 5，合计约 +3,984 B DRAM0。改动只
+> 影响 WROOM-32，版本号仍与上游一致。差异、预算与被拒绝的项目见
+> [`SELF-MAINTAINED.md`](SELF-MAINTAINED.md)；官方构建以 radxa 发布为准。
 
 **功能差异：**
 

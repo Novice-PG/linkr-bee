@@ -29,6 +29,11 @@ UART 常常是最后一个还能用的入口：新板启动、Bootloader 调试�
 Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、也不用把电脑守在目标设备旁。
 它只转发目标 UART 的原始字节，不替代目标系统的 Shell。
 
+> **ESP32-WROOM-32 自维护构建。** 本 fork 的 `fork/self-maintained` 分支只为
+> WROOM-32 维护固件：版本号跟随 radxa 上游，但 BLE/WebSocket 缓冲更大，并包含
+> `ZVFS_POLL_MAX` 修复，因此与官方构建不同；其他板型不受影响。具体差异、预算
+> 和官方固件入口见 [`docs/SELF-MAINTAINED.md`](docs/SELF-MAINTAINED.md)。
+
 ## 能做什么
 
 - 浏览器、手机 App、命令行三种终端，支持 ANSI 彩色与 256 色。

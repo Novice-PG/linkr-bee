@@ -6,6 +6,27 @@
 > 2026-10-27 一节），供上游与后续排障参考。
 > 客户端侧的三个问题（LAN 重连、上行限流、粘贴卡住）不在此列，见代码提交与本次 PR。
 
+## 2026-11-05 数值更正（自维护分支）
+
+本文的实测与结论仍然有效，但下面「板级配置现状（2026-10-11）」里的**当前取值
+已经不是今天的板级配置**；阅读时请以本段为准，历史段落保留作对照：
+
+| 项 | 文中旧值 | 2026-11-05 实际值 |
+|---|---|---|
+| `UART_RX_BUFFER_SIZE` | 16384 | **4096** |
+| `WS_BRIDGE_CLIENT_BUFFER_SIZE` | 2048 | **2048**（`fork/self-maintained`；官方 v1.1.4 为 1024） |
+| `WS_BRIDGE_MAX_CLIENTS` | 2 | **2** |
+| `WS_BRIDGE_STACK` | 4096 | **3072** |
+| `BLE_TO_UART_QUEUE_DEPTH` | 16 | **16** |
+| `PEER_TX_QUEUE_DEPTH` | 未列出 | **8**（`fork/self-maintained`；官方 v1.1.4 为 4） |
+| `ZVFS_POLL_MAX` | 未列出 | **5**（`fork/self-maintained` 修复；官方默认 3） |
+
+`fork/self-maintained` 只改 WROOM-32，且只在能改善终端体验的地方花 DRAM0：
+BLE peer 队列 4→8、WS TX 环 1024→2048、`ZVFS_POLL_MAX` 3→5（修 HTTP 服务
+`poll()` 失败重启），合计约 +3,984 B。UART RX、日志缓冲、系统堆、WiFi/网络池
+和线程栈都**不**加大。完整理由与被拒绝项见
+[`SELF-MAINTAINED.md`](SELF-MAINTAINED.md)。
+
 ## 2026-10-04 三处缓冲的丢包条件与影响
 
 ### 结论
