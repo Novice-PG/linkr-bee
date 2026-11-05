@@ -23,7 +23,7 @@ WS 缓冲压到 1,024 B 以节省 SRAM。本分支在 1.1.5 代码基础上把�
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
 | `LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE` | 4,096 | **8,192** | +4,096 B | 调度或 BLE/WS 短暂阻塞时，UART 环能多吸收约 355 ms 的串口输入，少丢一段正在传输的数据 |
 
-合计占用 **8,064 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `326a04c`）链接结果为
+合计占用 **8,064 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `4765fe7`）链接结果为
 `dram0_0_seg` 已用 **139,644 / 140,452 B**，**剩余 808 B**；`dram1_0_seg`
 仍为 94,424 / 95,232 B（剩余 808 B），没有被这次改动占用。符号大小与预算一致：
 `peer_storage` 3,840 B、`ws_tx_bufs` 4,096 B。
@@ -145,7 +145,7 @@ west build -b esp32_devkitc/esp32/procpu .
 提交前检查：
 
 1. 链接后 `dram0_0_seg` 空闲应为 **808 B**；`peer_storage` 应为 3,840 B，
-   `ws_tx_bufs` 应为 4,096 B。2026-11-05 已在 CI 构建（提交 `326a04c`）中核对。
+   `ws_tx_bufs` 应为 4,096 B。2026-11-05 已在 CI 构建（提交 `4765fe7`）中核对。
 2. UART 环为 8,192 B、BLE peer 队列为 8、WS TX 环为 2,048 B；任一值被上游
    合并覆盖都应先修正再发布。
 3. BLE 连接下跑一段突发输出，对比 `@i?` 的 `peer dropped`。
@@ -163,7 +163,7 @@ the per-client WebSocket TX ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` 
 1.1.5, which adopted the same default and added a build-time assertion; the
 fork relies on that upstream definition instead of carrying its own. Total
 added DRAM0 over the upstream 1.1.5 configuration is 8,064 B; the CI link
-(Zephyr 4.5, commit `326a04c`) uses 139,644 of 140,452 B and leaves exactly
+(Zephyr 4.5, commit `4765fe7`) uses 139,644 of 140,452 B and leaves exactly
 808 B free.
 The log buffer, the system heap, WiFi/network pools and thread stacks are
 deliberately not enlarged: their benefit is diagnostics, throughput or
