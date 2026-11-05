@@ -20,9 +20,9 @@ radxa 官方 v1.1.4 的 WROOM-32 构建在 Zephyr 4.5 下还剩 **8,888 B DRAM0*
 |---|---|---:|---:|---|
 | `LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH` | 4 | **8** | +1,920 B | BLE 终端每个 peer 的突发窗口约 0.7 s → 1.4 s；手机 / Windows 主机短暂停顿时少丢一段输出 |
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
-| `ZVFS_POLL_MAX` | 3 | **5** | +16 B | 两个 HTTP/WS 连接同时处于握手阶段时，`poll()` 不再因事件表不足而关掉监听器并重启服务 |
+| `ZVFS_POLL_MAX` | 3（v1.1.4） | **5**（上游 1.1.5 同值） | +16 B | 两个 HTTP/WS 连接同时握手时，`poll()` 不再因事件表不足而关掉监听器并重启服务；本分支直接复用上游定义 |
 
-合计占用 **3,984 B**。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
+合计占用 **3,984 B**（其中 3,968 B 来自两项缓冲放大，16 B 为上游 1.1.5 已带的 poll 预算）。2026-11-05 的 CI（Zephyr 4.5，提交 `4a23bf0`）链接结果为
 `dram0_0_seg` 已用 **135,548 / 140,452 B**，**剩余 4,904 B**；`dram1_0_seg`
 仍为 94,424 / 95,232 B（剩余 808 B），没有被这次改动占用。符号大小与预算一致：
 `peer_storage` 3,840 B、`ws_tx_bufs` 4,096 B。
@@ -42,7 +42,7 @@ BLE 是整条链路最慢的一段（实测可靠模式约 1.0–1.4 KiB/s），
 后台节流或 TCP 窗口暂时关闭时能多保留约 89 ms 的串口输出。它不会让一个
 休眠数秒的标签页“不丢”，只是把丢的位置推迟。
 
-### 3. `ZVFS_POLL_MAX` 3 → 5（这是一个缺陷修复）
+### 3. `ZVFS_POLL_MAX` 3 → 5（上游 1.1.5 已采用）
 
 Zephyr 4.5 的 HTTP 服务器固定这样轮询（`http_server_core.c`）：
 
@@ -73,8 +73,9 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 `ZVFS_POLL_MAX=5` 给 eventfd + 监听 + 2 客户端留 1 格余量。
 
 这不是缓冲放大，但同样属于“花配置空间换体验”，而且 C3 / C5 也有同样的
-风险，所以默认值放在顶层 `Kconfig` 里，按 `LINKR_BLE_BRIDGE_WS_BRIDGE`
-生效。
+风险。上游已在 `7c4922ac` 用相同的顶层 `Kconfig` 默认值（按
+`LINKR_BLE_BRIDGE_WS_BRIDGE` 生效）修复，并加了编译期断言；本分支自 1.1.5
+起直接使用上游定义，不再维护重复条目。
 
 ## 明确不加大
 
@@ -133,11 +134,13 @@ west build -b esp32_devkitc/esp32/procpu .
 
 This branch carries Novice-PG's self-maintained ESP32-WROOM-32 firmware. It
 tracks radxa's version number (`1.1.4`) but differs from the official build:
-the BLE peer TX queue is 8 chunks instead of 4, the per-client WebSocket TX
-ring is 2,048 B instead of 1,024 B, and `ZVFS_POLL_MAX` is 5 instead of 3 to
-stop a second in-flight HTTP/WebSocket handshake from making the Zephyr HTTP
-server fail `poll()` with `-ENOMEM` and restart. Total added DRAM0 is 3,984 B;
-the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly 4,904 B free.
+the BLE peer TX queue is 8 chunks instead of 4 and the per-client WebSocket TX
+ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream
+1.1.5, which adopted the same default and added a build-time assertion; the
+fork now relies on that upstream definition instead of carrying its own.
+Total added DRAM0 over 1.1.4 is 3,984 B (3,968 B of buffers plus 16 B for the
+poll budget); the CI link (Zephyr 4.5, commit `4a23bf0`) leaves exactly
+4,904 B free.
 UART RX, the log buffer, the system heap, WiFi/network pools and thread stacks
 are deliberately not enlarged: their benefit is diagnostics, throughput or
 internal headroom, not a better console.
