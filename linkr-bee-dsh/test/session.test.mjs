@@ -439,6 +439,10 @@ test('the Host half carries no hard-coded Chinese UI text', async () => {
 
 test('a not_connected exec says nothing was dispatched and the next call rescans', async t => {
   const f = await fixture(t, 'not-connected-once', {transport:'ble',bleName:'',bleAddress:''});
+  // Watching keeps the session alive between calls, so the recovery below is
+  // the stale-session path rather than "the lease closed the session".
+  const watched = await f.route('/watch', {on:true});
+  assert.equal(watched.ok, true);
   await assert.rejects(
     f.call('linkr_bee_exec', {cmd:'echo hi'}),
     /not dispatched.*not reachable/,
@@ -450,6 +454,7 @@ test('a not_connected exec says nothing was dispatched and the next call rescans
   const calls = await f.calls();
   assert.equal(calls.filter(c => c.mode === 'scan').length, 2);
   assert.equal(calls.filter(c => c.mode === 'serve').length, 2);
+  await f.route('/watch', {on:false});
 });
 
 test('a line send frames the text with a newline before the capture window', async t => {
