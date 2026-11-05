@@ -88,10 +88,26 @@ zsock_poll(ctx->fds, ARRAY_SIZE(ctx->fds), -1);
 ## 如何分辨这是自维护固件
 
 - 版本号仍然是 `1.1.4`，与上游一致，便于客户端和发布流程继续工作。
-- 烧录页的 WROOM 条目会标注“Novice-PG 自维护”，并链接到本文。
+- 烧录页有两个 WROOM-32 条目：官方 `esp32-wroom-32`，以及带
+  `Novice-PG 自维护` 标注的 `esp32-wroom-32-self`，选择后状态栏会说明差异。
 - `firmware.json` 里的 `git_commit` 指向本分支的提交，而不是 radxa 的 tag。
 - 官方固件仍然从 <https://github.com/radxa/linkr-bee/releases> 获取；
   官方 WROOM 构建不带上述三项改动。
+
+## 更新烧录页
+
+烧录页（`fork/web-flasher` 分支）从 `fork/self-maintained` 的**最近一次成功
+Build and test 运行**里取 WROOM 产物，因此缓冲区改动不会进入官方 release
+资产，也不会覆盖官方 WROOM ZIP：
+
+1. 推送本分支。
+2. 在 Actions 里对 `fork/self-maintained` 手动运行一次 `Build and test`，
+   等 WROOM job 成功。
+3. 烧录页会在下一次部署时自动出现/刷新 `esp32-wroom-32-self` 条目；也可以
+   手动运行 `Deploy the web terminal and the firmware flasher to GitHub Pages`。
+
+Actions artifact 默认保留 30 天；过期后重新运行一次构建即可。页面上的
+`firmware.json.git_commit` 是固件对应的提交，不一定是分支文档的最新提交。
 
 ## 构建与验证
 
