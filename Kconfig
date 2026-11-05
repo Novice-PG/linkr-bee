@@ -674,19 +674,14 @@ config LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK
 config HTTP_SERVER_MAX_CLIENTS
 	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
 
-config WEBSOCKET_MAX_CONTEXTS
-	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
-
-# The HTTP server's poll() reserves one k_poll_event per valid fd: the stop
-# eventfd, one listening socket per service, and one per client that has not
-# completed the WebSocket upgrade. With two clients that is 4 entries, while
-# Zephyr's default (3) only covers one. The fourth POLL_PREPARE then fails with
-# -ENOMEM, and http_server_core.c closes the listener and every in-flight
-# handshake before restarting after CONFIG_HTTP_SERVER_RESTART_DELAY. Keep one
-# spare entry so a second tab, a browser preconnect, or an idle probe cannot
-# tear the server down.
+# HTTP/1 polling needs an eventfd, a listener and every unupgraded client.
+# Two clients need four events; keep a spare. ws_bridge.c rejects larger
+# custom service/client counts unless the poll budget is raised with them.
 config ZVFS_POLL_MAX
 	default 5 if LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config WEBSOCKET_MAX_CONTEXTS
+	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
 
 config HTTP_SERVER_VERSION_2
 	default n if LINKR_BLE_BRIDGE_WS_BRIDGE
