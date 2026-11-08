@@ -25,7 +25,7 @@ if (args.includes('--scan')) {
     fs.writeFileSync(__dirname+'/attempted','1');
     process.exit(1);
   }
-  const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
+  const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window'||config.scenario==='large-output')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
   if(config.scenario==='slow-start'||config.scenario==='slow-capture')setTimeout(ready,250);else ready();
   readline.createInterface({input:process.stdin}).on('line', line => {
     const request = JSON.parse(line);
@@ -35,6 +35,21 @@ if (args.includes('--scan')) {
     if(config.scenario==='not-connected-once'&&request.op==='exec'&&!fs.existsSync(__dirname+'/nc-used')){
       fs.writeFileSync(__dirname+'/nc-used','1');
       emit({event:'error',id:request.id,code:'not_connected',message:'the board is not reachable'});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
+    if(config.scenario==='lost-exec'&&request.op==='exec'){
+      emit({event:'output',id:request.id,data:'SIDE_EFFECT_DONE\n'});
+      emit({event:'error',id:request.id,code:'link_lost',message:'the link went away mid-command',still_running:false});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
+    if(config.scenario==='large-resident-output'&&request.op==='exec') {
+      for(let i=0;i<80;i++) emit({event:'output',id:request.id,data:'界'.repeat(12000)});
+    }
+    if(config.scenario==='large-lost-exec'&&request.op==='exec') {
+      for(let i=0;i<80;i++) emit({event:'output',id:request.id,data:'x'.repeat(32768)});
+      emit({event:'error',id:request.id,code:'link_lost',message:'lost after a large response',still_running:false});
       emit({event:'end',id:request.id,code:255});
       return;
     }
@@ -58,6 +73,11 @@ if (args.includes('--scan')) {
   });
 } else {
   note({mode:'one-shot',args});
+  if(config.scenario==='large-output') {
+    for(let i=0;i<80;i++) emit({event:'output',data:'x'.repeat(32768)});
+    emit({event:'result',what:'exec',ok:true,exit:0});
+    return;
+  }
   if(config.scenario==='uart-nonzero') {process.stderr.write('UART configuration unavailable');process.exit(2);}
   if(config.scenario==='uart-empty')process.exit(0);
   if(config.scenario==='uart-rejected'){emit({event:'result',what:'uart',ok:false,detail:'UART refused'});process.exit(0);}
@@ -85,7 +105,7 @@ if (args.includes('--scan')) {
 async function fixture(t, scenario = 'ok', extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'linkr-plugin-session-'));
   const executable = join(dir, 'bee-cli.cjs');
-  const { cli = {}, ...configExtra } = extra;
+  const { cli = {}, editor, fiberEntry, ...configExtra } = extra;
   await writeFile(executable, fakeCli, { mode: 0o755 });
   await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario, ...cli }));
   await writeFile(join(dir, 'calls.jsonl'), '');
@@ -99,6 +119,8 @@ async function fixture(t, scenario = 'ok', extra = {}) {
     tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } },
     webServer: { register(options) { handler = options.handler; return () => {}; } },
   };
+  if (editor !== undefined) ctx.get = name => (name === 'configEditor' ? editor : undefined);
+  if (fiberEntry !== undefined) ctx.fiber = { entry: fiberEntry };
   const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...configExtra };
   apply(ctx, config);
   const dispose = () => {
@@ -474,6 +496,22 @@ test('a not_connected exec says nothing was dispatched and the next call rescans
   await f.route('/watch', {on:false});
 });
 
+test('a lost exec after dispatch is never reported as safe to resend', async t => {
+  // The CLI emits `link_lost` with `still_running: false` after the command
+  // was sent and the link died holding the answer. That flag is not proof
+  // that nothing was dispatched, so the tool must not offer a resend.
+  const f = await fixture(t, 'lost-exec', {transport:'ble',bleName:'Mock'});
+  await assert.rejects(
+    f.call('linkr_bee_exec', {cmd:'touch /tmp/already-ran'}),
+    /bee-cli exec failed \(link_lost\).*do not resend automatically/,
+  );
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'request' && c.op === 'exec').length, 1,
+    'the command was dispatched exactly once');
+  assert.equal(calls.filter(c => c.mode === 'one-shot').length, 0,
+    'a post-dispatch failure must not fall back to a one-shot replay');
+});
+
 test('an inherited property is not a named key', async t => {
   const f = await fixture(t, 'ok');
   await assert.rejects(
@@ -592,6 +630,46 @@ test('a connection change cannot redirect an active or queued command', async t 
   assert.equal(calls.find(c => c.cmd === 'new-board').pid, current.pid);
 });
 
+test('a command accepted during an async settings write waits for the new board', async t => {
+  let releaseEdit;
+  const gate = new Promise(resolve => { releaseEdit = resolve; });
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const editor = {
+    async edit() {
+      markStarted();
+      await gate;
+    },
+  };
+  const f = await fixture(t, 'ok', {
+    transport: 'ble',
+    bleName: 'Board-A',
+    editor,
+    fiberEntry: { config: { transport: 'ble', bleName: 'Board-A' } },
+  });
+  const saving = f.route('/config', { bleName: 'Board-B' });
+  await started;
+  const exec = f.call('linkr_bee_exec', { cmd: 'only-on-B' });
+  await pause(120);
+  const during = await f.calls();
+  assert.equal(during.filter(c => c.mode === 'serve').length, 0,
+    'a command accepted during the write must not be dialled to the old board');
+  assert.equal(during.filter(c => c.op === 'exec').length, 0,
+    'nothing reaches the resident session while the write is pending');
+  releaseEdit();
+  const saved = await saving;
+  assert.equal(saved.ok, true);
+  const answer = await exec;
+  assert.match(answer, /result/);
+  const calls = await f.calls();
+  const serves = calls.filter(c => c.mode === 'serve');
+  assert.equal(serves.length, 1, 'the command was dialled once, after the write');
+  const name = serves[0].args[serves[0].args.indexOf('--ble-name') + 1];
+  assert.equal(name, 'Board-B');
+  assert.equal(calls.find(c => c.cmd === 'only-on-B').pid, serves[0].pid,
+    'the accepted command belongs to the new connection, not the stopped one');
+});
+
 test('legacy UART replies expose the confirmed baud without inventing other fields', async t => {
   const f = await fixture(t, 'uart-baud', {transport:'ble',bleName:'Mock'});
   const reply = await f.route('/uart');
@@ -678,4 +756,142 @@ test('cancelling a send capture after acknowledgement never claims input was not
   await f.waitFor(c=>c.mode==='finished'&&c.op==='send');
   await pause(30);controller.abort();await rejected;
   assert.equal((await f.calls()).filter(c=>c.mode==='request'&&c.op==='send').length,1);
+});
+
+
+for (const kind of ['set', 'exec-timeout', 'http-exec', 'http-uart']) {
+  test(`${kind}: parameters are prepared after a pending connection save`, {timeout:5000}, async t => {
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    t.after(() => release());
+    const f = await fixture(t, 'uart-ok', {
+      transport:'ble', bleName:'Board-A',
+      editor:{async edit() { entered(); await gate; }},
+      fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+    });
+    const saving = f.route('/config', {bleName:'Board-B'});
+    await started;
+    const operation = kind === 'set'
+      ? f.call('linkr_bee_set', {target:'rename-ble',value:'Renamed'})
+      : kind === 'exec-timeout'
+        ? f.call('linkr_bee_exec', {cmd:'probe-target',timeoutMs:12000})
+        : kind === 'http-exec'
+          ? f.route('/exec', {cmd:'probe-target',timeoutMs:12000})
+          : f.route('/uart', {value:'115200,8,n,1,none'});
+    await pause(40);
+    assert.equal((await f.calls()).length,0,'nothing dials while the settings edit is pending');
+    release();
+    assert.equal((await saving).ok,true);
+    const answer=await operation;
+    if(kind.startsWith('http-')) assert.equal(answer.ok,true);
+    const runtime=(await f.route('/config')).config;
+    const dial=(await f.calls()).find(c=>c.mode==='one-shot'||c.mode==='serve');
+    assert.equal(runtime.bleName,'Board-B');
+    assert.equal(dial.args[dial.args.indexOf('--ble-name')+1],runtime.bleName);
+  });
+}
+
+test('overlapping settings patches preserve the new target and the later timeout', {timeout:5000}, async t => {
+  const releases=[];
+  let profile={transport:'ble',bleName:'Board-A',timeoutMs:30000};
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(_entry,update){
+      const gate=new Promise(resolve=>releases.push(resolve));
+      await gate;
+      profile=update(profile);
+    }},
+    fiberEntry:{config:profile},
+  });
+  t.after(()=>releases.forEach(release=>release()));
+  const first=f.route('/config',{bleName:'Board-B'});
+  while(releases.length<1) await pause(5);
+  const second=f.route('/config',{timeoutMs:12000});
+  await pause(30);
+  assert.equal(releases.length,1,'profile writes must be serialized');
+  releases[0]();
+  assert.equal((await first).ok,true);
+  while(releases.length<2) await pause(5);
+  const command=f.call('linkr_bee_exec',{cmd:'after-both-saves'});
+  await pause(30);
+  assert.equal((await f.calls()).length,0,'commands wait for every queued settings patch');
+  releases[1]();
+  assert.equal((await second).ok,true);
+  const runtime=(await f.route('/config')).config;
+  assert.equal(profile.bleName,'Board-B');
+  assert.equal(runtime.bleName,profile.bleName);
+  assert.equal(runtime.timeoutMs,12000);
+  assert.equal(profile.timeoutMs,12000);
+  await command;
+  const dial=(await f.calls()).find(c=>c.mode==='serve');
+  assert.equal(dial.args[dial.args.indexOf('--ble-name')+1],'Board-B');
+  assert.equal((await f.calls()).find(c=>c.op==='exec').timeout_ms,12000);
+});
+
+test('cancelling a command waiting for settings does not dial or retain its lease', {timeout:5000}, async t => {
+  let release, entered;
+  const gate=new Promise(resolve=>release=resolve);
+  const started=new Promise(resolve=>entered=resolve);
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(){entered();await gate;}},
+    fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+  });
+  t.after(()=>release());
+  const saving=f.route('/config',{bleName:'Board-B'});
+  await started;
+  const controller=new AbortController();
+  const command=f.call('linkr_bee_exec',{cmd:'cancelled-before-settings-commit'},controller.signal);
+  const rejected=assert.rejects(command,{name:'AbortError'});
+  controller.abort();
+  await rejected;
+  assert.equal((await f.calls()).length,0);
+  release();
+  assert.equal((await saving).ok,true);
+  await f.call('linkr_bee_exec',{cmd:'next-command'});
+  const history=await f.calls();
+  assert.equal(history.filter(c=>c.mode==='request'&&c.op==='exec').length,1);
+  assert.equal(history.find(c=>c.mode==='request'&&c.op==='exec').cmd,'next-command');
+});
+
+test('a rejected profile edit releases queued settings and the next command', {timeout:5000}, async t => {
+  let release, entered;
+  const gate=new Promise(resolve=>release=resolve);
+  const started=new Promise(resolve=>entered=resolve);
+  let edits=0;
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(){ if(++edits===1){entered();await gate;throw new Error('profile write failed');} }},
+    fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+  });
+  t.after(()=>release());
+  const first=f.route('/config',{bleName:'Board-B'});
+  await started;
+  const second=f.route('/config',{timeoutMs:12000});
+  release();
+  assert.equal((await first).ok,false);
+  assert.equal((await second).ok,true);
+  const runtime=(await f.route('/config')).config;
+  assert.equal(runtime.bleName,'Board-A');
+  assert.equal(runtime.timeoutMs,12000);
+  await f.call('linkr_bee_exec',{cmd:'after-failed-save'});
+});
+
+for(const scenario of ['large-output','large-resident-output']) {
+  test(`${scenario}: retained output is bounded and completion remains visible`, async t => {
+    const f=await fixture(t,scenario);
+    const result=await f.call('linkr_bee_exec',{cmd:'large-output'});
+    assert.ok(Buffer.byteLength(result)<=1024*1024+8192);
+    assert.match(result,/"event":"result"/);
+    assert.match(result,/captured output truncated/);
+  });
+}
+
+test('output truncation preserves a later lost-link error without replay', async t => {
+  const f=await fixture(t,'large-lost-exec');
+  await assert.rejects(f.call('linkr_bee_exec',{cmd:'large-output'}),/link_lost.*do not resend automatically/);
+  const history=await f.calls();
+  assert.equal(history.filter(c=>c.mode==='request'&&c.op==='exec').length,1);
+  assert.equal(history.some(c=>c.mode==='one-shot'),false);
 });

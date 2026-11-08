@@ -223,8 +223,34 @@ async function dialArgs(config, signal, sessionStart = null) {
   return ['--ble-name', discovered.name];
 }
 
-/** Per-run/per-request memory ceiling for captured output (1 MiB). */
+/** Per-run/per-request serialized JSON capture budget (1 MiB). */
 const MAX_CAPTURE_BYTES = 1024 * 1024;
+const MAX_CAPTURE_EVENTS = 4096;
+const CAPTURE_NOTICE = '(captured output truncated; read the shared console for recent output)';
+
+function newCapture() {
+  return { events: [], sizes: [], bytes: 0, truncated: false };
+}
+
+/** Bound retained JSON frames while keeping the latest result/error frames. */
+function captureEvent(capture, event) {
+  const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
+  if (bytes > MAX_CAPTURE_BYTES || (event.event === 'output' &&
+      (capture.bytes + bytes > MAX_CAPTURE_BYTES || capture.events.length >= MAX_CAPTURE_EVENTS))) {
+    capture.truncated = true;
+    return;
+  }
+  // Output is expendable; a completion or failure must remain observable even
+  // after the output budget fills up. Metadata also has a bounded total size.
+  while (capture.bytes + bytes > MAX_CAPTURE_BYTES || capture.events.length >= MAX_CAPTURE_EVENTS) {
+    capture.bytes -= capture.sizes.shift();
+    capture.events.shift();
+    capture.truncated = true;
+  }
+  capture.events.push(event);
+  capture.sizes.push(bytes);
+  capture.bytes += bytes;
+}
 
 /**
  * Run one bee-cli request. Resolves with the parsed JSON Lines events plus the
@@ -242,7 +268,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     try {
       while (true) {
         signal.throwIfAborted();
-        if (streamBorrows === 0 && sessionBorrows === 0 && sessionStarting === null && !session?.busy) {
+        if (streamBorrows === 0 && sessionBorrows === 0 && sessionStarting === null && configSaving === 0 && !session?.busy) {
           // Reserve synchronously: two waiters must not both observe an idle
           // link before either actually owns it.
           streamBorrows += 1;
@@ -301,7 +327,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     let captureTimer;
     // Parsed once, as lines arrive: the answer is this list, not a copy of the
     // whole stream, so a runaway command cannot grow the heap without bound.
-    const events = [];
+    const capture = newCapture();
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -344,7 +370,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
         try {
           const event = JSON.parse(line);
           if (event && typeof event === 'object') {
-            events.push(event);
+            captureEvent(capture, event);
             onEvent?.(event);
           }
         } catch {
@@ -368,7 +394,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
         linkState.lastError = code === 0 ? '' : stderr.trim().split('\n').pop() || '';
         linkState.at = Date.now();
       }
-      finish(resolve, { code, signalName, events, stdout, stderr });
+      finish(resolve, { code, signalName, events: capture.events, truncated: capture.truncated, stdout, stderr });
     });
 
     // The executor runs synchronously to here, so a throw would reject the
@@ -414,6 +440,7 @@ function renderRun(run) {
   if (output) sections.push(`--- target output ---\n${output}`);
   if (!sections.length) sections.push(run.stdout.trim() || run.stderr.trim() || '(no output)');
   if (run.stderr.trim()) sections.push(`--- stderr ---\n${run.stderr.trim()}`);
+  if (run.truncated) sections.push(CAPTURE_NOTICE);
   return sections.join('\n');
 }
 
@@ -906,6 +933,22 @@ let sessionStarting = null;
 let sessionRetiring = Promise.resolve();
 let sessionBorrows = 0;
 let oneShotWaiters = 0;
+/** Pending settings writes block new configuration leases until committed. */
+let configSaving = 0;
+let configBorrows = 0;
+let configWriteTail = Promise.resolve();
+
+/** Bind parameters and the whole operation to one committed configuration. */
+async function withConfigLease(signal, work) {
+  const current = operationSignal(signal);
+  while (configSaving > 0) {
+    await waitWithSignal(sleep(10), current);
+  }
+  current.throwIfAborted();
+  configBorrows += 1;
+  try { return await work(); }
+  finally { configBorrows -= 1; }
+}
 /** The panel wants the target's bytes: pushed by `watch`, or polled on an old CLI. */
 let watchWanted = false;
 /** The session that currently has `watch` on (so it can be told `off`). */
@@ -1008,19 +1051,13 @@ function makeSession(child, ready, config) {
       // no longer connects. Remember that so the next caller re-dials.
       if (event.event === 'error' && event.code === 'not_connected') markDirty(event.message);
       if (event.event === 'end') {
-        entry.finish(null, { code: event.code, events: entry.events });
+        entry.finish(null, { code: event.code, events: entry.capture.events, truncated: entry.capture.truncated });
         continue;
       }
       // Keep the stored answer bounded. The panel still receives every chunk
       // through onEvent; only the copy that would be rendered back to the
       // caller is capped.
-      if (event.event === 'output') {
-        const text = event.data ?? event.text ?? '';
-        entry.bytes = (entry.bytes || 0) + String(text).length;
-        if (entry.bytes <= MAX_CAPTURE_BYTES) entry.events.push(event);
-      } else {
-        entry.events.push(event);
-      }
+      captureEvent(entry.capture, event);
       try { entry.onEvent?.(event); } catch { /* a subscriber cannot end the session */ }
     }
   });
@@ -1069,7 +1106,7 @@ function makeSession(child, ready, config) {
         if (signal.aborted) { abort(); return; }
         if (closed) { finish(new Error('bee-cli serve is not running; this input was not sent.')); return; }
         const id = nextId++;
-        entry = { id, events: [], onEvent, finish };
+        entry = { id, capture: newCapture(), onEvent, finish };
         pending.set(id, entry);
         // Exec's budget is per attempt; retries and their state probes also
         // consume time. The host guard must outlive the CLI's own deadline.
@@ -1131,7 +1168,7 @@ function makeSession(child, ready, config) {
 async function ensureSession(config, signal) {
   signal = operationSignal(signal);
   signal.throwIfAborted();
-  while (streamBorrows > 0) {
+  while (streamBorrows > 0 || configSaving > 0) {
     await waitWithSignal(sleep(10), signal);
     signal.throwIfAborted();
   }
@@ -1240,7 +1277,7 @@ async function withSessionLease(signal, work) {
   const current = operationSignal(signal);
   while (true) {
     current.throwIfAborted();
-    if (streamBorrows === 0 && oneShotWaiters === 0) {
+    if (streamBorrows === 0 && oneShotWaiters === 0 && configSaving === 0) {
       sessionBorrows += 1;
       break;
     }
@@ -1549,18 +1586,20 @@ async function runExec(config, options, signal) {
     const results = answer.events.filter(event => event.event === 'result');
     const output = consoleOutputOf(answer);
     const rendered = [results.map(event => JSON.stringify(event)).join('\n'),
-      output ? `--- target output ---\n${output}` : ''].filter(Boolean).join('\n');
+      output ? `--- target output ---\n${output}` : '',
+      answer.truncated ? CAPTURE_NOTICE : ''].filter(Boolean).join('\n');
     if (answer.code !== 0 && results.length === 0) {
       const failure = answer.events.find(event => event.event === 'error');
       if (failure) {
         const detail = typeof failure.message === 'string' && failure.message ? failure.message : 'no reason given';
-        // `not_connected`/`bad_request` are refused before anything reaches
-        // the board, so retrying is safe and the caller should be told so.
-        const notSent = failure.still_running === false ||
-          failure.code === 'not_connected' || failure.code === 'bad_request';
+        // Only a refusal that happened before the request reached the board
+        // means "nothing was dispatched". `still_running` is not that signal:
+        // the CLI reports `link_lost` with `still_running: false` after the
+        // command was sent and the link died holding the answer.
+        const notSent = failure.code === 'not_connected' || failure.code === 'bad_request';
         throw new Error(notSent
           ? `bee-cli exec was not dispatched (${failure.code}): ${detail}`
-          : `bee-cli exec failed (${failure.code}): ${detail}`);
+          : `bee-cli exec failed (${failure.code}): ${detail}. The command may have run; do not resend automatically.`);
       }
       throw new Error(`bee-cli exec failed (exit ${answer.code}); completion is unknown. Do not resend automatically.`);
     }
@@ -1692,57 +1731,65 @@ const MASKED_TOKEN = /^[\u2022*]+$/;
 async function saveConfig(ctx, config, body, signal) {
   const ownerSignal = operationSignal(signal);
   ownerSignal.throwIfAborted();
-  const patch = {};
-  for (const key of WRITABLE_KEYS) {
-    const value = body?.[key];
-    if (value === undefined) continue;
-    if (key === 'lanToken' && typeof value === 'string' && MASKED_TOKEN.test(value)) continue;
-    patch[key] = value;
-  }
-  if (Object.keys(patch).length === 0) return { ok: false, error: 'nothing to change' };
-  const issues = [];
-  const next = normalizeConfig({ ...config, ...patch }, issues);
-  if (issues.length > 0) return { ok: false, error: issues.map((issue) => issue.message).join('; ') };
-  const entry = ctx.fiber?.entry;
-  const editor = ctx.get?.('configEditor');
-  // Whether the write lands in the profile or only in memory, the running
-  // plugin must stop using the settings it was dialling with: otherwise
-  // GET /config keeps reporting the old values and an open session keeps the
-  // old board/transport until the shell reloads the plugin.
-  const connectionKeys = ['cliPath', 'transport', 'bleName', 'bleAddress', 'lanHost', 'lanToken'];
-  const changed = connectionKeys.some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
-  // A connection change must not redirect work that is already in flight (or
-  // queued behind it): those commands were accepted for the old board.
-  if (changed && (sessionBorrows > 0 || streamBorrows > 0 || oneShotWaiters > 0 || sessionStarting || session?.busy)) {
-    return { ok: false, error: 'The console is busy. Wait for the active operation before changing the connection.' };
-  }
-  const applyLocally = () => {
-    Object.assign(config, next);
-    // The editor may have reloaded the plugin: do not let this instance tear
-    // down or redial a link that now belongs to its replacement.
-    const sameInstance = signal === undefined || signal === lifecycle.signal;
-    if (!changed || ownerSignal.aborted || !sameInstance) return;
-    if (watchTimer !== null) clearTimeout(watchTimer);
-    watchTimer = null;
-    stopMonitor();
-    stopSession();
-    flushReadingPending();
-    readingCommands.clear();
-    forgetDiscoveredName();
-    linkState.transport = config.transport;
-    linkState.target = config.bleAddress || config.bleName || config.lanHost ||
-      (config.transport === 'loopback' ? 'loopback' : '');
-    linkState.connected = false;
-    // An open panel should follow the new settings without a reload.
-    if (watchWanted) resumeStreaming(config);
-  };
-  if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
-    await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));
+  const previous = configWriteTail;
+  let release;
+  configWriteTail = new Promise(resolve => { release = resolve; });
+  configSaving += 1;
+  try {
+    await waitWithSignal(previous, ownerSignal);
+    ownerSignal.throwIfAborted();
+    // Derive the complete next value only after preceding writes committed.
+    const patch = {};
+    for (const key of WRITABLE_KEYS) {
+      const value = body?.[key];
+      if (value === undefined) continue;
+      if (key === 'lanToken' && typeof value === 'string' && MASKED_TOKEN.test(value)) continue;
+      patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) return { ok: false, error: 'nothing to change' };
+    const issues = [];
+    const next = normalizeConfig({ ...config, ...patch }, issues);
+    if (issues.length > 0) return { ok: false, error: issues.map(issue => issue.message).join('; ') };
+    const entry = ctx.fiber?.entry;
+    const editor = ctx.get?.('configEditor');
+    const connectionKeys = ['cliPath', 'transport', 'bleName', 'bleAddress', 'lanHost', 'lanToken'];
+    const changed = connectionKeys.some(key => (config?.[key] ?? '') !== (next?.[key] ?? ''));
+    // A command owns its configuration before it constructs any dial arguments,
+    // including while it is queued or preparing a compatibility fallback.
+    if (changed && (configBorrows > 0 || sessionBorrows > 0 || streamBorrows > 0 ||
+        oneShotWaiters > 0 || sessionStarting || session?.busy)) {
+      return { ok: false, error: 'The console is busy. Wait for the active operation before changing the connection.' };
+    }
+    const applyLocally = () => {
+      Object.assign(config, next);
+      const sameInstance = signal === undefined || signal === lifecycle.signal;
+      if (!changed || ownerSignal.aborted || !sameInstance) return;
+      if (watchTimer !== null) clearTimeout(watchTimer);
+      watchTimer = null;
+      stopMonitor();
+      stopSession();
+      flushReadingPending();
+      readingCommands.clear();
+      forgetDiscoveredName();
+      linkState.transport = config.transport;
+      linkState.target = config.bleAddress || config.bleName || config.lanHost ||
+        (config.transport === 'loopback' ? 'loopback' : '');
+      linkState.connected = false;
+      if (watchWanted) resumeStreaming(config);
+    };
+    if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
+      await editor.edit(entry, current => ({ ...(current ?? config), ...patch }));
+      applyLocally();
+      return { ok: true, applied: 'profile', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+    }
     applyLocally();
-    return { ok: true, applied: 'profile', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+    return { ok: true, applied: 'memory', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+  } finally {
+    configSaving -= 1;
+    // A cancelled queued writer must not let its successor overtake an earlier
+    // edit which is still persisting. Keep the queue ordered on every exit.
+    previous.then(release, release);
   }
-  applyLocally();
-  return { ok: true, applied: 'memory', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
 }
 
 function normalizeConfig(raw, issues) {
@@ -1829,6 +1876,17 @@ export function apply(ctx, rawConfig) {
   const instanceController = lifecycle;
   const instanceSignal = instanceController.signal;
   const taskSignal = exec => exec?.signal ? AbortSignal.any([instanceSignal, exec.signal]) : instanceSignal;
+  const withConfig = work => withConfigLease(instanceSignal, work);
+  const connectionTool = tool => defineTool({
+    ...tool,
+    execute: (args, exec) => {
+      // Local console inspection/control stays available during a settings edit.
+      if (tool.name === 'linkr_bee_console' && ['open', 'focus', 'clear', 'read', 'state'].includes(args.action)) {
+        return tool.execute(args, exec);
+      }
+      return withConfigLease(taskSignal(exec), () => tool.execute(args, exec));
+    },
+  });
   const readBody = async req => {
     const body = await readJsonBody(req);
     instanceSignal.throwIfAborted();
@@ -1945,7 +2003,7 @@ export function apply(ctx, rawConfig) {
               }
               const timeoutMs = Number.isFinite(body?.timeoutMs) ? Number(body.timeoutMs) : undefined;
               const idleMs = Number.isFinite(body?.idleMs) ? Number(body.idleMs) : undefined;
-              const result = await runExec(config, { cmd, timeoutMs, idleMs, source: 'agent' }, instanceSignal);
+              const result = await withConfig(() => runExec(config, { cmd, timeoutMs, idleMs, source: 'agent' }, instanceSignal));
               sendJson(res, 200, { ok: result.ok, exit: result.exit, output: result.output });
             } catch (error) {
               sendJson(res, 400, {
@@ -1960,7 +2018,7 @@ export function apply(ctx, rawConfig) {
           if (req.method === 'POST' && path === '/console/input') {
             try {
               const body = await readBody(req);
-              const result = await runConsoleInput(config, body, instanceSignal);
+              const result = await withConfig(() => runConsoleInput(config, body, instanceSignal));
               // Nothing is streaming to the panel: do not sit on the radio for
               // a console nobody is watching.
               releaseIfIdle();
@@ -1975,7 +2033,7 @@ export function apply(ctx, rawConfig) {
           // links have no such channel, and bee-cli says so explicitly.
           if (req.method === 'GET' && path === '/uart') {
             try {
-              sendJson(res, 200, await queryUart(config, instanceSignal));
+              sendJson(res, 200, await withConfig(() => queryUart(config, instanceSignal)));
             } catch (error) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
             }
@@ -1984,7 +2042,7 @@ export function apply(ctx, rawConfig) {
           if (req.method === 'POST' && path === '/uart') {
             try {
               const body = await readBody(req);
-              sendJson(res, 200, await setUart(config, body?.value, instanceSignal));
+              sendJson(res, 200, await withConfig(() => setUart(config, body?.value, instanceSignal)));
             } catch (error) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
             }
@@ -2034,7 +2092,7 @@ export function apply(ctx, rawConfig) {
               }
               // One keystroke path for the panel and for the agent's tool: the
               // same bytes, the same retry, the same echo window.
-              const result = await typeIntoConsole(config, data, config.sendCaptureMs ?? 1500, false, instanceSignal);
+              const result = await withConfig(() => typeIntoConsole(config, data, config.sendCaptureMs ?? 1500, false, instanceSignal));
               // Nothing is streaming to the panel: do not sit on the radio for
               // a console nobody is watching.
               releaseIfIdle();
@@ -2054,7 +2112,7 @@ export function apply(ctx, rawConfig) {
                 sendJson(res, 200, { ok: true, streaming: false, released: result.released, session: sessionInfo() });
                 return;
               }
-              const result = await startWatch(config, instanceSignal);
+              const result = await withConfig(() => startWatch(config, instanceSignal));
               sendJson(res, 200, {
                 ok: true,
                 streaming: true,
@@ -2089,7 +2147,7 @@ export function apply(ctx, rawConfig) {
               }
               // One geometry path for the panel's route and for the agent's
               // tool, so a resize means the same thing whichever asked.
-              sendJson(res, 200, await applyResize(cols, rows, instanceSignal));
+              sendJson(res, 200, await withConfig(() => applyResize(cols, rows, instanceSignal)));
             } catch (error) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
             }
@@ -2097,7 +2155,7 @@ export function apply(ctx, rawConfig) {
           }
           if (req.method === 'POST' && path === '/scan') {
             try {
-              const run = await runBee(config, ['--scan', '--json'], { signal: instanceSignal });
+              const run = await withConfig(() => runBee(config, ['--scan', '--json'], { signal: instanceSignal }));
               const failure = run.events.find((event) => event.event === 'error');
               if (run.code !== 0 || failure) {
                 // "No boards nearby" is an empty list; a failed scan is not.
@@ -2124,7 +2182,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const unregister = ctx.tools.register(
-      defineTool({
+      connectionTool({
         name: 'linkr_bee_exec',
         description:
           'Run a shell command on the target board connected to the Linkr Bee wireless serial bridge ' +
@@ -2200,7 +2258,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const unregister = ctx.tools.register(
-      defineTool({
+      connectionTool({
         name: 'linkr_bee_console',
         description:
           'Operate the serial console in the Web UI\'s right column and read what the target said on it. Use it ' +
@@ -2334,7 +2392,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const unregister = ctx.tools.register(
-      defineTool({
+      connectionTool({
         name: 'linkr_bee_query',
         description:
           'Read state from the Linkr Bee bridge or its link: bridge diagnostics, UART/WiFi/WebDAV/BLE-name/LAN ' +
@@ -2385,7 +2443,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const unregister = ctx.tools.register(
-      defineTool({
+      connectionTool({
         name: 'linkr_bee_send',
         description:
           'Send input to the target UART console without waiting for a command to finish, then capture the console ' +
@@ -2450,7 +2508,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const unregister = ctx.tools.register(
-      defineTool({
+      connectionTool({
         name: 'linkr_bee_set',
         description:
           'Change a Linkr Bee bridge setting and read it back: UART format, WiFi join/leave, WebDAV log upload on/off, ' +
