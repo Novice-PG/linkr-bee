@@ -19,7 +19,8 @@ Usage:
         --out release-out \
         --apk apk/linkr-bee-v0.1.0-android-debug.apk \
         --firmware-dir artifacts/firmware \
-        --desktop-dir artifacts/desktop
+        --desktop-dir artifacts/desktop \
+        --web-dir artifacts/web --repo owner/name --commit <sha>
 
 The firmware directory holds one directory per board, named
 ``linkr-bee-<slug>``, exactly as the workflow's upload step names the artifact.
@@ -37,6 +38,7 @@ from assemble_release import (
     DESKTOP_RE,
     FIRMWARE_BOARDS,
     RAW_CLI_RE,
+    collect_web,
     sha256,
     zip_tree,
 )
@@ -137,13 +139,19 @@ def main() -> int:
     parser.add_argument("--apk", type=Path)
     parser.add_argument("--firmware-dir", type=Path)
     parser.add_argument("--desktop-dir", type=Path)
+    parser.add_argument("--web-dir", type=Path)
+    parser.add_argument("--repo")
+    parser.add_argument("--commit")
     args = parser.parse_args()
 
-    if args.apk is None and args.firmware_dir is None and args.desktop_dir is None:
+    if (args.apk is None and args.firmware_dir is None
+            and args.desktop_dir is None and args.web_dir is None):
         fail(
-            "nothing to replace: pass --apk, --firmware-dir, --desktop-dir "
-            "or a combination"
+            "nothing to replace: pass --apk, --firmware-dir, --desktop-dir, "
+            "--web-dir or a combination"
         )
+    if args.web_dir is not None and not (args.repo and args.commit):
+        fail("--web-dir needs --repo and --commit for the package README")
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     if manifest.get("tag") != args.tag:
@@ -167,6 +175,17 @@ def main() -> int:
 
     if args.desktop_dir is not None:
         replace_desktop(args.desktop_dir, args.out, manifest, args.run_id)
+
+    if args.web_dir is not None:
+        # The Web package is not a copy of the build directory: the release
+        # shape carries the licence and a README naming the source commit, so
+        # rebuild it with the same collector the release uses.
+        for package in collect_web(
+                args.web_dir, args.out, args.tag, args.repo, args.commit,
+                args.tag.removeprefix("v")):
+            patch_entry(manifest, package.name, package, args.run_id)
+        # The staging tree is an input to the zip, not a file to upload.
+        shutil.rmtree(args.out / "web-package", ignore_errors=True)
 
     write_metadata(args.manifest, args.sums, manifest)
     print(f"metadata written to {args.manifest} and {args.sums}")

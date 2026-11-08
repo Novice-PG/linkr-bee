@@ -23,6 +23,10 @@ on:
         description: "Replace the six firmware bundles"
         type: boolean
         default: true
+      web:
+        description: "Replace the Web terminal package"
+        type: boolean
+        default: true
       desktop:
         description: "Replace the host archives, .deb packages and CLI binaries"
         type: boolean
@@ -58,7 +62,7 @@ jobs:
     if: >-
       always() && needs.build.result == 'success'
       && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
-      && (inputs.apk || inputs.firmware || inputs.desktop)
+      && (inputs.apk || inputs.firmware || inputs.desktop || inputs.web)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,6 +85,13 @@ jobs:
           # that is not a board slug.
           pattern: linkr-bee-*
           path: assets/firmware
+
+      - name: Collect the Web package built by this run
+        if: inputs.web
+        uses: actions/download-artifact@v4
+        with:
+          name: linkr-bee-web
+          path: assets/web
 
       - name: Collect the host archives built by this run
         if: inputs.desktop
@@ -123,6 +134,10 @@ jobs:
           fi
           if [ "${{ inputs.desktop }}" = "true" ]; then
             args+=(--desktop-dir assets/desktop)
+          fi
+          if [ "${{ inputs.web }}" = "true" ]; then
+            args+=(--web-dir assets/web
+                   --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA")
           fi
           python3 tools/refresh_release.py "${args[@]}"
 

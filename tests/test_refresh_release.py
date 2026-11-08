@@ -217,6 +217,72 @@ class RefreshReleaseTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not carry exactly one", result.stderr)
 
+    def test_the_web_package_is_rebuilt_around_the_build_directory(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-refresh-web-") as tmp:
+            root = Path(tmp)
+            write_metadata(root, [asset(OTHER_NAME, b"old web", "web")])
+            web = root / "artifacts" / "web"
+            web.mkdir(parents=True)
+            (web / "about-data.js").write_text(json.dumps(
+                {"app": {"version": VERSION}}, indent=2))
+            (web / "index.html").write_text("<title>new</title>\n")
+
+            result = subprocess.run(
+                command_for(root, "--web-dir", str(web),
+                            "--repo", "owner/name", "--commit", "abc123"),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            package = root / "out" / OTHER_NAME
+            self.assertTrue(package.is_file(), OTHER_NAME)
+            # The staging tree must not be left for the upload step.
+            self.assertFalse((root / "out" / "web-package").exists())
+            manifest = json.loads((root / "release-manifest.json").read_text())
+            entries = {a["name"]: a for a in manifest["assets"]}
+            self.assertEqual(entries[OTHER_NAME]["sha256"],
+                             digest(package.read_bytes()))
+            self.assertEqual(entries[OTHER_NAME]["size"], package.stat().st_size)
+            self.assertEqual(entries[OTHER_NAME]["build_run"], 42)
+
+            with zipfile.ZipFile(package) as archive:
+                root_dir = f"linkr-bee-{TAG}-web"
+                self.assertIn(f"{root_dir}/index.html", archive.namelist())
+                self.assertIn(f"{root_dir}/LICENSE", archive.namelist())
+                readme = archive.read(f"{root_dir}/README.txt").decode()
+            self.assertIn("Commit: abc123", readme)
+            self.assertIn(f"Source: owner/name/tree/{TAG}", readme)
+
+    def test_a_web_build_whose_version_differs_from_the_tag_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-refresh-webbad-") as tmp:
+            root = Path(tmp)
+            write_metadata(root, [asset(OTHER_NAME, b"old web", "web")])
+            web = root / "artifacts" / "web"
+            web.mkdir(parents=True)
+            (web / "about-data.js").write_text(json.dumps(
+                {"app": {"version": "0.1.3"}}))
+
+            result = subprocess.run(
+                command_for(root, "--web-dir", str(web),
+                            "--repo", "owner/name", "--commit", "abc123"),
+                capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Web reports version '0.1.3'", result.stderr)
+
+    def test_a_web_refresh_without_a_repository_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-refresh-webrepo-") as tmp:
+            root = Path(tmp)
+            write_metadata(root, [asset(OTHER_NAME, b"old web", "web")])
+            web = root / "artifacts" / "web"
+            web.mkdir(parents=True)
+            (web / "about-data.js").write_text(json.dumps(
+                {"app": {"version": VERSION}}))
+
+            result = subprocess.run(
+                command_for(root, "--web-dir", str(web), "--commit", "abc123"),
+                capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--web-dir needs --repo and --commit", result.stderr)
+
     def test_replacing_nothing_is_refused(self):
         with tempfile.TemporaryDirectory(prefix="linkr-refresh-none-") as tmp:
             root = Path(tmp)
