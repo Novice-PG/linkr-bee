@@ -36,6 +36,7 @@ from assemble_release import (
     DEB_RE,
     DESKTOP_RE,
     FIRMWARE_BOARDS,
+    RAW_CLI_RE,
     sha256,
     zip_tree,
 )
@@ -89,17 +90,20 @@ def replace_desktop(source: Path, out: Path, manifest: dict,
                     run_id: int | None) -> list[Path]:
     """Copy the desktop matrix's files into the release under their own names.
 
-    The host matrix already writes the archives and ``.deb`` packages the
-    release shape expects, version and target in the file name, so nothing is
-    rebuilt here: each file replaces the entry of the same name. A name the
-    manifest does not carry is refused rather than uploaded, and a macOS leg
-    the run did not build simply keeps the bytes it was published with.
+    The host matrix already writes the archives, ``.deb`` packages and bare
+    ``bee-cli`` binaries the release shape expects, version and target in the
+    file name, so nothing is rebuilt here: each file replaces the entry of the
+    same name. The CLI binary is part of the matrix's payload because the npm
+    launcher downloads it by name. A name the manifest does not carry is
+    refused rather than uploaded, and a macOS leg the run did not build simply
+    keeps the bytes it was published with.
     """
     files: list[Path] = []
     for path in sorted(source.iterdir()):
         if not path.is_file() or path.name == "SHA256SUMS":
             continue
-        if not (DESKTOP_RE.match(path.name) or DEB_RE.match(path.name)):
+        if not (DESKTOP_RE.match(path.name) or DEB_RE.match(path.name)
+                or RAW_CLI_RE.match(path.name)):
             fail(f"unexpected desktop artifact: {path.name}")
         destination = out / path.name
         shutil.copy2(path, destination)

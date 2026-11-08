@@ -170,6 +170,9 @@ class RefreshReleaseTests(unittest.TestCase):
                 f"linkr-bee-{VERSION}-x86_64-unknown-linux-gnu.tar.gz",
                 f"linkr-bee-cli-{VERSION}-x86_64-pc-windows-gnu.zip",
                 f"linkr-bee_{VERSION}_amd64.deb",
+                # The matrix also publishes the bare CLI the npm launcher fetches.
+                "bee-cli-x86_64-unknown-linux-gnu",
+                "bee-cli-x86_64-pc-windows-msvc.exe",
             ]
             write_metadata(root, [asset(name, b"old", "desktop")
                                   for name in names])

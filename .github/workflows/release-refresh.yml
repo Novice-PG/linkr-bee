@@ -24,7 +24,7 @@ on:
         type: boolean
         default: true
       desktop:
-        description: "Replace the host archives and .deb packages"
+        description: "Replace the host archives, .deb packages and CLI binaries"
         type: boolean
         default: true
 
