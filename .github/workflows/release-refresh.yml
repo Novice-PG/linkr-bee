@@ -121,6 +121,9 @@ jobs:
           if [ "${{ inputs.firmware }}" = "true" ]; then
             args+=(--firmware-dir assets/firmware)
           fi
+          if [ "${{ inputs.desktop }}" = "true" ]; then
+            args+=(--desktop-dir assets/desktop)
+          fi
           python3 tools/refresh_release.py "${args[@]}"
 
       - name: Replace the assets and upload the updated metadata
