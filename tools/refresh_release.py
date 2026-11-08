@@ -19,7 +19,8 @@ Usage:
         --out release-out \
         --apk apk/linkr-bee-v0.1.0-android-debug.apk \
         --firmware-dir artifacts/firmware \
-        --desktop-dir artifacts/desktop
+        --desktop-dir artifacts/desktop \
+        --web-dir artifacts/web --repo owner/name --commit <sha>
 
 The firmware directory holds one directory per board, named
 ``linkr-bee-<slug>``, exactly as the workflow's upload step names the artifact.
@@ -36,6 +37,8 @@ from assemble_release import (
     DEB_RE,
     DESKTOP_RE,
     FIRMWARE_BOARDS,
+    RAW_CLI_RE,
+    collect_web,
     sha256,
     zip_tree,
 )
@@ -89,17 +92,20 @@ def replace_desktop(source: Path, out: Path, manifest: dict,
                     run_id: int | None) -> list[Path]:
     """Copy the desktop matrix's files into the release under their own names.
 
-    The host matrix already writes the archives and ``.deb`` packages the
-    release shape expects, version and target in the file name, so nothing is
-    rebuilt here: each file replaces the entry of the same name. A name the
-    manifest does not carry is refused rather than uploaded, and a macOS leg
-    the run did not build simply keeps the bytes it was published with.
+    The host matrix already writes the archives, ``.deb`` packages and bare
+    ``bee-cli`` binaries the release shape expects, version and target in the
+    file name, so nothing is rebuilt here: each file replaces the entry of the
+    same name. The CLI binary is part of the matrix's payload because the npm
+    launcher downloads it by name. A name the manifest does not carry is
+    refused rather than uploaded, and a macOS leg the run did not build simply
+    keeps the bytes it was published with.
     """
     files: list[Path] = []
     for path in sorted(source.iterdir()):
         if not path.is_file() or path.name == "SHA256SUMS":
             continue
-        if not (DESKTOP_RE.match(path.name) or DEB_RE.match(path.name)):
+        if not (DESKTOP_RE.match(path.name) or DEB_RE.match(path.name)
+                or RAW_CLI_RE.match(path.name)):
             fail(f"unexpected desktop artifact: {path.name}")
         destination = out / path.name
         shutil.copy2(path, destination)
@@ -133,13 +139,19 @@ def main() -> int:
     parser.add_argument("--apk", type=Path)
     parser.add_argument("--firmware-dir", type=Path)
     parser.add_argument("--desktop-dir", type=Path)
+    parser.add_argument("--web-dir", type=Path)
+    parser.add_argument("--repo")
+    parser.add_argument("--commit")
     args = parser.parse_args()
 
-    if args.apk is None and args.firmware_dir is None and args.desktop_dir is None:
+    if (args.apk is None and args.firmware_dir is None
+            and args.desktop_dir is None and args.web_dir is None):
         fail(
-            "nothing to replace: pass --apk, --firmware-dir, --desktop-dir "
-            "or a combination"
+            "nothing to replace: pass --apk, --firmware-dir, --desktop-dir, "
+            "--web-dir or a combination"
         )
+    if args.web_dir is not None and not (args.repo and args.commit):
+        fail("--web-dir needs --repo and --commit for the package README")
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     if manifest.get("tag") != args.tag:
@@ -163,6 +175,17 @@ def main() -> int:
 
     if args.desktop_dir is not None:
         replace_desktop(args.desktop_dir, args.out, manifest, args.run_id)
+
+    if args.web_dir is not None:
+        # The Web package is not a copy of the build directory: the release
+        # shape carries the licence and a README naming the source commit, so
+        # rebuild it with the same collector the release uses.
+        for package in collect_web(
+                args.web_dir, args.out, args.tag, args.repo, args.commit,
+                args.tag.removeprefix("v")):
+            patch_entry(manifest, package.name, package, args.run_id)
+        # The staging tree is an input to the zip, not a file to upload.
+        shutil.rmtree(args.out / "web-package", ignore_errors=True)
 
     write_metadata(args.manifest, args.sums, manifest)
     print(f"metadata written to {args.manifest} and {args.sums}")
