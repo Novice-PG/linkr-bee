@@ -156,7 +156,7 @@ const labels = {
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput, onExecutionRecord = null, readExecutionEvents = null }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput, onExecutionRecord = null, readExecutionEvents = null, onBusyChange = null }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -242,6 +242,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let executionMode = "auto";
   let fingerprint = "";
   let busy = false;
+  let stopping = false;
+  let revokedResidentTask = null;
   const isResidentBusy = () => resident?.isBusy?.() === true;
   let version = 0;
   let eventVersion = 0;
@@ -545,6 +547,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function refreshActivity() {
     const residentBusy = isResidentBusy();
+    const residentTask = resident?.getRunningTaskId?.();
+    onBusyChange?.((busy && !stopping) || Boolean(residentTask && residentTask !== revokedResidentTask));
     settings.setBusy(busy || residentBusy);
     $("agentAsk").disabled = $("agentNew").disabled = busy || residentBusy;
     $("agentStop").disabled = !(busy || residentBusy);
@@ -556,6 +560,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function setBusy(value) {
     busy = value;
+    if (value) stopping = false;
     if (!value) activity.finish(currentTask?.status === "failed" ? "error" : currentTask?.status === "interrupted" ? "interrupted" : "done");
     refreshHistory();
     refreshActivity();
@@ -565,9 +570,14 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   // Cancelling a run keeps its history; only explicit context/session resets
   // discard the runner. The active prompt must still settle before another ask.
-  function stop(reason, { preserveConversation = true } = {}) {
+  function stop(reason, { preserveConversation = true, preserveResidentIndicator = false } = {}) {
     if (currentTask && busy) { currentTask.status = "interrupted"; persistTask(); }
     version++;
+    stopping = true;
+    // Retire this task's indication on connection/ownership/context changes.
+    // Hiding the panel leaves an independently running resident task intact.
+    if (!preserveResidentIndicator) revokedResidentTask = resident?.getRunningTaskId?.() || null;
+    refreshActivity();
     activity.finish("interrupted");
     runner?.abort();
     $("agentQueue").textContent = '';
@@ -1122,7 +1132,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
      * mid-verify would lose the check for the rest of the connection. Manual
      * binding actions are not re-armed: the user runs those deliberately. */
     const autoVerifyAborted = bindingController !== null && bindingAutomatic;
-    stop("stopped");
+    stop("stopped", { preserveResidentIndicator: true });
     if (autoVerifyAborted) autoIdentitySession = null;
     showModePicker(false);
     opened = false;
