@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     termios = None
     tty = None
 
-__version__ = "1.1.5"
+__version__ = "1.2.0"
 DEFAULT_NAME = None  # Discover by service; --name is an explicit override.
 MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
@@ -395,7 +395,7 @@ def terminal_geometry(cols, rows) -> dict:
 
 
 def terminal_geometry_command(cols, rows) -> str:
-    """The stty line the web client sends; keep the two byte-identical."""
+    """Basic resize shared with Web/TUI; Web additionally reads back the size."""
     geometry = terminal_geometry(cols, rows)
     return (
         f"stty rows {geometry['rows']} cols {geometry['cols']} "
@@ -405,19 +405,65 @@ def terminal_geometry_command(cols, rows) -> str:
 
 def looks_like_shell_prompt(text: str) -> bool:
     """Port of looksLikeShellPrompt() from web/terminal_geometry.js."""
-    if not isinstance(text, str) or not re.search(r"[$#] $", text):
+    if not isinstance(text, str) or len(text) < 2:
+        return False
+    # One space, then a prompt terminator. `%` is zsh, `>` is fish, and the
+    # arrows are what starship and powerline prompts end with — the shape most
+    # development boards ship, and the one that used to never look idle.
+    if text[-1] != " " or text[-2] not in "$#%>→❯›":
         return False
 
     prefix = text[:-2].strip()
+    if text[-2] == ">" and not prefix:
+        return False  # Default PS2: a multiline command is still being entered.
     if not prefix:
         return True
 
-    return bool(
-        re.search(r"@\S+(?::\S*)?$", prefix)
-        or re.match(r"^(?:ba|da|a|z)?sh(?:-[\d.]+)?$", prefix)
-        or re.match(r"^(?:~|/\S*)$", prefix)
-        or re.match(r"^\[[^\]]+\]$", prefix)
-    )
+    # `(venv) user@host:~` — an activated environment is part of the prompt.
+    wrapper = re.match(r"^\([^)]*\)\s+", prefix)
+    if wrapper:
+        prefix = prefix[wrapper.end():].strip()
+        if not prefix:
+            return False
+
+    if re.match(r"^\[[^\]]+\]$", prefix):
+        return True
+    if re.match(r"^(?:ba|da|a|z)?sh(?:-[\d.]+)?$", prefix):
+        return True
+    if re.match(r"^(?:~|~?/\S*|/\S*)$", prefix):
+        return True
+
+    # `user@host`, `user@host:path`, `user@host ~/dir` — zsh and fish place the
+    # working directory after a space instead of a colon.
+    at = prefix.rfind("@")
+    if at > 0:
+        # The last token before `@` is the user. observe() concatenates a prompt
+        # redrawn without a newline, so an earlier prompt may sit to its left.
+        user = prefix[:at].split()[-1] if prefix[:at].split() else ""
+        if not user:
+            return False
+        rest = prefix[at + 1:]
+        split = re.search(r"[\s:]", rest)
+        host = rest if split is None else rest[: split.start()]
+        if not host:
+            return False
+        if split is None:
+            return True
+        tail = rest[split.start():]
+        if tail.startswith(":"):
+            return not re.search(r"\s", tail)
+        path = tail.strip()
+        return path == "~" or path.startswith("~/") or path.startswith("/")
+
+    # `buildroot:~#`, `host:/etc#` — a host name with no `user@`.
+    colon = prefix.find(":")
+    if colon > 0:
+        host = prefix[:colon]
+        path = prefix[colon + 1:]
+        if not re.search(r"[\s@:]", host) and not re.search(r"\s", path):
+            return path == "~" or path.startswith("~/") or path.startswith("/")
+
+    return False
 
 
 class TerminalGeometrySync:

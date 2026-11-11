@@ -1,10 +1,46 @@
 # Changelog
 
+## 1.2.0
+
+The published cut of the Harness plugin after the 1.1.5 baseline. Versions
+continue to follow the Linkr Bee main line.
+
+- The link heals instead of wedging: a synchronous spawn failure, a session
+  that dies mid-command and a config write that races the link are all
+  recovered, and a `resize` the session could not take is no longer reported
+  as applied.
+- "Link lost" is no longer treated as "nothing was sent": only the pre-dispatch
+  refusals (`not_connected`, `bad_request`) say a command never ran, so an
+  outcome that cannot be known is never retried automatically.
+- `linkr_bee_exec --dry-run` answers offline instead of scanning for a board
+  first, which used to fail with "No Linkr Bee board found" when none was in
+  range.
+- Command configuration is bound to the session it was edited for and retained
+  events are bounded, so a reconnect cannot apply the previous board's settings.
+- Settings say what saves what: the UART card is "Write to board", the footer is
+  the only "Save settings", and the card is disabled while connection fields are
+  dirty.
+- A `bee-cli` built in the checkout this plugin is linked from is found again,
+  so a profile whose package manager pruned `linkr-bee-cli` no longer fails
+  every link with "bee-cli was not found".
+
 ## 1.1.5
 
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
 continue to follow the Linkr Bee main line.
 
+- Resolution now falls back to a `bee-cli` built in the checkout this plugin is
+  linked from (`tools/linkr-tui/target/release/bee-cli`). A profile whose
+  package manager pruned the linked plugin's `linkr-bee-cli` dependency used to
+  fail every link with "bee-cli was not found" even though the person had just
+  built it; the documented auto-detect order now matches the code.
+- The connection-settings page no longer lets the UART card look like the way
+  to save a selected board: the footer button is the only "Save settings"
+  action, the UART action is labelled "Write to board", and unsaved connection
+  edits disable that card with a hint to save first. A failed scan reports a
+  scan failure instead of "save failed" and keeps the previous results. A
+  busy save says the board is working instead of echoing the Host's English
+  message, and UART errors for a disconnected or renamed board are explained.
 - Follow-up review fixes: commands acquire their configuration before preparing
   dial arguments or a timeout override, including one-shot management calls and
   HTTP input routes. Settings patches are persisted and applied in order; a

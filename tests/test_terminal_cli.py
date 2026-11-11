@@ -926,16 +926,52 @@ class TerminalGeometryTests(unittest.TestCase):
         )
 
     def test_prompt_detection_matches_the_web_client_rules(self):
-        for text in ["user@host:~$ ", "# ", "/srv/app$ ", "sh-5.1$ ", "[root@host]# "]:
+        for text in [
+            "user@host:~$ ",
+            "# ",
+            "/srv/app$ ",
+            "sh-5.1$ ",
+            "[root@host]# ",
+            # zsh and fish terminators, previously never recognised: a board
+            # whose prompt ends this way never received the stty line.
+            "user@host ~ % ",
+            "user@host ~/src % ",
+            "user@host ~> ",
+            "user@host ~/src> ",
+            "sh-5.1> ",
+            # a host with no user@, the buildroot prompt
+            "buildroot:~# ",
+            "buildroot:/etc# ",
+            # starship / powerline: the shape most development boards ship
+            "08:57:55 radxa@radxa-cubie-a7z ~ → ",
+            "bob@host /srv ❯ ",
+            "❯ ",
+            # an activated environment is part of the prompt
+            "(venv) user@host:~# ",
+        ]:
             with self.subTest(text=text):
                 self.assertTrue(terminal.looks_like_shell_prompt(text))
-        for text in ["", "$ x", "running", "Loading kernel..."]:
+        for text in [
+            "",
+            "$ x",
+            "running",
+            "Loading kernel...",
+            # `>` appears in ordinary output, so the prefix must look like one.
+            "=> ",
+            "U-Boot> ",
+            "echo hi > ",
+            "100% ",
+            "select> ",
+            "> ",  # Default PS2: heredoc/quote continuation, not an idle shell.
+            "   > ",
+            "cost $ ",
+        ]:
             with self.subTest(text=text):
                 self.assertFalse(terminal.looks_like_shell_prompt(text))
 
         web = (ROOT / "web/terminal_geometry.js").read_text()
-        self.assertIn(r"/[$#] $/", web)
-        self.assertIn(r"/@\S+(?::\S*)?$/", web)
+        self.assertIn('new Set(["$", "#", "%", ">", "→", "❯", "›"])', web)
+        self.assertIn('line[line.length - 2]', web)
 
     def test_geometry_sync_waits_for_an_idle_prompt_and_dedupes(self):
         sync = terminal.TerminalGeometrySync(80, 24)
@@ -950,6 +986,20 @@ class TerminalGeometryTests(unittest.TestCase):
         sync.confirm_sent()
         sync.observe("root@target:~$ ")
         self.assertIsNone(sync.take_pending_command())
+
+    def test_geometry_resize_during_a_multiline_command_never_writes_into_it(self):
+        sync = terminal.TerminalGeometrySync(80, 24)
+        sync.observe("root@target:~$ ")
+        sync.take_pending_command()
+        sync.confirm_sent()
+        sync.mark_busy()
+        sync.set_size(120, 40)
+        sync.observe("cat <<EOF\r\n> ")
+        self.assertIsNone(sync.take_pending_command())
+        sync.observe("PAYLOAD\r\n> ")
+        self.assertIsNone(sync.take_pending_command())
+        sync.observe("EOF\r\nroot@target:~$ ")
+        self.assertEqual(sync.take_pending_command(), "stty rows 40 cols 120 >/dev/null 2>&1\r")
 
     def test_geometry_sync_resends_after_a_resize(self):
         sync = terminal.TerminalGeometrySync(80, 24)

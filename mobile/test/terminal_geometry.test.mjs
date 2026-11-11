@@ -5,6 +5,8 @@ import {
   looksLikeShellPrompt,
   normalizeTerminalGeometry,
   terminalGeometryCommand,
+  terminalGeometryProbeCommand,
+  parseTerminalGeometryConfirmation,
 } from "../../web/terminal_geometry.js";
 
 test("target session restart survives fragmented and coalesced UART notifications", () => {
@@ -56,6 +58,24 @@ test("common Linux shell prompts are recognized", () => {
     "[root@linkr tmp]# ",
     "$ ",
     "# ",
+    // zsh and fish terminators: a board whose prompt ends this way used to
+    // never receive the stty line, so every full-screen program stayed at the
+    // tty's boot-time size.
+    "user@host ~ % ",
+    "user@host ~/src % ",
+    "user@host:~/src% ",
+    "user@host ~> ",
+    "user@host ~/src> ",
+    "sh-5.2> ",
+    // a host with no user@, the buildroot prompt
+    "buildroot:~# ",
+    "buildroot:/etc# ",
+    // starship / powerline: the shape most development boards ship
+    "08:57:55 radxa@radxa-cubie-a7z ~ → ",
+    "bob@host /srv ❯ ",
+    "❯ ",
+    // an activated environment is part of the prompt
+    "(venv) user@host:~# ",
   ]) {
     assert.equal(looksLikeShellPrompt(prompt), true, prompt);
   }
@@ -70,7 +90,29 @@ test("login prompts and command output do not trigger shell synchronization", ()
     "printf '# '",
     "root@linkr:~# command",
     "",
+    // `>` appears in ordinary output, so the prefix must look like a prompt.
+    "=> ",
+    "U-Boot> ",
+    "echo hi > ",
+    "100% ",
+    "select> ",
+    "> ",
+    "   > ",
   ]) {
     assert.equal(looksLikeShellPrompt(output), false, output);
   }
+});
+
+test("TTY size probes require a valid nonce and read back the target size", () => {
+  const nonce = "a".repeat(32);
+  assert.equal(terminalGeometryProbeCommand(80, 24, nonce),
+    `stty rows 24 cols 80 >/dev/null 2>&1 && printf '\\033]633;P;LinkrTTY=${nonce};%s\\007' "$(stty size 2>/dev/null)"\r`);
+  assert.throws(() => terminalGeometryProbeCommand(80, 24, "'; echo bad"), TypeError);
+  assert.deepEqual(parseTerminalGeometryConfirmation(`P;LinkrTTY=${nonce};24 80`, nonce), normalizeTerminalGeometry(80, 24));
+  for (const data of [`P;LinkrTTY=${"b".repeat(32)};24 80`, `P;LinkrTTY=${nonce};`,
+    `P;LinkrTTY=${nonce};0 80`, `P;LinkrTTY=${nonce};24 1001`,
+    `P;LinkrTTY=${nonce};24 80 extra`]) {
+    assert.equal(parseTerminalGeometryConfirmation(data, nonce), null, data);
+  }
+  assert.equal(parseTerminalGeometryConfirmation(`P;LinkrTTY=${nonce};24 80`, null), null);
 });

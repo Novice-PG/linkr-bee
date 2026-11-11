@@ -3,8 +3,9 @@
 //! The UART carries a live console, so an `stty` line sent while a command owns
 //! the line would be typed into that command. The web client gates on the same
 //! condition (`web/terminal_geometry.js`), and the Python reference client
-//! mirrors it (`tools/linkr_ble_terminal.py`). The command is byte-identical
-//! across all three clients; the TUI gate uses the existing VT parser's screen.
+//! mirrors it (`tools/linkr_ble_terminal.py`). The basic resize is shared by all
+//! three clients; the Web status indicator adds a correlated size readback.
+//! The TUI gate uses the existing VT parser's screen.
 //!
 //! The target's tty is a separate screen from the pane. A board that was left
 //! at 57 columns by an earlier client keeps wrapping there however wide the
@@ -44,7 +45,7 @@ pub fn normalize(cols: u16, rows: u16) -> Geometry {
     }
 }
 
-/// The line sent to the target, byte-identical to the web and Python clients.
+/// The basic resize line shared with the web helper and Python client.
 pub fn command(cols: u16, rows: u16) -> String {
     let geometry = normalize(cols, rows);
     format!(
@@ -61,24 +62,55 @@ pub fn command(cols: u16, rows: u16) -> String {
 /// A custom prompt that looks like nothing here is not synced rather than
 /// guessed at.
 pub fn looks_like_shell_prompt(text: &str) -> bool {
-    if !text.ends_with("$ ") && !text.ends_with("# ") {
-        return false;
-    }
-
     let chars: Vec<char> = text.chars().collect();
     if chars.len() < 2 {
         return false;
     }
+    // One space, then a prompt terminator. `%` is zsh and `>` is fish; without
+    // them a board whose prompt ends that way never got the `stty` line at all.
+    // The arrow family is what a starship or powerline prompt ends with — the
+    // shape most developer boards ship — and it was the one missing here: a
+    // `user@host ~ ->` prompt never looked idle, so the `stty` was never sent
+    // and every full-screen program drew at the tty's 80x24.
+    if chars[chars.len() - 1] != ' ' {
+        return false;
+    }
+    if !matches!(
+        chars[chars.len() - 2],
+        '$' | '#' | '%' | '>' | '→' | '❯' | '›'
+    ) {
+        return false;
+    }
     let prefix: String = chars[..chars.len() - 2].iter().collect();
-    let prefix = prefix.trim();
+    if chars[chars.len() - 2] == '>' && prefix.trim().is_empty() {
+        return false; // Default PS2: a multiline command is still being entered.
+    }
+    looks_like_prompt_prefix(prefix.trim())
+}
+
+/// A prompt on its own line, without the terminator.
+fn looks_like_prompt_prefix(prefix: &str) -> bool {
     if prefix.is_empty() {
         return true;
     }
 
-    // `@\S+(?::\S*)?$`: an address or a user@host, with an optional path.
-    if let Some(at) = prefix.rfind('@') {
-        let tail = &prefix[at + 1..];
-        if !tail.is_empty() && !tail.chars().any(char::is_whitespace) {
+    // `(venv) user@host:~` — an activated environment is part of the prompt.
+    let prefix = if prefix.starts_with('(') {
+        match prefix.find(") ") {
+            Some(close) => prefix[close + 2..].trim_start(),
+            None => prefix,
+        }
+    } else {
+        prefix
+    };
+    if prefix.is_empty() {
+        return false;
+    }
+
+    // `^\[[^\]]+\]$`: `[user@host dir]`, the root prompt several boards use.
+    if prefix.starts_with('[') && prefix.ends_with(']') {
+        let inner = &prefix[1..prefix.len() - 1];
+        if !inner.is_empty() && !inner.contains(']') {
             return true;
         }
     }
@@ -88,19 +120,51 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
         return true;
     }
 
-    // `^(?:~|/\S*)$`: a bare home or an absolute path.
+    // `^(?:~|~?/\S*|/\S*)$`: a bare home or a path.
     if prefix == "~" {
         return true;
     }
-    if prefix.starts_with('/') && !prefix.chars().any(char::is_whitespace) {
+    if (prefix.starts_with("~/") || prefix.starts_with('/'))
+        && !prefix.chars().any(char::is_whitespace)
+    {
         return true;
     }
 
-    // `^\[[^\]]+\]$`: `[user@host dir]`, the root prompt several boards use.
-    if prefix.starts_with('[') && prefix.ends_with(']') {
-        let inner = &prefix[1..prefix.len() - 1];
-        if !inner.is_empty() && !inner.contains(']') {
-            return true;
+    // `user@host`, `user@host:path`, `user@host ~/dir` — zsh and fish place the
+    // working directory after a space instead of a colon.
+    if let Some(at) = prefix.rfind('@') {
+        // The last token before `@` is the user: a prompt redrawn without a
+        // newline can leave an earlier one to the left of this one.
+        let user = prefix[..at].split_whitespace().last().unwrap_or("");
+        if !user.is_empty() {
+            let rest = &prefix[at + 1..];
+            let split = rest.find([':', ' ', '\t']).unwrap_or(rest.len());
+            let host = &rest[..split];
+            if !host.is_empty() {
+                if split == rest.len() {
+                    return true;
+                }
+                let tail = &rest[split..];
+                if tail.starts_with(':') {
+                    return !tail.chars().any(char::is_whitespace);
+                }
+                let path = tail.trim();
+                return path == "~" || path.starts_with("~/") || path.starts_with('/');
+            }
+        }
+    }
+
+    // `buildroot:~#`, `host:/etc#` — a host name with no `user@`.
+    if let Some(colon) = prefix.find(':') {
+        let host = &prefix[..colon];
+        let path = &prefix[colon + 1..];
+        if !host.is_empty()
+            && !host
+                .chars()
+                .any(|c| c.is_whitespace() || c == '@' || c == ':')
+            && !path.chars().any(char::is_whitespace)
+        {
+            return path == "~" || path.starts_with("~/") || path.starts_with('/');
         }
     }
 
@@ -132,7 +196,7 @@ fn is_shell_name(prefix: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct TerminalGeometrySync {
     geometry: Geometry,
-    /// The last size the target acknowledged, as a key.
+    /// The last size whose transport send completed, used only for deduplication.
     synced: String,
     /// The size a command is currently out for, as a key.
     in_flight: String,
@@ -186,7 +250,7 @@ impl TerminalGeometrySync {
         }
     }
 
-    /// Forget what an *earlier* link acknowledged: a new session is a new tty,
+    /// Forget what an *earlier* link was sent: a new session is a new tty,
     /// even when the size is the same.
     pub fn reset_session(&mut self) {
         self.synced.clear();
@@ -269,6 +333,18 @@ mod tests {
             "# ",
             "bash-5.2$ ",
             "sh-5.2# ",
+            // zsh and fish terminators: without these a board whose prompt
+            // ends this way never received the stty line at all.
+            "user@target ~ % ",
+            "user@target ~/src % ",
+            "user@target ~> ",
+            "user@target ~/src> ",
+            "sh-5.2> ",
+            // a host with no user@, the buildroot prompt
+            "buildroot:~# ",
+            "buildroot:/etc# ",
+            // an activated environment is part of the prompt
+            "(venv) user@target:~# ",
         ] {
             assert!(looks_like_shell_prompt(text), "{text:?}");
         }
@@ -280,9 +356,31 @@ mod tests {
             "root@target:~$ echo hello",
             "running",
             "Loading kernel...",
+            // `>` is common in ordinary output: the prefix has to be a prompt.
+            "=> ",
+            "U-Boot> ",
+            "echo hi > ",
+            "100% ",
+            "select> ",
+            "> ", // Default PS2: heredoc/quote continuation, not an idle shell.
+            "   > ",
+            "cost $ ",
         ] {
             assert!(!looks_like_shell_prompt(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_starship_prompt_ending_in_an_arrow_is_idle() {
+        // The shape most development boards ship: timestamp, user@host, path,
+        // then an arrow. It used to look busy forever, so no `stty` was sent.
+        assert!(looks_like_shell_prompt(
+            "08:57:55 radxa@radxa-cubie-a7z ~ → "
+        ));
+        assert!(looks_like_shell_prompt("bob@host /srv › "));
+        assert!(looks_like_shell_prompt("❯ "));
+        // An arrow in prose is not a prompt terminator on its own line.
+        assert!(!looks_like_shell_prompt("reboot → done"));
     }
 
     #[test]
@@ -313,6 +411,23 @@ mod tests {
         assert_eq!(sync.take_pending_command(), None);
         sync.set_size(117, 40);
         observe(&mut sync, &mut pane, "\r\nroot@target:~$ ");
+        assert_eq!(sync.take_pending_command(), Some(command(117, 40)));
+    }
+
+    #[test]
+    fn resize_during_a_multiline_command_never_writes_into_it() {
+        let mut sync = TerminalGeometrySync::default();
+        let mut pane = TerminalPane::new();
+        observe(&mut sync, &mut pane, "root@target:~$ ");
+        sync.take_pending_command();
+        sync.confirm_sent();
+        sync.note_input(b"cat <<EOF\r");
+        sync.set_size(117, 40);
+        observe(&mut sync, &mut pane, "cat <<EOF\r\n> ");
+        assert_eq!(sync.take_pending_command(), None);
+        observe(&mut sync, &mut pane, "PAYLOAD\r\n> ");
+        assert_eq!(sync.take_pending_command(), None);
+        observe(&mut sync, &mut pane, "EOF\r\nroot@target:~$ ");
         assert_eq!(sync.take_pending_command(), Some(command(117, 40)));
     }
 

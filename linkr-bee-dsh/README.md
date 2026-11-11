@@ -18,7 +18,7 @@ on the target board — the person and the agent share one board and one link.
 ## Requirements
 
 - DeepSeek Harness `>=0.2.0-rc.1 <0.3.0` (`engines.dsh`).
-- **`bee-cli`**, the Linkr Bee command-line client, version **1.1.5 or newer with
+- **`bee-cli`**, the Linkr Bee command-line client, version **1.2.0 or newer with
   the `watch` and `resize` operations** (this plugin's streaming depends on
   them; a build without them falls back to one dial per command and shows no
   unsolicited output). Install it from npm — the package fetches, verifies and
@@ -39,8 +39,10 @@ on the target board — the person and the agent share one board and one link.
   rm -f target/release/bee-cli && cp target/release/bee target/release/bee-cli
   ```
 
-  The plugin resolves it as: `cliPath` (below) → `$LINKR_BEE_CLI` → `bee-cli` on
-  `PATH` (which the global npm install provides). Keep the *same path* across
+  The plugin resolves it as: `cliPath` (below) → `$LINKR_BEE_CLI` → the
+  `linkr-bee-cli` launcher this plugin depends on (it fetches and checks the
+  release binary) → `tools/linkr-tui/target/release/bee-cli` in the source
+  checkout → `bee-cli` on `PATH`. Keep the *same path* across
   restarts; replace the file with `rm`/`cp` rather than overwriting it in place
   (macOS may refuse to run a binary that was rewritten under the same inode).
 
