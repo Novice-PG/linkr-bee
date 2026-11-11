@@ -2,14 +2,14 @@
 
 > 状态：**Novice-PG fork 自维护**，不属于 radxa 官方固件，也不进入上游 PR。
 > 适用板型：仅 `esp32_devkitc/esp32/procpu`（ESP32-WROOM-32 DevKitC）。
-> 固件版本：`1.1.5`（与 radxa 上游对齐，见下文“如何分辨”）。
+> 固件版本：`1.2.0`（与 radxa 上游对齐，见下文“如何分辨”）。
 > 分支：`fork/self-maintained`。
 
 ## 为什么单独维护
 
-radxa 上游 1.1.5 把 WROOM-32 的 UART 接收环压到 4,096 B、BLE 队列压到 4、
-WS 缓冲压到 1,024 B 以节省 SRAM。本分支在 1.1.5 代码基础上把这三项恢复到
-上游缩减前的大小，版本号与上游一致，烧录页可以把自维护包和官方 1.1.5 放在
+radxa 上游 1.2.0 把 WROOM-32 的 UART 接收环压到 4,096 B、BLE 队列压到 4、
+WS 缓冲压到 1,024 B 以节省 SRAM。本分支在 1.2.0 代码基础上把这三项恢复到
+上游缩减前的大小，版本号与上游一致，烧录页可以把自维护包和官方 1.2.0 放在
 同一条发布线上。其余配置跟随上游。诊断日志、吞吐余量、内部堆余量都不属于
 这个标准，因此不加大。
 
@@ -17,7 +17,7 @@ WS 缓冲压到 1,024 B 以节省 SRAM。本分支在 1.1.5 代码基础上把�
 
 ## 与官方 WROOM 构建的差别
 
-| 配置 | 上游 1.1.5 配置 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
+| 配置 | 上游 1.2.0 配置 | 本分支 | DRAM0 变化 | 用户能感知到什么 |
 |---|---|---:|---:|---|
 | `LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH` | 4 | **8** | +1,920 B | BLE 终端每个 peer 的突发窗口约 0.7 s → 1.4 s；手机 / Windows 主机短暂停顿时少丢一段输出 |
 | `LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE` | 1,024 | **2,048** | +2,048 B | 浏览器终端每个客户端的 TX 环约 89 ms → 178 ms；渲染卡顿时少丢最旧的输出 |
@@ -45,10 +45,10 @@ BLE 是整条链路最慢的一段（实测可靠模式约 1.0–1.4 KiB/s），
 
 ### 3. UART 接收环 4,096 → 8,192
 
-`uart_to_ble_thread()` 从 UART 环取数据后按 BLE/WS 的节奏 fan-out。上游 1.1.5
+`uart_to_ble_thread()` 从 UART 环取数据后按 BLE/WS 的节奏 fan-out。上游 1.2.0
 把环减半以省 SRAM；恢复到 8,192 B 后，调度停顿或 BLE/WS 短暂阻塞时能多吸收
 约 355 ms 的串口输入，避免把正在传输的一段输出从中间截断。它不改变持续丢包
-的上限——输出长期快于 BLE 仍然会丢——只是把突发容忍窗口拉回 1.1.5 之前。
+的上限——输出长期快于 BLE 仍然会丢——只是把突发容忍窗口拉回上游缩减前。
 
 ### 补充：`ZVFS_POLL_MAX` 已由上游修复
 
@@ -111,7 +111,7 @@ CONFIG_ZVFS_POLL_MAX=5
 
 ## 如何分辨这是自维护固件
 
-- 版本号仍然是 `1.1.5`，与上游一致，便于客户端和发布流程继续工作。
+- 版本号仍然是 `1.2.0`，与上游一致，便于客户端和发布流程继续工作。
 - 烧录页 <https://novice-pg.github.io/linkr-bee/flash.html> 有两个 WROOM-32
   条目：官方 `esp32-wroom-32`，以及带 `Novice-PG 自维护` 标注的
   `esp32-wroom-32-self`，选择后状态栏会说明差异。
@@ -121,9 +121,10 @@ CONFIG_ZVFS_POLL_MAX=5
 
 ## 更新烧录页
 
-烧录页（`fork/web-flasher` 分支）从 `fork/self-maintained` 的**最近一次成功
-Build and test 运行**里取 WROOM 产物，因此缓冲区改动不会进入官方 release
-资产，也不会覆盖官方 WROOM ZIP：
+烧录页（`pages.yml`，从 `main` 的 `web/flash.html` 发布）从
+`fork/self-maintained` 的**最近一次成功 Build and test 运行**里取 WROOM
+产物，因此缓冲区改动不会进入官方 release 资产，也不会覆盖官方 WROOM ZIP。
+旧的 `fork/web-flasher` 分支已不再参与 Pages 部署，保留仅作历史参考。
 
 1. 推送本分支。
 2. 在 Actions 里对 `fork/self-maintained` 手动运行一次 `Build and test`，
@@ -156,13 +157,13 @@ west build -b esp32_devkitc/esp32/procpu .
 ## English summary
 
 This branch carries Novice-PG's self-maintained ESP32-WROOM-32 firmware. It
-tracks radxa's `1.1.5` version and is based on upstream `main`, but it differs
-from the upstream 1.1.5 configuration in three buffers: the UART RX ring is
+tracks radxa's `1.2.0` version and is based on upstream `main`, but it differs
+from the upstream 1.2.0 configuration in three buffers: the UART RX ring is
 8,192 B instead of 4,096, the BLE peer TX queue is 8 chunks instead of 4, and
 the per-client WebSocket TX ring is 2,048 B instead of 1,024 B. `ZVFS_POLL_MAX` is 5, matching upstream
-1.1.5, which adopted the same default and added a build-time assertion; the
+1.2.0, which adopted the same default and added a build-time assertion; the
 fork relies on that upstream definition instead of carrying its own. Total
-added DRAM0 over the upstream 1.1.5 configuration is 8,064 B; the CI link
+added DRAM0 over the upstream 1.2.0 configuration is 8,064 B; the CI link
 (Zephyr 4.5, commit `7a13f09`) uses 139,644 of 140,452 B and leaves exactly
 808 B free.
 The log buffer, the system heap, WiFi/network pools and thread stacks are
