@@ -1,18 +1,40 @@
-name: Deploy the firmware flasher to GitHub Pages
+name: Deploy the web terminal and firmware flasher to GitHub Pages
 
 # Fork-only deployment.
 #
-# The published site is the browser flasher, which lives on the long-lived
-# fork/web-flasher branch. This workflow checks that branch out explicitly so a
-# push to main (upstream's plain web terminal) can never replace the flasher,
-# and a release publication still refreshes the staged firmware automatically.
+# The site published here is the plain web terminal (web/) with the browser
+# flasher at /flash/. Both live on main now that upstream imported the flasher,
+# so a push to main, a release, or a manual dispatch publishes exactly the
+# checked-out tree. The flasher firmware is never checked in: this workflow
+# copies the released bundles into web/firmware/ and generates the manifest
+# with tools/build_firmware_manifest.py.
+#
+# The fork additionally offers the self-maintained WROOM build as a second
+# WROOM entry. That image is deliberately not a release asset; it comes from
+# the latest successful Build and test run on fork/self-maintained.
+#
+# BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
+# WebSocket bridge works from here too, but with a warning: an https page that
+# opens ws:// is mixed content, and Chromium allows it while marking it
+# deprecated ("Insecure access to this endpoint is deprecated"). Measured on
+# 2026-09-29 against a ws:// endpoint on a 192.168 address from this exact
+# origin: the connection opened, only the warning was printed. The bridge is
+# therefore left available; a locally served copy (tools/serve_web.sh) remains
+# the way to run it without the warning, and to reach a device when a browser
+# does enforce the deprecation.
 #
 # Requires Settings -> Pages -> Source: "GitHub Actions" once.
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "web/**"
+      - "tools/build_firmware_manifest.py"
+      - ".github/workflows/pages.yml"
   release:
-    types:
-      - published
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -20,47 +42,158 @@ permissions:
   pages: write
   id-token: write
 
+# Pages deployments are not worth racing: a cancelled deploy can leave the site
+# half-updated, and the site changes at most a few times a day.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Publish the firmware flasher
+    name: Publish the web terminal and firmware flasher
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out the flasher branch
+      - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: fork/web-flasher
 
-      # Publish the newest released firmware beside the page. The flasher
-      # fetches these same-origin files rather than cross-origin release
-      # assets. Without a release the page still deploys and its runtime
-      # fallback reads the latest release from the API.
-      - name: Stage the latest released firmware
+      # A release run builds the page from that tag; a push run from whatever
+      # GitHub currently calls the latest release. Either way the firmware the
+      # page offers is a published artifact, never a local build.
+      - name: Resolve the firmware release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download the firmware bundles
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p .firmware-release
-          if gh release download \
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*firmware-*.zip' \
+            --dir .firmware-release
+
+      # Add the self-maintained WROOM build from the branch's last green
+      # Build and test run. It is deliberately not a release asset: the
+      # release keeps the official board set, while this page offers the
+      # fork's larger-buffer variant as a second WROOM entry. Both carry the
+      # same version, so the manifest keeps them together.
+      - name: Stage the self-maintained WROOM build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build.yml \
+            --branch fork/self-maintained \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')"
+          rm -rf .self-wroom
+          if [ -n "${run_id}" ] && gh run download "${run_id}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --pattern '*firmware-*.zip' \
-              --dir .firmware-release; then
-            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName)"
-            python3 tools/build_firmware_manifest.py \
-              --source .firmware-release \
-              --output web/firmware \
-              --tag "${tag}" \
-              --repo "${GITHUB_REPOSITORY}"
+              --name linkr-bee-esp32-wroom-32 \
+              --dir .self-wroom; then
+            python3 - <<'PY'
+          import json
+          import pathlib
+          import zipfile
+
+          source = pathlib.Path(".self-wroom")
+          metadata = json.loads((source / "firmware.json").read_text(encoding="utf-8"))
+          image = metadata["image"]
+          if not (source / image).is_file():
+              raise SystemExit(f"self-maintained artifact has no {image}")
+          expected = {
+              "CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192",
+              "CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=8",
+              "CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=2048",
+              "CONFIG_ZVFS_POLL_MAX=5",
+          }
+          config = (source / "firmware.config").read_text(encoding="utf-8").splitlines()
+          missing = sorted(expected.difference(config))
+          if missing:
+              raise SystemExit(
+                  "self-maintained artifact is not the expected build: "
+                  + ", ".join(missing)
+              )
+          map_file = source / "linkr-bee-esp32-wroom-32.map"
+          if map_file.is_file():
+              for line in map_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                  if "dram0_0_seg" in line:
+                      print(line.strip())
+          target = pathlib.Path(".firmware-release") / (
+              f"linkr-bee-v{metadata['version']}-firmware-esp32-wroom-32-self.zip"
+          )
+          prefix = pathlib.Path("linkr-bee-esp32-wroom-32-self")
+          with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(source.rglob("*")):
+                  if path.is_file():
+                      archive.write(path, prefix / path.relative_to(source))
+          print(f"staged {target}")
+          PY
           else
-            echo "No released firmware yet; publishing without a staged manifest."
-            rm -rf .firmware-release
+            echo "No self-maintained WROOM artifact; publishing the official set only."
+            rm -rf .self-wroom
+          fi
+
+      # Stage the images beside the page so it fetches them same-origin: release
+      # assets do not send the CORS headers a cross-origin fetch would need. The
+      # manifest names the tag and repository, and the page falls back to the
+      # GitHub API only when this file is absent.
+      - name: Stage the flashing page firmware
+        run: |
+          python3 tools/build_firmware_manifest.py \
+            --source .firmware-release \
+            --output web/firmware \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}"
+
+      # The release does not carry the self-maintained ZIP, so give that
+      # entry its own staged archive. Without this the "下载固件 ZIP"
+      # button would fall back to a release URL that does not exist.
+      - name: Point the self-maintained entry at its staged archive
+        run: |
+          set -euo pipefail
+          self_zip="$(find .firmware-release -maxdepth 1 \
+            -name '*-firmware-esp32-wroom-32-self.zip' -print -quit)"
+          if [ -n "${self_zip}" ]; then
+            cp "${self_zip}" web/firmware/esp32-wroom-32-self/
+            python3 - "${self_zip}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          archive = pathlib.Path(sys.argv[1])
+          manifest_path = pathlib.Path("web/firmware/manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          for board in manifest["boards"]:
+              if board["slug"] == "esp32-wroom-32-self":
+                  board["zip_url"] = f"firmware/esp32-wroom-32-self/{archive.name}"
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(f"staged download archive {archive.name}")
+          PY
           fi
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a

@@ -149,6 +149,26 @@ UART input can exceed a host's BLE drain rate: a separate unpaced run counted
 only absorb bursts; sustained lossless traffic requires upstream pacing, flow
 control or a transport with sufficient throughput.
 
+The air link is the other half of that budget, and until now every board left it
+at the slowest setting: `prj.conf` shipped `CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS=n`,
+so the peripheral never asked for an interval and the central's choice stood
+(measured 37.5 ms on the ESP32 board), and no board requested a PHY, so every
+link ran 1M. A full-screen program is the worst case for that: one redraw is a
+burst of a few KB, and a slower interval multiplies the time the 232-byte
+output queue stays full. `prj.conf` now asks for 7.5–15 ms (`PREF_MIN/MAX_INT`
+6/12 in 1.25 ms units) and `BT_AUTO_PHY_PERIPHERAL_2M`; the 2M request is
+guarded by the controller's feature bit, so the BT 4.2 WROOM board keeps 1M.
+`boards/esp32_devkitc_esp32_procpu.conf` keeps the original measurement notes
+for that interval. The supervision timeout that C5 and X1.0 already set
+(`PREF_TIMEOUT=800`) only takes effect now that the request is actually sent.
+
+Compression of the UART stream was considered and rejected for this link: at
+115200 the serial line caps the bridge at 11520 B/s (`src/uart_bulk_tx.c`), and
+once the interval above is in force the air link carries more than that, so
+compressing the bytes cannot raise the ceiling. It would only pay off above
+115200 baud, where the UART stops being the limit — LAN (`ws://`) is the better
+answer there.
+
 The HTTP/WebSocket bridge defaults `CONFIG_ZVFS_POLL_MAX` to 5. HTTP/1 polling
 needs one wakeup eventfd, one listener per service and one event per client
 still in HTTP/upgrade processing: two clients and one service need four events.
@@ -301,6 +321,32 @@ must be cleared. The artifact also contains `FLASHING.txt`,
 `firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
 WiFi, networking, Bluetooth, or binary-output configuration is absent.
+
+
+### The browser flashing page
+
+`web/flash.html` writes the same release images over USB from the browser. It
+uses esptool-js (Web Serial, so Chrome or Edge on a desktop) and JSZip to read
+the release bundles, and it reuses the terminal's `style.css` / `skin-v2.css`
+rather than introducing a second design system. It is published with the rest
+of the site as `/flash.html`: a repository has one Pages deployment, so this is
+a page rather than a second site.
+
+The images are not checked in. `.github/workflows/pages.yml` downloads the
+current release's `*firmware-*.zip` and runs:
+
+```sh
+python3 tools/build_firmware_manifest.py --source .firmware-release \
+    --output web/firmware --tag "$tag" --repo "$GITHUB_REPOSITORY"
+```
+
+which writes `web/firmware/<board>/<image>.bin` and one `manifest.json` naming
+the chip, flash address, size and SHA-256 of each board. The page fetches that
+manifest same-origin, because release assets do not send the CORS headers a
+cross-origin fetch would need; if the manifest is absent it falls back to the
+GitHub API for the latest release. Boards are listed in the order of
+`BOARD_NAMES` in the generator, which puts the Bee itself first. To preview
+locally without a release, point `--source` at a directory holding the zips.
 
 ## UART selection
 
@@ -1431,12 +1477,27 @@ Terminal layout and touch behavior intentionally differ by surface:
 | --- | --- | --- | --- |
 | Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
 | Desktop Rust TUI | Synchronized with the same `stty rows <rows> cols <cols>` command at the next idle shell prompt; re-sent when the window, the rail or the assistant panel changes the pane's width | The pane follows the terminal window | Pane scrollback, drag selection, and the copy chord; see `tools/linkr-tui/README.md` |
-| Android / iOS / HarmonyOS native shell | Android never sends `stty`; other native shells also keep the tty unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
+| Android / iOS / HarmonyOS native shell | One `stty` per connection at the first idle prompt, so a full-screen program starts at the size the pane has with the keyboard away; "Automatically sync target size" keeps it following later resizes. The keyboard itself never moves the tty | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
 
-The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
-resize is local display state, not a request to reflow the remote console. On
-Android this means no `stty rows/cols` is sent at all. The browser build keeps the
-existing `stty rows <rows> cols <cols>` behavior.
+A native shell resizes its own viewport for the soft keyboard, so a keyboard
+open/close is local display state and never a request to reflow the remote
+console: `onTerminalResize` ignores a pane that shrank while the keyboard is up,
+and `scheduleTerminalGeometrySync` holds while it is open. What a native shell
+does send is one `stty` per connection, at the first idle prompt — the size a
+full-screen program reads when it starts, which is otherwise the tty's boot-time
+80x24. Turning on "Automatically sync target size" (Terminal settings, native shells only)
+keeps the target following later resizes as well; the switch is hidden in a
+browser build, which always syncs. Changing this preference preserves the
+confirmed size and any pending readback; turning it off cancels queued automatic
+resizes, including the resize normally sent after a full-screen program exits.
+
+Both surfaces offer **Sync to current window** in Terminal settings. It requests
+one resize without changing the automatic-sync preference. A busy shell,
+alternate-screen program or open soft keyboard holds the request until a safe
+idle prompt; disconnect, reboot and ownership changes discard it. Completion is
+shown only after the current nonce's `stty size` readback, and an unconfirmed
+request is never automatically retried. Another click explicitly requests a
+fresh readback, including when the window size itself has not changed.
 
 The desktop TUI sends the same command as the web and Python clients, and only
 at an idle shell prompt: local typing, a pending line-mode buffer, or any target
