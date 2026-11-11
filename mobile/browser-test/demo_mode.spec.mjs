@@ -92,6 +92,6 @@ test("a native shell is offered the remote-size switch", async ({ browser }) => 
   // A native shell starts with automatic syncing off.
   await expect(page.locator("#remoteSizeInput")).not.toBeChecked();
   await expect(page.locator("#remoteSizeHint, [data-i18n=\"remoteSizeHint\"]").first())
-    .toContainText(/tty/);
+    .toContainText(/Sync to current window|同步到当前窗口/);
   await context.close();
 });
