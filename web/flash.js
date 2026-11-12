@@ -514,13 +514,27 @@ async function flash({ noReset = false } = {}) {
 
     setStatus("正在重启开发板…");
     logLine("正在重启开发板…");
-    await restartBoard();
+    // The write already succeeded. A restart that cannot get the port back
+    // (USB re-enumeration, a cable pulled at the wrong moment) is not a failed
+    // flash, and saying so would invite the user to erase and write again.
+    let restarted = true;
+    try {
+      await restartBoard();
+    } catch (error) {
+      restarted = false;
+      logLine(`自动重启失败：${error?.message || error}`);
+    }
     // The board is booting; hand the port back so the terminal can open it.
     await releaseConnection();
     setProgress(1);
     resetButton.disabled = false;
-    setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
-    logLine("烧录完成，设备已重启。");
+    if (restarted) {
+      setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
+      logLine("烧录完成，设备已重启。");
+    } else {
+      setStatus("烧录完成，但自动重启失败；请点“重启设备”后再打开终端。");
+      logLine("烧录完成；自动重启失败，请点“重启设备”。");
+    }
   } catch (error) {
     console.error(error);
     let message = String(error?.message || error).replace(/[。.\s]+$/, "");
