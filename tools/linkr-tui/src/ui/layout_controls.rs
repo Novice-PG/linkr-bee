@@ -30,11 +30,6 @@ pub fn bar(app: &App, screen: Rect) -> Bar {
     let focus = app.layout_restore.is_some();
     let buttons = [
         (
-            Control::Assistant,
-            if compact { "[F6]" } else { "[F6 AI]" },
-            assistant_visible,
-        ),
-        (
             Control::Sidebar,
             if compact {
                 "[F7]"
@@ -44,6 +39,11 @@ pub fn bar(app: &App, screen: Rect) -> Bar {
                 "[F7 Nav]"
             },
             sidebar_visible,
+        ),
+        (
+            Control::Assistant,
+            if compact { "[F6]" } else { "[F6 AI]" },
+            assistant_visible,
         ),
         (
             Control::Focus,
@@ -146,27 +146,28 @@ mod tests {
             .collect()
     }
 
-    /// The panel keys read left to right in the order their function keys go:
-    /// F6 assistant, F7 sidebar, F8 focus. A screen too narrow for the words
-    /// keeps the same order, and so does Chinese.
+    /// The panel keys sit where their panels do: F7 sidebar on the left, F6
+    /// assistant on the right, F8 focus after them. The numbers are not in
+    /// order on purpose; the row follows the screen. A narrow screen keeps
+    /// the same order, and so does Chinese.
     #[test]
-    fn the_panel_keys_run_f6_f7_f8() {
+    fn the_panel_keys_follow_the_panels_they_open() {
         let mut app = App {
             lang: Lang::En,
             ..App::default()
         };
         assert_eq!(
             labels(&app, 120)[..3],
-            ["[F6 AI]", "[F7 Nav]", "[F8 Focus]"]
+            ["[F7 Nav]", "[F6 AI]", "[F8 Focus]"]
         );
-        assert_eq!(labels(&app, 50)[..3], ["[F6]", "[F7]", "[F8]"]);
+        assert_eq!(labels(&app, 50)[..3], ["[F7]", "[F6]", "[F8]"]);
 
         app.lang = Lang::Zh;
         assert_eq!(
             labels(&app, 120)[..3],
-            ["[F6 AI]", "[F7 左栏]", "[F8 专注]"]
+            ["[F7 左栏]", "[F6 AI]", "[F8 专注]"]
         );
-        assert_eq!(labels(&app, 50)[..3], ["[F6]", "[F7]", "[F8]"]);
+        assert_eq!(labels(&app, 50)[..3], ["[F7]", "[F6]", "[F8]"]);
     }
 
     /// Each label's hit box follows the label, whichever order the row is in.
@@ -182,8 +183,8 @@ mod tests {
             screen(120, 24).right() - row.line.width() as u16 + left,
             screen(120, 24).bottom() - 1,
         );
-        assert_eq!(action, Control::Assistant);
-        assert!(hit(&app, screen(120, 24), point) == Some(Control::Assistant));
+        assert_eq!(action, Control::Sidebar);
+        assert!(hit(&app, screen(120, 24), point) == Some(Control::Sidebar));
         assert!(left < right);
     }
 }
