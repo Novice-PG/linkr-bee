@@ -118,6 +118,48 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 | C3 / Bee X1.0 | WiFi 动态 RX/TX 各 8 个、WiFi 堆预留 40 KiB、每个 BLE peer 8 块、延迟日志 4 KiB、HTTP/系统/连接线程栈各 4 KiB |
 | C5 | WiFi 动态 RX/TX 各 6 个、WiFi 堆预留 36 KiB、Bluetooth 堆预留 44000 B、12 个 MSYS-2 块、8 个 255 B 控制器 ACL 缓冲、网络缓冲各 20 个、包描述符各 10 个 |
 | WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
+| YD-ESP32-S3（默认） | 不假设 PSRAM：8 KiB UART 接收、每个 BLE peer 8 块、网络缓冲每方向 32 个、HTTP 栈 4 KiB |
+| YD-ESP32-S3 N16R8 | 7.68 MiB PSRAM 堆；128 KiB 日志环形缓冲、64 KiB WebDAV 分块、深度 64 的 BLE peer 队列以及 2 × 32 KiB LAN 环形缓冲放入 PSRAM；24 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
+
+![VCC-GND YD-ESP32-S3（N16R8）](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
+台架目标 `esp32s3_devkitc/esp32s3/procpu` 配合
+`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` 描述 VCC-GND
+YD-ESP32-S3：GPIO48 上的可寻址 RGB 灯，以及接在 UART0 线路（GPIO43/44）上的
+两颗单色 TX/RX 灯。这颗灯是 SK6812 系列的四通道
+RGBW 灯（每像素 32 位），overlay 里必须写 `channel-count = <4>`：沿用 X1 的 24
+位帧会少一个字节，导致红色串到绿色（红变黄）且无法关灯。灯与 GPIO48 之间
+隔着一处出厂默认断开的焊桥，必须先短接这处焊桥，灯才能点亮。
+驱动空闲一段时间后的第一帧曾经必然出错：一串 0 位被当成 1 位，于是红色锁成黄色，
+全零帧保留上一帧颜色。原因不在数据线，而在取指——位循环放在 flash 里，指令缓存
+未命中把开头几个高电平拉长。现在位循环放在 IRAM（`.iram1`），350 纳秒的码元才
+可预测，因此每次更新只发一帧。
+因此 UART0 作为桥接串口，这两颗灯会按方向显示实时桥接流量。数据指示已经由它们
+承担，所以可寻址 RGB 不再充当第二个状态灯：`RGB_MANUAL_ONLY` 让它默认熄灭，
+只有管理命令 `@l` 设置颜色后才亮，并一直保持该颜色（不再 5 秒后回到状态色），
+也不随串口活动闪烁。控制台改到原生 USB
+Serial/JTAG 口。CH343 口此后传输桥接数据而不再输出日志，ROM 下载模式仍可通过
+任一 USB 口烧录。连接 SBC 时请拔掉 CH343 口，只用原生 USB 口供电，因为
+GPIO44 与 CH343 的 TXD 输出共用，两路同时驱动会相互冲突。
+
+默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
+N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM
+模式、容量和堆的位置都是编译期决定的：
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee
+```
+
+N16R8 构建额外声明 16 MB flash、8 MB 八线 PSRAM，并启用放入 PSRAM 的放大缓冲：
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
+    -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
+    -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
+```
+
+两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
+台架配置，不进入发布矩阵。
 
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
@@ -612,7 +654,7 @@ rel 分组分别提供 UART 发送队列丢弃、BLE 输出队列丢弃和 BLE i
 
 ```text
 @info fw version=0.1.2 zephyr=4.5.0
-@info sys uptime_ms=123456 owner=0 security=1
+@info sys uptime_ms=123456 owner=0 links=1 security=1
 @info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
@@ -1256,9 +1298,11 @@ BLE 回环、WiFi 扫描和 UART 线速接收测试；其他板型，以及 WiFi
 
 | 层次 | 本仓库已验证 | 仍需硬件验证 |
 | --- | --- | --- |
-| 固件构建 | 六个目标（含 `esp32_devkitc/esp32/procpu`）均通过 Zephyr v4.5.0 本地构建及控制器安全、PSRAM 段与 ROM 摘要检查；Bee X1.0 另通过启动、BLE 二进制回环、WiFi 扫描和 60 秒 UART 线速接收及栈水位检查 | 其他板型的 4.5 运行验收、WiFi 联网/LAN/上传，以及发布后对应提交的远程 CI |
+| 固件构建 | 六个目标（含 `esp32_devkitc/esp32/procpu`）均通过 Zephyr v4.5.0 本地构建及控制器安全、PSRAM 段与 ROM 摘要检查；Bee X1.0 另通过启动、BLE 二进制回环、WiFi 扫描和 60 秒 UART 线速接收及栈水位检查。存储于 `linkr/bond/<addr>` 的配对标签在 X1.0 与 WROOM-32 上复位后不再产生逐条启动错误，重命名、列出与清除仍可持久化 | 其他板型的 4.5 运行验收、WiFi 联网/LAN/上传，以及发布后对应提交的远程 CI |
 | 协议主机测试 | `tests/` 编译并驱动生产代码中的管理协议、安全配对门禁、目标绑定、WebDAV 与 HCI 顺序逻辑，含 C3/C5 构建约束 | 真实 SMP 配对、NVS 持久化、射频行为 |
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
+| 浏览器烧录 | Web Streams 和浏览器回归覆盖切换波特率时释放 reader、串口复用、烧录与复位互斥、ROM 启动错误提示。原生 USB 只有读到下载模式提示才会再次发送 EN 脉冲，读到 Zephyr 启动标记才确认启动。X1.0 原生 USB 另支持 C3 看门狗复位。已检查中文烧录页在 338、390、834 和 1440 px 宽度下的明暗主题 | 实机 EN 时序、USB 重新枚举、各板型与浏览器的完整烧录流程 |
+| Rust TUI | Bee X1.0 实机验证 Reliable UART 路径（`link: Reliable UART`、`@i?` 序号计数递增、行输入进入运行中的目标 shell）、选错板后的重连修复、按面板位置排列的底部控件（左栏 F7 在左，助手 F6 在右，F8 专注在后），以及控制权：只读/控制中徽标、空闲控制台自动接管、输入时按空闲窗口申请接管、对方正在输入时申请被拒；释放、交接、“单问题槽等待”以及 LAN 的 `@control …` 文本帧路径由主机测试覆盖；发送特征消失时停止可靠写、以及“加入时对方正忙则之后不自动接管”同样有主机测试。CLI 复用同一会话：`--query-control`、`--control …` 与发送前的控制权检查由同一批测试覆盖。另完成两台物理主机验证：web 客户端走 LAN 桥、TUI 走蓝牙以及走 LAN，均显示只读、空闲接管、交还（`yield`）与释放；web 的输入到达目标时另一端的 TUI 可以看到 | 同时两个 LAN WebSocket 客户端：当前固件在一个 WS 客户端已认证时会拒绝第二个连接，因此未能把两个 WS 客户端放在一起验证 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |
 | 助手（Agent 模式） | Node 与浏览器套件覆盖执行策略、证据处理与任务恢复 | 真实目标机上的命令执行与设备档案恢复，详见 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
 | 手机 App | 共享 Web 资源可构建并通过类型检查；Android/iOS/HarmonyOS 工程已与终端界面同步；浏览器回归套件覆盖 Termux 式触摸滚动、轻点呼出键盘、原生壳长按选区并拖动两个圆点精确调整（键盘关闭和打开时都覆盖）、浮动复制按钮、WebView 清空选区后仍能复制、浏览器保留原生选择且不绘制自定义圆点、无选区时不复制、复制选区保留折行与边界空格、剪贴板回退不抢焦点和选区、长按绝不呼出键盘、键盘按钮与实际输入法状态同步，以及键盘本地布局（不发送远端 `stty`） | Android、iOS、HarmonyOS 真机 Bluetooth LE |

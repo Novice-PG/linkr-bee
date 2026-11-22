@@ -270,6 +270,30 @@
 
         <section class="card" data-i18n-aria="terminalSettingsAria" aria-label="Terminal settings" data-settings-page="terminal">
           <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
+          <div class="field">
+            <label class="field-label" for="baudSelect" data-i18n="baudRate">Baud rate</label>
+            <select id="baudSelect" aria-describedby="baudHint">
+              <option value="1200">1200</option>
+              <option value="2400">2400</option>
+              <option value="4800">4800</option>
+              <option value="9600">9600</option>
+              <option value="19200">19200</option>
+              <option value="38400">38400</option>
+              <option value="57600">57600</option>
+              <option value="115200" selected>115200</option>
+              <option value="230400">230400</option>
+              <option value="460800">460800</option>
+              <option value="921600">921600</option>
+              <!-- 1500000 is the console rate most Rockchip (RK) boards ship with. -->
+              <option value="1500000">1500000</option>
+              <option value="custom" data-i18n="baudCustom">Custom…</option>
+            </select>
+            <span id="baudHint" class="field-hint" data-i18n="baudHint">Picking a rate updates the UART string below; press Set to apply it.</span>
+          </div>
+          <label class="field" id="baudCustomField" for="baudCustomInput" hidden>
+            <span class="field-label" data-i18n="baudCustomRate">Custom baud rate</span>
+            <input id="baudCustomInput" type="number" min="300" max="3000000" step="1" inputmode="numeric" autocomplete="off" aria-describedby="baudHint">
+          </label>
           <label class="field">
             <span class="field-label" data-i18n="uart">UART</span>
             <span class="field-row">
@@ -782,6 +806,7 @@
                   <path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"></path>
                 </svg>
               </button>
+              <button id="eventLogBtn" class="term-tool event-log-toggle" type="button" data-i18n-title="eventLogHint" data-i18n-aria="eventLog" aria-label="Event log" aria-expanded="false" aria-controls="eventLogPanel"><span data-i18n="eventLogShort">Log</span><span id="eventLogDot" class="event-log-dot" hidden aria-hidden="true"></span></button>
               <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" data-i18n-aria="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
               <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" data-i18n-aria="copy" aria-label="Copy selection">⧉</button>
               <span class="term-hint" data-i18n="xterm">xterm.js</span>
@@ -872,6 +897,19 @@
             </div>
             <button id="terminalKeysCustomize" class="terminal-keys-customize" type="button" hidden>Choose favorite keys</button>
           </div>
+          <section id="eventLogPanel" class="event-log" hidden aria-label="Event log" data-i18n-aria="eventLog">
+            <div id="eventLogResize" class="event-log-resize" role="separator" aria-orientation="horizontal" tabindex="0" data-i18n-title="eventLogResize" data-i18n-aria="eventLogResize" title="Drag to resize the event log" aria-label="Resize event log"></div>
+            <div class="event-log-head">
+              <span class="event-log-title"><span class="dot"></span><span data-i18n="eventLog">Event log</span></span>
+              <div class="event-log-actions">
+                <button id="eventLogClear" class="term-tool event-log-clear" type="button" data-i18n="eventLogClear">Clear</button>
+                <button id="eventLogClose" class="term-tool" type="button" data-i18n-title="eventLogClose" data-i18n-aria="eventLogClose" aria-label="Close event log">×</button>
+              </div>
+            </div>
+            <div id="eventLogList" class="event-log-list" role="log" aria-live="polite" tabindex="0">
+              <p class="event-log-empty" data-i18n="eventLogEmpty">No events yet. Connection, reconnect and error messages appear here instead of in the serial terminal.</p>
+            </div>
+          </section>
         </section>
         </div>
 

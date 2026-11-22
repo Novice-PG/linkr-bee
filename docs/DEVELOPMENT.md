@@ -124,6 +124,58 @@ existing services and client limits with smaller bounded queues:
 | C3 / Bee X1.0 | 8 dynamic WiFi RX/TX buffers, 40 KiB WiFi heap reservation, 8 chunks per BLE peer, 4 KiB deferred logs, 4 KiB HTTP/system/connect stacks |
 | C5 | 6 dynamic WiFi RX/TX buffers, 36 KiB WiFi and 44000 B Bluetooth heap reservations, 12 MSYS-2 blocks, 8 controller ACL buffers of 255 bytes, 20 network buffers and 10 packet descriptors per direction |
 | WROOM | Existing 52000 B system heap, 4 KiB UART capture, 4 chunks per BLE peer, 1 KiB LAN rings, 4 KiB HTTP and 3 KiB LAN client stacks |
+| YD-ESP32-S3 (default) | No PSRAM assumption: 8 KiB UART capture, 8-chunk BLE peer queues, 32 network buffers per direction, 4 KiB HTTP stack |
+| YD-ESP32-S3 N16R8 | 7.68 MiB PSRAM heap; 128 KiB log ring, 64 KiB WebDAV chunk, 64-deep BLE peer queues and 2 × 32 KiB LAN rings in PSRAM; 24 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
+
+![VCC-GND YD-ESP32-S3 (N16R8)](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
+The bench target `esp32s3_devkitc/esp32s3/procpu` with
+`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND
+YD-ESP32-S3: an addressable RGB LED on GPIO48 and two single-colour TX/RX LEDs
+that sit on the UART0 lines (GPIO43/44). The pixel is a four-channel RGBW part
+in the SK6812 family (32 bits per pixel), so the overlay
+sets `channel-count = <4>`; with the X1 board's 24-bit frame the shift register
+is one byte short, red leaks into green and the pixel cannot be turned off. The
+LED nets to GPIO48 only through a solder bridge that the factory leaves open,
+so close that bridge before the LED can light. The first frame after the
+driver had been idle used to arrive wrong: runs of zero bits were seen as ones,
+so red latched as yellow and an all-zero frame left the previous colour on.
+The cause was instruction fetch rather than the data line -- the bit loop ran
+from flash and missed the instruction cache, stretching its first high cells.
+The loop now lives in IRAM (`.iram1`), which is the only way the 350 ns cells
+are predictable, so one frame per update is enough.
+UART0 is therefore the bridge UART, so those two LEDs show live
+bridge traffic in each direction. Because that is this board's data
+indication, the addressable RGB is not a second status light:
+`RGB_MANUAL_ONLY` keeps it dark until the management `@l` command sets a
+colour, holds that colour instead of previewing for five seconds, and never
+blinks on UART activity. The console moves to the native USB
+Serial/JTAG port. The CH343 port then carries bridge data instead of logs,
+and the ROM loader still flashes over either USB port. Connect the SBC to the
+UART0 header pins with the CH343 port unplugged and power the board from the
+native USB port: GPIO44 is shared with the CH343 TXD output, so two drivers on
+that net would fight.
+
+The default build makes no PSRAM assumption, so it runs on 8 MB-flash modules
+with no PSRAM as well as on an N16R8 module (where the PSRAM then stays
+unused); a 2 MB N8R2 module also uses this build, because PSRAM mode, size and
+heap placement are compile-time values:
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee
+```
+
+The N16R8 build adds the 16 MB flash and 8 MB octal PSRAM sizes plus the
+enlarged PSRAM-resident buffers:
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
+    -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
+    -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
+```
+
+Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
+a bench configuration and is not part of the release matrix.
 
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
@@ -827,7 +879,7 @@ timing:
 
 ```text
 @info fw version=0.1.2 zephyr=4.5.0
-@info sys uptime_ms=123456 owner=0 security=1
+@info sys uptime_ms=123456 owner=0 links=1 security=1
 @info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
@@ -1618,9 +1670,11 @@ and 1440 px in English/Chinese and light/dark themes. The About page displays
 
 | Layer | Verified in this repository | Still requires hardware |
 | --- | --- | --- |
-| Firmware builds | Six targets including `esp32_devkitc/esp32/procpu` build locally on Zephyr v4.5.0 with controller security, PSRAM placement and ROM image checks; Bee X1.0 also passed boot, BLE binary loopback, WiFi scans and a 60-second UART line-rate RX test with stack watermarks | Other boards' 4.5 runtime acceptance, WiFi association/LAN/uploads, and remote CI on the published revision |
+| Firmware builds | Six targets including `esp32_devkitc/esp32/procpu` build locally on Zephyr v4.5.0 with controller security, PSRAM placement and ROM image checks; Bee X1.0 also passed boot, BLE binary loopback, WiFi scans and a 60-second UART line-rate RX test with stack watermarks. Bond labels, stored as `linkr/bond/<addr>`, survive a reset without the per-label boot-log error on X1.0 and WROOM-32, and rename/list/clear still persist | Other boards' 4.5 runtime acceptance, WiFi association/LAN/uploads, and remote CI on the published revision |
 | Host protocol tests | `tests/` compiles and drives the production management, security, target-binding, WebDAV, and HCI-order code paths, including the C3/C5 build guards | Real SMP pairing, NVS persistence, radio behaviour |
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
+| Browser flasher | Web Streams and browser regressions cover release of the loader reader across baud changes, port reuse, exclusive flash/reset operations, and ROM error reporting. On native USB, an explicit download-mode message permits another EN pulse. A Zephyr banner confirms boot. The X1.0 also offers a C3 watchdog reset on its native USB port. The Chinese flash page was rendered at 338, 390, 834 and 1440 px in light and dark themes | Physical EN timing, USB re-enumeration, and an end-to-end flash on supported boards and browsers |
+| Rust TUI | Bee X1.0 ran the Reliable UART path (`link: Reliable UART`, `@i?` sequence counters advancing, line input reaching a live target shell), the wrong-board reconnect fix, the panel controls placed where their panels are (F7 sidebar on the left, F6 assistant on the right, F8 focus after them), and console ownership: read-only and in-control badges, automatic claim of a free console, idle hand-over on typing, and a refused claim while another session was typing. Release, hand-over, the one-question ownership wait, and the LAN `@control …` text-frame path are covered by host tests, as are the reliable-write shutdown when the transmit characteristic disappears and the rule that a session joining a busy console does not claim it when it later frees up. The CLI shares the same session: `--query-control`, `--control …` and the send gate are exercised through `App` by the same tests. Two physical hosts were also checked: the web client over the LAN bridge and the TUI over Bluetooth and over LAN showed read-only, idle hand-over, hand-back (`yield`) and release, and the web's input reached the target while the TUI watched | A second simultaneous LAN WebSocket client: this firmware refused the second WS connection while one was authenticated, so two WS clients could not be exercised together |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
 | Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, native-shell long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, native browser selection without custom dots, Copy writing nothing with no selection, selected wrapped lines preserving boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |

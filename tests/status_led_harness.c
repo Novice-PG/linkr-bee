@@ -9,6 +9,8 @@
 #define CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS 30
 #define LINKR_ACTIVITY_MS 40
 #define ARG_UNUSED(value) (void)(value)
+/* The policy logs one line per colour change; the harness asserts colours. */
+#define LOG_INF(fmt, ...) ((void)0)
 #define K_NO_WAIT 0
 #define K_MSEC(value) (value)
 #define ENODEV 19
@@ -102,7 +104,41 @@ int main(int argc, char **argv)
         assert(linkr_status_led_set_rgb(1, 2, 3) == -ENODEV);
         return 0;
     }
+#if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
+    if (scenario == 13) {
+        /* The bench board has UART TX/RX LEDs, so the addressable pixel is a
+         * user light: dark by default, unaffected by BLE/WiFi/AI/activity,
+         * and a manual colour is held past the old five-second preview. */
+        assert(linkr_status_led_init() == 0);
+        advance(100);
+        expect(0, 0, 0);
+        linkr_status_led_ble(true);
+        linkr_status_led_wifi(true);
+        linkr_status_led_ai(true);
+        advance(200);
+        expect(0, 0, 0);
+        assert(linkr_status_led_set_rgb(255, 0, 0) == 0);
+        advance(300);
+        expect(77, 0, 0);
+        advance(6000);
+        expect(77, 0, 0);
+        linkr_status_led_activity();
+        advance(6100);
+        expect(77, 0, 0);
+        linkr_status_led_off();
+        advance(6200);
+        expect(0, 0, 0);
+        return 0;
+    }
+#endif
     assert(linkr_status_led_init() == 0);
+    if (scenario == 12) {
+        /* Nothing has ever connected: white says the board is up and well. */
+        advance(100);
+        expect(77, 77, 77);
+        assert(!locks);
+        return 0;
+    }
     advance(100);
     linkr_status_led_ble(true);
     advance(100);
@@ -134,7 +170,7 @@ int main(int argc, char **argv)
             advance(220);
             expect(0, 0, 0);
             advance(240);
-            expect(7, 7, 7);
+            expect(0, 10, 0);
         } else {
             advance(239);
             now_ms = 240; /* New RX arrives before the due work runs. */
@@ -145,11 +181,11 @@ int main(int argc, char **argv)
             expect(0, 0, 10);
         }
     } else if (scenario == 5) {
-        linkr_status_led_wifi(true); advance(200); expect(7, 7, 7);
+        linkr_status_led_wifi(true); advance(200); expect(0, 10, 0);
         advance(300); linkr_status_led_ai(true); advance(300); expect(0, 7, 7);
         advance(400); linkr_status_led_ble(false); advance(400); expect(0, 7, 7);
-        advance(500); linkr_status_led_ai(false); advance(500); expect(7, 7, 7);
-        advance(600); linkr_status_led_wifi(false); advance(600); expect(0, 0, 0);
+        advance(500); linkr_status_led_ai(false); advance(500); expect(0, 10, 0);
+        advance(600); linkr_status_led_wifi(false); advance(600); expect(77, 77, 77);
     } else if (scenario == 6) {
         linkr_status_led_ai(true); advance(200); expect(0, 7, 7);
         advance(15199); expect(0, 7, 7);
@@ -179,9 +215,12 @@ int main(int argc, char **argv)
         advance(1240);
         assert(writes <= 27); /* All sources, including manual, stay bounded. */
     } else if (scenario == 11) {
-        linkr_status_led_ble(false); advance(200);
-        advance(300); linkr_status_led_activity(); advance(300); expect(5, 16, 26);
-        advance(340); expect(0, 0, 0);
+        /* Disconnected the base colour is white, so UART traffic shows as that
+         * white blinking off rather than an activity colour on a black base. */
+        linkr_status_led_ble(false); advance(200); expect(77, 77, 77);
+        advance(300); linkr_status_led_activity();
+        advance(310); expect(0, 0, 0);
+        advance(345); expect(77, 77, 77);
     } else assert(false);
     assert(!locks);
     return 0;
