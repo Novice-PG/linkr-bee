@@ -129,32 +129,18 @@ existing services and client limits with smaller bounded queues:
 
 ![VCC-GND YD-ESP32-S3 (N16R8)](../boards/esp32s3_devkitc_esp32s3_procpu.png)
 
-The bench target `esp32s3_devkitc/esp32s3/procpu` with
-`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND
-YD-ESP32-S3: an addressable RGB LED on GPIO48 and two single-colour TX/RX LEDs
-that sit on the UART0 lines (GPIO43/44). The pixel is a four-channel RGBW part
-in the SK6812 family (32 bits per pixel), so the overlay
-sets `channel-count = <4>`; with the X1 board's 24-bit frame the shift register
-is one byte short, red leaks into green and the pixel cannot be turned off. The
-LED nets to GPIO48 only through a solder bridge that the factory leaves open,
-so close that bridge before the LED can light. The first frame after the
-driver had been idle used to arrive wrong: runs of zero bits were seen as ones,
-so red latched as yellow and an all-zero frame left the previous colour on.
-The cause was instruction fetch rather than the data line -- the bit loop ran
-from flash and missed the instruction cache, stretching its first high cells.
-The loop now lives in IRAM (`.iram1`), which is the only way the 350 ns cells
-are predictable, so one frame per update is enough.
-UART0 is therefore the bridge UART, so those two LEDs show live
-bridge traffic in each direction. Because that is this board's data
-indication, the addressable RGB is not a second status light:
-`RGB_MANUAL_ONLY` keeps it dark until the management `@l` command sets a
-colour, holds that colour instead of previewing for five seconds, and never
-blinks on UART activity. The console moves to the native USB
-Serial/JTAG port. The CH343 port then carries bridge data instead of logs,
-and the ROM loader still flashes over either USB port. Connect the SBC to the
-UART0 header pins with the CH343 port unplugged and power the board from the
-native USB port: GPIO44 is shared with the CH343 TXD output, so two drivers on
-that net would fight.
+The VCC-GND YD-ESP32-S3 V1.4 bench build uses UART1 for the target console.
+Connect GPIO17 (Bee TX) to the target's RX, GPIO18 (Bee RX) to its TX, and
+connect both grounds. Use 3.3 V UART levels. Zephyr logs use the native USB
+Serial/JTAG port on GPIO19/20. The ROM boot log, CH343P, and the board's
+two TX/RX indicators use UART0 on GPIO43/44. With the default wiring, a Bee
+reset leaves the target's serial input quiet.
+
+The V1.4 schematic identifies U1 as an XL-5050RGBC-WS2812B, a 24-bit GRB
+pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
+The pixel starts off and holds the colour set through `@l` at 30% brightness.
+The driver generates the waveform from IRAM.
+[V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 The default build makes no PSRAM assumption, so it runs on 8 MB-flash modules
 with no PSRAM as well as on an N16R8 module (where the PSRAM then stays
@@ -173,6 +159,17 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
     -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
     -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
 ```
+
+Two independent overlays are available for bench hardware. Include the relevant
+paths in `EXTRA_DTC_OVERLAY_FILE` and separate multiple paths with semicolons
+inside one quoted argument. For N16R8, retain its memory overlay in that list.
+
+- `boards/yd_esp32s3_uart0.overlay` routes bridge traffic through the CH343P and
+  the TX/RX indicators. GPIO43 transmits ROM messages at 115200 baud on reset.
+  GPIO44 shares the CH343P TX output. Use the CH343P USB port as the serial
+  endpoint or keep its transmitter isolated before attaching another TX driver.
+- `boards/yd_esp32s3_rgbw.overlay` selects a 32-bit GRBW replacement pixel.
+  The three-channel management command drives RGB and leaves W at zero.
 
 Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
 a bench configuration and is not part of the release matrix.
@@ -1670,11 +1667,11 @@ and 1440 px in English/Chinese and light/dark themes. The About page displays
 
 | Layer | Verified in this repository | Still requires hardware |
 | --- | --- | --- |
-| Firmware builds | Six targets including `esp32_devkitc/esp32/procpu` build locally on Zephyr v4.5.0 with controller security, PSRAM placement and ROM image checks; Bee X1.0 also passed boot, BLE binary loopback, WiFi scans and a 60-second UART line-rate RX test with stack watermarks. Bond labels, stored as `linkr/bond/<addr>`, survive a reset without the per-label boot-log error on X1.0 and WROOM-32, and rename/list/clear still persist | Other boards' 4.5 runtime acceptance, WiFi association/LAN/uploads, and remote CI on the published revision |
+| Firmware builds | Six targets including `esp32_devkitc/esp32/procpu` build locally on Zephyr v4.5.0 with controller security, PSRAM placement and ROM image checks; Bee X1.0 also passed boot, BLE binary loopback, WiFi scans and a 60-second UART line-rate RX test with stack watermarks | Other boards' 4.5 runtime acceptance, WiFi association/LAN/uploads, and remote CI on the published revision |
 | Host protocol tests | `tests/` compiles and drives the production management, security, target-binding, WebDAV, and HCI-order code paths, including the C3/C5 build guards | Real SMP pairing, NVS persistence, radio behaviour |
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | Browser flasher | Web Streams and browser regressions cover release of the loader reader across baud changes, port reuse, exclusive flash/reset operations, and ROM error reporting. On native USB, an explicit download-mode message permits another EN pulse. A Zephyr banner confirms boot. The X1.0 also offers a C3 watchdog reset on its native USB port. The Chinese flash page was rendered at 338, 390, 834 and 1440 px in light and dark themes | Physical EN timing, USB re-enumeration, and an end-to-end flash on supported boards and browsers |
-| Rust TUI | Bee X1.0 ran the Reliable UART path (`link: Reliable UART`, `@i?` sequence counters advancing, line input reaching a live target shell), the wrong-board reconnect fix, the panel controls placed where their panels are (F7 sidebar on the left, F6 assistant on the right, F8 focus after them), and console ownership: read-only and in-control badges, automatic claim of a free console, idle hand-over on typing, and a refused claim while another session was typing. Release, hand-over, the one-question ownership wait, and the LAN `@control …` text-frame path are covered by host tests, as are the reliable-write shutdown when the transmit characteristic disappears and the rule that a session joining a busy console does not claim it when it later frees up. The CLI shares the same session: `--query-control`, `--control …` and the send gate are exercised through `App` by the same tests. Two physical hosts were also checked: the web client over the LAN bridge and the TUI over Bluetooth and over LAN showed read-only, idle hand-over, hand-back (`yield`) and release, and the web's input reached the target while the TUI watched | A second simultaneous LAN WebSocket client: this firmware refused the second WS connection while one was authenticated, so two WS clients could not be exercised together |
+| Rust TUI | Bee X1.0 ran the Reliable UART path (`link: Reliable UART`, `@i?` sequence counters advancing, line input reaching a live target shell), the wrong-board reconnect fix, the F6/F7/F8 order, and console ownership: read-only and in-control badges, automatic claim of a free console, idle hand-over on typing, and a refused claim while another session was typing. Release, hand-over, the one-question ownership wait, and the LAN `@control …` text-frame path are covered by host tests, as are the reliable-write shutdown when the transmit characteristic disappears and the rule that a session joining a busy console does not claim it when it later frees up. The CLI shares the same session: `--query-control`, `--control …` and the send gate are exercised through `App` by the same tests | A second physical host for a live `yield`/hand-over, because one host adapter can expose both processes as a single session; LAN ownership against a real bridge |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |
 | Assistant (Agent mode) | Node and browser suites cover the execution policy, evidence handling, and task recovery | Command execution and profile recovery on a real target; details in [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md) |
 | Phone apps | Shared web assets build and type-check; Android/iOS/HarmonyOS projects are synchronized with the terminal UI; browser regressions cover Termux-style touch scrolling, tap-to-open keyboard, native-shell long-press selection with two draggable handles (both with the keyboard closed and open), the floating Copy pill, copy surviving a WebView selection clear, native browser selection without custom dots, Copy writing nothing with no selection, selected wrapped lines preserving boundary spaces, a clipboard fallback that keeps focus and selection, a long hold never opening the keyboard, IME-aware keyboard-button state, and local keyboard layout without remote `stty` | Android, iOS, and HarmonyOS Bluetooth LE on physical devices |

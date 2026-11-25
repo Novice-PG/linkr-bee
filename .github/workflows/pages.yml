@@ -1,17 +1,17 @@
-name: Deploy the web terminal and firmware flasher to GitHub Pages
+name: Deploy the web terminal to GitHub Pages
 
-# Fork-only deployment.
+# The plain web terminal (web/) is a self-contained static site: no backend, no
+# build step, all asset references relative. Publishing it is therefore a copy,
+# and the vendored assistant bundle committed under web/vendor/agent is the
+# artifact -- it is not rebuilt here, so what is published is exactly what the
+# regression suite ran against.
 #
-# The site published here is the plain web terminal (web/) with the browser
-# flasher at /flash/. Both live on main now that upstream imported the flasher,
-# so a push to main, a release, or a manual dispatch publishes exactly the
-# checked-out tree. The flasher firmware is never checked in: this workflow
-# copies the released bundles into web/firmware/ and generates the manifest
-# with tools/build_firmware_manifest.py.
-#
-# The fork additionally offers the self-maintained WROOM build as a second
-# WROOM entry. That image is deliberately not a release asset; it comes from
-# the latest successful Build and test run on fork/self-maintained.
+# `web/flash/` is the browser flashing page. It is part of the same site (a
+# repository has one Pages deployment), but it is a separate page with its own
+# entry point at /flash/. Its firmware is not checked in: this workflow copies
+# the release bundles into `web/firmware/` and generates the manifest with
+# `tools/build_firmware_manifest.py`, so the page always offers the images the
+# release actually built.
 #
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
 # WebSocket bridge works from here too, but with a warning: an https page that
@@ -50,7 +50,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Publish the web terminal and firmware flasher
+    name: Publish the plain web terminal
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -205,6 +205,30 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: web
+
+      # `deploy-pages` asks the API for the artifact the moment the upload step
+      # returns, and that listing is eventually consistent. On 2026-11-25 an
+      # upload that finished at 11:21:50.29 was reported as "No artifacts named
+      # github-pages were found" at 11:21:50.86, failing a deploy whose bytes
+      # were already stored. Poll the same listing until it catches up instead
+      # of letting the index lag decide the outcome.
+      - name: Wait for the uploaded artifact to be listed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            count=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "github-pages")] | length')
+            if [ "${count}" -ge 1 ]; then
+              echo "github-pages artifact listed after ${attempt} check(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "the github-pages artifact never appeared in the run listing"
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
