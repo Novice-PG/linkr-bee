@@ -9,9 +9,9 @@ name: Deploy the web terminal to GitHub Pages
 # `web/flash/` is the browser flashing page. It is part of the same site (a
 # repository has one Pages deployment), but it is a separate page with its own
 # entry point at /flash/. Its firmware is not checked in: this workflow copies
-# the release bundles into `web/flash/firmware/` and generates the manifests
-# with tools/build_flasher.py, so the page always offers the images the release
-# actually built.
+# the release bundles into `web/firmware/` and generates the manifest with
+# `tools/build_firmware_manifest.py`, so the page always offers the images the
+# release actually built.
 #
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
 # WebSocket bridge works from here too, but with a warning: an https page that
@@ -31,7 +31,7 @@ on:
       - main
     paths:
       - "web/**"
-      - "tools/build_flasher.py"
+      - "tools/build_firmware_manifest.py"
       - ".github/workflows/pages.yml"
   release:
     types: [published]
@@ -89,6 +89,72 @@ jobs:
             --pattern '*firmware-*.zip' \
             --dir .firmware-release
 
+      # Add the self-maintained WROOM build from the branch's last green
+      # Build and test run. It is deliberately not a release asset: the
+      # release keeps the official board set, while this page offers the
+      # fork's larger-buffer variant as a second WROOM entry. Both carry the
+      # same version, so the manifest keeps them together.
+      - name: Stage the self-maintained WROOM build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build.yml \
+            --branch fork/self-maintained \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')"
+          rm -rf .self-wroom
+          if [ -n "${run_id}" ] && gh run download "${run_id}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name linkr-bee-esp32-wroom-32 \
+              --dir .self-wroom; then
+            python3 - <<'PY'
+          import json
+          import pathlib
+          import zipfile
+
+          source = pathlib.Path(".self-wroom")
+          metadata = json.loads((source / "firmware.json").read_text(encoding="utf-8"))
+          image = metadata["image"]
+          if not (source / image).is_file():
+              raise SystemExit(f"self-maintained artifact has no {image}")
+          expected = {
+              "CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192",
+              "CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=8",
+              "CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=2048",
+              "CONFIG_ZVFS_POLL_MAX=5",
+          }
+          config = (source / "firmware.config").read_text(encoding="utf-8").splitlines()
+          missing = sorted(expected.difference(config))
+          if missing:
+              raise SystemExit(
+                  "self-maintained artifact is not the expected build: "
+                  + ", ".join(missing)
+              )
+          map_file = source / "linkr-bee-esp32-wroom-32.map"
+          if map_file.is_file():
+              for line in map_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                  if "dram0_0_seg" in line:
+                      print(line.strip())
+          target = pathlib.Path(".firmware-release") / (
+              f"linkr-bee-v{metadata['version']}-firmware-esp32-wroom-32-self.zip"
+          )
+          prefix = pathlib.Path("linkr-bee-esp32-wroom-32-self")
+          with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(source.rglob("*")):
+                  if path.is_file():
+                      archive.write(path, prefix / path.relative_to(source))
+          print(f"staged {target}")
+          PY
+          else
+            echo "No self-maintained WROOM artifact; publishing the official set only."
+            rm -rf .self-wroom
+          fi
+
       # Stage the images beside the page so it fetches them same-origin: release
       # assets do not send the CORS headers a cross-origin fetch would need. The
       # manifest names the tag and repository, and the page falls back to the
@@ -100,6 +166,35 @@ jobs:
             --output web/firmware \
             --tag "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}"
+
+      # The release does not carry the self-maintained ZIP, so give that
+      # entry its own staged archive. Without this the "下载固件 ZIP"
+      # button would fall back to a release URL that does not exist.
+      - name: Point the self-maintained entry at its staged archive
+        run: |
+          set -euo pipefail
+          self_zip="$(find .firmware-release -maxdepth 1 \
+            -name '*-firmware-esp32-wroom-32-self.zip' -print -quit)"
+          if [ -n "${self_zip}" ]; then
+            cp "${self_zip}" web/firmware/esp32-wroom-32-self/
+            python3 - "${self_zip}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          archive = pathlib.Path(sys.argv[1])
+          manifest_path = pathlib.Path("web/firmware/manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          for board in manifest["boards"]:
+              if board["slug"] == "esp32-wroom-32-self":
+                  board["zip_url"] = f"firmware/esp32-wroom-32-self/{archive.name}"
+          manifest_path.write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(f"staged download archive {archive.name}")
+          PY
+          fi
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.
