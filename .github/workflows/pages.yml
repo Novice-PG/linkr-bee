@@ -206,6 +206,30 @@ jobs:
         with:
           path: web
 
+      # `deploy-pages` asks the API for the artifact the moment the upload step
+      # returns, and that listing is eventually consistent. On 2026-11-25 an
+      # upload that finished at 11:21:50.29 was reported as "No artifacts named
+      # github-pages were found" at 11:21:50.86, failing a deploy whose bytes
+      # were already stored. Poll the same listing until it catches up instead
+      # of letting the index lag decide the outcome.
+      - name: Wait for the uploaded artifact to be listed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            count=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "github-pages")] | length')
+            if [ "${count}" -ge 1 ]; then
+              echo "github-pages artifact listed after ${attempt} check(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "the github-pages artifact never appeared in the run listing"
+          exit 1
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
