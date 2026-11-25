@@ -228,16 +228,43 @@ def ble_write_size(value: str) -> int:
 
 
 def led_colour(value: str) -> str:
-    """`off`, or six hex digits with or without a leading `#`."""
+    """`off`, `RRGGBB`, or `R,G,B`, normalized to the wire's `r,g,b` form.
+
+    The firmware only accepts decimal channels on the wire (`@l=<r>,<g>,<b>`;
+    `src/linkr_aux.c` answers `ERR led rgb=expected r,g,b 0-255` to anything
+    else), while a colour is naturally typed as hex. Converting here keeps the
+    two spellings from drifting apart again: sending `@l=1a2b3c` never worked.
+    """
     text = value.strip().lower()
     if text == "off":
         return text
+
+    def channel(field: str) -> str:
+        number = int(field, 10)
+        if not 0 <= number <= 255:
+            raise ValueError(field)
+        return str(number)
+
+    if "," in text:
+        fields = [field.strip() for field in text.split(",")]
+        if len(fields) == 3 and all(
+                field.isascii() and field.isdigit() for field in fields):
+            try:
+                return ",".join(channel(field) for field in fields)
+            except ValueError:
+                pass
+        raise argparse.ArgumentTypeError(
+            "LED colour must be 'off', six hex digits, or three channels "
+            "0-255, e.g. 1a2b3c or 26,43,60")
+
     if text.startswith("#"):
         text = text[1:]
     if len(text) != 6 or any(char not in "0123456789abcdef" for char in text):
         raise argparse.ArgumentTypeError(
-            "LED colour must be 'off' or six hex digits, e.g. 1a2b3c")
-    return text
+            "LED colour must be 'off', six hex digits, or three channels "
+            "0-255, e.g. 1a2b3c or 26,43,60")
+    return ",".join(str(int(text[offset:offset + 2], 16))
+                    for offset in (0, 2, 4))
 
 
 def pulse_ms(value: str) -> int:
@@ -1716,7 +1743,23 @@ async def run(args: argparse.Namespace, state: SessionState | None = None) -> in
                     info("macOS requests pairing when the encrypted service is "
                          "read; accept the system dialog.")
                 else:
-                    await client.pair()
+                    try:
+                        await client.pair()
+                    except Exception as exc:
+                        # BlueZ only asks for a bonded link when a pairing agent
+                        # is registered. bleak installs none, so Pair() opens a
+                        # non-bonding pairing that a board running
+                        # CONFIG_BT_BONDING_REQUIRED rejects with SMP 0x08 —
+                        # surfacing here as a bare AuthenticationFailed.
+                        if not sys.platform.startswith("linux"):
+                            raise
+                        raise RuntimeError(
+                            "BlueZ refused the pairing. It needs a registered "
+                            "agent to ask for a bond; without one it requests a "
+                            "non-bonding link and the board rejects it (SMP "
+                            "reason 0x08). Run `bluetoothctl`, then `agent "
+                            "NoInputNoOutput`, `default-agent` and `pair "
+                            f"{target}`, and retry. Details: {exc}") from exc
 
             def on_notify(_char, data: bytearray) -> None:
                 payload = bytes(data)
@@ -1957,7 +2000,7 @@ def build_parser() -> argparse.ArgumentParser:
     board.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
     board.add_argument("--query-led", action="store_true",
                           help="send @l? and print the board's status LED colour")
-    board.add_argument("--led", type=led_colour, metavar="RRGGBB|off",
+    board.add_argument("--led", type=led_colour, metavar="RRGGBB|R,G,B|off",
                           help="set the board's status LED, or turn it off")
     board.add_argument("--query-opto", action="store_true",
                           help="send @o? and print the isolated contact state")

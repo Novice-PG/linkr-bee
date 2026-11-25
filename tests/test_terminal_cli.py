@@ -566,7 +566,7 @@ class RunCommandsTests(unittest.IsolatedAsyncioTestCase):
     async def test_board_io_flags_become_the_documented_commands(self):
         sent, _ = await self.run_flags("--led", "#1A2B3C", "--opto-pulse", "500",
                                        "--query-opto")
-        self.assertEqual(sent, [b"@l=1a2b3c", b"@o pulse 500", b"@o?"])
+        self.assertEqual(sent, [b"@l=26,43,60", b"@o pulse 500", b"@o?"])
 
     async def test_off_forms_are_spelled_out(self):
         sent, _ = await self.run_flags("--led", "off", "--opto", "on")
@@ -598,7 +598,7 @@ class RunCommandsTests(unittest.IsolatedAsyncioTestCase):
                                        "1a2b3c", "--query-control", "--release")
         self.assertEqual(sent[:2], [b"@c?", b"@c claim"])
         self.assertEqual(sent[-1], b"@c release")
-        self.assertIn(b"@l=1a2b3c", sent)
+        self.assertIn(b"@l=26,43,60", sent)
 
     async def test_pairing_commands_use_the_long_form(self):
         sent, _ = await self.run_flags("--bonds", "--bonds-names",
@@ -652,12 +652,23 @@ class BoardIoFlagTests(unittest.TestCase):
 
     def test_led_colour_accepts_hex_with_or_without_hash(self):
         for value in ("1a2b3c", "#1A2B3C", " 1A2B3C "):
-            self.assertEqual(terminal.led_colour(value), "1a2b3c")
+            self.assertEqual(terminal.led_colour(value), "26,43,60")
         self.assertEqual(terminal.led_colour("off"), "off")
         self.assertEqual(terminal.led_colour("OFF"), "off")
 
+    def test_led_colour_speaks_the_firmware_wire_format(self):
+        # The board only parses decimal channels; a hex string on the wire is
+        # answered with "ERR led rgb=expected r,g,b 0-255".
+        for value in ("255,0,0", "255, 0, 0", "0,0,0", "255,255,255"):
+            self.assertEqual(terminal.led_colour(value), value.replace(" ", ""))
+        self.assertEqual(terminal.led_colour("007,0,0"), "7,0,0")
+        self.assertEqual(terminal.led_colour("ffffff"), "255,255,255")
+        self.assertEqual(terminal.led_colour("000000"), "0,0,0")
+
     def test_led_colour_rejects_anything_else(self):
-        for value in ("", "offf", "1a2b3", "1a2b3c4", "gggggg", "0x1a2b3c"):
+        for value in ("", "offf", "1a2b3", "1a2b3c4", "gggggg", "0x1a2b3c",
+                      "@l=1a2b3c", "256,0,0", "1,2", "1,2,3,4", "-1,0,0",
+                      "1.5,0,0", ",,", "²,0,0", "1a,2b,3c"):
             with self.assertRaises(argparse.ArgumentTypeError, msg=value):
                 terminal.led_colour(value)
 

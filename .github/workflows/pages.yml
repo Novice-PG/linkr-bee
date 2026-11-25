@@ -206,30 +206,32 @@ jobs:
         with:
           path: web
 
-      # `deploy-pages` asks the API for the artifact the moment the upload step
-      # returns, and that listing is eventually consistent. On 2026-11-25 an
-      # upload that finished at 11:21:50.29 was reported as "No artifacts named
-      # github-pages were found" at 11:21:50.86, failing a deploy whose bytes
-      # were already stored. Poll the same listing until it catches up instead
-      # of letting the index lag decide the outcome.
-      - name: Wait for the uploaded artifact to be listed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 24); do
-            count=$(gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-              --jq '[.artifacts[] | select(.name == "github-pages")] | length')
-            if [ "${count}" -ge 1 ]; then
-              echo "github-pages artifact listed after ${attempt} check(s)"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "the github-pages artifact never appeared in the run listing"
-          exit 1
+      # `deploy-pages` does not read the REST artifact listing: it asks the
+      # Actions results service (Twirp `ListArtifacts`) for the artifact the
+      # upload just finalized. That index lags further behind than the REST one,
+      # so polling REST does not help: on 2026-11-25 the REST listing already
+      # showed the 9.7 MB artifact while `deploy-pages` answered "Found 0
+      # artifact(s)" 0.7 s later and failed the job. Retry the action itself, a
+      # few times with a pause, instead of trusting a single immediate read.
+      - name: Deploy to GitHub Pages (attempt 1)
+        id: deploy1
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - name: Wait for the artifact index before retrying
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 45
+
+      - name: Deploy to GitHub Pages (attempt 2)
+        id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+
+      - name: Wait longer before the last attempt
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        run: sleep 90
+
+      - name: Deploy to GitHub Pages (last attempt)
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
         uses: actions/deploy-pages@v4
