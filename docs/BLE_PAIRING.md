@@ -121,6 +121,16 @@ bluetoothctl
 如果之前删除过设备记录，先 `scan on` 重新发现再 `pair`，否则会报
 `Device ... not available`。
 
+#### `--pair` 报 `AuthenticationFailed`，固件日志是 SMP `0x08`
+
+Python CLI 的 `--pair` 直接调用 BlueZ 的 `Device1.Pair`，自己不注册 pairing
+agent。没有 agent 时 BlueZ 会把配对请求发成 **No Bonding**（AuthReq 不含
+`0x01`），而固件（`CONFIG_BT_BONDING_REQUIRED=y`）按规范回
+`SMP 0x08 Unspecified`，主机侧只看到一句 `org.bluez.Error.AuthenticationFailed`。
+按上面注册一次 `NoInputNoOutput` agent，或先用 `bluetoothctl pair` 完成绑定，
+再重试即可；已绑定的主机重连不经过这条路径。抓包对比：成功时配对请求的
+AuthReq 是 `0x2d`（带 Bonding），失败时是 `0x28`/`0x2c`（不带 Bonding）。
+
 配对完成后建议先 `disconnect`，让 CLI/TUI 自己建立连接，避免两个进程争用同一条
 LE 链路：
 
