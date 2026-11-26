@@ -157,8 +157,10 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
 - `boards/yd_esp32s3_rgbw.overlay` 适用于换装 32 位 GRBW 灯珠的板子。
   管理命令仍使用 RGB 三通道，白色通道保持为零。
 
-两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
-台架配置，不进入发布矩阵。
+两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。两个构建都
+以台架条目发布（`esp32s3-default` 与 `esp32s3-n16r8`），在网页烧录页的板型列表末尾
+出现，发布页也与正式固件并列提供。上面两个 overlay 只在本地使用：它们改变接线，
+不随发布提供。
 
 两个板级配置都把 esptool 的 flash 大小固定为 Devicetree 声明的值（默认构建
 8 MB，N16R8 为 16 MB），`tools/verify.sh` 会断言该值，因此 `west flash` 无需

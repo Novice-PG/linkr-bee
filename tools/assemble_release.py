@@ -42,6 +42,11 @@ FIRMWARE_BOARDS = {
     "linkr-bee-x1-0": ("linkr_bee_x1_0", "esp32c3"),
     "esp32c5-devkitc": ("esp32c5_devkitc/esp32c5/hpcore", "esp32c5"),
     "esp32-wroom-32": ("esp32_devkitc/esp32/procpu", "esp32"),
+    # Bench targets: the YD-ESP32-S3 V1.4 with the standard wiring (UART1 on
+    # GPIO17/18, three-channel pixel on GPIO48). The two entries differ only in
+    # the module fitted (8 MB flash, or N16R8 with 16 MB flash and PSRAM).
+    "esp32s3-default": ("esp32s3_devkitc/esp32s3/procpu", "esp32s3"),
+    "esp32s3-n16r8": ("esp32s3_devkitc/esp32s3/procpu", "esp32s3"),
 }
 
 DEB_ARCH = {
@@ -364,7 +369,8 @@ def main() -> int:
     expected_counts = {
         "desktop": 28,
         "cli": len(CLI_TARGETS),
-        "firmware": 6,
+        # The six product boards plus the two S3 bench images.
+        "firmware": len(FIRMWARE_BOARDS),
         "web": 1,
         "apk": 1,
     }

@@ -172,8 +172,11 @@ inside one quoted argument. For N16R8, retain its memory overlay in that list.
 - `boards/yd_esp32s3_rgbw.overlay` selects a 32-bit GRBW replacement pixel.
   The three-channel management command drives RGB and leaves W at zero.
 
-Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
-a bench configuration and is not part of the release matrix.
+Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. Both builds are
+published as bench entries (`esp32s3-default` and `esp32s3-n16r8`) at the end of
+the browser flasher's board list, and the release carries their bundles beside
+the product images. The two overlays above stay local-only: they change the
+wiring, so they are not published.
 
 Both board configurations pin the esptool flash size to the size their Devicetree
 declares (8 MB for the default build, 16 MB for N16R8), and `tools/verify.sh`

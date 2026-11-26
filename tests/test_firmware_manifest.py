@@ -97,6 +97,24 @@ class FirmwareManifestTests(unittest.TestCase):
             self.assertEqual([b["slug"] for b in manifest["boards"]],
                              ["esp32-wroom-32"])
 
+    def test_bench_s3_pair_is_named_and_offered_last(self):
+        """Both bench images ship as their own entries, after the products."""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "zips"
+            source.mkdir()
+            write_bundle(source, "esp32c3-devkitc", chip="esp32c3", address="0x0")
+            write_bundle(source, "esp32s3-n16r8", chip="esp32s3", address="0x0")
+            write_bundle(source, "esp32s3-default", chip="esp32s3", address="0x0")
+
+            manifest = MANIFEST.stage(source, Path(tmp) / "out", "v0.1.3")
+
+            self.assertEqual(
+                [(b["slug"], b["name"]) for b in manifest["boards"]],
+                [("esp32c3-devkitc", "ESP32-C3 DevKitC"),
+                 ("esp32s3-default", "ESP32-S3 台架 (8 MB)"),
+                 ("esp32s3-n16r8", "ESP32-S3 N16R8 台架 (16 MB)")],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

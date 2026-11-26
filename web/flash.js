@@ -10,6 +10,10 @@ const BOARD_NAMES = {
   "esp32c3-devkitm": "ESP32-C3 DevKitM",
   "esp32c3-supermini": "ESP32-C3 Super Mini",
   "esp32c5-devkitc": "ESP32-C5 DevKitC",
+  // Bench targets: the YD-ESP32-S3 V1.4 with the standard wiring, differing
+  // only in the module fitted. Listed last on purpose.
+  "esp32s3-default": "ESP32-S3 台架 (8 MB)",
+  "esp32s3-n16r8": "ESP32-S3 N16R8 台架 (16 MB)",
 };
 
 const $ = (id) => document.getElementById(id);

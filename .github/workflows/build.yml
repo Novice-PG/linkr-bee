@@ -259,6 +259,26 @@ jobs:
             toolchain: xtensa-espressif_esp32_zephyr-elf
             flash_address: "0x1000"
             factory_reset: GPIO27 to GND via external jumper
+          # The two S3 bench images. They are built from the same tree as the
+          # official boards and appear on the flasher page, but they are named
+          # as bench targets: the YD-ESP32-S3 wiring is UART1 on GPIO17/18 with
+          # the three-channel pixel on GPIO48, not a product enclosure.
+          - name: ESP32-S3 bench (8 MB)
+            board: esp32s3_devkitc/esp32s3/procpu
+            slug: esp32s3-default
+            chip: esp32s3
+            toolchain: xtensa-espressif_esp32s3_zephyr-elf
+            flash_address: "0x0"
+            factory_reset: erase the flash (GPIO0 is the ROM download strap on this board)
+          - name: ESP32-S3 bench N16R8
+            board: esp32s3_devkitc/esp32s3/procpu
+            slug: esp32s3-n16r8
+            chip: esp32s3
+            toolchain: xtensa-espressif_esp32s3_zephyr-elf
+            flash_address: "0x0"
+            factory_reset: erase the flash (GPIO0 is the ROM download strap on this board)
+            extra_conf: boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf
+            extra_overlay: boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
 
     steps:
       - name: Check out repository
@@ -306,8 +326,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Most targets need no extra fragments; the S3 bench entries do, and
+          # an empty matrix field must expand to no argument at all.
+          args=()
+          if [ -n "${{ matrix.extra_conf }}" ]; then
+            args+=(-DEXTRA_CONF_FILE="${{ matrix.extra_conf }}")
+          fi
+          if [ -n "${{ matrix.extra_overlay }}" ]; then
+            args+=(-DEXTRA_DTC_OVERLAY_FILE="${{ matrix.extra_overlay }}")
+          fi
           west build -p always -b "${{ matrix.board }}" \
-            -d "${GITHUB_WORKSPACE}/app/build" "${GITHUB_WORKSPACE}/app"
+            -d "${GITHUB_WORKSPACE}/app/build" "${GITHUB_WORKSPACE}/app" \
+            -- "${args[@]}"
 
       - name: Verify default feature set
         shell: bash
@@ -402,6 +432,38 @@ jobs:
             grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "${config}"
             grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "${config}"
             grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "${config}"
+          fi
+          # The S3 bench pair. Both keep the standard YD-ESP32-S3 wiring (UART1,
+          # three-channel pixel) and no pairing press; only the module differs.
+          # Pin the memory profile of each entry so a dropped fragment cannot
+          # publish an 8 MB image with a 16 MB devicetree, or the reverse.
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "${config}"; then
+            grep -qx 'CONFIG_BT_LONG_WQ_STACK_SIZE=2048' "${config}"
+            grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "${config}"
+            grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS=30' "${config}"
+            grep -qx '# CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH is not set' "${config}"
+            grep -Fq 'zephyr,linkr-ble-uart = &uart1;' \
+              "${GITHUB_WORKSPACE}/app/build/zephyr/zephyr.dts"
+            grep -Fq 'zephyr,console = &usb_serial;' \
+              "${GITHUB_WORKSPACE}/app/build/zephyr/zephyr.dts"
+            sed -n '/linkr_rgb: linkr-rgb {/,/};/p' \
+              "${GITHUB_WORKSPACE}/app/build/zephyr/zephyr.dts" |
+              grep -Fq 'channel-count = < 0x3 >;'
+            if [ "${{ matrix.slug }}" = "esp32s3-n16r8" ]; then
+              grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' "${config}"
+              grep -qx 'CONFIG_ESP_SPIRAM=y' "${config}"
+              grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "${config}"
+              grep -qx 'CONFIG_SPIRAM_MODE_OCT=y' "${config}"
+              grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "${config}"
+              grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "${config}"
+              grep -qx 'CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS=y' "${config}"
+            else
+              grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y' "${config}"
+              grep -qx '# CONFIG_ESP_SPIRAM is not set' "${config}"
+              grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "${config}"
+              grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "${config}"
+              grep -qx '# CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS is not set' "${config}"
+            fi
           fi
 
       - name: Package firmware

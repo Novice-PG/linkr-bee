@@ -33,6 +33,10 @@ BOARD_NAMES = {
     "esp32c3-devkitc": "ESP32-C3 DevKitC",
     "esp32c5-devkitc": "ESP32-C5 DevKitC",
     "esp32-wroom-32": "ESP32-WROOM-32 DevKitC",
+    # Bench targets, offered last: both are the YD-ESP32-S3 V1.4 with the
+    # standard wiring and differ only in the module fitted.
+    "esp32s3-default": "ESP32-S3 台架 (8 MB)",
+    "esp32s3-n16r8": "ESP32-S3 N16R8 台架 (16 MB)",
 }
 
 BOARD_ORDER = list(BOARD_NAMES)

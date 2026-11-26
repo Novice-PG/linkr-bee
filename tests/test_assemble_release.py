@@ -16,7 +16,8 @@ TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
            "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
            "aarch64-apple-darwin", "x86_64-apple-darwin"]
 BOARDS = ("esp32c3-supermini", "esp32c3-devkitm", "esp32c3-devkitc",
-          "esp32c5-devkitc", "esp32-wroom-32", "linkr-bee-x1-0")
+          "esp32c5-devkitc", "esp32-wroom-32", "linkr-bee-x1-0",
+          "esp32s3-default", "esp32s3-n16r8")
 
 
 def write_fixture(root: Path, *, firmware_version: str = "1.1.5",
@@ -122,9 +123,9 @@ class ReleaseAssemblyTests(unittest.TestCase):
                 with zipfile.ZipFile(root / "out/linkr-bee-v1.1.5-web.zip") as archive:
                     readme = archive.read("linkr-bee-v1.1.5-web/README.txt").decode()
                 self.assertIn(f"Source: {expected}/tree/v1.1.5", readme)
-                self.assertEqual(len(list((root / "out").iterdir())), 48)
+                self.assertEqual(len(list((root / "out").iterdir())), 50)
                 manifest = json.loads((root / "out/release-manifest.json").read_text())
-                self.assertEqual(len(manifest["assets"]), 46)
+                self.assertEqual(len(manifest["assets"]), 48)
                 for asset in manifest["assets"]:
                     self.assertEqual(asset["sha256"], hashlib.sha256(
                         (root / "out" / asset["name"]).read_bytes()).hexdigest())
