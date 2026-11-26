@@ -2068,6 +2068,7 @@ fn report_control_status(app: &mut App, format: Format, window: Duration) -> i32
 /// answer has landed.
 fn wait_for_control_ready(app: &mut App, window: Duration) -> Result<bool, String> {
     let deadline = Instant::now() + window;
+    let mut asked = false;
     loop {
         if !app.session.is_live() {
             return Err("the link ended before the bridge said who owns the console".to_string());
@@ -2075,6 +2076,15 @@ fn wait_for_control_ready(app: &mut App, window: Duration) -> Result<bool, Strin
         if app.supports_control() {
             if app.control.is_some() {
                 return Ok(true);
+            }
+            // The connect-time read is queued for the first free question
+            // slot, and a run that keeps the slot busy (a checkup asks one
+            // thing after another) can reach this wait without it ever having
+            // gone out. Ask once from here rather than waiting for an answer
+            // nobody requested.
+            if !asked && !app.waiting_on_device() {
+                asked = true;
+                app.control_read_pending = true;
             }
             if Instant::now() >= deadline {
                 return Err("the bridge did not report console ownership".to_string());
@@ -2186,7 +2196,44 @@ pub(crate) fn prepare_serial_input(app: &mut App) -> Result<(), String> {
     if !app.connected() {
         return Err(app.strings().not_connected.to_string());
     }
-    wait_for_input_control(app, control_window())
+    wait_for_input_control(app, control_window())?;
+    hold_input_control(app)
+}
+
+/// Make sure the console is actually ours before a byte is handed to the link.
+///
+/// A bridge that arbitrates ownership refuses a UART write from a session that
+/// has not claimed the console, and the refusal is an ATT error: the write
+/// thread reports nothing, so the caller sees silence. A round trip that waited
+/// on that silence reported a wiring failure for a wire that was fine, and the
+/// failure depended on whether the connect-time claim had landed yet.
+///
+/// `wait_for_input_control` assumes the claim it expects is already on its way.
+/// This is the check that assumption is worth: the mode is read again here, and
+/// a session that still does not hold the console asks for it — idle first, so
+/// another typist keeps the console and the caller is told nothing was sent.
+fn hold_input_control(app: &mut App) -> Result<(), String> {
+    use crate::device::ControlMode;
+
+    if !app.supports_control() || app.control_mode() == Some(ControlMode::Control) {
+        return Ok(());
+    }
+    // One settle turn for the connect-time claim: it is sent on the edge the
+    // status arrives on, and its answer is a management round trip away.
+    let settle = Instant::now() + SETTLE_SLACK;
+    while app.control_mode() != Some(ControlMode::Control) && Instant::now() < settle {
+        app.pump();
+        thread::sleep(Duration::from_millis(5));
+    }
+    if app.control_mode() == Some(ControlMode::Control) {
+        return Ok(());
+    }
+    let notice = app.take_control_when_idle();
+    if notice.level == crate::event::NoticeLevel::Warn {
+        return Err(format!("{}; nothing was sent", notice.text));
+    }
+    wait_for_control_answer(app, ControlAction::Idle, control_window())
+        .map_err(|why| format!("{why}; nothing was sent"))
 }
 
 /// Make the console writable for a script before it sends stdin.
