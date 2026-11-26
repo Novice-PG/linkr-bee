@@ -11,9 +11,11 @@ const BOARD_NAMES = {
   "esp32c3-supermini": "ESP32-C3 Super Mini",
   "esp32c5-devkitc": "ESP32-C5 DevKitC",
   // Bench targets: the YD-ESP32-S3 V1.4 with the standard wiring, differing
-  // only in the module fitted. Listed last on purpose.
-  "esp32s3-default": "ESP32-S3 台架 (8 MB)",
+  // only in the module fitted. Name flash and PSRAM explicitly. Listed last.
+  "esp32s3-default": "ESP32-S3 台架 (8 MB, 无 PSRAM)",
   "esp32s3-n16r8": "ESP32-S3 N16R8 台架 (16 MB)",
+  // Staged from the self-maintained branch; without a name it shows as a slug.
+  "esp32-wroom-32-self": "ESP32-WROOM-32 (Novice-PG 维护)",
 };
 
 const $ = (id) => document.getElementById(id);

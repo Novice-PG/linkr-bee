@@ -34,9 +34,17 @@ BOARD_NAMES = {
     "esp32c5-devkitc": "ESP32-C5 DevKitC",
     "esp32-wroom-32": "ESP32-WROOM-32 DevKitC",
     # Bench targets, offered last: both are the YD-ESP32-S3 V1.4 with the
-    # standard wiring and differ only in the module fitted.
-    "esp32s3-default": "ESP32-S3 台架 (8 MB)",
+    # standard wiring and differ only in the module fitted. Name the flash and
+    # PSRAM size explicitly: "8 MB" alone reads as "the small one" without
+    # saying whether PSRAM is present.
+    "esp32s3-default": "ESP32-S3 台架 (8 MB, 无 PSRAM)",
+    # N16R8 already names the module: 16 MB flash plus 8 MB PSRAM. Spelling
+    # it out pushes the option past the phone-width select and clips.
     "esp32s3-n16r8": "ESP32-S3 N16R8 台架 (16 MB)",
+    # Staged from the self-maintained branch, not a release asset. Without a
+    # name here the page falls back to the raw slug; "自维护" alone tells a
+    # visitor nothing, so name the maintainer.
+    "esp32-wroom-32-self": "ESP32-WROOM-32 (Novice-PG 维护)",
 }
 
 BOARD_ORDER = list(BOARD_NAMES)
